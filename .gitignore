@@ -1,0 +1,5 @@
+# Ignore Dicoms
+*.dcm
+
+# Ignore the Archived items
+Archive/*
