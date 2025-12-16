@@ -9,17 +9,25 @@ for id = 1:length(patient_ids)
     for session = 1:length(sessions)
         ctFolder = fullfile(pwd, 'EthosExports', patient_ids{id},'Pancreas',sessions{session});  
         if ~isfolder(ctFolder)
-            print("Warning: Empty session")
+            fprintf("Warning: Empty session for patient %s, session %s\n", patient_ids{id}, sessions{session});
             continue; 
         end
-        ctInfo = dicomCollection(ctFolder);
+        
+        ctInfo = dicomCollection(ctFolder); 
+        
         % Print diagnostic information about the collection
         fprintf('\n=== Analyzing Patient %s, %s ===\n', patient_ids{id}, sessions{session});
         PrintCollectionInfo(ctInfo);
-        sctSeriesUID = SortSct(ctInfo,ctFolder); 
-        SortRTFiles(ctInfo, ctFolder, sctSeriesUID);    
+        
+        % Sort SCT files first
+        sctSeriesUID = SortSct(ctInfo, ctFolder); 
+        
+        % Sort RT files based on instance matching
+        SortRTFiles(ctInfo, ctFolder, sctSeriesUID);
     end
 end
+
+%% Functions
 
 function sctSeriesUID = SortSct(ctInfo, ctFolder)
     % SCT - Sort and return the SeriesInstanceUID for matching
@@ -61,12 +69,6 @@ function sctSeriesUID = SortSct(ctInfo, ctFolder)
         end
     end
 end
-
-
-
-%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-
-
 
 function void = SortRTFiles(ctInfo, ctFolder, sctSeriesUID)
     % Sort RTDOSE, RTSTRUCT, RTPLAN based on instance relationships
@@ -159,10 +161,6 @@ function void = SortRTFiles(ctInfo, ctFolder, sctSeriesUID)
         fprintf('Copied RTDOSE: %s (Date: %s)\n', selectedRTDose.SeriesDescription, selectedRTDose.SeriesDate);
     end
 end
-
-
-
-
 
 function [selectedStruct, selectedPlan, selectedDose] = FindMatchingRTSet(rtFileInfo, sctSeriesUID)
     % Find a matching set of RTSTRUCT, RTPLAN, and RTDOSE
