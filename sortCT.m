@@ -65,7 +65,11 @@ function sctSeriesUID = SortSct(ctInfo, ctFolder)
         [~, name, ext] = fileparts(file);
         newFile = fullfile(sctDir, strcat(name, ext));
         if exist(file, 'file')
-            movefile(file, newFile);
+            if exist(newFile, 'file')
+                fprintf('  Skipping SCT file (already exists): %s\n', strcat(name, ext));
+            else
+                movefile(file, newFile);
+            end
         end
     end
 end
@@ -103,7 +107,12 @@ function void = SortRTFiles(ctInfo, ctFolder, sctSeriesUID)
                 fileInfo.SeriesInstanceUID = metadata.SeriesInstanceUID;
                 fileInfo.SeriesDate = metadata.SeriesDate;
                 fileInfo.SeriesTime = metadata.SeriesTime;
-                fileInfo.SeriesDescription = metadata.SeriesDescription;
+                % RT files typically don't have SeriesDescription
+                if isfield(metadata, 'SeriesDescription')
+                    fileInfo.SeriesDescription = metadata.SeriesDescription;
+                else
+                    fileInfo.SeriesDescription = 'N/A';
+                end
                 
                 % Get referenced series/instance UIDs
                 if strcmp(modality, 'RTSTRUCT') && isfield(metadata, 'ReferencedFrameOfReferenceSequence')
@@ -148,17 +157,17 @@ function void = SortRTFiles(ctInfo, ctFolder, sctSeriesUID)
     
     if ~isempty(selectedRTStruct)
         copyfile(selectedRTStruct.FilePath, sctDir);
-        fprintf('Copied RTSTRUCT: %s (Date: %s)\n', selectedRTStruct.SeriesDescription, selectedRTStruct.SeriesDate);
+        fprintf('Copied RTSTRUCT (Date: %s)\n', selectedRTStruct.SeriesDate);
     end
     
     if ~isempty(selectedRTPlan)
         copyfile(selectedRTPlan.FilePath, sctDir);
-        fprintf('Copied RTPLAN: %s (Date: %s)\n', selectedRTPlan.SeriesDescription, selectedRTPlan.SeriesDate);
+        fprintf('Copied RTPLAN (Date: %s)\n', selectedRTPlan.SeriesDate);
     end
     
     if ~isempty(selectedRTDose)
         copyfile(selectedRTDose.FilePath, sctDir);
-        fprintf('Copied RTDOSE: %s (Date: %s)\n', selectedRTDose.SeriesDescription, selectedRTDose.SeriesDate);
+        fprintf('Copied RTDOSE (Date: %s)\n', selectedRTDose.SeriesDate);
     end
 end
 
@@ -292,7 +301,7 @@ function void = PrintCollectionInfo(ctInfo)
                 fileCell = selectedRows.Filenames{j};
                 if ~isempty(fileCell) && ~isempty(fileCell{1})
                     metadata = dicominfo(fileCell{1});
-                    fprintf('  [%d] Series: %s\n', j, metadata.SeriesDescription);
+                    fprintf('  [%d] Modality: %s\n', j, modality);
                     fprintf('      Date/Time: %s / %s\n', metadata.SeriesDate, metadata.SeriesTime);
                     fprintf('      SeriesInstanceUID: %s\n', metadata.SeriesInstanceUID);
                     
