@@ -15,8 +15,72 @@ sessions = {'Session 1'};
 wd = '/mnt/weka/home/80030361/ETHOS_Simulations';
 matradPath = '/mnt/weka/home/80030361/MATLAB/Addons/matRad';
 
+% Verify paths exist
+fprintf('Verifying paths...\n');
+if ~exist(wd, 'dir')
+    error('Working directory does not exist: %s', wd);
+else
+    fprintf('  - Working directory OK: %s\n', wd);
+end
+
+if ~exist(matradPath, 'dir')
+    error('matRad path does not exist: %s', matradPath);
+else
+    fprintf('  - matRad path OK: %s\n', matradPath);
+end
+
 % Add MATRAD to path
 addpath(genpath(matradPath));
+fprintf('  - matRad added to MATLAB path\n');
+
+% Initialize MATRAD (required for some versions)
+fprintf('Initializing MATRAD...\n');
+try
+    matRad_rc; % matRad run configuration/initialization
+    fprintf('  - MATRAD initialized successfully\n');
+catch
+    fprintf('  - matRad_rc not found, trying matRad_cfg...\n');
+    try
+        matRad_cfg = MatRad_Config.instance();
+        fprintf('  - MATRAD configured successfully\n');
+    catch
+        fprintf('  - Direct initialization not available, continuing...\n');
+    end
+end
+
+% Verify MATRAD functions are available
+fprintf('Verifying MATRAD installation...\n');
+matRadFunctions = {'matRad_importDicom', 'matRad_importDicomCt', ...
+                   'matRad_importPatient', 'matRad_calcDoseInfluence', ...
+                   'matRad_generateStf'};
+foundFunctions = false(size(matRadFunctions));
+for i = 1:length(matRadFunctions)
+    if exist(matRadFunctions{i}, 'file')
+        fprintf('  - Found: %s\n', matRadFunctions{i});
+        foundFunctions(i) = true;
+    end
+end
+
+if ~any(foundFunctions)
+    fprintf('\n  WARNING: No matRad functions found on path!\n');
+    fprintf('  Checking directory contents...\n');
+    
+    % List .m files in matRad directory
+    mFiles = dir(fullfile(matradPath, '**', '*.m'));
+    importFiles = mFiles(contains({mFiles.name}, 'import', 'IgnoreCase', true));
+    
+    if ~isempty(importFiles)
+        fprintf('  Found potential import functions:\n');
+        for i = 1:min(10, length(importFiles))
+            fprintf('    - %s\n', importFiles(i).name);
+        end
+    else
+        fprintf('  No .m files found in matRad directory.\n');
+        fprintf('  Please verify matRad installation path: %s\n', matradPath);
+    end
+    
+    error('MATRAD not properly installed or not on path.');
+end
 
 %% Main Processing Loop
 for idxID = 1:length(ids)
@@ -43,18 +107,44 @@ for idxID = 1:length(ids)
         fprintf('\n[1/6] Importing DICOM data...\n');
         
         try
-            % Import CT, structures, and plan
-            ct = matRad_importDicomCt(dicomPath);
-            fprintf('  - CT imported: %d x %d x %d voxels\n', ct.cubeDim(1), ct.cubeDim(2), ct.cubeDim(3));
+            % Try unified import function first (newer matRad versions)
+            if exist('matRad_importDicom', 'file')
+                fprintf('  Using unified matRad_importDicom...\n');
+                [ct, cst, pln, resultGUI] = matRad_importDicom(dicomPath);
+                fprintf('  - Data imported successfully\n');
+            % Try individual import functions (older versions)
+            elseif exist('matRad_importDicomCt', 'file')
+                fprintf('  Using individual import functions...\n');
+                
+                % Import CT
+                ct = matRad_importDicomCt(dicomPath);
+                fprintf('  - CT imported: %d x %d x %d voxels\n', ct.cubeDim(1), ct.cubeDim(2), ct.cubeDim(3));
+                
+                % Import RT Plan
+                pln = matRad_importDicomRTPlan(dicomPath);
+                fprintf('  - RT Plan imported: %d beams\n', pln.propStf.numOfBeams);
+                
+                % Import RT Structures
+                cst = matRad_importDicomRtss(dicomPath, ct);
+                fprintf('  - RT Structures imported: %d structures\n', size(cst, 1));
+            else
+                error('No matRad import functions found. Please check matRad installation.');
+            end
             
-            pln = matRad_importDicomRTPlan(dicomPath);
-            fprintf('  - RT Plan imported: %d beams\n', pln.propStf.numOfBeams);
-            
-            cst = matRad_importDicomRtss(dicomPath, ct);
-            fprintf('  - RT Structures imported: %d structures\n', size(cst, 1));
+            % Display CT information
+            fprintf('  - CT dimensions: %d x %d x %d\n', ct.cubeDim(1), ct.cubeDim(2), ct.cubeDim(3));
+            fprintf('  - CT resolution: %.2f x %.2f x %.2f mm\n', ...
+                ct.resolution.x, ct.resolution.y, ct.resolution.z);
+            if isfield(pln, 'propStf')
+                fprintf('  - Number of beams: %d\n', pln.propStf.numOfBeams);
+            end
             
         catch ME
             fprintf('Error importing DICOM data: %s\n', ME.message);
+            fprintf('Stack trace:\n');
+            for k = 1:length(ME.stack)
+                fprintf('  %s (line %d)\n', ME.stack(k).name, ME.stack(k).line);
+            end
             continue;
         end
         
