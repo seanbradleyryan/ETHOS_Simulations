@@ -9,7 +9,7 @@ clear; clc; close all;
 %% Configuration
 % Patient and session arrays (expandable for batch processing)
 ids = {'1194203'};
-sessions = {'Session 1'};
+sessions = {'Session_1'};
 
 % Base directory
 wd = '/mnt/weka/home/80030361/ETHOS_Simulations';
@@ -151,6 +151,11 @@ for idxID = 1:length(ids)
             if ~isempty(rtdoseFile)
                 rtdoseInfo = dicominfo(fullfile(rtdoseFile(1).folder, rtdoseFile(1).name));
                 referenceDose = dicomread(fullfile(rtdoseFile(1).folder, rtdoseFile(1).name));
+                
+                % RTDOSE is often 4D with singleton dimension - squeeze it
+                referenceDose = squeeze(referenceDose);
+                
+                % Apply scaling
                 referenceDose = double(referenceDose) * rtdoseInfo.DoseGridScaling;
                 
                 fprintf('  - Reference dose grid: %d x %d x %d\n', ...
@@ -158,9 +163,28 @@ for idxID = 1:length(ids)
                 fprintf('  - Max dose: %.2f Gy\n', max(referenceDose(:)));
                 
                 % Extract dose grid parameters
-                doseGrid.resolution = rtdoseInfo.PixelSpacing;
-                doseGrid.dimensions = [rtdoseInfo.Rows, rtdoseInfo.Columns, ...
-                    size(referenceDose, 3)];
+                % X and Y resolution from PixelSpacing
+                doseGrid.resolution(1) = rtdoseInfo.PixelSpacing(1);
+                doseGrid.resolution(2) = rtdoseInfo.PixelSpacing(2);
+                
+                % Z resolution from GridFrameOffsetVector (multiframe DICOM)
+                if isfield(rtdoseInfo, 'GridFrameOffsetVector') && length(rtdoseInfo.GridFrameOffsetVector) > 1
+                    % Calculate slice spacing from frame offset vector
+                    doseGrid.resolution(3) = abs(rtdoseInfo.GridFrameOffsetVector(2) - rtdoseInfo.GridFrameOffsetVector(1));
+                    fprintf('  - Z resolution calculated from GridFrameOffsetVector: %.3f mm\n', doseGrid.resolution(3));
+                elseif isfield(rtdoseInfo, 'SliceThickness')
+                    doseGrid.resolution(3) = rtdoseInfo.SliceThickness;
+                    fprintf('  - Z resolution from SliceThickness: %.3f mm\n', doseGrid.resolution(3));
+                else
+                    % Fallback to CT resolution
+                    doseGrid.resolution(3) = ct.resolution.z;
+                    fprintf('  - Warning: Z resolution not found in RTDOSE, using CT resolution: %.3f mm\n', doseGrid.resolution(3));
+                end
+                
+                doseGrid.dimensions = [rtdoseInfo.Rows, rtdoseInfo.Columns, size(referenceDose, 3)];
+                
+                fprintf('  - Dose grid resolution: [%.3f, %.3f, %.3f] mm\n', ...
+                    doseGrid.resolution(1), doseGrid.resolution(2), doseGrid.resolution(3));
             else
                 fprintf('  Warning: No RTDOSE file found, using CT grid\n');
                 doseGrid.resolution = [ct.resolution.x, ct.resolution.y, ct.resolution.z];
