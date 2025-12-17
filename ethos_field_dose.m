@@ -202,6 +202,43 @@ for idxID = 1:length(ids)
         %% Step 3: Configure dose calculation
         fprintf('\n[3/6] Configuring dose calculation...\n');
         
+        % Check and override machine specification
+        if isfield(pln, 'machine')
+            fprintf('  - Original machine: %s\n', pln.machine);
+        end
+        
+        % Check available machine files
+        machineDir = fullfile(matradPath, 'basedata');
+        if exist(machineDir, 'dir')
+            machineFiles = dir(fullfile(machineDir, 'photons*.mat'));
+            if ~isempty(machineFiles)
+                fprintf('  - Available machine files:\n');
+                for i = 1:min(5, length(machineFiles))
+                    [~, machineName, ~] = fileparts(machineFiles(i).name);
+                    fprintf('    %d. %s\n', i, machineName);
+                end
+                
+                % Use first generic machine or specific one
+                genericMachines = machineFiles(contains({machineFiles.name}, 'Generic', 'IgnoreCase', true));
+                if ~isempty(genericMachines)
+                    [~, selectedMachine, ~] = fileparts(genericMachines(1).name);
+                    fprintf('  - Using generic machine: %s\n', selectedMachine);
+                    pln.machine = selectedMachine;
+                else
+                    % Use first available photon machine
+                    [~, selectedMachine, ~] = fileparts(machineFiles(1).name);
+                    fprintf('  - Using machine: %s\n', selectedMachine);
+                    pln.machine = selectedMachine;
+                end
+            else
+                fprintf('  - Warning: No machine files found, using default\n');
+                pln.machine = 'Generic';
+            end
+        else
+            fprintf('  - Warning: Machine directory not found, using default\n');
+            pln.machine = 'Generic';
+        end
+        
         % Set up dose calculation parameters
         pln.propStf.bixelWidth = 5; % mm
         pln.propDoseCalc.doseGrid.resolution.x = doseGrid.resolution(1);
@@ -216,6 +253,7 @@ for idxID = 1:length(ids)
         end
         
         fprintf('  - Radiation mode: %s\n', pln.radiationMode);
+        fprintf('  - Machine: %s\n', pln.machine);
         fprintf('  - Dose engine: %s\n', pln.propDoseCalc.engine);
         fprintf('  - Dose grid resolution: [%.2f, %.2f, %.2f] mm\n', ...
             doseGrid.resolution(1), doseGrid.resolution(2), doseGrid.resolution(3));
