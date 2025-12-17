@@ -1,0 +1,240 @@
+ 
+Verifying paths...
+  - Working directory OK: /mnt/weka/home/80030361/ETHOS_Simulations
+  - matRad path OK: /mnt/weka/home/80030361/MATLAB/Addons/matRad
+  - matRad added to MATLAB path
+Initializing MATRAD...
+'default'
+  - MATRAD initialized successfully
+Verifying MATRAD installation...
+  - WARNING: matRad_DicomImporter class not found at expected location
+Dose series matched to the different plans are displayed and could be selected.
+Rechecking of correct matching procedure is recommended.
+  - WARNING: Could not instantiate matRad_DicomImporter: Folder is empty!
+  - Found: matRad_calcDoseInfluence
+  - Found: matRad_generateStf
+  - Found: matRad_calcDoseForward
+
+========================================
+Processing Patient: 1194203, Session: Session_1
+========================================
+
+[1/6] Importing DICOM data...
+  Creating matRad_DicomImporter object...
+Dose series matched to the different plans are displayed and could be selected.
+Rechecking of correct matching procedure is recommended.
+Warning: MATLAB has disabled some advanced graphics rendering features by switching to software OpenGL. For more information, click here.
+Progress: 100.00 %
+  Importing DICOM files...
+
+importing ct-cube...
+creating info...Progress: 100.00 %
+reading slices...Progress: 100.00 %
+
+z-coordinates taken from ImagePositionPatient
+x-direction OK
+y-direction OK
+
+Interpolating CT cube...finished!
+
+conversion of ct-Cube to Hounsfield units...finished!
+
+Reading structures...finished!
+creating cube for Body volume...
+creating cube for Bowel volume...
+creating cube for Spinal Cord volume...
+creating cube for Duodenum volume...
+creating cube for Kidney right volume...
+creating cube for Liver volume...
+creating cube for Stomach volume...
+creating cube for Bones volume...
+creating cube for Kidney left volume...
+creating cube for Both kidneys volume...
+creating cube for Skin volume...
+creating cube for GTV volume...
+creating cube for 35 opti volume...
+creating cube for 60 opti volume...
+creating cube for GTVcore volume...
+creating cube for OAReval volume...
+creating cube for tempGTVexpand1 volume...
+creating cube for Body  GTV 6mm  volume...
+creating cube for Body PRV  0 7cm volume...
+creating cube for BDS volume...
+creating cube for GI PRV volume...
+creating cube for LowDoseControl volume...
+creating cube for 35opti 60opti volume...
+creating cube for 35opti GTV volume...
+creating cube for Aluminum1 volume...
+creating cube for Couch Exterior volume...
+creating cube for Couch Interior volume...
+finished!
+Warning: Empty shape detected!
+> In matRad_importFieldShapes (line 270)
+In matRad_DicomImporter/matRad_importDicomRTPlan (line 129)
+In matRad_DicomImporter/matRad_importDicom (line 143)
+In ethos_field_dose (line 118)
+Warning: Empty shape detected!
+> In matRad_importFieldShapes (line 270)
+In matRad_DicomImporter/matRad_importDicomRTPlan (line 129)
+In matRad_DicomImporter/matRad_importDicom (line 143)
+In ethos_field_dose (line 118)
+Warning: Empty shape detected!
+> In matRad_importFieldShapes (line 270)
+In matRad_DicomImporter/matRad_importDicomRTPlan (line 129)
+In matRad_DicomImporter/matRad_importDicom (line 143)
+In ethos_field_dose (line 118)
+Warning: Empty shape detected!
+> In matRad_importFieldShapes (line 270)
+In matRad_DicomImporter/matRad_importDicomRTPlan (line 129)
+In matRad_DicomImporter/matRad_importDicom (line 143)
+In ethos_field_dose (line 118)
+loading dose files...
+finished!
+  - Data imported successfully
+  - CT dimensions: 598 x 598 x 134
+  - CT resolution: 1.17 x 1.17 x 3.00 mm
+  - Number of structures: 27
+  - Number of beams: 17
+
+[2/6] Loading reference RTDOSE...
+  - Reference dose grid: 95 x 140 x 115
+  - Max dose: 71.34 Gy
+  - Z resolution calculated from GridFrameOffsetVector: 3.000 mm
+  - Dose grid resolution: [2.500, 2.500, 3.000] mm
+
+[3/6] Configuring dose calculation...
+  - Original machine: HalcyonSN1293
+  - Warning: Machine directory not found, using default
+  - Radiation mode: photons
+  - Machine: Generic
+  - Dose engine: pencilBeam
+  - Dose grid resolution: [2.50, 2.50, 3.00] mm
+
+[4/6] Generating steering information...
+Warning: Not able to assign property 'collimation' from pln.propStf to stf generator!
+> In MatRad_Config/displayToConsole (line 161)
+In MatRad_Config/dispWarning (line 392)
+In matRad_StfGeneratorBase/assignPropertiesFromPln (line 179)
+In matRad_StfGeneratorBase (line 52)
+In matRad_StfGeneratorExternalRayBixelAbstract (line 42)
+In matRad_StfGeneratorPhotonRayBixelAbstract (line 24)
+In matRad_StfGeneratorPhotonIMRT (line 16)
+In matRad_StfGeneratorBase.getGeneratorFromPln (line 390)
+In matRad_generateStf (line 33)
+In ethos_field_dose (line 265)
+Warning: Using default stf generator Photon IMRT stf Generator!
+> In MatRad_Config/displayToConsole (line 161)
+In MatRad_Config/dispWarning (line 392)
+In matRad_StfGeneratorBase.getGeneratorFromPln (line 392)
+In matRad_generateStf (line 33)
+In ethos_field_dose (line 265)
+matRad: Generating stf struct with generator 'Photon IMRT stf Generator'... Progress: 5.88 %Progress: 110100.00 %
+  - Steering file generated for 17 beams
+    Beam 1: Gantry=11.0°, Couch=0.0°, Rays=565
+    Beam 2: Gantry=32.0°, Couch=0.0°, Rays=598
+    Beam 3: Gantry=53.0°, Couch=0.0°, Rays=600
+    Beam 4: Gantry=74.0°, Couch=0.0°, Rays=569
+    Beam 5: Gantry=95.0°, Couch=0.0°, Rays=536
+    Beam 6: Gantry=116.0°, Couch=0.0°, Rays=519
+    Beam 7: Gantry=138.0°, Couch=0.0°, Rays=492
+    Beam 8: Gantry=159.0°, Couch=0.0°, Rays=516
+    Beam 9: Gantry=181.0°, Couch=0.0°, Rays=539
+    Beam 10: Gantry=201.0°, Couch=0.0°, Rays=589
+    Beam 11: Gantry=222.0°, Couch=0.0°, Rays=614
+    Beam 12: Gantry=244.0°, Couch=0.0°, Rays=602
+    Beam 13: Gantry=265.0°, Couch=0.0°, Rays=563
+    Beam 14: Gantry=286.0°, Couch=0.0°, Rays=543
+    Beam 15: Gantry=307.0°, Couch=0.0°, Rays=521
+    Beam 16: Gantry=328.0°, Couch=0.0°, Rays=521
+    Beam 17: Gantry=349.0°, Couch=0.0°, Rays=533
+
+[5/6] Calculating individual field doses...
+  Processing Beam 1/17 (Gantry: 11.0°)...
+Warning: Inconsistent dose engines given! pln asks for 'pencilBeam', but you are using 'SVDPB'!
+> In MatRad_Config/displayToConsole (line 161)
+In MatRad_Config/dispWarning (line 392)
+In DoseEngines/matRad_DoseEngineBase/assignPropertiesFromPln (line 149)
+In DoseEngines/matRad_DoseEngineBase (line 88)
+In DoseEngines/matRad_PencilBeamEngineAbstract (line 54)
+In DoseEngines.matRad_PhotonPencilBeamSVDEngine (line 94)
+In DoseEngines.matRad_DoseEngineBase.getEngineFromPln (line 50)
+In matRad_calcDoseInfluence (line 45)
+In ethos_field_dose (line 300)
+Warning: Using default dose calculation engine SVD Pencil Beam!
+> In MatRad_Config/displayToConsole (line 161)
+In MatRad_Config/dispWarning (line 392)
+In DoseEngines.matRad_DoseEngineBase.getEngineFromPln (line 51)
+In matRad_calcDoseInfluence (line 45)
+In ethos_field_dose (line 300)
+Dose influence matrix calculation using  'SVD Pencil Beam' Dose Engine...
+Dose grid has dimensions 280x280x134
+Adjusting structures for overlap... Done!
+Resampling structure set... Warning: Resizing the cst to the dose grid created an empty structure 35 opti in scenario 1 (cst{13,4}{1})!
+> In MatRad_Config/displayToConsole (line 161)
+In MatRad_Config/dispWarning (line 392)
+In matRad_resizeCstToGrid (line 53)
+In DoseEngines.matRad_DoseEngineBase/initDoseCalc (line 201)
+In DoseEngines/matRad_PencilBeamEngineAbstract/initDoseCalc (line 165)
+In DoseEngines/matRad_PhotonPencilBeamSVDEngine/initDoseCalc (line 140)
+In DoseEngines/matRad_PencilBeamEngineAbstract/calcDose (line 86)
+In DoseEngines/matRad_DoseEngineBase/calcDoseInfluence (line 342)
+In matRad_calcDoseInfluence (line 48)
+In ethos_field_dose (line 300)
+Warning: Resizing the cst to the dose grid created an empty structure 60 opti in scenario 1 (cst{14,4}{1})!
+> In MatRad_Config/displayToConsole (line 161)
+In MatRad_Config/dispWarning (line 392)
+In matRad_resizeCstToGrid (line 53)
+In DoseEngines.matRad_DoseEngineBase/initDoseCalc (line 201)
+In DoseEngines/matRad_PencilBeamEngineAbstract/initDoseCalc (line 165)
+In DoseEngines/matRad_PhotonPencilBeamSVDEngine/initDoseCalc (line 140)
+In DoseEngines/matRad_PencilBeamEngineAbstract/calcDose (line 86)
+In DoseEngines/matRad_DoseEngineBase/calcDoseInfluence (line 342)
+In matRad_calcDoseInfluence (line 48)
+In ethos_field_dose (line 300)
+Warning: Resizing the cst to the dose grid created an empty structure OAReval in scenario 1 (cst{16,4}{1})!
+> In MatRad_Config/displayToConsole (line 161)
+In MatRad_Config/dispWarning (line 392)
+In matRad_resizeCstToGrid (line 53)
+In DoseEngines.matRad_DoseEngineBase/initDoseCalc (line 201)
+In DoseEngines/matRad_PencilBeamEngineAbstract/initDoseCalc (line 165)
+In DoseEngines/matRad_PhotonPencilBeamSVDEngine/initDoseCalc (line 140)
+In DoseEngines/matRad_PencilBeamEngineAbstract/calcDose (line 86)
+In DoseEngines/matRad_DoseEngineBase/calcDoseInfluence (line 342)
+In matRad_calcDoseInfluence (line 48)
+In ethos_field_dose (line 300)
+Warning: Resizing the cst to the dose grid created an empty structure LowDoseControl in scenario 1 (cst{22,4}{1})!
+> In MatRad_Config/displayToConsole (line 161)
+In MatRad_Config/dispWarning (line 392)
+In matRad_resizeCstToGrid (line 53)
+In DoseEngines.matRad_DoseEngineBase/initDoseCalc (line 201)
+In DoseEngines/matRad_PencilBeamEngineAbstract/initDoseCalc (line 165)
+In DoseEngines/matRad_PhotonPencilBeamSVDEngine/initDoseCalc (line 140)
+In DoseEngines/matRad_PencilBeamEngineAbstract/calcDose (line 86)
+In DoseEngines/matRad_DoseEngineBase/calcDoseInfluence (line 342)
+In matRad_calcDoseInfluence (line 48)
+In ethos_field_dose (line 300)
+Warning: Resizing the cst to the dose grid created an empty structure 35opti 60opti in scenario 1 (cst{23,4}{1})!
+> In MatRad_Config/displayToConsole (line 161)
+In MatRad_Config/dispWarning (line 392)
+In matRad_resizeCstToGrid (line 53)
+In DoseEngines.matRad_DoseEngineBase/initDoseCalc (line 201)
+In DoseEngines/matRad_PencilBeamEngineAbstract/initDoseCalc (line 165)
+In DoseEngines/matRad_PhotonPencilBeamSVDEngine/initDoseCalc (line 140)
+In DoseEngines/matRad_PencilBeamEngineAbstract/calcDose (line 86)
+In DoseEngines/matRad_DoseEngineBase/calcDoseInfluence (line 342)
+In matRad_calcDoseInfluence (line 48)
+In ethos_field_dose (line 300)
+Done!
+Adjusting structures for overlap... Done!
+Warning: Could not find HLUT Varian Medical Systems-Ethos Treatment Planning-ConvolutionKernel-0_photons.hlut in hlutLibrary folder.
+matRad default HLUT loaded
+Warning: projecting out of range HU values
+Warning: Kernel Cut-Off 'Inf mm' larger than machine data range of '179.500000 mm'. Using '179.500000 mm'!
+matRad: calculate radiological depth cube... done.
+	SSD = 907 mm ...
+	Uniform primary photon fluence -> pre-compute kernel convolution...
+Progress: 100.00 %
+Dose calculation finished in 77.4948 seconds!
+Warning: Inconsistent dose engines given! pln asks for 'pencilBeam', but you are using 'SVDPB'!
+Warning: Using default dose calculation engine SVD Pencil Beam!
+Forward dose calculation using  'SVD Pencil Beam' Dose Engine...
