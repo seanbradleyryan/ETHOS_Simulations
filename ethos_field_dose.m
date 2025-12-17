@@ -50,36 +50,35 @@ end
 
 % Verify MATRAD functions are available
 fprintf('Verifying MATRAD installation...\n');
-matRadFunctions = {'matRad_importDicom', 'matRad_importDicomCt', ...
-                   'matRad_importPatient', 'matRad_calcDoseInfluence', ...
-                   'matRad_generateStf'};
-foundFunctions = false(size(matRadFunctions));
-for i = 1:length(matRadFunctions)
-    if exist(matRadFunctions{i}, 'file')
-        fprintf('  - Found: %s\n', matRadFunctions{i});
-        foundFunctions(i) = true;
-    end
+
+% Check for matRad_DicomImporter class
+classPath = fullfile(matradPath, 'dicom', '@matRad_DicomImporter');
+if exist(classPath, 'dir')
+    fprintf('  - Found: matRad_DicomImporter class at %s\n', classPath);
+else
+    fprintf('  - WARNING: matRad_DicomImporter class not found at expected location\n');
 end
 
-if ~any(foundFunctions)
-    fprintf('\n  WARNING: No matRad functions found on path!\n');
-    fprintf('  Checking directory contents...\n');
-    
-    % List .m files in matRad directory
-    mFiles = dir(fullfile(matradPath, '**', '*.m'));
-    importFiles = mFiles(contains({mFiles.name}, 'import', 'IgnoreCase', true));
-    
-    if ~isempty(importFiles)
-        fprintf('  Found potential import functions:\n');
-        for i = 1:min(10, length(importFiles))
-            fprintf('    - %s\n', importFiles(i).name);
-        end
+% Check if class can be instantiated
+try
+    testPath = tempname;
+    mkdir(testPath);
+    testImporter = matRad_DicomImporter(testPath);
+    fprintf('  - matRad_DicomImporter class successfully instantiated\n');
+    rmdir(testPath);
+    clear testImporter;
+catch ME
+    fprintf('  - WARNING: Could not instantiate matRad_DicomImporter: %s\n', ME.message);
+end
+
+% Check for other essential matRad functions
+essentialFunctions = {'matRad_calcDoseInfluence', 'matRad_generateStf', 'matRad_calcDoseForward'};
+for i = 1:length(essentialFunctions)
+    if exist(essentialFunctions{i}, 'file')
+        fprintf('  - Found: %s\n', essentialFunctions{i});
     else
-        fprintf('  No .m files found in matRad directory.\n');
-        fprintf('  Please verify matRad installation path: %s\n', matradPath);
+        fprintf('  - WARNING: %s not found\n', essentialFunctions{i});
     end
-    
-    error('MATRAD not properly installed or not on path.');
 end
 
 %% Main Processing Loop
@@ -107,36 +106,27 @@ for idxID = 1:length(ids)
         fprintf('\n[1/6] Importing DICOM data...\n');
         
         try
-            % Try unified import function first (newer matRad versions)
-            if exist('matRad_importDicom', 'file')
-                fprintf('  Using unified matRad_importDicom...\n');
-                [ct, cst, pln, resultGUI] = matRad_importDicom(dicomPath);
-                fprintf('  - Data imported successfully\n');
-            % Try individual import functions (older versions)
-            elseif exist('matRad_importDicomCt', 'file')
-                fprintf('  Using individual import functions...\n');
-                
-                % Import CT
-                ct = matRad_importDicomCt(dicomPath);
-                fprintf('  - CT imported: %d x %d x %d voxels\n', ct.cubeDim(1), ct.cubeDim(2), ct.cubeDim(3));
-                
-                % Import RT Plan
-                pln = matRad_importDicomRTPlan(dicomPath);
-                fprintf('  - RT Plan imported: %d beams\n', pln.propStf.numOfBeams);
-                
-                % Import RT Structures
-                cst = matRad_importDicomRtss(dicomPath, ct);
-                fprintf('  - RT Structures imported: %d structures\n', size(cst, 1));
-            else
-                error('No matRad import functions found. Please check matRad installation.');
-            end
+            % Use matRad_DicomImporter class (object-oriented approach)
+            fprintf('  Creating matRad_DicomImporter object...\n');
+            
+            % Create importer instance
+            importer = matRad_DicomImporter(dicomPath);
+            
+            % Import all DICOM data (CT, structures, plan)
+            fprintf('  Importing DICOM files...\n');
+            [ct, cst, pln] = importer.matRad_importDicom();
+            
+            fprintf('  - Data imported successfully\n');
             
             % Display CT information
             fprintf('  - CT dimensions: %d x %d x %d\n', ct.cubeDim(1), ct.cubeDim(2), ct.cubeDim(3));
             fprintf('  - CT resolution: %.2f x %.2f x %.2f mm\n', ...
                 ct.resolution.x, ct.resolution.y, ct.resolution.z);
+            fprintf('  - Number of structures: %d\n', size(cst, 1));
             if isfield(pln, 'propStf')
                 fprintf('  - Number of beams: %d\n', pln.propStf.numOfBeams);
+            elseif isfield(pln, 'numOfBeams')
+                fprintf('  - Number of beams: %d\n', pln.numOfBeams);
             end
             
         catch ME
