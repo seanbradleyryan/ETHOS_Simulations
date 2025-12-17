@@ -316,7 +316,7 @@ for idxID = 1:length(ids)
         
         % Initialize storage for field doses
         fieldDoses = cell(length(stf), 1);
-        totalDose = zeros(doseGrid.dimensions);
+        totalDose = [];  % Will be initialized after first successful calculation
         
         for beamIdx = 1:length(stf)
             fprintf('  Processing Beam %d/%d (Gantry: %.1f°)...\n', ...
@@ -375,23 +375,43 @@ for idxID = 1:length(ids)
                 if isfield(resultGUI, 'physicalDose')
                     maxDoseField = max(resultGUI.physicalDose(:));
                     nonzeroDose = nnz(resultGUI.physicalDose);
+                    doseSize = size(resultGUI.physicalDose);
+                    
+                    fprintf('    - Calculated dose grid: %d x %d x %d\n', ...
+                        doseSize(1), doseSize(2), doseSize(3));
                     
                     if maxDoseField > 0 && nonzeroDose > 0
                         fprintf('    ✓ SUCCESS: Max dose = %.2f Gy, Non-zero voxels = %d\n', ...
                             maxDoseField, nonzeroDose);
                         
-                        % Store field dose
-                        fieldDoses{beamIdx}.physicalDose = resultGUI.physicalDose;
-                        fieldDoses{beamIdx}.gantryAngle = stf(beamIdx).gantryAngle;
-                        fieldDoses{beamIdx}.couchAngle = stf(beamIdx).couchAngle;
-                        fieldDoses{beamIdx}.beamIdx = beamIdx;
-                        fieldDoses{beamIdx}.weights = w;
+                        % Initialize totalDose with correct dimensions on first successful calculation
+                        if isempty(totalDose)
+                            totalDose = zeros(doseSize);
+                            fprintf('    - Initialized totalDose with dimensions: %d x %d x %d\n', ...
+                                doseSize(1), doseSize(2), doseSize(3));
+                        end
                         
-                        % Accumulate total dose
-                        totalDose = totalDose + resultGUI.physicalDose;
+                        % Verify size compatibility before adding
+                        if isequal(size(totalDose), doseSize)
+                            % Store field dose
+                            fieldDoses{beamIdx}.physicalDose = resultGUI.physicalDose;
+                            fieldDoses{beamIdx}.gantryAngle = stf(beamIdx).gantryAngle;
+                            fieldDoses{beamIdx}.couchAngle = stf(beamIdx).couchAngle;
+                            fieldDoses{beamIdx}.beamIdx = beamIdx;
+                            fieldDoses{beamIdx}.weights = w;
+                            
+                            % Accumulate total dose
+                            totalDose = totalDose + resultGUI.physicalDose;
+                            fprintf('    - Added to totalDose (current max: %.2f Gy)\n', max(totalDose(:)));
+                        else
+                            fprintf('    ✗ ERROR: Size mismatch!\n');
+                            fprintf('      Expected: %d x %d x %d\n', size(totalDose));
+                            fprintf('      Got: %d x %d x %d\n', doseSize);
+                            fieldDoses{beamIdx} = [];
+                        end
                     else
                         fprintf('    ✗ ERROR: Calculated dose is all zeros!\n');
-                        fprintf('    - Result grid size: %d x %d x %d\n', size(resultGUI.physicalDose));
+                        fprintf('    - Result grid size: %d x %d x %d\n', doseSize);
                         fprintf('    - Check weights and beam configuration\n');
                         fieldDoses{beamIdx} = [];
                     end
