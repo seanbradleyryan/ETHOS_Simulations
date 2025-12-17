@@ -271,6 +271,34 @@ for idxID = 1:length(ids)
                     i, stf(i).gantryAngle, stf(i).couchAngle, length(stf(i).ray));
             end
             
+            % Diagnose plan structure for weight extraction
+            fprintf('\n  Diagnosing plan structure for weights:\n');
+            if isfield(pln, 'w')
+                fprintf('    - pln.w exists: %d values, sum=%.2f\n', length(pln.w), sum(pln.w));
+            else
+                fprintf('    - pln.w does NOT exist\n');
+            end
+            
+            if isfield(pln, 'propStf')
+                fprintf('    - pln.propStf exists\n');
+                if isfield(pln.propStf, 'beam')
+                    fprintf('      - pln.propStf.beam exists with %d beams\n', length(pln.propStf.beam));
+                    if isfield(pln.propStf.beam, 'weight')
+                        fprintf('      - pln.propStf.beam(1).weight exists\n');
+                    end
+                end
+            end
+            
+            % Check stf structure for any weight information
+            if isfield(stf, 'ray')
+                if isfield(stf(1).ray, 'weight')
+                    fprintf('    - stf(1).ray(1).weight exists: %.4f\n', stf(1).ray(1).weight);
+                end
+                if isfield(stf(1).ray, 'energy')
+                    fprintf('    - stf(1).ray has %d energy levels\n', length(stf(1).ray(1).energy));
+                end
+            end
+            
         catch ME
             fprintf('Error generating steering file: %s\n', ME.message);
             continue;
@@ -278,6 +306,13 @@ for idxID = 1:length(ids)
         
         %% Step 5: Calculate individual field doses
         fprintf('\n[5/6] Calculating individual field doses...\n');
+        
+        % Check if weights are available in the plan
+        if isfield(pln, 'w')
+            fprintf('  - Found weights in plan: %d values\n', length(pln.w));
+        else
+            fprintf('  - WARNING: No weights found in pln.w, will use uniform weights\n');
+        end
         
         % Initialize storage for field doses
         fieldDoses = cell(length(stf), 1);
@@ -297,45 +332,84 @@ for idxID = 1:length(ids)
                 stfSingle = stf(beamIdx);
                 
                 % Calculate dose influence matrix for this beam
+                fprintf('    Calculating dose influence matrix...\n');
                 dij = matRad_calcDoseInfluence(ct, cst, stfSingle, plnSingle);
+                fprintf('    - Total bixels in dij: %d\n', dij.totalNumOfBixels);
                 
-                % Extract beam weights from original plan
-                % For IMRT, weights should be in w vector
-                w = zeros(dij.totalNumOfBixels, 1);
+                % Initialize weights vector
+                w = ones(dij.totalNumOfBixels, 1);
                 
                 % Try to extract weights from imported plan
-                if isfield(pln, 'w') && length(pln.w) >= sum([stf(1:beamIdx).numOfRays] .* ...
-                        arrayfun(@(x) length(x.ray(1).energy), stf(1:beamIdx)))
-                    % Calculate offset for this beam
+                if isfield(pln, 'w') && ~isempty(pln.w)
+                    % Calculate offset for this beam in the global weight vector
                     offset = 0;
                     for b = 1:(beamIdx-1)
-                        offset = offset + stf(b).numOfRays * length(stf(b).ray(1).energy);
+                        % Count bixels in previous beams
+                        numRays = stf(b).numOfRays;
+                        numEnergies = length(stf(b).ray(1).energy);
+                        offset = offset + numRays * numEnergies;
                     end
-                    beamBixels = stfSingle.numOfRays * length(stfSingle.ray(1).energy);
-                    w = pln.w(offset+1:offset+beamBixels);
+                    
+                    % Number of bixels for current beam
+                    numBixelsThisBeam = stfSingle.numOfRays * length(stfSingle.ray(1).energy);
+                    
+                    fprintf('    - Extracting weights: offset=%d, num_bixels=%d\n', offset, numBixelsThisBeam);
+                    
+                    % Check if we have enough weights
+                    if offset + numBixelsThisBeam <= length(pln.w)
+                        w = pln.w(offset+1:offset+numBixelsThisBeam);
+                        fprintf('    - Using imported weights (sum=%.2f)\n', sum(w));
+                    else
+                        fprintf('    - WARNING: Not enough weights in pln.w, using uniform weights\n');
+                        w(:) = 1.0;
+                    end
                 else
-                    % Use uniform weights if not available
-                    w(:) = 1;
+                    fprintf('    - Using uniform weights (sum=%.2f)\n', sum(w));
                 end
                 
                 % Calculate dose for this field
+                fprintf('    Calculating forward dose...\n');
                 resultGUI = matRad_calcDoseForward(ct, cst, stfSingle, plnSingle, w);
                 
-                % Store field dose
-                fieldDoses{beamIdx}.physicalDose = resultGUI.physicalDose;
-                fieldDoses{beamIdx}.gantryAngle = stf(beamIdx).gantryAngle;
-                fieldDoses{beamIdx}.couchAngle = stf(beamIdx).couchAngle;
-                fieldDoses{beamIdx}.beamIdx = beamIdx;
-                
-                % Accumulate total dose
-                totalDose = totalDose + resultGUI.physicalDose;
-                
-                fprintf('    Max dose: %.2f Gy\n', max(resultGUI.physicalDose(:)));
+                % Check if dose was actually calculated
+                if isfield(resultGUI, 'physicalDose')
+                    maxDoseField = max(resultGUI.physicalDose(:));
+                    nonzeroDose = nnz(resultGUI.physicalDose);
+                    
+                    if maxDoseField > 0 && nonzeroDose > 0
+                        fprintf('    ✓ SUCCESS: Max dose = %.2f Gy, Non-zero voxels = %d\n', ...
+                            maxDoseField, nonzeroDose);
+                        
+                        % Store field dose
+                        fieldDoses{beamIdx}.physicalDose = resultGUI.physicalDose;
+                        fieldDoses{beamIdx}.gantryAngle = stf(beamIdx).gantryAngle;
+                        fieldDoses{beamIdx}.couchAngle = stf(beamIdx).couchAngle;
+                        fieldDoses{beamIdx}.beamIdx = beamIdx;
+                        fieldDoses{beamIdx}.weights = w;
+                        
+                        % Accumulate total dose
+                        totalDose = totalDose + resultGUI.physicalDose;
+                    else
+                        fprintf('    ✗ ERROR: Calculated dose is all zeros!\n');
+                        fprintf('    - Result grid size: %d x %d x %d\n', size(resultGUI.physicalDose));
+                        fprintf('    - Check weights and beam configuration\n');
+                        fieldDoses{beamIdx} = [];
+                    end
+                else
+                    fprintf('    ✗ ERROR: No physicalDose field in result!\n');
+                    fieldDoses{beamIdx} = [];
+                end
                 
             catch ME
-                fprintf('    Error calculating dose for beam %d: %s\n', beamIdx, ME.message);
+                fprintf('    ✗ ERROR calculating dose for beam %d: %s\n', beamIdx, ME.message);
+                fprintf('    Stack trace:\n');
+                for k = 1:min(3, length(ME.stack))
+                    fprintf('      %s (line %d)\n', ME.stack(k).name, ME.stack(k).line);
+                end
                 fieldDoses{beamIdx} = [];
             end
+            
+            fprintf('\n');
         end
         
         %% Step 6: Save results
