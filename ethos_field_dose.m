@@ -113,8 +113,9 @@ for idxID = 1:length(ids)
             importer = matRad_DicomImporter(dicomPath);
             
             % Import all DICOM data (CT, structures, plan)
+            % Note: This populates variables directly in workspace without output args
             fprintf('  Importing DICOM files...\n');
-            [ct, cst, pln] = importer.matRad_importDicom();
+            importer.matRad_importDicom();
             
             fprintf('  - Data imported successfully\n');
             
