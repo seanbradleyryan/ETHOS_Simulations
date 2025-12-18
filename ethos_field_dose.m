@@ -185,11 +185,76 @@ for idxID = 1:length(ids)
                 
                 fprintf('  - Dose grid resolution: [%.3f, %.3f, %.3f] mm\n', ...
                     doseGrid.resolution(1), doseGrid.resolution(2), doseGrid.resolution(3));
+                
+                % Resample RTDOSE to CT grid if dimensions don't match
+                if ~isequal(size(referenceDose), ct.cubeDim)
+                    fprintf('\n  Resampling RTDOSE to CT grid...\n');
+                    fprintf('    Original RTDOSE: %d x %d x %d at [%.2f, %.2f, %.2f] mm\n', ...
+                        size(referenceDose, 1), size(referenceDose, 2), size(referenceDose, 3), ...
+                        doseGrid.resolution(1), doseGrid.resolution(2), doseGrid.resolution(3));
+                    fprintf('    Target CT grid: %d x %d x %d at [%.2f, %.2f, %.2f] mm\n', ...
+                        ct.cubeDim(1), ct.cubeDim(2), ct.cubeDim(3), ...
+                        ct.resolution.x, ct.resolution.y, ct.resolution.z);
+                    
+                    % Get spatial coordinates for RTDOSE grid
+                    if isfield(rtdoseInfo, 'ImagePositionPatient')
+                        doseOrigin = rtdoseInfo.ImagePositionPatient;
+                    else
+                        fprintf('    Warning: ImagePositionPatient not found in RTDOSE, assuming same origin as CT\n');
+                        doseOrigin = [0; 0; 0];
+                    end
+                    
+                    % Create coordinate grids for RTDOSE
+                    [nRows, nCols, nSlices] = size(referenceDose);
+                    dose_x = doseOrigin(1) + (0:nCols-1) * doseGrid.resolution(1);
+                    dose_y = doseOrigin(2) + (0:nRows-1) * doseGrid.resolution(2);
+                    
+                    if isfield(rtdoseInfo, 'GridFrameOffsetVector')
+                        dose_z = doseOrigin(3) + rtdoseInfo.GridFrameOffsetVector;
+                    else
+                        dose_z = doseOrigin(3) + (0:nSlices-1) * doseGrid.resolution(3);
+                    end
+                    
+                    % Create coordinate grids for CT (using matRad's coordinate system)
+                    ct_x = (0:ct.cubeDim(1)-1) * ct.resolution.x;
+                    ct_y = (0:ct.cubeDim(2)-1) * ct.resolution.y;
+                    ct_z = (0:ct.cubeDim(3)-1) * ct.resolution.z;
+                    
+                    % Create meshgrids
+                    [Xdose, Ydose, Zdose] = meshgrid(dose_x, dose_y, dose_z);
+                    [Xct, Yct, Zct] = meshgrid(ct_x, ct_y, ct_z);
+                    
+                    % Interpolate dose to CT grid
+                    fprintf('    Interpolating dose values...\n');
+                    try
+                        referenceDoseResampled = interp3(Xdose, Ydose, Zdose, referenceDose, ...
+                            Xct, Yct, Zct, 'linear', 0);
+                        
+                        fprintf('    ✓ Resampling complete\n');
+                        fprintf('      Resampled grid: %d x %d x %d\n', ...
+                            size(referenceDoseResampled, 1), size(referenceDoseResampled, 2), size(referenceDoseResampled, 3));
+                        fprintf('      Max dose after resampling: %.2f Gy\n', max(referenceDoseResampled(:)));
+                        
+                        % Store both versions
+                        referenceDoseOriginal = referenceDose;
+                        referenceDose = referenceDoseResampled;
+                        
+                    catch ME
+                        fprintf('    ✗ ERROR during resampling: %s\n', ME.message);
+                        fprintf('    Continuing with original RTDOSE grid (comparison will note size mismatch)\n');
+                        referenceDoseOriginal = referenceDose;
+                    end
+                else
+                    fprintf('  - RTDOSE and CT grids already match, no resampling needed\n');
+                    referenceDoseOriginal = referenceDose;
+                end
+                
             else
                 fprintf('  Warning: No RTDOSE file found, using CT grid\n');
                 doseGrid.resolution = [ct.resolution.x, ct.resolution.y, ct.resolution.z];
                 doseGrid.dimensions = ct.cubeDim;
                 referenceDose = [];
+                referenceDoseOriginal = [];
             end
             
         catch ME
@@ -197,6 +262,7 @@ for idxID = 1:length(ids)
             doseGrid.resolution = [ct.resolution.x, ct.resolution.y, ct.resolution.z];
             doseGrid.dimensions = ct.cubeDim;
             referenceDose = [];
+            referenceDoseOriginal = [];
         end
         
         %% Step 3: Configure dose calculation
@@ -489,9 +555,12 @@ for idxID = 1:length(ids)
                 fprintf('      Reference grid: [%.2f, %.2f, %.2f] mm\n', ...
                     doseGrid.resolution(1), doseGrid.resolution(2), doseGrid.resolution(3));
                 
-                % Save without comparison
+                % Save without direct comparison
                 comparison.calculated = totalDose;
                 comparison.reference = referenceDose;
+                if exist('referenceDoseOriginal', 'var')
+                    comparison.referenceOriginal = referenceDoseOriginal;
+                end
                 comparison.note = 'Grid size mismatch - direct comparison not possible';
                 comparison.calculatedGrid = calculatedGridSize;
                 comparison.referenceGrid = size(referenceDose);
@@ -507,14 +576,31 @@ for idxID = 1:length(ids)
                 fprintf('      Max difference: %.2f Gy\n', max(abs(doseDiff(:))));
                 fprintf('      RMS difference: %.2f Gy\n', sqrt(mean(doseDiff(:).^2)));
                 
+                % Calculate relative differences in high dose region
+                highDoseThreshold = 0.5 * max(referenceDose(:));
+                highDoseMask = referenceDose > highDoseThreshold;
+                if any(highDoseMask(:))
+                    relativeDiff = abs(doseDiff(highDoseMask)) ./ referenceDose(highDoseMask) * 100;
+                    fprintf('      Mean relative diff (>50%% max): %.2f%%\n', mean(relativeDiff));
+                end
+                
                 % Save comparison
                 comparison.calculated = totalDose;
                 comparison.reference = referenceDose;
+                if exist('referenceDoseOriginal', 'var')
+                    comparison.referenceOriginal = referenceDoseOriginal;
+                    comparison.note = 'Reference dose was resampled to CT grid for comparison';
+                end
                 comparison.difference = doseDiff;
                 comparison.metrics.meanAbsDiff = mean(abs(doseDiff(:)));
                 comparison.metrics.maxDiff = max(abs(doseDiff(:)));
                 comparison.metrics.rmsDiff = sqrt(mean(doseDiff(:).^2));
+                if any(highDoseMask(:))
+                    comparison.metrics.meanRelativeDiff = mean(relativeDiff);
+                end
                 save(fullfile(outputPath, 'doseComparison.mat'), 'comparison');
+                
+                fprintf('    ✓ Comparison saved to doseComparison.mat\n');
             end
         elseif ~isempty(referenceDose) && isempty(totalDose)
             fprintf('  - Cannot compare: totalDose was not calculated\n');
