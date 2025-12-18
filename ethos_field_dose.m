@@ -317,154 +317,207 @@ for idxID = 1:length(ids)
         % Initialize storage for field doses
         fieldDoses = cell(length(stf), 1);
         totalDose = [];  % Will be initialized after first successful calculation
+        calculatedGridSize = [];  % Track the calculation grid size
         
         for beamIdx = 1:length(stf)
             fprintf('  Processing Beam %d/%d (Gantry: %.1f°)...\n', ...
                 beamIdx, length(stf), stf(beamIdx).gantryAngle);
             
+            % Create temporary plan with single beam
+            plnSingle = pln;
+            plnSingle.propStf.numOfBeams = 1;
+            plnSingle.propStf.isoCenter = stf(beamIdx).isoCenter;
+            
+            % Create single-beam steering file
+            stfSingle = stf(beamIdx);
+            
+            % Calculate dose influence matrix for this beam
             try
-                % Create temporary plan with single beam
-                plnSingle = pln;
-                plnSingle.propStf.numOfBeams = 1;
-                plnSingle.propStf.isoCenter = stf(beamIdx).isoCenter;
-                
-                % Create single-beam steering file
-                stfSingle = stf(beamIdx);
-                
-                % Calculate dose influence matrix for this beam
                 fprintf('    Calculating dose influence matrix...\n');
                 dij = matRad_calcDoseInfluence(ct, cst, stfSingle, plnSingle);
                 fprintf('    - Total bixels in dij: %d\n', dij.totalNumOfBixels);
-                
-                % Initialize weights vector
-                w = ones(dij.totalNumOfBixels, 1);
-                
-                % Try to extract weights from imported plan
-                if isfield(pln, 'w') && ~isempty(pln.w)
-                    % Calculate offset for this beam in the global weight vector
-                    offset = 0;
-                    for b = 1:(beamIdx-1)
-                        % Count bixels in previous beams
-                        numRays = stf(b).numOfRays;
-                        numEnergies = length(stf(b).ray(1).energy);
-                        offset = offset + numRays * numEnergies;
-                    end
-                    
-                    % Number of bixels for current beam
-                    numBixelsThisBeam = stfSingle.numOfRays * length(stfSingle.ray(1).energy);
-                    
-                    fprintf('    - Extracting weights: offset=%d, num_bixels=%d\n', offset, numBixelsThisBeam);
-                    
-                    % Check if we have enough weights
-                    if offset + numBixelsThisBeam <= length(pln.w)
-                        w = pln.w(offset+1:offset+numBixelsThisBeam);
-                        fprintf('    - Using imported weights (sum=%.2f)\n', sum(w));
-                    else
-                        fprintf('    - WARNING: Not enough weights in pln.w, using uniform weights\n');
-                        w(:) = 1.0;
-                    end
-                else
-                    fprintf('    - Using uniform weights (sum=%.2f)\n', sum(w));
+            catch ME
+                fprintf('    ✗ ERROR in dose influence calculation: %s\n', ME.message);
+                fieldDoses{beamIdx} = [];
+                continue;
+            end
+            
+            % Initialize weights vector
+            w = ones(dij.totalNumOfBixels, 1);
+            
+            % Try to extract weights from imported plan
+            if isfield(pln, 'w') && ~isempty(pln.w)
+                % Calculate offset for this beam in the global weight vector
+                offset = 0;
+                for b = 1:(beamIdx-1)
+                    numRays = stf(b).numOfRays;
+                    numEnergies = length(stf(b).ray(1).energy);
+                    offset = offset + numRays * numEnergies;
                 end
                 
-                % Calculate dose for this field
+                numBixelsThisBeam = stfSingle.numOfRays * length(stfSingle.ray(1).energy);
+                fprintf('    - Extracting weights: offset=%d, num_bixels=%d\n', offset, numBixelsThisBeam);
+                
+                if offset + numBixelsThisBeam <= length(pln.w)
+                    w = pln.w(offset+1:offset+numBixelsThisBeam);
+                    fprintf('    - Using imported weights (sum=%.2f)\n', sum(w));
+                else
+                    fprintf('    - WARNING: Not enough weights in pln.w, using uniform weights\n');
+                    w(:) = 1.0;
+                end
+            else
+                fprintf('    - Using uniform weights (sum=%.2f)\n', sum(w));
+            end
+            
+            % Calculate dose for this field
+            try
                 fprintf('    Calculating forward dose...\n');
                 resultGUI = matRad_calcDoseForward(ct, cst, stfSingle, plnSingle, w);
-                
-                % Check if dose was actually calculated
-                if isfield(resultGUI, 'physicalDose')
-                    maxDoseField = max(resultGUI.physicalDose(:));
-                    nonzeroDose = nnz(resultGUI.physicalDose);
-                    doseSize = size(resultGUI.physicalDose);
-                    
-                    fprintf('    - Calculated dose grid: %d x %d x %d\n', ...
-                        doseSize(1), doseSize(2), doseSize(3));
-                    
-                    if maxDoseField > 0 && nonzeroDose > 0
-                        fprintf('    ✓ SUCCESS: Max dose = %.2f Gy, Non-zero voxels = %d\n', ...
-                            maxDoseField, nonzeroDose);
-                        
-                        % Initialize totalDose with correct dimensions on first successful calculation
-                        if isempty(totalDose)
-                            totalDose = zeros(doseSize);
-                            fprintf('    - Initialized totalDose with dimensions: %d x %d x %d\n', ...
-                                doseSize(1), doseSize(2), doseSize(3));
-                        end
-                        
-                        % Verify size compatibility before adding
-                        if isequal(size(totalDose), doseSize)
-                            % Store field dose
-                            fieldDoses{beamIdx}.physicalDose = resultGUI.physicalDose;
-                            fieldDoses{beamIdx}.gantryAngle = stf(beamIdx).gantryAngle;
-                            fieldDoses{beamIdx}.couchAngle = stf(beamIdx).couchAngle;
-                            fieldDoses{beamIdx}.beamIdx = beamIdx;
-                            fieldDoses{beamIdx}.weights = w;
-                            
-                            % Accumulate total dose
-                            totalDose = totalDose + resultGUI.physicalDose;
-                            fprintf('    - Added to totalDose (current max: %.2f Gy)\n', max(totalDose(:)));
-                        else
-                            fprintf('    ✗ ERROR: Size mismatch!\n');
-                            fprintf('      Expected: %d x %d x %d\n', size(totalDose));
-                            fprintf('      Got: %d x %d x %d\n', doseSize);
-                            fieldDoses{beamIdx} = [];
-                        end
-                    else
-                        fprintf('    ✗ ERROR: Calculated dose is all zeros!\n');
-                        fprintf('    - Result grid size: %d x %d x %d\n', doseSize);
-                        fprintf('    - Check weights and beam configuration\n');
-                        fieldDoses{beamIdx} = [];
-                    end
-                else
-                    fprintf('    ✗ ERROR: No physicalDose field in result!\n');
-                    fieldDoses{beamIdx} = [];
-                end
-                
             catch ME
-                fprintf('    ✗ ERROR calculating dose for beam %d: %s\n', beamIdx, ME.message);
-                fprintf('    Stack trace:\n');
-                for k = 1:min(3, length(ME.stack))
-                    fprintf('      %s (line %d)\n', ME.stack(k).name, ME.stack(k).line);
-                end
+                fprintf('    ✗ ERROR in forward dose calculation: %s\n', ME.message);
                 fieldDoses{beamIdx} = [];
+                continue;
+            end
+            
+            % Validate and store the result
+            if ~isfield(resultGUI, 'physicalDose')
+                fprintf('    ✗ ERROR: No physicalDose field in result!\n');
+                fieldDoses{beamIdx} = [];
+                continue;
+            end
+            
+            % Check dose values
+            maxDoseField = max(resultGUI.physicalDose(:));
+            nonzeroDose = nnz(resultGUI.physicalDose);
+            doseSize = size(resultGUI.physicalDose);
+            
+            fprintf('    - Calculated dose grid: %d x %d x %d\n', ...
+                doseSize(1), doseSize(2), doseSize(3));
+            
+            if maxDoseField == 0 || nonzeroDose == 0
+                fprintf('    ✗ ERROR: Calculated dose is all zeros!\n');
+                fieldDoses{beamIdx} = [];
+                continue;
+            end
+            
+            fprintf('    ✓ Dose calculated: Max = %.2f Gy, Non-zero voxels = %d\n', ...
+                maxDoseField, nonzeroDose);
+            
+            % Store field dose (do this FIRST before any accumulation)
+            fieldDoses{beamIdx} = struct();
+            fieldDoses{beamIdx}.physicalDose = resultGUI.physicalDose;
+            fieldDoses{beamIdx}.gantryAngle = stf(beamIdx).gantryAngle;
+            fieldDoses{beamIdx}.couchAngle = stf(beamIdx).couchAngle;
+            fieldDoses{beamIdx}.beamIdx = beamIdx;
+            fieldDoses{beamIdx}.weights = w;
+            fieldDoses{beamIdx}.maxDose = maxDoseField;
+            
+            fprintf('    ✓ Field dose stored successfully\n');
+            
+            % Initialize or accumulate total dose
+            if isempty(totalDose)
+                totalDose = zeros(doseSize);
+                calculatedGridSize = doseSize;
+                fprintf('    - Initialized totalDose: %d x %d x %d\n', ...
+                    doseSize(1), doseSize(2), doseSize(3));
+            end
+            
+            % Verify size compatibility before accumulation
+            if isequal(doseSize, calculatedGridSize)
+                try
+                    totalDose = totalDose + resultGUI.physicalDose;
+                    fprintf('    ✓ Added to totalDose (running max: %.2f Gy)\n', max(totalDose(:)));
+                catch ME
+                    fprintf('    ⚠ WARNING: Could not add to totalDose: %s\n', ME.message);
+                    fprintf('      Field dose is still saved individually\n');
+                end
+            else
+                fprintf('    ⚠ WARNING: Size mismatch with totalDose\n');
+                fprintf('      Expected: %d x %d x %d\n', calculatedGridSize);
+                fprintf('      Got: %d x %d x %d\n', doseSize);
+                fprintf('      Field dose is still saved individually\n');
             end
             
             fprintf('\n');
         end
         
+        % Final summary
+        numSuccessful = sum(~cellfun(@isempty, fieldDoses));
+        fprintf('  Summary: %d/%d fields calculated successfully\n', numSuccessful, length(stf));
+        
         %% Step 6: Save results
         fprintf('\n[6/6] Saving results...\n');
+        
+        % Count successful calculations
+        numSuccessful = sum(~cellfun(@isempty, fieldDoses));
+        fprintf('  - Successfully calculated: %d/%d fields\n', numSuccessful, length(stf));
+        
+        if numSuccessful == 0
+            fprintf('  ✗ ERROR: No fields were successfully calculated!\n');
+            fprintf('  - Check MATRAD configuration and beam parameters\n');
+            continue;
+        end
         
         % Save individual field doses
         save(fullfile(outputPath, 'fieldDoses.mat'), 'fieldDoses', 'stf', 'pln', 'ct', 'cst');
         fprintf('  - Field doses saved to: fieldDoses.mat\n');
         
-        % Save reconstructed total dose
-        save(fullfile(outputPath, 'reconstructedDose.mat'), 'totalDose');
-        fprintf('  - Reconstructed total dose saved\n');
+        % Save reconstructed total dose if available
+        if ~isempty(totalDose) && max(totalDose(:)) > 0
+            save(fullfile(outputPath, 'reconstructedDose.mat'), 'totalDose', 'calculatedGridSize');
+            fprintf('  - Reconstructed total dose saved\n');
+            fprintf('    Total max dose: %.2f Gy\n', max(totalDose(:)));
+        else
+            fprintf('  - WARNING: Total dose is empty or zero, not saved\n');
+            fprintf('  - Individual field doses are still available\n');
+        end
         
         % Compare with reference if available
-        if ~isempty(referenceDose)
-            % Resample if needed
+        if ~isempty(referenceDose) && ~isempty(totalDose)
+            fprintf('\n  Comparing with reference RTDOSE...\n');
+            
+            % Check size compatibility
             if ~isequal(size(totalDose), size(referenceDose))
-                fprintf('  Warning: Dose grid size mismatch\n');
-                fprintf('    Calculated: %d x %d x %d\n', size(totalDose));
-                fprintf('    Reference: %d x %d x %d\n', size(referenceDose));
+                fprintf('    Dose grid size mismatch:\n');
+                fprintf('      Calculated: %d x %d x %d\n', size(totalDose));
+                fprintf('      Reference:  %d x %d x %d\n', size(referenceDose));
+                fprintf('    Note: Grids have different resolutions\n');
+                fprintf('      Calculated grid: [%.2f, %.2f, %.2f] mm\n', ...
+                    pln.propDoseCalc.doseGrid.resolution.x, ...
+                    pln.propDoseCalc.doseGrid.resolution.y, ...
+                    pln.propDoseCalc.doseGrid.resolution.z);
+                fprintf('      Reference grid: [%.2f, %.2f, %.2f] mm\n', ...
+                    doseGrid.resolution(1), doseGrid.resolution(2), doseGrid.resolution(3));
+                
+                % Save without comparison
+                comparison.calculated = totalDose;
+                comparison.reference = referenceDose;
+                comparison.note = 'Grid size mismatch - direct comparison not possible';
+                comparison.calculatedGrid = calculatedGridSize;
+                comparison.referenceGrid = size(referenceDose);
+                save(fullfile(outputPath, 'doseComparison.mat'), 'comparison');
             else
+                % Sizes match - can compare directly
                 doseDiff = totalDose - referenceDose;
                 
-                fprintf('\n  Comparison with reference RTDOSE:\n');
-                fprintf('    Calculated max dose: %.2f Gy\n', max(totalDose(:)));
-                fprintf('    Reference max dose: %.2f Gy\n', max(referenceDose(:)));
-                fprintf('    Mean absolute difference: %.2f Gy\n', mean(abs(doseDiff(:))));
-                fprintf('    Max difference: %.2f Gy\n', max(abs(doseDiff(:))));
+                fprintf('    Comparison statistics:\n');
+                fprintf('      Calculated max dose: %.2f Gy\n', max(totalDose(:)));
+                fprintf('      Reference max dose:  %.2f Gy\n', max(referenceDose(:)));
+                fprintf('      Mean absolute difference: %.2f Gy\n', mean(abs(doseDiff(:))));
+                fprintf('      Max difference: %.2f Gy\n', max(abs(doseDiff(:))));
+                fprintf('      RMS difference: %.2f Gy\n', sqrt(mean(doseDiff(:).^2)));
                 
                 % Save comparison
                 comparison.calculated = totalDose;
                 comparison.reference = referenceDose;
                 comparison.difference = doseDiff;
+                comparison.metrics.meanAbsDiff = mean(abs(doseDiff(:)));
+                comparison.metrics.maxDiff = max(abs(doseDiff(:)));
+                comparison.metrics.rmsDiff = sqrt(mean(doseDiff(:).^2));
                 save(fullfile(outputPath, 'doseComparison.mat'), 'comparison');
             end
+        elseif ~isempty(referenceDose) && isempty(totalDose)
+            fprintf('  - Cannot compare: totalDose was not calculated\n');
         end
         
         % Export individual field doses to DICOM
