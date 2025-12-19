@@ -326,6 +326,123 @@ for idxID = 1:length(ids)
         fprintf('  - Dose grid resolution: [%.2f, %.2f, %.2f] mm\n', ...
             doseGrid.resolution(1), doseGrid.resolution(2), doseGrid.resolution(3));
         
+        %% Manual MLC/Collimation Extraction
+        fprintf('\n  Extracting MLC/collimation data from RTPLAN...\n');
+        try
+            % Find RTPLAN file
+            rtplanFile = dir(fullfile(dicomPath, 'RP*.dcm'));
+            if isempty(rtplanFile)
+                rtplanFile = dir(fullfile(dicomPath, '*RTPLAN*.dcm'));
+            end
+            
+            if ~isempty(rtplanFile)
+                rtplanInfo = dicominfo(fullfile(rtplanFile(1).folder, rtplanFile(1).name));
+                
+                if isfield(rtplanInfo, 'BeamSequence')
+                    numBeams = length(fieldnames(rtplanInfo.BeamSequence));
+                    
+                    % Initialize collimation structure if it doesn't exist
+                    if ~isfield(pln.propStf, 'collimation')
+                        pln.propStf.collimation = struct();
+                    end
+                    
+                    mlcExtracted = false;
+                    
+                    for beamIdx = 1:numBeams
+                        beamField = sprintf('Item_%d', beamIdx);
+                        beam = rtplanInfo.BeamSequence.(beamField);
+                        
+                        % Initialize beam collimation structure
+                        if ~isfield(pln.propStf, 'beam')
+                            pln.propStf.beam = struct();
+                        end
+                        
+                        if isfield(beam, 'ControlPointSequence')
+                            numCP = length(fieldnames(beam.ControlPointSequence));
+                            
+                            % For simplicity, use first control point aperture
+                            % (represents initial field shape)
+                            cpField = 'Item_1';
+                            cp = beam.ControlPointSequence.(cpField);
+                            
+                            if isfield(cp, 'BeamLimitingDevicePositionSequence')
+                                numDevices = length(fieldnames(cp.BeamLimitingDevicePositionSequence));
+                                
+                                jawX = [];
+                                jawY = [];
+                                mlcX = [];
+                                mlcY = [];
+                                
+                                for devIdx = 1:numDevices
+                                    devField = sprintf('Item_%d', devIdx);
+                                    device = cp.BeamLimitingDevicePositionSequence.(devField);
+                                    
+                                    if isfield(device, 'RTBeamLimitingDeviceType')
+                                        deviceType = device.RTBeamLimitingDeviceType;
+                                        
+                                        if isfield(device, 'LeafJawPositions')
+                                            positions = device.LeafJawPositions;
+                                            
+                                            % Classify device type
+                                            if contains(deviceType, 'ASYMX', 'IgnoreCase', true) || ...
+                                               strcmp(deviceType, 'X')
+                                                jawX = positions;
+                                                fprintf('    Beam %d: X Jaws = [%.2f, %.2f] mm\n', ...
+                                                    beamIdx, positions(1), positions(2));
+                                            elseif contains(deviceType, 'ASYMY', 'IgnoreCase', true) || ...
+                                                   strcmp(deviceType, 'Y')
+                                                jawY = positions;
+                                                fprintf('    Beam %d: Y Jaws = [%.2f, %.2f] mm\n', ...
+                                                    beamIdx, positions(1), positions(2));
+                                            elseif contains(deviceType, 'MLCX', 'IgnoreCase', true) || ...
+                                                   contains(deviceType, 'MLC', 'IgnoreCase', true)
+                                                mlcX = positions;
+                                                numLeaves = length(positions) / 2;
+                                                fprintf('    Beam %d: MLC X with %d leaf pairs\n', ...
+                                                    beamIdx, numLeaves);
+                                                mlcExtracted = true;
+                                            elseif contains(deviceType, 'MLCY', 'IgnoreCase', true)
+                                                mlcY = positions;
+                                                numLeaves = length(positions) / 2;
+                                                fprintf('    Beam %d: MLC Y with %d leaf pairs\n', ...
+                                                    beamIdx, numLeaves);
+                                            end
+                                        end
+                                    end
+                                end
+                                
+                                % Store in pln structure
+                                pln.propStf.beam(beamIdx).jaw.x = jawX;
+                                pln.propStf.beam(beamIdx).jaw.y = jawY;
+                                
+                                if ~isempty(mlcX)
+                                    pln.propStf.beam(beamIdx).shape.x = mlcX;
+                                end
+                                if ~isempty(mlcY)
+                                    pln.propStf.beam(beamIdx).shape.y = mlcY;
+                                end
+                            end
+                        end
+                    end
+                    
+                    if mlcExtracted
+                        fprintf('  ✓ MLC positions extracted for %d beams\n', numBeams);
+                        fprintf('  ✓ Stored in pln.propStf.beam structure\n');
+                        
+                        % Set collimation flag
+                        pln.propStf.collimation.type = 'mlc';
+                        fprintf('  ✓ Set pln.propStf.collimation.type = ''mlc''\n');
+                    else
+                        fprintf('  ⚠ No MLC data found in control points\n');
+                    end
+                end
+            end
+        catch ME
+            error('  ⚠ Error extracting MLC data: %s\n', ME.message);
+            fprintf('    Will proceed with open field calculation\n');
+
+        end;
+        
         %% Step 4: Generate steering information
         fprintf('\n[4/6] Generating steering information...\n');
         
@@ -351,16 +468,24 @@ for idxID = 1:length(ids)
                 fprintf('    - pln.propStf exists\n');
                 if isfield(pln.propStf, 'beam')
                     fprintf('      - pln.propStf.beam exists with %d beams\n', length(pln.propStf.beam));
-                    if isfield(pln.propStf.beam, 'weight')
-                        fprintf('      - pln.propStf.beam(1).weight exists\n');
+                    if isfield(pln.propStf.beam(1), 'shape')
+                        fprintf('      - pln.propStf.beam(1).shape exists (MLC data populated)\n');
+                    else
+                        fprintf('      - pln.propStf.beam(1).shape does NOT exist\n');
                     end
+                end
+                if isfield(pln.propStf, 'collimation')
+                    fprintf('      - pln.propStf.collimation exists\n');
                 end
             end
             
-            % Check stf structure for any weight information
+            % Check if MLC data made it into stf
+            fprintf('\n  Checking if MLC data transferred to stf:\n');
             if isfield(stf, 'ray')
-                if isfield(stf(1).ray, 'weight')
-                    fprintf('    - stf(1).ray(1).weight exists: %.4f\n', stf(1).ray(1).weight);
+                if isfield(stf(1).ray, 'shape')
+                    fprintf('    - stf(1).ray(1).shape exists (MLC applied)\n');
+                else
+                    fprintf('    - stf(1).ray(1).shape does NOT exist (open field)\n');
                 end
                 if isfield(stf(1).ray, 'energy')
                     fprintf('    - stf(1).ray has %d energy levels\n', length(stf(1).ray(1).energy));
@@ -479,35 +604,6 @@ for idxID = 1:length(ids)
                             end
                         end
                     end
-                    
-                    % Check for MLC aperture information
-                    fprintf('\n    - Checking for MLC aperture data:\n');
-                    if isfield(rtplanInfo, 'BeamSequence')
-                        beam1 = rtplanInfo.BeamSequence.Item_1;
-                        if isfield(beam1, 'BeamLimitingDeviceSequence')
-                            fprintf('      ✓ BeamLimitingDeviceSequence found\n');
-                        else
-                            fprintf('      ✗ No BeamLimitingDeviceSequence\n');
-                        end
-                        
-                        if isfield(beam1, 'ControlPointSequence')
-                            cp1 = beam1.ControlPointSequence.Item_1;
-                            if isfield(cp1, 'BeamLimitingDevicePositionSequence')
-                                fprintf('      ✓ BeamLimitingDevicePositionSequence found in control points\n');
-                                numDevices = length(fieldnames(cp1.BeamLimitingDevicePositionSequence));
-                                fprintf('        Number of limiting devices: %d\n', numDevices);
-                            else
-                                fprintf('      ✗ No BeamLimitingDevicePositionSequence in control points\n');
-                            end
-                        end
-                    end
-                    
-                    fprintf('\n    ⚠ NOTE: MLC aperture simulation\n');
-                    fprintf('      The warning "Not able to assign property collimation" indicates\n');
-                    fprintf('      that MATRAD is calculating dose for open fields, not MLC-shaped fields.\n');
-                    fprintf('      This causes calculated fields to be much larger than reference fields.\n');
-                    fprintf('      This is a known limitation when RTPLAN collimation data cannot be\n');
-                    fprintf('      properly transferred to the dose calculation engine.\n');
                 end
             catch ME
                 fprintf('    ⚠ Error during manual weight extraction: %s\n', ME.message);
@@ -780,20 +876,34 @@ for idxID = 1:length(ids)
         fprintf('========================================\n');
         
         fprintf('\n** IMPORTANT NOTES **\n');
-        fprintf('1. MLC Aperture Limitation:\n');
-        fprintf('   - MATRAD calculated dose for open fields (no MLC shaping)\n');
-        fprintf('   - This causes calculated fields to be larger than reference fields\n');
-        fprintf('   - Field shapes are present in RTPLAN but not applied in dose calculation\n');
-        fprintf('   - This is indicated by the "collimation" property warning\n\n');
+        fprintf('1. MLC Aperture Status:\n');
+        if isfield(pln, 'propStf') && isfield(pln.propStf, 'beam') && ...
+           isfield(pln.propStf.beam(1), 'shape')
+            fprintf('   - MLC positions were extracted from RTPLAN\n');
+            fprintf('   - MLC data stored in pln.propStf.beam structures\n');
+            if exist('stf', 'var') && isfield(stf(1).ray, 'shape')
+                fprintf('   ✓ MLC shapes transferred to dose calculation\n');
+            else
+                fprintf('   ⚠ MLC shapes may not have been applied in dose calculation\n');
+                fprintf('   - Calculated fields may be larger than reference fields\n');
+            end
+        else
+            fprintf('   ⚠ MLC positions could not be extracted\n');
+            fprintf('   - MATRAD calculated dose for open fields (no MLC shaping)\n');
+            fprintf('   - Calculated fields will be larger than reference fields\n');
+        end
+        fprintf('\n');
         
         fprintf('2. Weight Extraction:\n');
         if isfield(pln, 'w') && ~isempty(pln.w)
-            fprintf('   - Weights were successfully extracted from RTPLAN\n');
-            fprintf('   - Using beam metersets distributed across bixels\n\n');
+            fprintf('   ✓ Weights successfully extracted from RTPLAN\n');
+            fprintf('   - Using beam metersets: total = %.2f\n', sum(pln.w));
         else
-            fprintf('   - Weights could not be extracted, uniform weights used\n');
-            fprintf('   - Relative field contributions may not match clinical plan\n\n');
+            fprintf('   ⚠ Weights could not be extracted\n');
+            fprintf('   - Uniform weights used for all bixels\n');
+            fprintf('   - Relative field contributions may not match clinical plan\n');
         end
+        fprintf('\n');
         
         fprintf('3. Machine Commissioning:\n');
         fprintf('   - Using generic photon machine data (not Halcyon-specific)\n');
