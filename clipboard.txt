@@ -1,4 +1,4 @@
- 
+
 Verifying paths...
   - Working directory OK: /mnt/weka/home/80030361/ETHOS_Simulations
   - matRad path OK: /mnt/weka/home/80030361/MATLAB/Addons/matRad
