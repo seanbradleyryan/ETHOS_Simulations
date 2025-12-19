@@ -196,48 +196,50 @@ for idxID = 1:length(ids)
                         ct.cubeDim(1), ct.cubeDim(2), ct.cubeDim(3), ...
                         ct.resolution.x, ct.resolution.y, ct.resolution.z);
                     
-                    % Get spatial coordinates for RTDOSE grid
-                    if isfield(rtdoseInfo, 'ImagePositionPatient')
-                        doseOrigin = rtdoseInfo.ImagePositionPatient;
-                    else
-                        fprintf('    Warning: ImagePositionPatient not found in RTDOSE, assuming same origin as CT\n');
-                        doseOrigin = [0; 0; 0];
-                    end
-                    
-                    % Create coordinate grids for RTDOSE
+                    % Use index-based interpolation (matRad works in voxel space, not DICOM coordinates)
                     [nRows, nCols, nSlices] = size(referenceDose);
-                    dose_x = doseOrigin(1) + (0:nCols-1) * doseGrid.resolution(1);
-                    dose_y = doseOrigin(2) + (0:nRows-1) * doseGrid.resolution(2);
                     
-                    if isfield(rtdoseInfo, 'GridFrameOffsetVector')
-                        dose_z = doseOrigin(3) + rtdoseInfo.GridFrameOffsetVector;
-                    else
-                        dose_z = doseOrigin(3) + (0:nSlices-1) * doseGrid.resolution(3);
-                    end
+                    % Create index grids for original RTDOSE
+                    [iDose, jDose, kDose] = ndgrid(1:nRows, 1:nCols, 1:nSlices);
                     
-                    % Create coordinate grids for CT (using matRad's coordinate system)
-                    ct_x = (0:ct.cubeDim(1)-1) * ct.resolution.x;
-                    ct_y = (0:ct.cubeDim(2)-1) * ct.resolution.y;
-                    ct_z = (0:ct.cubeDim(3)-1) * ct.resolution.z;
+                    % Create query points for CT grid (scaled by resolution ratios)
+                    % This maps CT voxel indices to RTDOSE voxel indices based on resolution
+                    scale_i = ct.resolution.y / doseGrid.resolution(1);  % Y direction
+                    scale_j = ct.resolution.x / doseGrid.resolution(2);  % X direction
+                    scale_k = ct.resolution.z / doseGrid.resolution(3);  % Z direction
                     
-                    % Create meshgrids
-                    [Xdose, Ydose, Zdose] = meshgrid(dose_x, dose_y, dose_z);
-                    [Xct, Yct, Zct] = meshgrid(ct_x, ct_y, ct_z);
+                    % Generate query grid in RTDOSE index space
+                    iQuery = 1 + (0:ct.cubeDim(1)-1) * scale_i;
+                    jQuery = 1 + (0:ct.cubeDim(2)-1) * scale_j;
+                    kQuery = 1 + (0:ct.cubeDim(3)-1) * scale_k;
+                    
+                    [iQ, jQ, kQ] = ndgrid(iQuery, jQuery, kQuery);
                     
                     % Interpolate dose to CT grid
-                    fprintf('    Interpolating dose values...\n');
+                    fprintf('    Interpolating dose values (index-based)...\n');
+                    fprintf('    Resolution scaling: [%.3f, %.3f, %.3f]\n', scale_i, scale_j, scale_k);
+                    
                     try
-                        referenceDoseResampled = interp3(Xdose, Ydose, Zdose, referenceDose, ...
-                            Xct, Yct, Zct, 'linear', 0);
+                        referenceDoseResampled = interpn(iDose, jDose, kDose, referenceDose, ...
+                            iQ, jQ, kQ, 'linear', 0);
                         
                         fprintf('    ✓ Resampling complete\n');
                         fprintf('      Resampled grid: %d x %d x %d\n', ...
                             size(referenceDoseResampled, 1), size(referenceDoseResampled, 2), size(referenceDoseResampled, 3));
                         fprintf('      Max dose after resampling: %.2f Gy\n', max(referenceDoseResampled(:)));
+                        fprintf('      Non-zero voxels: %d\n', nnz(referenceDoseResampled));
                         
-                        % Store both versions
-                        referenceDoseOriginal = referenceDose;
-                        referenceDose = referenceDoseResampled;
+                        % Verify resampled dose is not empty
+                        if max(referenceDoseResampled(:)) == 0 || nnz(referenceDoseResampled) == 0
+                            fprintf('    ✗ ERROR: Resampled dose is empty or all zeros!\n');
+                            fprintf('      Using original RTDOSE grid (comparison will note size mismatch)\n');
+                            referenceDoseOriginal = referenceDose;
+                        else
+                            % Store both versions
+                            referenceDoseOriginal = referenceDose;
+                            referenceDose = referenceDoseResampled;
+                            fprintf('    ✓ Resampled dose validated - contains non-zero values\n');
+                        end
                         
                     catch ME
                         fprintf('    ✗ ERROR during resampling: %s\n', ME.message);
