@@ -438,9 +438,8 @@ for idxID = 1:length(ids)
                 end
             end
         catch ME
-            error('  ⚠ Error extracting MLC data: %s\n', ME.message);
+            fprintf('  ⚠ Error extracting MLC data: %s\n', ME.message);
             fprintf('    Will proceed with open field calculation\n');
-
         end;
         
         %% Step 4: Generate steering information
@@ -454,6 +453,64 @@ for idxID = 1:length(ids)
             for i = 1:length(stf)
                 fprintf('    Beam %d: Gantry=%.1f°, Couch=%.1f°, Rays=%d\n', ...
                     i, stf(i).gantryAngle, stf(i).couchAngle, length(stf(i).ray));
+            end
+            
+            %% Manual injection of MLC shapes into stf structure
+            fprintf('\n  Injecting MLC shapes into steering file...\n');
+            if isfield(pln, 'propStf') && isfield(pln.propStf, 'beam') && ...
+               isfield(pln.propStf.beam(1), 'shape')
+                
+                shapesInjected = 0;
+                
+                for beamIdx = 1:length(stf)
+                    if beamIdx <= length(pln.propStf.beam)
+                        % Get MLC shape data for this beam
+                        if isfield(pln.propStf.beam(beamIdx), 'shape')
+                            
+                            % Assign shape to the beam level (some MATRAD versions use this)
+                            if isfield(pln.propStf.beam(beamIdx).shape, 'x')
+                                stf(beamIdx).shape.x = pln.propStf.beam(beamIdx).shape.x;
+                            end
+                            if isfield(pln.propStf.beam(beamIdx).shape, 'y')
+                                stf(beamIdx).shape.y = pln.propStf.beam(beamIdx).shape.y;
+                            end
+                            
+                            % Also assign to each ray (other MATRAD versions need this)
+                            for rayIdx = 1:length(stf(beamIdx).ray)
+                                if isfield(pln.propStf.beam(beamIdx).shape, 'x')
+                                    stf(beamIdx).ray(rayIdx).shape.x = pln.propStf.beam(beamIdx).shape.x;
+                                end
+                                if isfield(pln.propStf.beam(beamIdx).shape, 'y')
+                                    stf(beamIdx).ray(rayIdx).shape.y = pln.propStf.beam(beamIdx).shape.y;
+                                end
+                            end
+                            
+                            shapesInjected = shapesInjected + 1;
+                        end
+                        
+                        % Also inject jaw positions if available
+                        if isfield(pln.propStf.beam(beamIdx), 'jaw')
+                            if ~isfield(stf(beamIdx), 'jaw')
+                                stf(beamIdx).jaw = struct();
+                            end
+                            if isfield(pln.propStf.beam(beamIdx).jaw, 'x')
+                                stf(beamIdx).jaw.x = pln.propStf.beam(beamIdx).jaw.x;
+                            end
+                            if isfield(pln.propStf.beam(beamIdx).jaw, 'y')
+                                stf(beamIdx).jaw.y = pln.propStf.beam(beamIdx).jaw.y;
+                            end
+                        end
+                    end
+                end
+                
+                if shapesInjected > 0
+                    fprintf('  ✓ Successfully injected MLC shapes into %d beams\n', shapesInjected);
+                    fprintf('  ✓ Shapes assigned at both beam and ray levels\n');
+                else
+                    fprintf('  ⚠ No shapes were injected\n');
+                end
+            else
+                fprintf('  ⚠ No MLC shape data available in pln.propStf.beam\n');
             end
             
             % Diagnose plan structure for weight extraction
@@ -480,13 +537,40 @@ for idxID = 1:length(ids)
             end
             
             % Check if MLC data made it into stf
-            fprintf('\n  Checking if MLC data transferred to stf:\n');
-            if isfield(stf, 'ray')
-                if isfield(stf(1).ray, 'shape')
-                    fprintf('    - stf(1).ray(1).shape exists (MLC applied)\n');
-                else
-                    fprintf('    - stf(1).ray(1).shape does NOT exist (open field)\n');
+            fprintf('\n  Verifying MLC data in steering file:\n');
+            if isfield(stf(1), 'shape')
+                fprintf('    ✓ stf(1).shape exists (beam-level)\n');
+                if isfield(stf(1).shape, 'x')
+                    numLeaves = length(stf(1).shape.x) / 2;
+                    fprintf('      - %d MLC leaf pairs in X direction\n', numLeaves);
                 end
+            else
+                fprintf('    ✗ stf(1).shape does NOT exist (beam-level)\n');
+            end
+            
+            if isfield(stf(1).ray, 'shape')
+                fprintf('    ✓ stf(1).ray(1).shape exists (ray-level)\n');
+                if isfield(stf(1).ray(1).shape, 'x')
+                    numLeaves = length(stf(1).ray(1).shape.x) / 2;
+                    fprintf('      - %d MLC leaf pairs per ray\n', numLeaves);
+                end
+            else
+                fprintf('    ✗ stf(1).ray(1).shape does NOT exist (ray-level)\n');
+            end
+            
+            if isfield(stf(1), 'jaw')
+                fprintf('    ✓ stf(1).jaw exists\n');
+                if isfield(stf(1).jaw, 'x')
+                    fprintf('      - X jaws: [%.2f, %.2f] mm\n', stf(1).jaw.x(1), stf(1).jaw.x(2));
+                end
+                if isfield(stf(1).jaw, 'y')
+                    fprintf('      - Y jaws: [%.2f, %.2f] mm\n', stf(1).jaw.y(1), stf(1).jaw.y(2));
+                end
+            else
+                fprintf('    ✗ stf(1).jaw does NOT exist\n');
+            end
+            
+            if isfield(stf, 'ray')
                 if isfield(stf(1).ray, 'energy')
                     fprintf('    - stf(1).ray has %d energy levels\n', length(stf(1).ray(1).energy));
                 end
