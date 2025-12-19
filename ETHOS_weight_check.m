@@ -69,6 +69,9 @@ end
 %% Step 2: Deep dive into RTPLAN structure
 fprintf('\n[2/5] Analyzing RTPLAN DICOM structure...\n\n');
 
+% Initialize variable to track total meterset across all plans
+totalMetersetGlobal = 0;
+
 for planIdx = 1:length(rtplanFiles)
     fprintf('================== RTPLAN #%d ==================\n', planIdx);
     rtplanFile = rtplanFiles{planIdx};
@@ -96,11 +99,25 @@ for planIdx = 1:length(rtplanFiles)
     %% Check for Fraction Group Sequence (PRIMARY LOCATION FOR WEIGHTS)
     fprintf('\n=== FRACTION GROUP SEQUENCE ===\n');
     if isfield(rtplan, 'FractionGroupSequence')
-        numFractionGroups = length(rtplan.FractionGroupSequence);
+        fprintf('  ✓ FractionGroupSequence exists\n');
+        
+        % Count Item_X fields to determine number of fraction groups
+        fgFields = fieldnames(rtplan.FractionGroupSequence);
+        itemFields = fgFields(startsWith(fgFields, 'Item_'));
+        numFractionGroups = length(itemFields);
         fprintf('  Found %d Fraction Group(s)\n', numFractionGroups);
         
+        totalMeterset = 0;
+        
         for fgIdx = 1:numFractionGroups
-            fg = rtplan.FractionGroupSequence(fgIdx);
+            itemName = sprintf('Item_%d', fgIdx);
+            
+            if ~isfield(rtplan.FractionGroupSequence, itemName)
+                fprintf('  WARNING: %s not found, skipping\n', itemName);
+                continue;
+            end
+            
+            fg = rtplan.FractionGroupSequence.(itemName);
             fprintf('\n  --- Fraction Group %d ---\n', fgIdx);
             
             if isfield(fg, 'FractionGroupNumber')
@@ -115,12 +132,23 @@ for planIdx = 1:length(rtplanFiles)
             
             % Referenced Beam Sequence - THIS CONTAINS METERSET WEIGHTS
             if isfield(fg, 'ReferencedBeamSequence')
-                numRefBeams = length(fg.ReferencedBeamSequence);
+                fprintf('    ✓ ReferencedBeamSequence exists\n');
+                
+                % Count Item_X fields for referenced beams
+                rbsFields = fieldnames(fg.ReferencedBeamSequence);
+                rbItemFields = rbsFields(startsWith(rbsFields, 'Item_'));
+                numRefBeams = length(rbItemFields);
                 fprintf('    Referenced Beam Sequence found: %d beams\n\n', numRefBeams);
                 
-                totalMeterset = 0;
                 for rbIdx = 1:numRefBeams
-                    rb = fg.ReferencedBeamSequence(rbIdx);
+                    rbItemName = sprintf('Item_%d', rbIdx);
+                    
+                    if ~isfield(fg.ReferencedBeamSequence, rbItemName)
+                        fprintf('    WARNING: ReferencedBeamSequence.%s not found\n', rbItemName);
+                        continue;
+                    end
+                    
+                    rb = fg.ReferencedBeamSequence.(rbItemName);
                     fprintf('    ** BEAM %d **\n', rbIdx);
                     
                     if isfield(rb, 'ReferencedBeamNumber')
@@ -143,13 +171,20 @@ for planIdx = 1:length(rtplanFiles)
                     
                     % Check for control point sequence in referenced beam
                     if isfield(rb, 'ReferencedControlPointSequence')
-                        fprintf('      Referenced Control Points: %d\n', length(rb.ReferencedControlPointSequence));
+                        rbcpFields = fieldnames(rb.ReferencedControlPointSequence);
+                        rbcpItems = rbcpFields(startsWith(rbcpFields, 'Item_'));
+                        fprintf('      Referenced Control Points: %d\n', length(rbcpItems));
                     end
                     
-                    fprintf('\n');
+                    % Display all fields in this referenced beam for debugging
+                    fprintf('      Available fields: ');
+                    rbFieldNames = fieldnames(rb);
+                    fprintf('%s ', rbFieldNames{:});
+                    fprintf('\n\n');
                 end
                 
                 fprintf('    Total Meterset across all beams: %.2f MU\n', totalMeterset);
+                totalMetersetGlobal = totalMetersetGlobal + totalMeterset;
             else
                 fprintf('    WARNING: No ReferencedBeamSequence found!\n');
             end
@@ -161,11 +196,23 @@ for planIdx = 1:length(rtplanFiles)
     %% Check Beam Sequence (BEAM GEOMETRY AND PARAMETERS)
     fprintf('\n=== BEAM SEQUENCE ===\n');
     if isfield(rtplan, 'BeamSequence')
-        numBeams = length(rtplan.BeamSequence);
+        fprintf('  ✓ BeamSequence exists\n');
+        
+        % Count Item_X fields to determine number of beams
+        beamFields = fieldnames(rtplan.BeamSequence);
+        beamItemFields = beamFields(startsWith(beamFields, 'Item_'));
+        numBeams = length(beamItemFields);
         fprintf('  Found %d Beam(s) in BeamSequence\n', numBeams);
         
         for beamIdx = 1:numBeams
-            beam = rtplan.BeamSequence(beamIdx);
+            beamItemName = sprintf('Item_%d', beamIdx);
+            
+            if ~isfield(rtplan.BeamSequence, beamItemName)
+                fprintf('  WARNING: BeamSequence.%s not found, skipping\n', beamItemName);
+                continue;
+            end
+            
+            beam = rtplan.BeamSequence.(beamItemName);
             fprintf('\n  --- Beam %d ---\n', beamIdx);
             
             if isfield(beam, 'BeamNumber')
@@ -184,38 +231,55 @@ for planIdx = 1:length(rtplanFiles)
                 fprintf('    Machine: %s\n', beam.TreatmentMachineName);
             end
             
-            % Beam geometry
+            % Beam geometry and control points
             if isfield(beam, 'ControlPointSequence')
-                numCP = length(beam.ControlPointSequence);
+                fprintf('    ✓ ControlPointSequence exists\n');
+                
+                % Count Item_X fields for control points
+                cpFields = fieldnames(beam.ControlPointSequence);
+                cpItemFields = cpFields(startsWith(cpFields, 'Item_'));
+                numCP = length(cpItemFields);
                 fprintf('    Control Points: %d\n', numCP);
                 
-                % Check first and last control points for meterset
+                % Check first control point
                 if numCP > 0
-                    cp1 = beam.ControlPointSequence(1);
-                    fprintf('    \n    Control Point 1:\n');
-                    if isfield(cp1, 'ControlPointIndex')
-                        fprintf('      Index: %d\n', cp1.ControlPointIndex);
-                    end
-                    if isfield(cp1, 'CumulativeMetersetWeight')
-                        fprintf('      Cumulative Meterset Weight: %.6f\n', cp1.CumulativeMetersetWeight);
-                    end
-                    if isfield(cp1, 'GantryAngle')
-                        fprintf('      Gantry Angle: %.2f°\n', cp1.GantryAngle);
-                    end
-                    if isfield(cp1, 'BeamLimitingDeviceAngle')
-                        fprintf('      Collimator Angle: %.2f°\n', cp1.BeamLimitingDeviceAngle);
-                    end
-                    if isfield(cp1, 'PatientSupportAngle')
-                        fprintf('      Couch Angle: %.2f°\n', cp1.PatientSupportAngle);
+                    cp1ItemName = 'Item_1';
+                    if isfield(beam.ControlPointSequence, cp1ItemName)
+                        cp1 = beam.ControlPointSequence.(cp1ItemName);
+                        fprintf('    \n    Control Point 1:\n');
+                        if isfield(cp1, 'ControlPointIndex')
+                            fprintf('      Index: %d\n', cp1.ControlPointIndex);
+                        end
+                        if isfield(cp1, 'CumulativeMetersetWeight')
+                            fprintf('      Cumulative Meterset Weight: %.6f\n', cp1.CumulativeMetersetWeight);
+                        end
+                        if isfield(cp1, 'GantryAngle')
+                            fprintf('      Gantry Angle: %.2f°\n', cp1.GantryAngle);
+                        end
+                        if isfield(cp1, 'BeamLimitingDeviceAngle')
+                            fprintf('      Collimator Angle: %.2f°\n', cp1.BeamLimitingDeviceAngle);
+                        end
+                        if isfield(cp1, 'PatientSupportAngle')
+                            fprintf('      Couch Angle: %.2f°\n', cp1.PatientSupportAngle);
+                        end
+                        
+                        % Display all fields for debugging
+                        fprintf('      Available fields: ');
+                        cp1FieldNames = fieldnames(cp1);
+                        fprintf('%s ', cp1FieldNames{:});
+                        fprintf('\n');
                     end
                     
                     % Check last control point
                     if numCP > 1
-                        cpLast = beam.ControlPointSequence(numCP);
-                        fprintf('    \n    Control Point %d (Last):\n', numCP);
-                        if isfield(cpLast, 'CumulativeMetersetWeight')
-                            fprintf('      Cumulative Meterset Weight: %.6f\n', cpLast.CumulativeMetersetWeight);
-                            fprintf('      >>> This should equal 1.0 for normalized plan <<<\n');
+                        cpLastItemName = sprintf('Item_%d', numCP);
+                        if isfield(beam.ControlPointSequence, cpLastItemName)
+                            cpLast = beam.ControlPointSequence.(cpLastItemName);
+                            fprintf('    \n    Control Point %d (Last):\n', numCP);
+                            if isfield(cpLast, 'CumulativeMetersetWeight')
+                                fprintf('      Cumulative Meterset Weight: %.6f\n', cpLast.CumulativeMetersetWeight);
+                                fprintf('      >>> This should equal 1.0 for normalized plan <<<\n');
+                            end
                         end
                     end
                 end
@@ -232,6 +296,12 @@ for planIdx = 1:length(rtplanFiles)
             if isfield(beam, 'NumberOfControlPoints')
                 fprintf('    Number of Control Points: %d\n', beam.NumberOfControlPoints);
             end
+            
+            % Display all beam fields for debugging
+            fprintf('    Available beam fields: ');
+            beamFieldNames = fieldnames(beam);
+            fprintf('%s ', beamFieldNames{:});
+            fprintf('\n');
         end
     else
         fprintf('  WARNING: No BeamSequence found in RTPLAN!\n');
@@ -416,13 +486,13 @@ fprintf('KEY FINDINGS:\n\n');
 
 % Check if metersets were found in DICOM
 metersetFound = false;
-if exist('totalMeterset', 'var') && totalMeterset > 0
+if totalMetersetGlobal > 0
     metersetFound = true;
 end
 
 if metersetFound
     fprintf('✓ Meterset values found in RTPLAN DICOM files\n');
-    fprintf('  Total meterset: %.2f MU\n', totalMeterset);
+    fprintf('  Total meterset: %.2f MU\n', totalMetersetGlobal);
 else
     fprintf('✗ No meterset values found in RTPLAN DICOM files\n');
 end
