@@ -1,181 +1,241 @@
 function pln = reduce_collimator(pln)
-% REDUCE_COLLIMATOR - Reduce dual-layer MLC to single-layer for MATRAD compatibility
+% REDUCE_COLLIMATOR Convert Halcyon dual-layer MLC to single-layer for matRad
 %
-% Usage: pln = reduce_collimator(pln)
+% Description:
+%   Varian Halcyon uses a dual-layer stacked MLC design where two banks of
+%   leaves work together to create apertures. matRad expects single-layer
+%   MLC data. This function combines the dual layers by selecting the most
+%   restrictive leaf positions:
+%     - For left (proximal) bank: max() of both layers
+%     - For right (distal) bank: min() of both layers
 %
-% Takes the most restrictive leaf positions from dual-layer MLC systems
-% (like Halcyon) and creates a single-layer MLC that MATRAD can process.
+% Usage:
+%   pln = reduce_collimator(pln)
 %
 % Input:
-%   pln - MATRAD plan structure with pln.propStf.beam containing MLC data
+%   pln - matRad planning structure containing beam shape information
+%         in pln.propStf.beam(i).shape
 %
 % Output:
-%   pln - Modified plan structure with single-layer MLC data
+%   pln - Modified planning structure with single-layer MLC positions
 %
-% The "most restrictive" position is:
-%   - For left bank (negative positions): maximum value (most closed)
-%   - For right bank (positive positions): minimum value (most closed)
+% Notes:
+%   - Call this function AFTER DICOM import but BEFORE STF generation
+%   - Modifies pln.propStf.beam(i).shape in place
+%   - Halcyon has 2x28 leaf pairs per layer = 56 leaves per bank per layer
+%   - Combined single layer has 28 leaf pairs
+%
+% Author: Generated for ETHOS Simulation Analysis
+% Date: 2024
 
-fprintf('\n========================================\n');
-fprintf('DUAL-LAYER MLC REDUCTION\n');
-fprintf('========================================\n');
+fprintf('  [reduce_collimator] Starting dual-layer MLC reduction...\n');
 
-% Check if MLC data exists
-if ~isfield(pln, 'propStf') || ~isfield(pln.propStf, 'beam')
-    fprintf('No beam data found in pln.propStf\n');
-    fprintf('No collimator reduction needed.\n');
+% Check if pln structure has the required fields
+if ~isfield(pln, 'propStf')
+    warning('reduce_collimator: pln.propStf not found. Returning unchanged.');
+    return;
+end
+
+if ~isfield(pln.propStf, 'beam')
+    warning('reduce_collimator: pln.propStf.beam not found. Returning unchanged.');
     return;
 end
 
 numBeams = length(pln.propStf.beam);
-beamsProcessed = 0;
-beamsReduced = 0;
+fprintf('    Processing %d beams...\n', numBeams);
 
+% Process each beam
 for beamIdx = 1:numBeams
     
-    if ~isfield(pln.propStf.beam(beamIdx), 'shape')
+    beam = pln.propStf.beam(beamIdx);
+    
+    % Check if shape data exists
+    if ~isfield(beam, 'shape')
+        fprintf('    Beam %d: No shape data found, skipping\n', beamIdx);
         continue;
     end
     
-    beamsProcessed = beamsProcessed + 1;
+    % Process each control point / segment
+    numShapes = length(beam.shape);
     
-    % Process X-direction MLC (most common)
-    if isfield(pln.propStf.beam(beamIdx).shape, 'x')
-        mlcX = pln.propStf.beam(beamIdx).shape.x;
+    for shapeIdx = 1:numShapes
         
-        % Determine if this is dual-layer by checking for duplicate patterns
-        % or by the number of leaves (should be even for dual-layer)
-        numLeaves = length(mlcX) / 2;
+        shape = beam.shape(shapeIdx);
         
-        fprintf('\nBeam %d - X MLC Analysis:\n', beamIdx);
-        fprintf('  Total leaf positions: %d\n', length(mlcX));
-        fprintf('  Apparent leaf pairs: %.1f\n', numLeaves);
+        % Check for MLC leaf positions
+        % Halcyon dual-layer may have different field names depending on import
         
-        % Check if we have an even number (potential dual-layer)
-        if mod(numLeaves, 2) == 0
-            % Assume dual-layer format: [layer1_left, layer2_left, ...] then [layer1_right, layer2_right, ...]
-            % OR: [layer1_all_leaves, layer2_all_leaves]
-            
-            halfLength = length(mlcX) / 2;
-            
-            % Strategy 1: Assume interleaved layers (left bank, right bank format)
-            % MLC format: [leaf1_left, leaf2_left, ...] [leaf1_right, leaf2_right, ...]
-            % For dual layer: every other leaf is the same physical leaf, different layer
-            
-            % Check if we have a dual-layer pattern (every other leaf similar)
-            leftBank = mlcX(1:halfLength);
-            rightBank = mlcX(halfLength+1:end);
-            
-            if mod(length(leftBank), 2) == 0
-                % Test for dual-layer pattern in left bank
-                layer1_left = leftBank(1:2:end);
-                layer2_left = leftBank(2:2:end);
-                
-                layer1_right = rightBank(1:2:end);
-                layer2_right = rightBank(2:2:end);
-                
-                % Check if this looks like dual-layer (positions are relatively close)
-                if length(layer1_left) > 1
-                    meanDiff_left = mean(abs(layer1_left - layer2_left));
-                    meanDiff_right = mean(abs(layer1_right - layer2_right));
-                    
-                    fprintf('  Mean position difference between layers:\n');
-                    fprintf('    Left bank:  %.2f mm\n', meanDiff_left);
-                    fprintf('    Right bank: %.2f mm\n', meanDiff_right);
-                    
-                    % If differences are small-ish (< 50mm), assume dual-layer
-                    if meanDiff_left < 50 && meanDiff_right < 50
-                        fprintf('  ✓ Detected dual-layer MLC pattern\n');
-                        fprintf('  Reducing to single layer (most restrictive)...\n');
-                        
-                        % Take most restrictive: max for left bank (negative), min for right bank (positive)
-                        reduced_left = max([layer1_left; layer2_left], [], 1);
-                        reduced_right = min([layer1_right; layer2_right], [], 1);
-                        
-                        % Combine into single-layer format
-                        mlcX_reduced = [reduced_left(:); reduced_right(:)];
-                        
-                        fprintf('  Original: %d positions\n', length(mlcX));
-                        fprintf('  Reduced:  %d positions\n', length(mlcX_reduced));
-                        fprintf('  Left bank sample - Layer 1: [%.2f, %.2f, %.2f...]\n', ...
-                            layer1_left(1), layer1_left(2), layer1_left(min(3,end)));
-                        fprintf('  Left bank sample - Layer 2: [%.2f, %.2f, %.2f...]\n', ...
-                            layer2_left(1), layer2_left(2), layer2_left(min(3,end)));
-                        fprintf('  Left bank sample - Reduced: [%.2f, %.2f, %.2f...]\n', ...
-                            reduced_left(1), reduced_left(2), reduced_left(min(3,end)));
-                        
-                        % Update the structure
-                        pln.propStf.beam(beamIdx).shape.x = mlcX_reduced;
-                        beamsReduced = beamsReduced + 1;
-                        
-                    else
-                        fprintf('  - Pattern does not match dual-layer (differences too large)\n');
-                        fprintf('  - Keeping original MLC configuration\n');
-                    end
-                end
-            else
-                fprintf('  - Cannot reduce: odd number of leaves in bank\n');
+        % Try different possible field names for MLC data
+        mlcFieldNames = {'MLCPositions', 'mlcPositions', 'leafPositions', ...
+                        'LeafPositions', 'MLC', 'mlc'};
+        
+        mlcData = [];
+        mlcFieldUsed = '';
+        
+        for fn = 1:length(mlcFieldNames)
+            if isfield(shape, mlcFieldNames{fn})
+                mlcData = shape.(mlcFieldNames{fn});
+                mlcFieldUsed = mlcFieldNames{fn};
+                break;
             end
+        end
+        
+        if isempty(mlcData)
+            % Try to find MLC data in nested structures
+            if isfield(shape, 'collimator')
+                if isfield(shape.collimator, 'leafPositions')
+                    mlcData = shape.collimator.leafPositions;
+                    mlcFieldUsed = 'collimator.leafPositions';
+                elseif isfield(shape.collimator, 'MLC')
+                    mlcData = shape.collimator.MLC;
+                    mlcFieldUsed = 'collimator.MLC';
+                end
+            end
+        end
+        
+        if isempty(mlcData)
+            continue; % No MLC data found for this shape
+        end
+        
+        % Determine MLC configuration
+        [numRows, numCols] = size(mlcData);
+        
+        % Halcyon dual-layer configurations:
+        % Option 1: [2*numLeaves x 2] - stacked leaves, 2 banks
+        % Option 2: [numLeaves x 4] - 2 layers x 2 banks
+        % Option 3: [4 x numLeaves] - transposed version
+        
+        % Standard Halcyon has 28 leaf pairs per layer = 56 per layer total
+        % Dual layer = 112 leaves total for both banks
+        
+        if numRows == 56 && numCols == 2
+            % Format: [56 leaves x 2 banks] - single layer 28 pairs
+            % Each row: [left_position, right_position]
+            % This might already be reduced, check if further reduction needed
+            
+            % Assume this is already dual-layer combined into 56 leaves
+            % Need to reduce to 28 leaf pairs
+            
+            numLeafPairs = 28;
+            reducedMLC = zeros(numLeafPairs, 2);
+            
+            % Layer 1: leaves 1-28, Layer 2: leaves 29-56
+            for lp = 1:numLeafPairs
+                layer1_left = mlcData(lp, 1);
+                layer2_left = mlcData(lp + numLeafPairs, 1);
+                layer1_right = mlcData(lp, 2);
+                layer2_right = mlcData(lp + numLeafPairs, 2);
+                
+                % Most restrictive: max for left bank, min for right bank
+                reducedMLC(lp, 1) = max(layer1_left, layer2_left);
+                reducedMLC(lp, 2) = min(layer1_right, layer2_right);
+            end
+            
+            mlcData = reducedMLC;
+            
+        elseif numRows == 112 && numCols == 2
+            % Format: [112 leaves x 2 banks] - dual layer, 28 pairs each
+            % Leaves 1-28: Layer 1 proximal, 29-56: Layer 1 distal
+            % Leaves 57-84: Layer 2 proximal, 85-112: Layer 2 distal
+            
+            numLeafPairs = 28;
+            reducedMLC = zeros(numLeafPairs, 2);
+            
+            for lp = 1:numLeafPairs
+                % Get all layer positions for this leaf pair
+                layer1_left = mlcData(lp, 1);
+                layer1_right = mlcData(lp + numLeafPairs, 2);
+                layer2_left = mlcData(lp + 2*numLeafPairs, 1);
+                layer2_right = mlcData(lp + 3*numLeafPairs, 2);
+                
+                % Most restrictive combination
+                reducedMLC(lp, 1) = max(layer1_left, layer2_left);
+                reducedMLC(lp, 2) = min(layer1_right, layer2_right);
+            end
+            
+            mlcData = reducedMLC;
+            
+        elseif numCols == 4 && numRows >= 28
+            % Format: [numLeaves x 4] - [layer1_left, layer1_right, layer2_left, layer2_right]
+            
+            numLeafPairs = numRows;
+            reducedMLC = zeros(numLeafPairs, 2);
+            
+            for lp = 1:numLeafPairs
+                layer1_left = mlcData(lp, 1);
+                layer1_right = mlcData(lp, 2);
+                layer2_left = mlcData(lp, 3);
+                layer2_right = mlcData(lp, 4);
+                
+                reducedMLC(lp, 1) = max(layer1_left, layer2_left);
+                reducedMLC(lp, 2) = min(layer1_right, layer2_right);
+            end
+            
+            mlcData = reducedMLC;
+            
+        elseif numRows == 4 && numCols >= 28
+            % Transposed version of above
+            mlcData = mlcData';
+            [numRows, numCols] = size(mlcData);
+            
+            numLeafPairs = numRows;
+            reducedMLC = zeros(numLeafPairs, 2);
+            
+            for lp = 1:numLeafPairs
+                layer1_left = mlcData(lp, 1);
+                layer1_right = mlcData(lp, 2);
+                layer2_left = mlcData(lp, 3);
+                layer2_right = mlcData(lp, 4);
+                
+                reducedMLC(lp, 1) = max(layer1_left, layer2_left);
+                reducedMLC(lp, 2) = min(layer1_right, layer2_right);
+            end
+            
+            mlcData = reducedMLC;
+            
+        elseif numRows == 28 && numCols == 2
+            % Already in single-layer format, no reduction needed
+            % Keep as is
+            
         else
-            fprintf('  - Odd total leaf count - likely already single-layer\n');
-        end
-    end
-    
-    % Process Y-direction MLC (if it exists - uncommon)
-    if isfield(pln.propStf.beam(beamIdx).shape, 'y')
-        mlcY = pln.propStf.beam(beamIdx).shape.y;
-        
-        fprintf('\nBeam %d - Y MLC Analysis:\n', beamIdx);
-        fprintf('  Total leaf positions: %d\n', length(mlcY));
-        
-        % Apply same logic as X direction
-        numLeaves = length(mlcY) / 2;
-        
-        if mod(numLeaves, 2) == 0
-            halfLength = length(mlcY) / 2;
-            leftBank = mlcY(1:halfLength);
-            rightBank = mlcY(halfLength+1:end);
+            % Unknown format - try generic reduction
+            fprintf('    Beam %d, Shape %d: Unknown MLC format [%d x %d], attempting generic reduction\n', ...
+                beamIdx, shapeIdx, numRows, numCols);
             
-            if mod(length(leftBank), 2) == 0
-                layer1_left = leftBank(1:2:end);
-                layer2_left = leftBank(2:2:end);
-                layer1_right = rightBank(1:2:end);
-                layer2_right = rightBank(2:2:end);
+            % If more than 2 columns, assume dual-layer format
+            if numCols > 2
+                numLeafPairs = numRows;
+                reducedMLC = zeros(numLeafPairs, 2);
                 
-                if length(layer1_left) > 1
-                    meanDiff_left = mean(abs(layer1_left - layer2_left));
-                    meanDiff_right = mean(abs(layer1_right - layer2_right));
+                % Assume columns are: [left1, right1, left2, right2, ...]
+                numLayers = floor(numCols / 2);
+                
+                for lp = 1:numLeafPairs
+                    leftPositions = mlcData(lp, 1:2:end);
+                    rightPositions = mlcData(lp, 2:2:end);
                     
-                    if meanDiff_left < 50 && meanDiff_right < 50
-                        fprintf('  ✓ Detected dual-layer MLC pattern in Y\n');
-                        
-                        reduced_left = max([layer1_left; layer2_left], [], 1);
-                        reduced_right = min([layer1_right; layer2_right], [], 1);
-                        mlcY_reduced = [reduced_left(:); reduced_right(:)];
-                        
-                        pln.propStf.beam(beamIdx).shape.y = mlcY_reduced;
-                        fprintf('  Reduced Y MLC from %d to %d positions\n', ...
-                            length(mlcY), length(mlcY_reduced));
-                    end
+                    reducedMLC(lp, 1) = max(leftPositions);
+                    reducedMLC(lp, 2) = min(rightPositions);
                 end
+                
+                mlcData = reducedMLC;
             end
         end
-    end
-end
+        
+        % Update the shape with reduced MLC data
+        if contains(mlcFieldUsed, '.')
+            % Nested structure
+            pln.propStf.beam(beamIdx).shape(shapeIdx).collimator.leafPositions = mlcData;
+        else
+            pln.propStf.beam(beamIdx).shape(shapeIdx).(mlcFieldUsed) = mlcData;
+        end
+        
+    end % shape loop
+    
+    fprintf('    Beam %d: Processed %d control points\n', beamIdx, numShapes);
+    
+end % beam loop
 
-fprintf('\n========================================\n');
-fprintf('REDUCTION SUMMARY\n');
-fprintf('========================================\n');
-fprintf('Beams with MLC data: %d\n', beamsProcessed);
-fprintf('Beams reduced to single-layer: %d\n', beamsReduced);
-
-if beamsReduced > 0
-    fprintf('\n✓ Dual-layer MLC successfully reduced to single-layer\n');
-    fprintf('  This should improve MATRAD compatibility\n');
-else
-    fprintf('\nNo dual-layer patterns detected or reduction not needed\n');
-end
-
-fprintf('========================================\n\n');
+fprintf('  [reduce_collimator] MLC reduction complete.\n');
 
 end
