@@ -335,6 +335,28 @@ for idxID = 1:length(ids)
         fprintf('  - Dose grid resolution: [%.2f, %.2f, %.2f] mm\n', ...
             doseGrid.resolution(1), doseGrid.resolution(2), doseGrid.resolution(3));
         
+        %% Reduce dual-layer MLC to single-layer (if present)
+        fprintf('\n  Checking for dual-layer MLC in imported plan...\n');
+        if isfield(pln, 'propStf') && isfield(pln.propStf, 'beam') && ...
+           length(pln.propStf.beam) > 0 && isfield(pln.propStf.beam(1), 'shape')
+            fprintf('  - MLC shape data found in pln.propStf.beam\n');
+            % MLC data was imported by matRad_DicomImporter
+            % Call the collimator reduction function to convert dual-layer to single-layer
+            if exist('reduce_collimator', 'file')
+                fprintf('  - Calling reduce_collimator to convert dual-layer to single-layer...\n');
+                pln = reduce_collimator(pln);
+                fprintf('  - Collimator reduction complete\n');
+            else
+                fprintf('  ⚠ WARNING: reduce_collimator.m not found!\n');
+                fprintf('    Dual-layer MLC will not be reduced\n');
+                fprintf('    This may cause MATRAD to fail or produce incorrect results\n');
+                fprintf('    Place reduce_collimator.m in the current directory or MATLAB path\n');
+            end
+        else
+            fprintf('  - No MLC shape data found in imported plan\n');
+            fprintf('  - MATRAD will calculate open field doses\n');
+        end;
+        
         %% Manual MLC/Collimation Extraction
         fprintf('\n  Extracting MLC/collimation data from RTPLAN...\n');
         try
