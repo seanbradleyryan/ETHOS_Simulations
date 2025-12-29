@@ -3,6 +3,9 @@
 % Uses MATRAD for dose calculation
 % Author: Generated for ETHOS dose analysis
 % Date: 2025
+%
+% MODIFIED: Field doses and CT are now resampled to RTDOSE grid dimensions
+%           instead of resampling RTDOSE to CT grid
 
 clear; clc; close all;
 
@@ -112,7 +115,7 @@ for idxID = 1:length(ids)
         end
         
         %% Step 1: Import DICOM data using MATRAD
-        fprintf('\n[1/6] Importing DICOM data...\n');
+        fprintf('\n[1/7] Importing DICOM data...\n');
         
         try
             % Use matRad_DicomImporter class (object-oriented approach)
@@ -148,10 +151,61 @@ for idxID = 1:length(ids)
             continue;
         end
         
-        %% Step 2: Load reference RTDOSE for grid parameters
-        fprintf('\n[2/6] Loading reference RTDOSE...\n');
+        %% Step 2: Load reference RTDOSE and extract spatial coordinates
+        fprintf('\n[2/7] Loading reference RTDOSE and extracting spatial coordinates...\n');
+        
+        % Initialize spatial coordinate structures
+        ctSpatial = struct();
+        doseSpatial = struct();
         
         try
+            % Extract CT spatial coordinates from DICOM files
+            fprintf('  Extracting CT spatial coordinates...\n');
+            ctFiles = dir(fullfile(dicomPath, 'CT*.dcm'));
+            if isempty(ctFiles)
+                ctFiles = dir(fullfile(dicomPath, '*CT*.dcm'));
+            end
+            
+            if ~isempty(ctFiles)
+                % Read first CT slice for ImagePositionPatient and PixelSpacing
+                ctInfo = dicominfo(fullfile(ctFiles(1).folder, ctFiles(1).name));
+                
+                ctSpatial.ImagePositionPatient = ctInfo.ImagePositionPatient;
+                ctSpatial.PixelSpacing = ctInfo.PixelSpacing;
+                ctSpatial.Rows = ctInfo.Rows;
+                ctSpatial.Columns = ctInfo.Columns;
+                
+                % Get all slice positions to determine Z coordinates
+                slicePositions = zeros(length(ctFiles), 1);
+                for i = 1:length(ctFiles)
+                    tempInfo = dicominfo(fullfile(ctFiles(i).folder, ctFiles(i).name));
+                    slicePositions(i) = tempInfo.ImagePositionPatient(3);
+                end
+                slicePositions = sort(slicePositions);
+                
+                ctSpatial.SlicePositions = slicePositions;
+                ctSpatial.SliceThickness = abs(slicePositions(2) - slicePositions(1));
+                ctSpatial.NumSlices = length(slicePositions);
+                
+                % Calculate CT bounding box in patient coordinates
+                ctSpatial.XMin = ctSpatial.ImagePositionPatient(1);
+                ctSpatial.XMax = ctSpatial.XMin + (ctSpatial.Columns - 1) * ctSpatial.PixelSpacing(2);
+                ctSpatial.YMin = ctSpatial.ImagePositionPatient(2);
+                ctSpatial.YMax = ctSpatial.YMin + (ctSpatial.Rows - 1) * ctSpatial.PixelSpacing(1);
+                ctSpatial.ZMin = min(slicePositions);
+                ctSpatial.ZMax = max(slicePositions);
+                
+                fprintf('    CT spatial extent:\n');
+                fprintf('      X: [%.2f, %.2f] mm\n', ctSpatial.XMin, ctSpatial.XMax);
+                fprintf('      Y: [%.2f, %.2f] mm\n', ctSpatial.YMin, ctSpatial.YMax);
+                fprintf('      Z: [%.2f, %.2f] mm\n', ctSpatial.ZMin, ctSpatial.ZMax);
+                fprintf('      Resolution: [%.2f, %.2f, %.2f] mm\n', ...
+                    ctSpatial.PixelSpacing(1), ctSpatial.PixelSpacing(2), ctSpatial.SliceThickness);
+            else
+                fprintf('  WARNING: No CT DICOM files found for spatial extraction\n');
+            end
+            
+            % Load RTDOSE and extract spatial coordinates
             rtdoseFile = dir(fullfile(dicomPath, 'RD*.dcm'));
             if isempty(rtdoseFile)
                 rtdoseFile = dir(fullfile(dicomPath, '*RTDOSE*.dcm'));
@@ -171,113 +225,69 @@ for idxID = 1:length(ids)
                     size(referenceDose, 1), size(referenceDose, 2), size(referenceDose, 3));
                 fprintf('  - Max dose: %.2f Gy\n', max(referenceDose(:)));
                 
-                % Extract dose grid parameters
-                % X and Y resolution from PixelSpacing
-                doseGrid.resolution(1) = rtdoseInfo.PixelSpacing(1);
-                doseGrid.resolution(2) = rtdoseInfo.PixelSpacing(2);
+                % Extract RTDOSE spatial coordinates
+                doseSpatial.ImagePositionPatient = rtdoseInfo.ImagePositionPatient;
+                doseSpatial.PixelSpacing = rtdoseInfo.PixelSpacing;
+                doseSpatial.Rows = rtdoseInfo.Rows;
+                doseSpatial.Columns = rtdoseInfo.Columns;
                 
                 % Z resolution from GridFrameOffsetVector (multiframe DICOM)
                 if isfield(rtdoseInfo, 'GridFrameOffsetVector') && length(rtdoseInfo.GridFrameOffsetVector) > 1
-                    % Calculate slice spacing from frame offset vector
-                    doseGrid.resolution(3) = abs(rtdoseInfo.GridFrameOffsetVector(2) - rtdoseInfo.GridFrameOffsetVector(1));
-                    fprintf('  - Z resolution calculated from GridFrameOffsetVector: %.3f mm\n', doseGrid.resolution(3));
+                    doseSpatial.GridFrameOffsetVector = rtdoseInfo.GridFrameOffsetVector;
+                    doseSpatial.SliceThickness = abs(rtdoseInfo.GridFrameOffsetVector(2) - rtdoseInfo.GridFrameOffsetVector(1));
+                    doseSpatial.NumSlices = length(rtdoseInfo.GridFrameOffsetVector);
+                    fprintf('  - Z resolution from GridFrameOffsetVector: %.3f mm\n', doseSpatial.SliceThickness);
                 elseif isfield(rtdoseInfo, 'SliceThickness')
-                    doseGrid.resolution(3) = rtdoseInfo.SliceThickness;
-                    fprintf('  - Z resolution from SliceThickness: %.3f mm\n', doseGrid.resolution(3));
+                    doseSpatial.SliceThickness = rtdoseInfo.SliceThickness;
+                    doseSpatial.NumSlices = size(referenceDose, 3);
+                    doseSpatial.GridFrameOffsetVector = (0:doseSpatial.NumSlices-1) * doseSpatial.SliceThickness;
+                    fprintf('  - Z resolution from SliceThickness: %.3f mm\n', doseSpatial.SliceThickness);
                 else
-                    % Fallback to CT resolution
-                    doseGrid.resolution(3) = ct.resolution.z;
-                    fprintf('  - Warning: Z resolution not found in RTDOSE, using CT resolution: %.3f mm\n', doseGrid.resolution(3));
+                    % Fallback
+                    doseSpatial.SliceThickness = 2.5;  % Common default
+                    doseSpatial.NumSlices = size(referenceDose, 3);
+                    doseSpatial.GridFrameOffsetVector = (0:doseSpatial.NumSlices-1) * doseSpatial.SliceThickness;
+                    fprintf('  - WARNING: Z resolution not found, using default: %.3f mm\n', doseSpatial.SliceThickness);
                 end
                 
-                doseGrid.dimensions = [rtdoseInfo.Rows, rtdoseInfo.Columns, size(referenceDose, 3)];
+                % Calculate RTDOSE bounding box in patient coordinates
+                doseSpatial.XMin = doseSpatial.ImagePositionPatient(1);
+                doseSpatial.XMax = doseSpatial.XMin + (doseSpatial.Columns - 1) * doseSpatial.PixelSpacing(2);
+                doseSpatial.YMin = doseSpatial.ImagePositionPatient(2);
+                doseSpatial.YMax = doseSpatial.YMin + (doseSpatial.Rows - 1) * doseSpatial.PixelSpacing(1);
+                doseSpatial.ZMin = doseSpatial.ImagePositionPatient(3);
+                doseSpatial.ZMax = doseSpatial.ZMin + doseSpatial.GridFrameOffsetVector(end);
                 
-                fprintf('  - Dose grid resolution: [%.3f, %.3f, %.3f] mm\n', ...
+                % Store dose grid parameters for later use
+                doseGrid.resolution = [doseSpatial.PixelSpacing(1), doseSpatial.PixelSpacing(2), doseSpatial.SliceThickness];
+                doseGrid.dimensions = [doseSpatial.Rows, doseSpatial.Columns, doseSpatial.NumSlices];
+                doseGrid.ImagePositionPatient = doseSpatial.ImagePositionPatient;
+                
+                fprintf('    RTDOSE spatial extent:\n');
+                fprintf('      X: [%.2f, %.2f] mm\n', doseSpatial.XMin, doseSpatial.XMax);
+                fprintf('      Y: [%.2f, %.2f] mm\n', doseSpatial.YMin, doseSpatial.YMax);
+                fprintf('      Z: [%.2f, %.2f] mm\n', doseSpatial.ZMin, doseSpatial.ZMax);
+                fprintf('      Resolution: [%.3f, %.3f, %.3f] mm\n', ...
                     doseGrid.resolution(1), doseGrid.resolution(2), doseGrid.resolution(3));
-                
-                % Resample RTDOSE to CT grid if dimensions don't match
-                if ~isequal(size(referenceDose), ct.cubeDim)
-                    fprintf('\n  Resampling RTDOSE to CT grid...\n');
-                    fprintf('    Original RTDOSE: %d x %d x %d at [%.2f, %.2f, %.2f] mm\n', ...
-                        size(referenceDose, 1), size(referenceDose, 2), size(referenceDose, 3), ...
-                        doseGrid.resolution(1), doseGrid.resolution(2), doseGrid.resolution(3));
-                    fprintf('    Target CT grid: %d x %d x %d at [%.2f, %.2f, %.2f] mm\n', ...
-                        ct.cubeDim(1), ct.cubeDim(2), ct.cubeDim(3), ...
-                        ct.resolution.x, ct.resolution.y, ct.resolution.z);
-                    
-                    % Use index-based interpolation (matRad works in voxel space, not DICOM coordinates)
-                    [nRows, nCols, nSlices] = size(referenceDose);
-                    
-                    % Create index grids for original RTDOSE
-                    [iDose, jDose, kDose] = ndgrid(1:nRows, 1:nCols, 1:nSlices);
-                    
-                    % Create query points for CT grid (scaled by resolution ratios)
-                    % This maps CT voxel indices to RTDOSE voxel indices based on resolution
-                    scale_i = ct.resolution.y / doseGrid.resolution(1);  % Y direction
-                    scale_j = ct.resolution.x / doseGrid.resolution(2);  % X direction
-                    scale_k = ct.resolution.z / doseGrid.resolution(3);  % Z direction
-                    
-                    % Generate query grid in RTDOSE index space
-                    iQuery = 1 + (0:ct.cubeDim(1)-1) * scale_i;
-                    jQuery = 1 + (0:ct.cubeDim(2)-1) * scale_j;
-                    kQuery = 1 + (0:ct.cubeDim(3)-1) * scale_k;
-                    
-                    [iQ, jQ, kQ] = ndgrid(iQuery, jQuery, kQuery);
-                    
-                    % Interpolate dose to CT grid
-                    fprintf('    Interpolating dose values (index-based)...\n');
-                    fprintf('    Resolution scaling: [%.3f, %.3f, %.3f]\n', scale_i, scale_j, scale_k);
-                    
-                    try
-                        referenceDoseResampled = interpn(iDose, jDose, kDose, referenceDose, ...
-                            iQ, jQ, kQ, 'linear', 0);
-                        
-                        fprintf('    ✓ Resampling complete\n');
-                        fprintf('      Resampled grid: %d x %d x %d\n', ...
-                            size(referenceDoseResampled, 1), size(referenceDoseResampled, 2), size(referenceDoseResampled, 3));
-                        fprintf('      Max dose after resampling: %.2f Gy\n', max(referenceDoseResampled(:)));
-                        fprintf('      Non-zero voxels: %d\n', nnz(referenceDoseResampled));
-                        
-                        % Verify resampled dose is not empty
-                        if max(referenceDoseResampled(:)) == 0 || nnz(referenceDoseResampled) == 0
-                            fprintf('    ✗ ERROR: Resampled dose is empty or all zeros!\n');
-                            fprintf('      Using original RTDOSE grid (comparison will note size mismatch)\n');
-                            referenceDoseOriginal = referenceDose;
-                        else
-                            % Store both versions
-                            referenceDoseOriginal = referenceDose;
-                            referenceDose = referenceDoseResampled;
-                            fprintf('    ✓ Resampled dose validated - contains non-zero values\n');
-                        end
-                        
-                    catch ME
-                        fprintf('    ✗ ERROR during resampling: %s\n', ME.message);
-                        fprintf('    Continuing with original RTDOSE grid (comparison will note size mismatch)\n');
-                        referenceDoseOriginal = referenceDose;
-                    end
-                else
-                    fprintf('  - RTDOSE and CT grids already match, no resampling needed\n');
-                    referenceDoseOriginal = referenceDose;
-                end
+                fprintf('      Dimensions: [%d, %d, %d]\n', ...
+                    doseGrid.dimensions(1), doseGrid.dimensions(2), doseGrid.dimensions(3));
                 
             else
-                fprintf('  Warning: No RTDOSE file found, using CT grid\n');
+                fprintf('  WARNING: No RTDOSE file found\n');
                 doseGrid.resolution = [ct.resolution.x, ct.resolution.y, ct.resolution.z];
                 doseGrid.dimensions = ct.cubeDim;
                 referenceDose = [];
-                referenceDoseOriginal = [];
             end
             
         catch ME
-            fprintf('Warning: Could not load RTDOSE: %s\n', ME.message);
+            fprintf('WARNING: Could not load RTDOSE: %s\n', ME.message);
             doseGrid.resolution = [ct.resolution.x, ct.resolution.y, ct.resolution.z];
             doseGrid.dimensions = ct.cubeDim;
             referenceDose = [];
-            referenceDoseOriginal = [];
         end
         
         %% Step 3: Configure dose calculation
-        fprintf('\n[3/6] Configuring dose calculation...\n');
+        fprintf('\n[3/7] Configuring dose calculation...\n');
         
         % Check and override machine specification
         if isfield(pln, 'machine')
@@ -316,11 +326,12 @@ for idxID = 1:length(ids)
             pln.machine = 'Generic';
         end
         
-        % Set up dose calculation parameters
+        % Set up dose calculation parameters - use CT resolution for calculation
+        % (will be resampled to RTDOSE grid later)
         pln.propStf.bixelWidth = 5; % mm
-        pln.propDoseCalc.doseGrid.resolution.x = doseGrid.resolution(1);
-        pln.propDoseCalc.doseGrid.resolution.y = doseGrid.resolution(2);
-        pln.propDoseCalc.doseGrid.resolution.z = doseGrid.resolution(3);
+        pln.propDoseCalc.doseGrid.resolution.x = ct.resolution.x;
+        pln.propDoseCalc.doseGrid.resolution.y = ct.resolution.y;
+        pln.propDoseCalc.doseGrid.resolution.z = ct.resolution.z;
         
         % Set algorithm (typically 'pencilBeam' for photons)
         if strcmp(pln.radiationMode, 'photons')
@@ -332,7 +343,9 @@ for idxID = 1:length(ids)
         fprintf('  - Radiation mode: %s\n', pln.radiationMode);
         fprintf('  - Machine: %s\n', pln.machine);
         fprintf('  - Dose engine: %s\n', pln.propDoseCalc.engine);
-        fprintf('  - Dose grid resolution: [%.2f, %.2f, %.2f] mm\n', ...
+        fprintf('  - Calculation grid resolution: [%.2f, %.2f, %.2f] mm (CT resolution)\n', ...
+            ct.resolution.x, ct.resolution.y, ct.resolution.z);
+        fprintf('  - Final output will be resampled to RTDOSE grid: [%.2f, %.2f, %.2f] mm\n', ...
             doseGrid.resolution(1), doseGrid.resolution(2), doseGrid.resolution(3));
         
         %% Reduce dual-layer MLC to single-layer (if present)
@@ -355,7 +368,7 @@ for idxID = 1:length(ids)
         else
             fprintf('  - No MLC shape data found in imported plan\n');
             fprintf('  - MATRAD will calculate open field doses\n');
-        end;
+        end
         
         %% Manual MLC/Collimation Extraction
         fprintf('\n  Extracting MLC/collimation data from RTPLAN...\n');
@@ -471,10 +484,10 @@ for idxID = 1:length(ids)
         catch ME
             fprintf('  ⚠ Error extracting MLC data: %s\n', ME.message);
             fprintf('    Will proceed with open field calculation\n');
-        end;
+        end
         
         %% Step 4: Generate steering information
-        fprintf('\n[4/6] Generating steering information...\n');
+        fprintf('\n[4/7] Generating steering information...\n');
         
         try
             stf = matRad_generateStf(ct, cst, pln);
@@ -638,7 +651,7 @@ for idxID = 1:length(ids)
         end
         
         %% Step 5: Calculate individual field doses
-        fprintf('\n[5/6] Calculating individual field doses...\n');
+        fprintf('\n[5/7] Calculating individual field doses...\n');
         
         % Re-check if weights are now available after manual extraction
         if isfield(pln, 'w') && ~isempty(pln.w)
@@ -779,8 +792,146 @@ for idxID = 1:length(ids)
         numSuccessful = sum(~cellfun(@isempty, fieldDoses));
         fprintf('  Summary: %d/%d fields calculated successfully\n', numSuccessful, length(stf));
         
-        %% Step 6: Save results
-        fprintf('\n[6/6] Saving results...\n');
+        %% Step 6: Resample CT and field doses to RTDOSE grid
+        fprintf('\n[6/7] Resampling CT and field doses to RTDOSE grid...\n');
+        
+        if ~isempty(referenceDose) && ~isempty(ctSpatial.ImagePositionPatient) && ~isempty(doseSpatial.ImagePositionPatient)
+            
+            fprintf('  Computing spatial transformation from CT to RTDOSE grid...\n');
+            
+            % --- Calculate coordinate systems ---
+            % CT coordinate vectors (patient coordinates)
+            ct_x = ctSpatial.ImagePositionPatient(1) + (0:ctSpatial.Columns-1) * ctSpatial.PixelSpacing(2);
+            ct_y = ctSpatial.ImagePositionPatient(2) + (0:ctSpatial.Rows-1) * ctSpatial.PixelSpacing(1);
+            ct_z = ctSpatial.SlicePositions;
+            
+            % RTDOSE coordinate vectors (patient coordinates)
+            dose_x = doseSpatial.ImagePositionPatient(1) + (0:doseSpatial.Columns-1) * doseSpatial.PixelSpacing(2);
+            dose_y = doseSpatial.ImagePositionPatient(2) + (0:doseSpatial.Rows-1) * doseSpatial.PixelSpacing(1);
+            dose_z = doseSpatial.ImagePositionPatient(3) + doseSpatial.GridFrameOffsetVector;
+            
+            fprintf('    CT X range: [%.2f, %.2f] mm (%d points)\n', min(ct_x), max(ct_x), length(ct_x));
+            fprintf('    CT Y range: [%.2f, %.2f] mm (%d points)\n', min(ct_y), max(ct_y), length(ct_y));
+            fprintf('    CT Z range: [%.2f, %.2f] mm (%d points)\n', min(ct_z), max(ct_z), length(ct_z));
+            fprintf('    Dose X range: [%.2f, %.2f] mm (%d points)\n', min(dose_x), max(dose_x), length(dose_x));
+            fprintf('    Dose Y range: [%.2f, %.2f] mm (%d points)\n', min(dose_y), max(dose_y), length(dose_y));
+            fprintf('    Dose Z range: [%.2f, %.2f] mm (%d points)\n', min(dose_z), max(dose_z), length(dose_z));
+            
+            % --- Resample CT to RTDOSE grid ---
+            fprintf('\n  Resampling CT to RTDOSE grid...\n');
+            
+            % Get CT HU data
+            ctCube = ct.cubeHU{1};
+            fprintf('    Original CT size: %d x %d x %d\n', size(ctCube, 1), size(ctCube, 2), size(ctCube, 3));
+            
+            % Create meshgrid for CT coordinates
+            [CT_Y, CT_X, CT_Z] = ndgrid(ct_y, ct_x, ct_z);
+            
+            % Create query points at RTDOSE coordinates
+            [DOSE_Y, DOSE_X, DOSE_Z] = ndgrid(dose_y, dose_x, dose_z);
+            
+            % Interpolate CT to RTDOSE grid
+            try
+                ctResampled = interpn(CT_Y, CT_X, CT_Z, ctCube, ...
+                                      DOSE_Y, DOSE_X, DOSE_Z, 'linear', -1000);
+                fprintf('    ✓ CT resampled to RTDOSE grid: %d x %d x %d\n', ...
+                    size(ctResampled, 1), size(ctResampled, 2), size(ctResampled, 3));
+                fprintf('      CT HU range after resampling: [%.0f, %.0f]\n', ...
+                    min(ctResampled(:)), max(ctResampled(:)));
+            catch ME
+                fprintf('    ✗ ERROR resampling CT: %s\n', ME.message);
+                ctResampled = [];
+            end
+            
+            % --- Resample field doses to RTDOSE grid ---
+            fprintf('\n  Resampling field doses to RTDOSE grid...\n');
+            
+            % Field doses are on the CT grid, so use the same transformation
+            fieldDosesResampled = cell(length(fieldDoses), 1);
+            totalDoseResampled = zeros(length(dose_y), length(dose_x), length(dose_z));
+            
+            for beamIdx = 1:length(fieldDoses)
+                if ~isempty(fieldDoses{beamIdx})
+                    fprintf('    Resampling Field %d (Gantry: %.1f°)...\n', ...
+                        beamIdx, fieldDoses{beamIdx}.gantryAngle);
+                    
+                    fieldDose = fieldDoses{beamIdx}.physicalDose;
+                    
+                    % Verify field dose matches CT dimensions
+                    if ~isequal(size(fieldDose), size(ctCube))
+                        fprintf('      ⚠ Field dose size (%d x %d x %d) differs from CT (%d x %d x %d)\n', ...
+                            size(fieldDose, 1), size(fieldDose, 2), size(fieldDose, 3), ...
+                            size(ctCube, 1), size(ctCube, 2), size(ctCube, 3));
+                        fprintf('      Skipping this field\n');
+                        fieldDosesResampled{beamIdx} = [];
+                        continue;
+                    end
+                    
+                    try
+                        % Interpolate field dose to RTDOSE grid
+                        fieldDoseResampled = interpn(CT_Y, CT_X, CT_Z, fieldDose, ...
+                                                     DOSE_Y, DOSE_X, DOSE_Z, 'linear', 0);
+                        
+                        fprintf('      ✓ Resampled: %d x %d x %d, Max=%.4f Gy\n', ...
+                            size(fieldDoseResampled, 1), size(fieldDoseResampled, 2), size(fieldDoseResampled, 3), ...
+                            max(fieldDoseResampled(:)));
+                        
+                        % Store resampled field dose
+                        fieldDosesResampled{beamIdx} = struct();
+                        fieldDosesResampled{beamIdx}.physicalDose = fieldDoseResampled;
+                        fieldDosesResampled{beamIdx}.gantryAngle = fieldDoses{beamIdx}.gantryAngle;
+                        fieldDosesResampled{beamIdx}.couchAngle = fieldDoses{beamIdx}.couchAngle;
+                        fieldDosesResampled{beamIdx}.beamIdx = fieldDoses{beamIdx}.beamIdx;
+                        fieldDosesResampled{beamIdx}.weights = fieldDoses{beamIdx}.weights;
+                        fieldDosesResampled{beamIdx}.maxDose = max(fieldDoseResampled(:));
+                        fieldDosesResampled{beamIdx}.originalMaxDose = fieldDoses{beamIdx}.maxDose;
+                        
+                        % Accumulate total resampled dose
+                        totalDoseResampled = totalDoseResampled + fieldDoseResampled;
+                        
+                    catch ME
+                        fprintf('      ✗ ERROR resampling field: %s\n', ME.message);
+                        fieldDosesResampled{beamIdx} = [];
+                    end
+                end
+            end
+            
+            numResampledFields = sum(~cellfun(@isempty, fieldDosesResampled));
+            fprintf('\n  Resampling complete: %d/%d fields resampled\n', numResampledFields, numSuccessful);
+            fprintf('    Total resampled dose max: %.4f Gy\n', max(totalDoseResampled(:)));
+            fprintf('    Reference dose max: %.4f Gy\n', max(referenceDose(:)));
+            
+            % --- Create resampled CT structure for kWave ---
+            fprintf('\n  Creating resampled CT structure for kWave simulation...\n');
+            
+            ctResampled_struct = struct();
+            ctResampled_struct.cubeHU = {ctResampled};
+            ctResampled_struct.cubeDim = [size(ctResampled, 1), size(ctResampled, 2), size(ctResampled, 3)];
+            ctResampled_struct.resolution.x = doseGrid.resolution(2);  % Column direction
+            ctResampled_struct.resolution.y = doseGrid.resolution(1);  % Row direction
+            ctResampled_struct.resolution.z = doseGrid.resolution(3);  % Slice direction
+            ctResampled_struct.x = dose_x;
+            ctResampled_struct.y = dose_y;
+            ctResampled_struct.z = dose_z;
+            ctResampled_struct.ImagePositionPatient = doseSpatial.ImagePositionPatient;
+            ctResampled_struct.originalCTDim = ct.cubeDim;
+            ctResampled_struct.originalCTResolution = [ct.resolution.x, ct.resolution.y, ct.resolution.z];
+            
+            fprintf('    Resampled CT structure created\n');
+            fprintf('      Dimensions: %d x %d x %d\n', ctResampled_struct.cubeDim);
+            fprintf('      Resolution: [%.2f, %.2f, %.2f] mm\n', ...
+                ctResampled_struct.resolution.x, ctResampled_struct.resolution.y, ctResampled_struct.resolution.z);
+            
+        else
+            fprintf('  ⚠ Cannot resample - missing RTDOSE or spatial coordinates\n');
+            fprintf('    Using original CT grid\n');
+            ctResampled_struct = [];
+            fieldDosesResampled = fieldDoses;
+            totalDoseResampled = totalDose;
+        end
+        
+        %% Step 7: Save results
+        fprintf('\n[7/7] Saving results...\n');
         
         % Count successful calculations
         numSuccessful = sum(~cellfun(@isempty, fieldDoses));
@@ -792,53 +943,63 @@ for idxID = 1:length(ids)
             continue;
         end
         
-        % Save individual field doses
-        save(fullfile(outputPath, 'fieldDoses.mat'), 'fieldDoses', 'stf', 'pln', 'ct', 'cst');
-        fprintf('  - Field doses saved to: fieldDoses.mat\n');
+        % Save original field doses (CT grid)
+        save(fullfile(outputPath, 'fieldDoses_CTgrid.mat'), 'fieldDoses', 'stf', 'pln', 'ct', 'cst', 'totalDose');
+        fprintf('  - Original field doses (CT grid) saved to: fieldDoses_CTgrid.mat\n');
+        
+        % Save resampled field doses (RTDOSE grid)
+        if ~isempty(ctResampled_struct)
+            save(fullfile(outputPath, 'fieldDoses.mat'), 'fieldDosesResampled', 'stf', 'pln', ...
+                 'ctResampled_struct', 'cst', 'totalDoseResampled', 'referenceDose', 'doseGrid', ...
+                 'ctSpatial', 'doseSpatial');
+            fprintf('  - Resampled field doses (RTDOSE grid) saved to: fieldDoses.mat\n');
+            
+            % Save resampled CT separately for kWave
+            save(fullfile(outputPath, 'ctResampled.mat'), 'ctResampled_struct', 'doseGrid', ...
+                 'ctSpatial', 'doseSpatial');
+            fprintf('  - Resampled CT saved to: ctResampled.mat\n');
+        else
+            % Fallback: save with original naming
+            save(fullfile(outputPath, 'fieldDoses.mat'), 'fieldDoses', 'stf', 'pln', 'ct', 'cst');
+            fprintf('  - Field doses saved to: fieldDoses.mat\n');
+        end
         
         % Save reconstructed total dose if available
-        if ~isempty(totalDose) && max(totalDose(:)) > 0
-            save(fullfile(outputPath, 'reconstructedDose.mat'), 'totalDose', 'calculatedGridSize');
+        if ~isempty(totalDoseResampled) && max(totalDoseResampled(:)) > 0
+            calculatedGridSize = size(totalDoseResampled);
+            save(fullfile(outputPath, 'reconstructedDose.mat'), 'totalDoseResampled', 'calculatedGridSize', ...
+                 'referenceDose', 'doseGrid');
             fprintf('  - Reconstructed total dose saved\n');
-            fprintf('    Total max dose: %.2f Gy\n', max(totalDose(:)));
+            fprintf('    Total max dose: %.2f Gy\n', max(totalDoseResampled(:)));
         else
             fprintf('  - WARNING: Total dose is empty or zero, not saved\n');
             fprintf('  - Individual field doses are still available\n');
         end
         
         % Compare with reference if available
-        if ~isempty(referenceDose) && ~isempty(totalDose)
+        if ~isempty(referenceDose) && ~isempty(totalDoseResampled)
             fprintf('\n  Comparing with reference RTDOSE...\n');
             
             % Check size compatibility
-            if ~isequal(size(totalDose), size(referenceDose))
+            if ~isequal(size(totalDoseResampled), size(referenceDose))
                 fprintf('    Dose grid size mismatch:\n');
-                fprintf('      Calculated: %d x %d x %d\n', size(totalDose));
+                fprintf('      Calculated: %d x %d x %d\n', size(totalDoseResampled));
                 fprintf('      Reference:  %d x %d x %d\n', size(referenceDose));
-                fprintf('    Note: Grids have different resolutions\n');
-                fprintf('      Calculated grid: [%.2f, %.2f, %.2f] mm\n', ...
-                    pln.propDoseCalc.doseGrid.resolution.x, ...
-                    pln.propDoseCalc.doseGrid.resolution.y, ...
-                    pln.propDoseCalc.doseGrid.resolution.z);
-                fprintf('      Reference grid: [%.2f, %.2f, %.2f] mm\n', ...
-                    doseGrid.resolution(1), doseGrid.resolution(2), doseGrid.resolution(3));
                 
                 % Save without direct comparison
-                comparison.calculated = totalDose;
+                comparison.calculated = totalDoseResampled;
                 comparison.reference = referenceDose;
-                if exist('referenceDoseOriginal', 'var')
-                    comparison.referenceOriginal = referenceDoseOriginal;
-                end
                 comparison.note = 'Grid size mismatch - direct comparison not possible';
-                comparison.calculatedGrid = calculatedGridSize;
+                comparison.calculatedGrid = size(totalDoseResampled);
                 comparison.referenceGrid = size(referenceDose);
                 save(fullfile(outputPath, 'doseComparison.mat'), 'comparison');
             else
                 % Sizes match - can compare directly
-                doseDiff = totalDose - referenceDose;
+                doseDiff = totalDoseResampled - referenceDose;
                 
+                fprintf('    ✓ Grids match! Direct comparison possible.\n');
                 fprintf('    Comparison statistics:\n');
-                fprintf('      Calculated max dose: %.2f Gy\n', max(totalDose(:)));
+                fprintf('      Calculated max dose: %.2f Gy\n', max(totalDoseResampled(:)));
                 fprintf('      Reference max dose:  %.2f Gy\n', max(referenceDose(:)));
                 fprintf('      Mean absolute difference: %.2f Gy\n', mean(abs(doseDiff(:))));
                 fprintf('      Max difference: %.2f Gy\n', max(abs(doseDiff(:))));
@@ -853,13 +1014,12 @@ for idxID = 1:length(ids)
                 end
                 
                 % Save comparison
-                comparison.calculated = totalDose;
+                comparison.calculated = totalDoseResampled;
                 comparison.reference = referenceDose;
-                if exist('referenceDoseOriginal', 'var')
-                    comparison.referenceOriginal = referenceDoseOriginal;
-                    comparison.note = 'Reference dose was resampled to CT grid for comparison';
-                end
                 comparison.difference = doseDiff;
+                comparison.gridResolution = doseGrid.resolution;
+                comparison.gridDimensions = doseGrid.dimensions;
+                comparison.note = 'Field doses and CT resampled to RTDOSE grid';
                 comparison.metrics.meanAbsDiff = mean(abs(doseDiff(:)));
                 comparison.metrics.maxDiff = max(abs(doseDiff(:)));
                 comparison.metrics.rmsDiff = sqrt(mean(doseDiff(:).^2));
@@ -870,22 +1030,17 @@ for idxID = 1:length(ids)
                 
                 fprintf('    ✓ Comparison saved to doseComparison.mat\n');
             end
-        elseif ~isempty(referenceDose) && isempty(totalDose)
-            fprintf('  - Cannot compare: totalDose was not calculated\n');
+        elseif ~isempty(referenceDose) && isempty(totalDoseResampled)
+            fprintf('  - Cannot compare: totalDoseResampled was not calculated\n');
         end
         
         % Export individual field doses to DICOM
-        fprintf('\n  Exporting field doses to DICOM...\n');
-        for beamIdx = 1:length(fieldDoses)
-            if ~isempty(fieldDoses{beamIdx})
-                dicomFilename = sprintf('Field_%02d_Gantry_%.0f.dcm', ...
-                    beamIdx, fieldDoses{beamIdx}.gantryAngle);
-                
+        fprintf('\n  Exporting field doses to .mat files...\n');
+        for beamIdx = 1:length(fieldDosesResampled)
+            if ~isempty(fieldDosesResampled{beamIdx})
                 try
-                    % This would require MATRAD DICOM export functionality
-                    % For now, save as .mat files
                     fieldFilename = sprintf('Field_%02d.mat', beamIdx);
-                    fieldData = fieldDoses{beamIdx};
+                    fieldData = fieldDosesResampled{beamIdx};
                     save(fullfile(outputPath, fieldFilename), 'fieldData');
                 catch
                     fprintf('    Warning: Could not export field %d\n', beamIdx);
@@ -899,7 +1054,21 @@ for idxID = 1:length(ids)
         fprintf('========================================\n');
         
         fprintf('\n** IMPORTANT NOTES **\n');
-        fprintf('1. MLC Aperture Status:\n');
+        fprintf('1. Grid Resampling:\n');
+        if ~isempty(ctResampled_struct)
+            fprintf('   ✓ CT and field doses resampled to RTDOSE grid\n');
+            fprintf('     Original CT: %d x %d x %d at [%.2f, %.2f, %.2f] mm\n', ...
+                ct.cubeDim(1), ct.cubeDim(2), ct.cubeDim(3), ...
+                ct.resolution.x, ct.resolution.y, ct.resolution.z);
+            fprintf('     Resampled:   %d x %d x %d at [%.2f, %.2f, %.2f] mm\n', ...
+                ctResampled_struct.cubeDim(1), ctResampled_struct.cubeDim(2), ctResampled_struct.cubeDim(3), ...
+                ctResampled_struct.resolution.x, ctResampled_struct.resolution.y, ctResampled_struct.resolution.z);
+        else
+            fprintf('   ⚠ Resampling not performed - using original CT grid\n');
+        end
+        fprintf('\n');
+        
+        fprintf('2. MLC Aperture Status:\n');
         if isfield(pln, 'propStf') && isfield(pln.propStf, 'beam') && ...
            length(pln.propStf.beam) > 0 && isfield(pln.propStf.beam(1), 'shape')
             fprintf('   ✓ MLC data imported by MATRAD\n');
@@ -922,7 +1091,7 @@ for idxID = 1:length(ids)
         end
         fprintf('\n');
         
-        fprintf('2. Weight Extraction:\n');
+        fprintf('3. Weight Extraction:\n');
         if isfield(pln, 'w') && ~isempty(pln.w)
             fprintf('   ✓ Weights successfully extracted from RTPLAN\n');
             fprintf('   - Using beam metersets: total = %.2f\n', sum(pln.w));
@@ -933,16 +1102,17 @@ for idxID = 1:length(ids)
         end
         fprintf('\n');
         
-        fprintf('3. Machine Commissioning:\n');
+        fprintf('4. Machine Commissioning:\n');
         fprintf('   - Using generic photon machine data (not Halcyon-specific)\n');
         fprintf('   - Absolute dose values will differ from clinical plan\n');
         fprintf('   - Dose distributions and relative contributions are still valid for QA\n\n');
         
-        fprintf('4. Recommendations:\n');
-        fprintf('   - Individual field doses are correctly separated\n');
-        fprintf('   - Use for field-by-field contribution analysis\n');
-        fprintf('   - Relative dose patterns are meaningful for QA\n');
-        fprintf('   - Consider results as qualitative validation of field arrangement\n\n');
+        fprintf('5. Output Files:\n');
+        fprintf('   - fieldDoses.mat: Resampled field doses (RTDOSE grid) for kWave\n');
+        fprintf('   - fieldDoses_CTgrid.mat: Original field doses (CT grid)\n');
+        fprintf('   - ctResampled.mat: CT resampled to RTDOSE grid for kWave\n');
+        fprintf('   - reconstructedDose.mat: Total accumulated dose\n');
+        fprintf('   - doseComparison.mat: Comparison with reference RTDOSE\n\n');
         
     end
 end

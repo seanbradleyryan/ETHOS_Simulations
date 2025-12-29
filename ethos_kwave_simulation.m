@@ -3,14 +3,18 @@
 %          radiation field and reconstruct dose via time reversal
 % 
 % Workflow:
-%   1. Load field doses from ethos_field_dosev3.m output
-%   2. Process CT to extract density and assign acoustic properties
-%   3. Convert dose to initial pressure: p0 = D * Gamma * rho
-%   4. Run kWave forward simulation
-%   5. Perform time reversal reconstruction
-%   6. Convert pressure back to dose
-%   7. Sum all field contributions
-%   8. Visualize results
+%   1. Load field doses from ethos_field_dosev3.m output (RTDOSE grid)
+%   2. Load CT resampled to RTDOSE grid dimensions
+%   3. Process CT to extract density and assign acoustic properties
+%   4. Convert dose to initial pressure: p0 = D * Gamma * rho
+%   5. Run kWave forward simulation
+%   6. Perform time reversal reconstruction
+%   7. Convert pressure back to dose
+%   8. Sum all field contributions
+%   9. Visualize results
+%
+% MODIFIED: Now loads CT resampled to RTDOSE grid from ctResampled.mat
+%           instead of using original high-resolution CT
 %
 % Author: Generated for ETHOS dose analysis
 % Date: 2025
@@ -123,7 +127,7 @@ fprintf('=======================================================\n');
 fprintf('  ETHOS Field-by-Field Photoacoustic Reconstruction\n');
 fprintf('=======================================================\n\n');
 
-fprintf('[1/8] Verifying paths and dependencies...\n');
+fprintf('[1/9] Verifying paths and dependencies...\n');
 
 % Check if field dose directory exists
 if ~exist(fieldDoseDir, 'dir')
@@ -151,19 +155,86 @@ if ~exist('kWaveGrid', 'file')
 end
 fprintf('  - kWave toolbox: OK\n');
 
-%% ======================== LOAD FIELD DOSES ========================
-fprintf('\n[2/8] Loading field doses from Step 1...\n');
+%% ======================== LOAD RESAMPLED CT AND FIELD DOSES ========================
+fprintf('\n[2/9] Loading resampled CT and field doses from Step 1...\n');
 
+% Check for resampled CT file (preferred)
+ctResampledFile = fullfile(fieldDoseDir, 'ctResampled.mat');
 fieldDoseFile = fullfile(fieldDoseDir, 'fieldDoses.mat');
+
+if exist(ctResampledFile, 'file')
+    fprintf('  Loading resampled CT from: ctResampled.mat\n');
+    ctData = load(ctResampledFile);
+    
+    % Extract resampled CT structure
+    if isfield(ctData, 'ctResampled_struct')
+        ct = ctData.ctResampled_struct;
+        fprintf('  ✓ Loaded resampled CT structure\n');
+    else
+        error('ctResampled.mat does not contain ctResampled_struct');
+    end
+    
+    % Extract dose grid info
+    if isfield(ctData, 'doseGrid')
+        doseGrid = ctData.doseGrid;
+    end
+    if isfield(ctData, 'doseSpatial')
+        doseSpatial = ctData.doseSpatial;
+    end
+    if isfield(ctData, 'ctSpatial')
+        ctSpatial = ctData.ctSpatial;
+    end
+    
+    usingResampledCT = true;
+else
+    fprintf('  ⚠ Resampled CT file not found: %s\n', ctResampledFile);
+    fprintf('  Falling back to original CT from fieldDoses.mat\n');
+    usingResampledCT = false;
+end
+
+% Load field doses
 if ~exist(fieldDoseFile, 'file')
     error('Field doses file not found: %s\nRun ethos_field_dosev3.m first.', fieldDoseFile);
 end
 
 loadedData = load(fieldDoseFile);
-fieldDoses = loadedData.fieldDoses;
-ct = loadedData.ct;
-pln = loadedData.pln;
-stf = loadedData.stf;
+
+% Check which field dose format is available (resampled vs original)
+if isfield(loadedData, 'fieldDosesResampled')
+    fieldDoses = loadedData.fieldDosesResampled;
+    fprintf('  ✓ Loaded resampled field doses (RTDOSE grid)\n');
+else
+    fieldDoses = loadedData.fieldDoses;
+    fprintf('  ⚠ Loaded original field doses (CT grid)\n');
+end
+
+% Load CT if not already loaded from ctResampled.mat
+if ~usingResampledCT
+    if isfield(loadedData, 'ctResampled_struct')
+        ct = loadedData.ctResampled_struct;
+        usingResampledCT = true;
+        fprintf('  ✓ Found resampled CT in fieldDoses.mat\n');
+    elseif isfield(loadedData, 'ct')
+        ct = loadedData.ct;
+        fprintf('  ⚠ Using original CT (not resampled)\n');
+    else
+        error('No CT data found in loaded files');
+    end
+end
+
+% Load additional data
+if isfield(loadedData, 'pln')
+    pln = loadedData.pln;
+end
+if isfield(loadedData, 'stf')
+    stf = loadedData.stf;
+end
+if isfield(loadedData, 'referenceDose')
+    referenceDose = loadedData.referenceDose;
+end
+if isfield(loadedData, 'doseGrid') && ~exist('doseGrid', 'var')
+    doseGrid = loadedData.doseGrid;
+end
 
 % Count valid fields
 numFields = length(fieldDoses);
@@ -171,11 +242,28 @@ validFields = find(~cellfun(@isempty, fieldDoses));
 numValidFields = length(validFields);
 
 fprintf('  - Loaded %d field doses (%d valid)\n', numFields, numValidFields);
-fprintf('  - CT dimensions: %d x %d x %d\n', ct.cubeDim(1), ct.cubeDim(2), ct.cubeDim(3));
-fprintf('  - CT resolution: [%.2f, %.2f, %.2f] mm\n', ct.resolution.x, ct.resolution.y, ct.resolution.z);
+
+% Display CT information
+if isfield(ct, 'cubeDim')
+    fprintf('  - CT dimensions: %d x %d x %d\n', ct.cubeDim(1), ct.cubeDim(2), ct.cubeDim(3));
+elseif isfield(ct, 'cubeHU')
+    ctSize = size(ct.cubeHU{1});
+    fprintf('  - CT dimensions: %d x %d x %d\n', ctSize(1), ctSize(2), ctSize(3));
+end
+
+if isfield(ct, 'resolution')
+    fprintf('  - CT resolution: [%.2f, %.2f, %.2f] mm\n', ...
+        ct.resolution.x, ct.resolution.y, ct.resolution.z);
+end
+
+if usingResampledCT
+    fprintf('  ✓ Using CT resampled to RTDOSE grid\n');
+else
+    fprintf('  ⚠ Using original CT grid (may not match field dose dimensions)\n');
+end
 
 %% ======================== LOAD RTPLAN FOR PULSE CALCULATION ========================
-fprintf('\n[3/8] Extracting pulse count from RTPLAN...\n');
+fprintf('\n[3/9] Extracting pulse count from RTPLAN...\n');
 
 % Find RTPLAN file
 rtplanFiles = dir(fullfile(dicomDir, 'RP*.dcm'));
@@ -228,12 +316,13 @@ fprintf('  - Total pulses: %d\n', totalPulses);
 fprintf('  - Dose per pulse: %.4f Gy\n', dosePerPulse_Gy);
 
 %% ======================== PROCESS CT FOR ACOUSTIC PROPERTIES ========================
-fprintf('\n[4/8] Processing CT for acoustic medium properties...\n');
+fprintf('\n[4/9] Processing CT for acoustic medium properties...\n');
 
 % Get CT cube (Hounsfield Units)
 ctCube = ct.cubeHU{1};
 ctSize = size(ctCube);
 
+fprintf('  - CT grid size: %d x %d x %d\n', ctSize(1), ctSize(2), ctSize(3));
 fprintf('  - CT HU range: [%.0f, %.0f]\n', min(ctCube(:)), max(ctCube(:)));
 
 % Initialize acoustic property arrays
@@ -284,12 +373,21 @@ fprintf('  - Density range: [%.0f, %.0f] kg/m³\n', min(density(:)), max(density
 fprintf('  - Sound speed range: [%.0f, %.0f] m/s\n', min(soundSpeed(:)), max(soundSpeed(:)));
 
 %% ======================== SETUP KWAVE GRID ========================
-fprintf('\n[5/8] Setting up kWave simulation grid...\n');
+fprintf('\n[5/9] Setting up kWave simulation grid...\n');
 
 % Grid dimensions and spacing (convert from mm to m)
-dx = ct.resolution.x / 1000;  % m
-dy = ct.resolution.y / 1000;  % m
-dz = ct.resolution.z / 1000;  % m
+if isfield(ct, 'resolution')
+    dx = ct.resolution.x / 1000;  % m
+    dy = ct.resolution.y / 1000;  % m
+    dz = ct.resolution.z / 1000;  % m
+elseif exist('doseGrid', 'var')
+    % Use dose grid resolution
+    dx = doseGrid.resolution(2) / 1000;  % Column direction (X)
+    dy = doseGrid.resolution(1) / 1000;  % Row direction (Y)
+    dz = doseGrid.resolution(3) / 1000;  % Slice direction (Z)
+else
+    error('Cannot determine grid resolution');
+end
 
 Nx = ctSize(1);
 Ny = ctSize(2);
@@ -319,7 +417,7 @@ fprintf('  - Number of time steps: %d\n', Nt);
 fprintf('  - Simulation time: %.2e s\n', simTime);
 
 %% ======================== SETUP MEDIUM PROPERTIES ========================
-fprintf('\n[6/8] Configuring acoustic medium...\n');
+fprintf('\n[6/9] Configuring acoustic medium...\n');
 
 medium = struct();
 medium.density = density;
@@ -331,7 +429,7 @@ fprintf('  - Medium properties assigned\n');
 fprintf('  - Alpha power: %.2f\n', medium.alpha_power);
 
 %% ======================== PROCESS EACH FIELD ========================
-fprintf('\n[7/8] Processing radiation fields with kWave...\n');
+fprintf('\n[7/9] Processing radiation fields with kWave...\n');
 
 % Initialize storage for reconstructed doses
 reconstructedFieldDoses = cell(numFields, 1);
@@ -363,15 +461,17 @@ for fieldIdx = validFields'
     % Get field dose
     fieldDose = fieldDoses{fieldIdx}.physicalDose;
     
-    % Check size compatibility
+    % Check size compatibility with CT grid
     if ~isequal(size(fieldDose), ctSize)
-        fprintf('    Resampling dose grid to CT dimensions...\n');
+        fprintf('    ⚠ Field dose size mismatch with CT grid\n');
+        fprintf('      Field dose: %d x %d x %d\n', size(fieldDose, 1), size(fieldDose, 2), size(fieldDose, 3));
+        fprintf('      CT grid: %d x %d x %d\n', ctSize(1), ctSize(2), ctSize(3));
         
-        % Create coordinate grids for resampling
+        % Attempt resampling if sizes don't match
+        fprintf('    Attempting to resample field dose to CT grid...\n');
         [nRows, nCols, nSlices] = size(fieldDose);
         [iDose, jDose, kDose] = ndgrid(1:nRows, 1:nCols, 1:nSlices);
         
-        % Scale factors
         scale_i = nRows / Nx;
         scale_j = nCols / Ny;
         scale_k = nSlices / Nz;
@@ -382,8 +482,13 @@ for fieldIdx = validFields'
         
         [iQ, jQ, kQ] = ndgrid(iQuery, jQuery, kQuery);
         
-        fieldDose = interpn(iDose, jDose, kDose, fieldDose, iQ, jQ, kQ, 'linear', 0);
-        fprintf('    Resampled to: %d x %d x %d\n', size(fieldDose));
+        try
+            fieldDose = interpn(iDose, jDose, kDose, fieldDose, iQ, jQ, kQ, 'linear', 0);
+            fprintf('    ✓ Resampled to: %d x %d x %d\n', size(fieldDose));
+        catch ME
+            fprintf('    ✗ Resampling failed: %s\n', ME.message);
+            continue;
+        end
     end
     
     % Get number of pulses for this field
@@ -549,7 +654,7 @@ fprintf('  - Original total max dose: %.4f Gy\n', max(totalOriginalDose(:)));
 fprintf('  - Reconstructed total max dose: %.4f Gy\n', max(totalReconstructedDose(:)));
 
 %% ======================== SAVE RESULTS ========================
-fprintf('\n[8/8] Saving results and generating visualization...\n');
+fprintf('\n[8/9] Saving results and generating visualization...\n');
 
 % Save all results
 results = struct();
@@ -561,16 +666,28 @@ results.soundSpeed = soundSpeed;
 results.gruneisen = gruneisen;
 results.beamPulses = beamPulses;
 results.dosePerPulse_Gy = dosePerPulse_Gy;
-results.ctResolution = [ct.resolution.x, ct.resolution.y, ct.resolution.z];
 results.gridSize = ctSize;
 results.patientID = patientID;
 results.sessionName = sessionName;
+results.usingResampledCT = usingResampledCT;
+
+% Store resolution info
+if isfield(ct, 'resolution')
+    results.ctResolution = [ct.resolution.x, ct.resolution.y, ct.resolution.z];
+elseif exist('doseGrid', 'var')
+    results.ctResolution = doseGrid.resolution;
+end
+
+% Store reference dose if available
+if exist('referenceDose', 'var') && ~isempty(referenceDose)
+    results.referenceDose = referenceDose;
+end
 
 save(fullfile(outputDir, 'kwave_reconstruction_results.mat'), 'results', '-v7.3');
 fprintf('  - Results saved to: kwave_reconstruction_results.mat\n');
 
 %% ======================== VISUALIZATION ========================
-fprintf('  Generating visualization...\n');
+fprintf('\n[9/9] Generating visualization...\n');
 
 % Find slice with maximum dose for display
 [maxDose, maxIdx] = max(totalOriginalDose(:));
@@ -648,7 +765,14 @@ fig2 = figure('Position', [100, 100, 1000, 400], 'Color', 'w');
 subplot(1, 2, 1);
 origProfile = squeeze(totalOriginalDose(maxX, :, maxZ));
 reconProfile = squeeze(totalReconstructedDose(maxX, :, maxZ));
-yAxis = (1:Ny) * ct.resolution.y;
+
+if isfield(ct, 'resolution')
+    yAxis = (1:Ny) * ct.resolution.y;
+elseif exist('doseGrid', 'var')
+    yAxis = (1:Ny) * doseGrid.resolution(1);
+else
+    yAxis = 1:Ny;
+end
 
 plot(yAxis, origProfile, 'b-', 'LineWidth', 2, 'DisplayName', 'Original');
 hold on;
@@ -663,7 +787,14 @@ grid on;
 subplot(1, 2, 2);
 origProfileX = squeeze(totalOriginalDose(:, maxY, maxZ));
 reconProfileX = squeeze(totalReconstructedDose(:, maxY, maxZ));
-xAxis = (1:Nx) * ct.resolution.x;
+
+if isfield(ct, 'resolution')
+    xAxis = (1:Nx) * ct.resolution.x;
+elseif exist('doseGrid', 'var')
+    xAxis = (1:Nx) * doseGrid.resolution(2);
+else
+    xAxis = 1:Nx;
+end
 
 plot(xAxis, origProfileX, 'b-', 'LineWidth', 2, 'DisplayName', 'Original');
 hold on;
@@ -726,5 +857,10 @@ fprintf('  Fields processed: %d/%d\n', sum(~cellfun(@isempty, reconstructedField
 fprintf('  Total pulses: %d\n', totalPulses);
 fprintf('  Original max dose: %.4f Gy\n', max(totalOriginalDose(:)));
 fprintf('  Reconstructed max dose: %.4f Gy\n', max(totalReconstructedDose(:)));
+if usingResampledCT
+    fprintf('  ✓ Used CT resampled to RTDOSE grid\n');
+else
+    fprintf('  ⚠ Used original CT grid\n');
+end
 fprintf('  Output directory: %s\n', outputDir);
 fprintf('=======================================================\n\n');
