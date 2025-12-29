@@ -15,7 +15,7 @@
 %   - reconstructedDose.mat: Sum of all fields (total plan dose)
 %   - doseComparison.mat: Comparison metrics with reference RTDOSE
 %   - Field_XX.mat: Individual field dose files
-%   - croppedResampledData.mat: CT and doses cropped/resampled to RTDOSE grid
+%   - resampledData.mat: CT and doses resampled to RTDOSE resolution
 
 clear; clc; close all;
 
@@ -256,11 +256,6 @@ for idxID = 1:length(ids)
                     doseGrid.origin = rtdoseInfo.ImagePositionPatient;
                     fprintf('  - Dose grid origin: [%.2f, %.2f, %.2f] mm\n', ...
                         doseGrid.origin(1), doseGrid.origin(2), doseGrid.origin(3));
-                end
-                
-                % Store GridFrameOffsetVector for Z coordinates
-                if isfield(rtdoseInfo, 'GridFrameOffsetVector')
-                    doseGrid.frameOffsets = rtdoseInfo.GridFrameOffsetVector;
                 end
                 
                 fprintf('  ✓ Dose grid resolution: [%.3f, %.3f, %.3f] mm\n', ...
@@ -664,9 +659,9 @@ for idxID = 1:length(ids)
         end
         
         %% ================================================================
-        %  STEP 7: CROP CT TO RTDOSE EXTENT, RESAMPLE, AND SAVE RESULTS
+        %  STEP 7: RESAMPLE TO RTDOSE RESOLUTION AND SAVE RESULTS
         %  ================================================================
-        fprintf('\n[7/7] Cropping to RTDOSE extent, resampling, and saving results...\n');
+        fprintf('\n[7/7] Resampling to RTDOSE resolution and saving results...\n');
         
         % Save individual field doses (on CT grid)
         save(fullfile(outputPath, 'fieldDoses.mat'), 'fieldDoses', 'stf', 'pln', 'ct', 'cst', '-v7.3');
@@ -691,75 +686,63 @@ for idxID = 1:length(ids)
             end
         end
         
-        % Crop and resample all doses to match RTDOSE grid
-        fprintf('\n  Cropping CT to RTDOSE extent and resampling...\n');
+        % Resample all doses to RTDOSE grid resolution
+        fprintf('\n  Resampling CT and doses to RTDOSE resolution...\n');
         
-        croppedResampledData = struct();
-        croppedResampledData.ctResolution = [ct.resolution.x, ct.resolution.y, ct.resolution.z];
-        croppedResampledData.doseResolution = doseGrid.resolution;
-        croppedResampledData.doseGridDimensions = doseGrid.dimensions;
+        resampledData = struct();
+        resampledData.ctResolution = [ct.resolution.x, ct.resolution.y, ct.resolution.z];
+        resampledData.doseResolution = doseGrid.resolution;
         
         if ~isempty(referenceDoseOriginal) && ~isempty(totalDose)
             try
-                % Crop and resample totalDose to match RTDOSE grid
-                fprintf('    Cropping and resampling totalDose to RTDOSE grid...\n');
+                % Resample totalDose from CT grid to RTDOSE grid
+                fprintf('    Resampling totalDose to RTDOSE grid...\n');
                 
-                [totalDoseCropped, cropResampleInfo] = crop_and_resample_to_rtdose(...
+                [totalDoseResampled, resampleInfo] = resample_to_dose_grid(...
                     totalDose, ct, doseGrid, rtdoseInfo);
                 
-                croppedResampledData.totalDose = totalDoseCropped;
-                croppedResampledData.cropResampleInfo = cropResampleInfo;
+                resampledData.totalDose = totalDoseResampled;
+                resampledData.resampleInfo = resampleInfo;
                 
-                fprintf('    ✓ totalDose cropped/resampled: %s -> %s\n', ...
-                    mat2str(size(totalDose)), mat2str(size(totalDoseCropped)));
-                fprintf('      Max dose after crop/resample: %.4f Gy\n', max(totalDoseCropped(:)));
-                fprintf('      Crop region (CT indices): rows [%d:%d], cols [%d:%d], slices [%d:%d]\n', ...
-                    cropResampleInfo.cropIndices.rowStart, cropResampleInfo.cropIndices.rowEnd, ...
-                    cropResampleInfo.cropIndices.colStart, cropResampleInfo.cropIndices.colEnd, ...
-                    cropResampleInfo.cropIndices.sliceStart, cropResampleInfo.cropIndices.sliceEnd);
+                fprintf('    ✓ totalDose resampled: %s -> %s\n', ...
+                    mat2str(size(totalDose)), mat2str(size(totalDoseResampled)));
+                fprintf('      Max dose after resampling: %.4f Gy\n', max(totalDoseResampled(:)));
                 
-                % Crop and resample individual field doses
-                fprintf('    Cropping and resampling individual field doses...\n');
-                croppedResampledData.fieldDoses = cell(length(fieldDoses), 1);
+                % Resample individual field doses
+                fprintf('    Resampling individual field doses...\n');
+                resampledData.fieldDoses = cell(length(fieldDoses), 1);
                 
                 for beamIdx = 1:length(fieldDoses)
                     if ~isempty(fieldDoses{beamIdx})
-                        [fieldCropped, ~] = crop_and_resample_to_rtdose(...
+                        [fieldResampled, ~] = resample_to_dose_grid(...
                             fieldDoses{beamIdx}.physicalDose, ct, doseGrid, rtdoseInfo);
                         
-                        croppedResampledData.fieldDoses{beamIdx} = fieldDoses{beamIdx};
-                        croppedResampledData.fieldDoses{beamIdx}.physicalDose = fieldCropped;
-                        croppedResampledData.fieldDoses{beamIdx}.croppedResampledMaxDose = max(fieldCropped(:));
+                        resampledData.fieldDoses{beamIdx} = fieldDoses{beamIdx};
+                        resampledData.fieldDoses{beamIdx}.physicalDose = fieldResampled;
+                        resampledData.fieldDoses{beamIdx}.resampledMaxDose = max(fieldResampled(:));
                         
-                        fprintf('      Field %2d cropped/resampled: max=%.4f Gy\n', beamIdx, max(fieldCropped(:)));
+                        fprintf('      Field %2d resampled: max=%.4f Gy\n', beamIdx, max(fieldResampled(:)));
                     end
                 end
                 
-                % Crop and resample CT to RTDOSE grid
-                fprintf('    Cropping and resampling CT to RTDOSE grid...\n');
-                [ctCropped, ~] = crop_and_resample_to_rtdose(...
+                % Resample CT to RTDOSE grid
+                fprintf('    Resampling CT to RTDOSE grid...\n');
+                [ctResampled, ~] = resample_to_dose_grid(...
                     ct.cubeHU{1}, ct, doseGrid, rtdoseInfo);
-                croppedResampledData.ct = ctCropped;
-                fprintf('    ✓ CT cropped/resampled: %s -> %s\n', ...
-                    mat2str(size(ct.cubeHU{1})), mat2str(size(ctCropped)));
+                resampledData.ct = ctResampled;
+                fprintf('    ✓ CT resampled: %s -> %s\n', ...
+                    mat2str(size(ct.cubeHU{1})), mat2str(size(ctResampled)));
                 
-                % Store reference dose for convenience
-                croppedResampledData.referenceDose = referenceDoseOriginal;
-                
-                % Save cropped/resampled data
-                save(fullfile(outputPath, 'croppedResampledData.mat'), 'croppedResampledData', '-v7.3');
-                fprintf('  ✓ Cropped/resampled data saved to: croppedResampledData.mat\n');
+                % Save resampled data
+                save(fullfile(outputPath, 'resampledData.mat'), 'resampledData', '-v7.3');
+                fprintf('  ✓ Resampled data saved to: resampledData.mat\n');
                 
             catch ME
-                fprintf('    ⚠ Error during crop/resample: %s\n', ME.message);
-                fprintf('    Stack trace:\n');
-                for k = 1:length(ME.stack)
-                    fprintf('      %s (line %d)\n', ME.stack(k).name, ME.stack(k).line);
-                end
-                fprintf('    Continuing without cropped/resampled data...\n');
+                fprintf('    ⚠ Error during resampling: %s\n', ME.message);
+                fprintf('    Continuing without resampled data...\n');
             end
         else
-            fprintf('    ⚠ Cannot crop/resample: missing reference RTDOSE or totalDose\n');
+            fprintf('    ⚠ Cannot resample: missing reference RTDOSE or totalDose\n');
         end
         
         % Compare with reference RTDOSE
@@ -770,13 +753,13 @@ for idxID = 1:length(ids)
             comparison.reference = referenceDoseOriginal;
             comparison.referenceGrid = doseGrid;
             
-            if exist('totalDoseCropped', 'var') && ~isempty(totalDoseCropped)
-                % Compare cropped/resampled calculated dose with reference
-                if isequal(size(totalDoseCropped), size(referenceDoseOriginal))
-                    doseDiff = totalDoseCropped - referenceDoseOriginal;
+            if exist('totalDoseResampled', 'var') && ~isempty(totalDoseResampled)
+                % Compare resampled calculated dose with reference
+                if isequal(size(totalDoseResampled), size(referenceDoseOriginal))
+                    doseDiff = totalDoseResampled - referenceDoseOriginal;
                     
                     fprintf('    Comparison statistics (on RTDOSE grid):\n');
-                    fprintf('      Calculated max dose: %.4f Gy\n', max(totalDoseCropped(:)));
+                    fprintf('      Calculated max dose: %.4f Gy\n', max(totalDoseResampled(:)));
                     fprintf('      Reference max dose:  %.4f Gy\n', max(referenceDoseOriginal(:)));
                     fprintf('      Mean absolute difference: %.4f Gy\n', mean(abs(doseDiff(:))));
                     fprintf('      Max difference: %.4f Gy\n', max(abs(doseDiff(:))));
@@ -791,23 +774,23 @@ for idxID = 1:length(ids)
                         comparison.metrics.meanRelativeDiff = mean(relativeDiff);
                     end
                     
-                    comparison.calculated = totalDoseCropped;
+                    comparison.calculated = totalDoseResampled;
                     comparison.difference = doseDiff;
                     comparison.metrics.meanAbsDiff = mean(abs(doseDiff(:)));
                     comparison.metrics.maxDiff = max(abs(doseDiff(:)));
                     comparison.metrics.rmsDiff = sqrt(mean(doseDiff(:).^2));
-                    comparison.note = 'Comparison on RTDOSE grid (CT cropped to RTDOSE extent, then resampled)';
+                    comparison.note = 'Comparison on RTDOSE grid (calculated dose resampled)';
                     
                     fprintf('    ✓ Comparison complete\n');
                 else
-                    fprintf('    ⚠ Size mismatch after crop/resample:\n');
-                    fprintf('      Calculated: %s\n', mat2str(size(totalDoseCropped)));
+                    fprintf('    ⚠ Size mismatch after resampling:\n');
+                    fprintf('      Calculated: %s\n', mat2str(size(totalDoseResampled)));
                     fprintf('      Reference: %s\n', mat2str(size(referenceDoseOriginal)));
-                    comparison.calculated = totalDoseCropped;
+                    comparison.calculated = totalDoseResampled;
                     comparison.note = 'Size mismatch - direct comparison not possible';
                 end
             else
-                fprintf('    ⚠ No cropped/resampled dose available for comparison\n');
+                fprintf('    ⚠ No resampled dose available for comparison\n');
                 comparison.calculated = totalDose;
                 comparison.calculatedGrid = calculatedGridSize;
                 comparison.note = 'Different grids - data saved separately';
@@ -852,18 +835,13 @@ for idxID = 1:length(ids)
         fprintf('     - Absolute dose values will differ from clinical plan\n');
         
         fprintf('\n  4. Output Files:\n');
-        fprintf('     - fieldDoses.mat: All field doses + metadata (CT grid)\n');
-        fprintf('     - reconstructedDose.mat: Sum of all fields (CT grid)\n');
+        fprintf('     - fieldDoses.mat: All field doses + metadata\n');
+        fprintf('     - reconstructedDose.mat: Sum of all fields\n');
         fprintf('     - doseComparison.mat: Comparison metrics\n');
-        fprintf('     - croppedResampledData.mat: CT & doses cropped to RTDOSE extent\n');
+        fprintf('     - resampledData.mat: Doses resampled to RTDOSE grid\n');
         fprintf('     - Field_XX.mat: Individual field files\n');
         
-        fprintf('\n  5. Crop/Resample Approach:\n');
-        fprintf('     - CT cropped to RTDOSE spatial extent\n');
-        fprintf('     - Cropped region resampled to match RTDOSE dimensions\n');
-        fprintf('     - Enables direct voxel-by-voxel comparison\n');
-        
-        fprintf('\n  6. Validation Notes:\n');
+        fprintf('\n  5. Validation Notes:\n');
         fprintf('     - %d/%d fields calculated successfully\n', numSuccessful, length(stf));
         if ~isempty(totalDose)
             fprintf('     - Total reconstructed max dose: %.4f Gy\n', max(totalDose(:)));
@@ -1039,175 +1017,62 @@ function pln = populate_weights(pln, stf, beamMetersets)
     end
 end
 
-function [croppedResampled, info] = crop_and_resample_to_rtdose(data, ct, doseGrid, rtdoseInfo)
-%CROP_AND_RESAMPLE_TO_RTDOSE Crop data to RTDOSE extent and resample to match dimensions
+function [resampled, info] = resample_to_dose_grid(data, ct, doseGrid, rtdoseInfo)
+%RESAMPLE_TO_DOSE_GRID Resample 3D data from CT grid to RTDOSE grid
 %
-%   This function:
-%   1. Computes the physical extent of the RTDOSE grid in patient coordinates
-%   2. Finds the corresponding region in the CT coordinate system
-%   3. Crops the input data (CT or dose on CT grid) to that region
-%   4. Resamples the cropped region to match RTDOSE dimensions exactly
-%
-%   Inputs:
-%       data        - 3D array on CT grid (dose or HU values)
-%       ct          - matRad CT structure with resolution and coordinate info
-%       doseGrid    - Structure with RTDOSE grid parameters
-%       rtdoseInfo  - DICOM info structure from RTDOSE file
-%
-%   Outputs:
-%       croppedResampled - 3D array matching RTDOSE dimensions
-%       info             - Structure with crop/resample metadata
+%   Uses trilinear interpolation to resample data from the CT coordinate
+%   system to the RTDOSE coordinate system.
 
     info = struct();
     info.originalSize = size(data);
-    info.method = 'crop_then_trilinear';
+    info.method = 'trilinear';
     
-    % Get CT grid parameters
-    ctRows = size(data, 1);
-    ctCols = size(data, 2);
-    ctSlices = size(data, 3);
+    % Get original grid dimensions
+    [nRows, nCols, nSlices] = size(data);
     
-    ctResX = ct.resolution.x;  % Column spacing (mm)
-    ctResY = ct.resolution.y;  % Row spacing (mm)
-    ctResZ = ct.resolution.z;  % Slice spacing (mm)
+    % Create index grids for original data
+    [iOrig, jOrig, kOrig] = ndgrid(1:nRows, 1:nCols, 1:nSlices);
     
-    % Get CT origin from dicomInfo if available, otherwise estimate from matRad structure
-    if isfield(ct, 'dicomInfo') && isfield(ct.dicomInfo, 'ImagePositionPatient')
-        ctOrigin = ct.dicomInfo.ImagePositionPatient;
-    elseif isfield(ct, 'x') && isfield(ct, 'y') && isfield(ct, 'z')
-        % matRad stores coordinate vectors
-        ctOrigin = [ct.x(1), ct.y(1), ct.z(1)];
+    % Calculate scaling factors based on resolution ratios
+    scale_i = ct.resolution.y / doseGrid.resolution(1);  % Row direction
+    scale_j = ct.resolution.x / doseGrid.resolution(2);  % Column direction
+    scale_k = ct.resolution.z / doseGrid.resolution(3);  % Slice direction
+    
+    info.scales = [scale_i, scale_j, scale_k];
+    
+    % Determine target grid size
+    if isfield(rtdoseInfo, 'Rows') && isfield(rtdoseInfo, 'Columns')
+        targetRows = rtdoseInfo.Rows;
+        targetCols = rtdoseInfo.Columns;
+        if isfield(rtdoseInfo, 'GridFrameOffsetVector')
+            targetSlices = length(rtdoseInfo.GridFrameOffsetVector);
+        else
+            targetSlices = round(nSlices * scale_k);
+        end
     else
-        % Fallback: assume origin at (0,0,0) - this may need adjustment
-        ctOrigin = [0, 0, 0];
-        warning('CT origin not found, using [0,0,0]. Results may be misaligned.');
+        targetRows = round(nRows / scale_i);
+        targetCols = round(nCols / scale_j);
+        targetSlices = round(nSlices / scale_k);
     end
     
-    % Get RTDOSE grid parameters
-    doseRows = rtdoseInfo.Rows;
-    doseCols = rtdoseInfo.Columns;
-    if isfield(rtdoseInfo, 'GridFrameOffsetVector')
-        doseSlices = length(rtdoseInfo.GridFrameOffsetVector);
-    else
-        doseSlices = doseGrid.dimensions(3);
-    end
+    info.targetSize = [targetRows, targetCols, targetSlices];
     
-    doseResX = doseGrid.resolution(2);  % Column spacing
-    doseResY = doseGrid.resolution(1);  % Row spacing
-    doseResZ = doseGrid.resolution(3);  % Slice spacing
+    % Generate query grid in original index space
+    iQuery = 1 + (0:targetRows-1) * scale_i;
+    jQuery = 1 + (0:targetCols-1) * scale_j;
+    kQuery = 1 + (0:targetSlices-1) * scale_k;
     
-    doseOrigin = doseGrid.origin;  % [x, y, z] of first voxel center
+    [iQ, jQ, kQ] = ndgrid(iQuery, jQuery, kQuery);
     
-    % Compute RTDOSE physical extent (min/max coordinates)
-    % DICOM convention: ImagePositionPatient is center of first voxel
-    % X increases with column index, Y increases with row index
-    doseXmin = doseOrigin(1);
-    doseXmax = doseOrigin(1) + (doseCols - 1) * doseResX;
-    doseYmin = doseOrigin(2);
-    doseYmax = doseOrigin(2) + (doseRows - 1) * doseResY;
-    
-    % Z coordinates from GridFrameOffsetVector
-    if isfield(rtdoseInfo, 'GridFrameOffsetVector')
-        doseZmin = doseOrigin(3) + min(rtdoseInfo.GridFrameOffsetVector);
-        doseZmax = doseOrigin(3) + max(rtdoseInfo.GridFrameOffsetVector);
-    else
-        doseZmin = doseOrigin(3);
-        doseZmax = doseOrigin(3) + (doseSlices - 1) * doseResZ;
-    end
-    
-    info.doseExtent.xRange = [doseXmin, doseXmax];
-    info.doseExtent.yRange = [doseYmin, doseYmax];
-    info.doseExtent.zRange = [doseZmin, doseZmax];
-    
-    % Compute CT physical coordinates
-    % Note: In matRad, the CT cube is typically stored as (rows, cols, slices)
-    % where rows correspond to Y, cols to X, slices to Z
-    ctXmin = ctOrigin(1);
-    ctXmax = ctOrigin(1) + (ctCols - 1) * ctResX;
-    ctYmin = ctOrigin(2);
-    ctYmax = ctOrigin(2) + (ctRows - 1) * ctResY;
-    ctZmin = ctOrigin(3);
-    ctZmax = ctOrigin(3) + (ctSlices - 1) * ctResZ;
-    
-    info.ctExtent.xRange = [ctXmin, ctXmax];
-    info.ctExtent.yRange = [ctYmin, ctYmax];
-    info.ctExtent.zRange = [ctZmin, ctZmax];
-    
-    % Find CT indices corresponding to RTDOSE extent
-    % Add small margin to ensure we capture the full RTDOSE region
-    margin = 0.5;  % Half voxel margin
-    
-    % Column indices (X direction)
-    colStart = max(1, floor((doseXmin - ctXmin) / ctResX + 1 - margin));
-    colEnd = min(ctCols, ceil((doseXmax - ctXmin) / ctResX + 1 + margin));
-    
-    % Row indices (Y direction)
-    rowStart = max(1, floor((doseYmin - ctYmin) / ctResY + 1 - margin));
-    rowEnd = min(ctRows, ceil((doseYmax - ctYmin) / ctResY + 1 + margin));
-    
-    % Slice indices (Z direction)
-    sliceStart = max(1, floor((doseZmin - ctZmin) / ctResZ + 1 - margin));
-    sliceEnd = min(ctSlices, ceil((doseZmax - ctZmin) / ctResZ + 1 + margin));
-    
-    info.cropIndices.rowStart = rowStart;
-    info.cropIndices.rowEnd = rowEnd;
-    info.cropIndices.colStart = colStart;
-    info.cropIndices.colEnd = colEnd;
-    info.cropIndices.sliceStart = sliceStart;
-    info.cropIndices.sliceEnd = sliceEnd;
-    
-    % Crop the data
-    croppedData = data(rowStart:rowEnd, colStart:colEnd, sliceStart:sliceEnd);
-    info.croppedSize = size(croppedData);
-    
-    % Compute the physical coordinates of the cropped region
-    croppedXmin = ctXmin + (colStart - 1) * ctResX;
-    croppedYmin = ctYmin + (rowStart - 1) * ctResY;
-    croppedZmin = ctZmin + (sliceStart - 1) * ctResZ;
-    
-    info.croppedOrigin = [croppedXmin, croppedYmin, croppedZmin];
-    
-    % Now resample from cropped CT grid to RTDOSE grid
-    % Create coordinate vectors for cropped data
-    croppedRows = size(croppedData, 1);
-    croppedCols = size(croppedData, 2);
-    croppedSlices = size(croppedData, 3);
-    
-    % Physical coordinates of cropped voxel centers
-    croppedX = croppedXmin + (0:croppedCols-1) * ctResX;
-    croppedY = croppedYmin + (0:croppedRows-1) * ctResY;
-    croppedZ = croppedZmin + (0:croppedSlices-1) * ctResZ;
-    
-    % Physical coordinates of RTDOSE voxel centers
-    doseX = doseOrigin(1) + (0:doseCols-1) * doseResX;
-    doseY = doseOrigin(2) + (0:doseRows-1) * doseResY;
-    
-    if isfield(rtdoseInfo, 'GridFrameOffsetVector')
-        doseZ = doseOrigin(3) + rtdoseInfo.GridFrameOffsetVector(:)';
-    else
-        doseZ = doseOrigin(3) + (0:doseSlices-1) * doseResZ;
-    end
-    
-    % Create meshgrids for interpolation
-    % Note: interpn expects dimensions in order (Y, X, Z) -> (row, col, slice)
-    [croppedYgrid, croppedXgrid, croppedZgrid] = ndgrid(croppedY, croppedX, croppedZ);
-    [doseYgrid, doseXgrid, doseZgrid] = ndgrid(doseY, doseX, doseZ);
+    % Clamp query indices to valid range
+    iQ = max(1, min(nRows, iQ));
+    jQ = max(1, min(nCols, jQ));
+    kQ = max(1, min(nSlices, kQ));
     
     % Perform trilinear interpolation
-    croppedResampled = interpn(croppedYgrid, croppedXgrid, croppedZgrid, ...
-                               double(croppedData), ...
-                               doseYgrid, doseXgrid, doseZgrid, ...
-                               'linear', 0);  % 0 for extrapolation
+    resampled = interpn(iOrig, jOrig, kOrig, double(data), iQ, jQ, kQ, 'linear', 0);
     
-    info.targetSize = [doseRows, doseCols, doseSlices];
-    info.finalSize = size(croppedResampled);
+    info.resampledSize = size(resampled);
     info.maxOriginal = max(data(:));
-    info.maxCropped = max(croppedData(:));
-    info.maxFinal = max(croppedResampled(:));
-    
-    % Verify output dimensions match RTDOSE
-    if ~isequal(size(croppedResampled), [doseRows, doseCols, doseSlices])
-        warning('Output size %s does not match expected RTDOSE size %s', ...
-            mat2str(size(croppedResampled)), mat2str([doseRows, doseCols, doseSlices]));
-    end
+    info.maxResampled = max(resampled(:));
 end
