@@ -46,14 +46,14 @@ gruneisen_default = 1.0;
 
 %% ======================== MATERIAL PROPERTIES ========================
 % Define acoustic properties for each tissue type based on HU thresholds
-% Format: [HU_min, HU_max, density (kg/m³), speed_of_sound (m/s), alpha_coeff, alpha_power]
+% Format: [HU_min, HU_max, density (kg/m), speed_of_sound (m/s), alpha_coeff, alpha_power]
 
 materialTable = struct();
 
 % Air: HU ~ -1000
 materialTable.air.HU_range = [-1024, -900];
-materialTable.air.density = 1.2;
-materialTable.air.soundSpeed = 343;
+materialTable.air.density = 1000;
+materialTable.air.soundSpeed = 1480;
 materialTable.air.alphaCoeff = 0;
 materialTable.air.alphaPower = 1;
 materialTable.air.gruneisen = 0;  % No photoacoustic signal in air
@@ -169,7 +169,7 @@ if exist(ctResampledFile, 'file')
     % Extract resampled CT structure
     if isfield(ctData, 'ctResampled_struct')
         ct = ctData.ctResampled_struct;
-        fprintf('  ✓ Loaded resampled CT structure\n');
+        fprintf('   Loaded resampled CT structure\n');
     else
         error('ctResampled.mat does not contain ctResampled_struct');
     end
@@ -187,7 +187,7 @@ if exist(ctResampledFile, 'file')
     
     usingResampledCT = true;
 else
-    fprintf('  ⚠ Resampled CT file not found: %s\n', ctResampledFile);
+    fprintf('   Resampled CT file not found: %s\n', ctResampledFile);
     fprintf('  Falling back to original CT from fieldDoses.mat\n');
     usingResampledCT = false;
 end
@@ -202,10 +202,10 @@ loadedData = load(fieldDoseFile);
 % Check which field dose format is available (resampled vs original)
 if isfield(loadedData, 'fieldDosesResampled')
     fieldDoses = loadedData.fieldDosesResampled;
-    fprintf('  ✓ Loaded resampled field doses (RTDOSE grid)\n');
+    fprintf('   Loaded resampled field doses (RTDOSE grid)\n');
 else
     fieldDoses = loadedData.fieldDoses;
-    fprintf('  ⚠ Loaded original field doses (CT grid)\n');
+    fprintf('   Loaded original field doses (CT grid)\n');
 end
 
 % Load CT if not already loaded from ctResampled.mat
@@ -213,10 +213,10 @@ if ~usingResampledCT
     if isfield(loadedData, 'ctResampled_struct')
         ct = loadedData.ctResampled_struct;
         usingResampledCT = true;
-        fprintf('  ✓ Found resampled CT in fieldDoses.mat\n');
+        fprintf('   Found resampled CT in fieldDoses.mat\n');
     elseif isfield(loadedData, 'ct')
         ct = loadedData.ct;
-        fprintf('  ⚠ Using original CT (not resampled)\n');
+        fprintf('   Using original CT (not resampled)\n');
     else
         error('No CT data found in loaded files');
     end
@@ -257,9 +257,9 @@ if isfield(ct, 'resolution')
 end
 
 if usingResampledCT
-    fprintf('  ✓ Using CT resampled to RTDOSE grid\n');
+    fprintf('   Using CT resampled to RTDOSE grid\n');
 else
-    fprintf('  ⚠ Using original CT grid (may not match field dose dimensions)\n');
+    fprintf('   Using original CT grid (may not match field dose dimensions)\n');
 end
 
 %% ======================== LOAD RTPLAN FOR PULSE CALCULATION ========================
@@ -294,7 +294,7 @@ if isfield(rtplanInfo, 'FractionGroupSequence')
             
             if isfield(refBeam, 'BeamMeterset')
                 % BeamMeterset is typically in MU (Monitor Units)
-                % For most linacs, 1 MU ≈ 1 cGy at dmax for standard conditions
+                % For most linacs, 1 MU  1 cGy at dmax for standard conditions
                 % We use this as an approximation for the beam dose
                 beamDose_cGy = refBeam.BeamMeterset;  % Approximate dose in cGy
                 beamDose_Gy = beamDose_cGy / 100;
@@ -369,7 +369,7 @@ end
 density = max(density, 1);
 soundSpeed = max(soundSpeed, 100);
 
-fprintf('  - Density range: [%.0f, %.0f] kg/m³\n', min(density(:)), max(density(:)));
+fprintf('  - Density range: [%.0f, %.0f] kg/m\n', min(density(:)), max(density(:)));
 fprintf('  - Sound speed range: [%.0f, %.0f] m/s\n', min(soundSpeed(:)), max(soundSpeed(:)));
 
 %% ======================== SETUP KWAVE GRID ========================
@@ -451,11 +451,11 @@ else
 end
 
 inputArgs = {'Smooth', false, 'PMLInside', false, 'PMLSize', pmlSize, ...
-             'DataCast', dataCast, 'PlotSim', false};
+             'DataCast', dataCast, 'PlotSim', true};
 
 % Process each valid field
 for fieldIdx = validFields'
-    fprintf('\n  Processing Field %d/%d (Gantry: %.1f°)...\n', ...
+    fprintf('\n  Processing Field %d/%d (Gantry: %.1f)...\n', ...
         fieldIdx, numFields, fieldDoses{fieldIdx}.gantryAngle);
     
     % Get field dose
@@ -463,7 +463,7 @@ for fieldIdx = validFields'
     
     % Check size compatibility with CT grid
     if ~isequal(size(fieldDose), ctSize)
-        fprintf('    ⚠ Field dose size mismatch with CT grid\n');
+        fprintf('     Field dose size mismatch with CT grid\n');
         fprintf('      Field dose: %d x %d x %d\n', size(fieldDose, 1), size(fieldDose, 2), size(fieldDose, 3));
         fprintf('      CT grid: %d x %d x %d\n', ctSize(1), ctSize(2), ctSize(3));
         
@@ -484,9 +484,9 @@ for fieldIdx = validFields'
         
         try
             fieldDose = interpn(iDose, jDose, kDose, fieldDose, iQ, jQ, kQ, 'linear', 0);
-            fprintf('    ✓ Resampled to: %d x %d x %d\n', size(fieldDose));
+            fprintf('     Resampled to: %d x %d x %d\n', size(fieldDose));
         catch ME
-            fprintf('    ✗ Resampling failed: %s\n', ME.message);
+            fprintf('     Resampling failed: %s\n', ME.message);
             continue;
         end
     end
@@ -858,9 +858,9 @@ fprintf('  Total pulses: %d\n', totalPulses);
 fprintf('  Original max dose: %.4f Gy\n', max(totalOriginalDose(:)));
 fprintf('  Reconstructed max dose: %.4f Gy\n', max(totalReconstructedDose(:)));
 if usingResampledCT
-    fprintf('  ✓ Used CT resampled to RTDOSE grid\n');
+    fprintf('   Used CT resampled to RTDOSE grid\n');
 else
-    fprintf('  ⚠ Used original CT grid\n');
+    fprintf('   Used original CT grid\n');
 end
 fprintf('  Output directory: %s\n', outputDir);
 fprintf('=======================================================\n\n');

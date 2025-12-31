@@ -224,10 +224,7 @@ for idxID = 1:length(ids)
                 fprintf('  - Reference dose grid: %d x %d x %d\n', ...
                     size(referenceDose, 1), size(referenceDose, 2), size(referenceDose, 3));
                 fprintf('  - Max dose: %.2f Gy\n', max(referenceDose(:)));
-                if rtdoseInfo.DoseSummationType == 'PLAN'
-                    print('Warning: Entire planned dose detect. Dividing by 10 fractions'); 
-                    referenceDose = referenceDose ./ 10; 
-                end
+                
                 % Extract RTDOSE spatial coordinates
                 doseSpatial.ImagePositionPatient = rtdoseInfo.ImagePositionPatient;
                 doseSpatial.PixelSpacing = rtdoseInfo.PixelSpacing;
@@ -796,8 +793,6 @@ for idxID = 1:length(ids)
         fprintf('  Summary: %d/%d fields calculated successfully\n', numSuccessful, length(stf));
         
         %% Step 6: Resample CT and field doses to RTDOSE grid
-        % load('/home/80030361/ETHOS_Simulations/ws1.mat')
-
         fprintf('\n[6/7] Resampling CT and field doses to RTDOSE grid...\n');
         
         if ~isempty(referenceDose) && ~isempty(ctSpatial.ImagePositionPatient) && ~isempty(doseSpatial.ImagePositionPatient)
@@ -806,14 +801,14 @@ for idxID = 1:length(ids)
             
             % --- Calculate coordinate systems ---
             % CT coordinate vectors (patient coordinates)
-            ct_x = double(ctSpatial.ImagePositionPatient(1)) + double((0:ctSpatial.Columns-1) * ctSpatial.PixelSpacing(2));
-            ct_y = double(ctSpatial.ImagePositionPatient(2)) + double((0:ctSpatial.Rows-1) * ctSpatial.PixelSpacing(1));
+            ct_x = double(ctSpatial.ImagePositionPatient(1) + (0:ctSpatial.Columns-1) * ctSpatial.PixelSpacing(2));
+            ct_y = double(ctSpatial.ImagePositionPatient(2) + (0:ctSpatial.Rows-1) * ctSpatial.PixelSpacing(1));
             ct_z = double(ctSpatial.SlicePositions);
             
             % RTDOSE coordinate vectors (patient coordinates)
-            dose_x = double(doseSpatial.ImagePositionPatient(1)) + double((0:doseSpatial.Columns-1) * doseSpatial.PixelSpacing(2));
-            dose_y = double(doseSpatial.ImagePositionPatient(2)) + double((0:doseSpatial.Rows-1) * doseSpatial.PixelSpacing(1));
-            dose_z = double(doseSpatial.ImagePositionPatient(3)) + double(doseSpatial.GridFrameOffsetVector);
+            dose_x = double(doseSpatial.ImagePositionPatient(1) + (0:doseSpatial.Columns-1) * doseSpatial.PixelSpacing(2));
+            dose_y = double(doseSpatial.ImagePositionPatient(2) + (0:doseSpatial.Rows-1) * doseSpatial.PixelSpacing(1));
+            dose_z = double(doseSpatial.ImagePositionPatient(3) + doseSpatial.GridFrameOffsetVector);
             
             fprintf('    CT X range: [%.2f, %.2f] mm (%d points)\n', min(ct_x), max(ct_x), length(ct_x));
             fprintf('    CT Y range: [%.2f, %.2f] mm (%d points)\n', min(ct_y), max(ct_y), length(ct_y));
@@ -950,6 +945,7 @@ for idxID = 1:length(ids)
         if numSuccessful == 0
             fprintf('   ERROR: No fields were successfully calculated!\n');
             fprintf('  - Check MATRAD configuration and beam parameters\n');
+            continue;
         end
         
         % Save original field doses (CT grid)

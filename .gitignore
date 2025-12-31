@@ -1,5 +1,12 @@
-# Ignore Dicoms
+# Ignore big storage files
 *.dcm
+*.mat
 
 # Ignore the Archived items
 Archive/*
+quick_results/*
+EthosExports/*
+FieldDoses/*
+Results/*
+kWaveReconstruction/*
+Visualizations/*
