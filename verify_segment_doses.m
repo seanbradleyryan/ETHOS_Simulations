@@ -1,825 +1,679 @@
-%% ETHOS Segment Dose Verification Visualizer
-% Purpose: Visualize and verify output from calculate_field_dose.m
+%% ETHOS Segment Dose Verification and Visualization
+% Purpose: Create comprehensive visualizations of segment dose calculations
+%          from calculate_field_dose.m output
 %
-% This script provides comprehensive visualization tools to verify:
-%   1. Segment dose distributions
-%   2. Beam dose accumulations
-%   3. Total dose vs reference comparison
-%   4. MLC aperture shapes
-%   5. Dose profiles (depth and lateral)
-%   6. Gamma analysis
-%   7. DVH comparisons
-%   8. Segment weight analysis
+% Prerequisites:
+%   - calculate_field_dose.m must have been run successfully
+%   - Output files must exist in the SegmentDoses directory
 %
-% Usage:
-%   1. Run calculate_field_dose.m first
-%   2. Set patientID and sessionName below
-%   3. Run this script
+% Outputs:
+%   - Multi-panel dose comparison figures
+%   - Dose profiles (axial, coronal, sagittal)
+%   - Beam-by-beam analysis
+%   - Gamma analysis (if applicable)
+%   - Summary statistics
 %
 % Author: Generated for ETHOS dose analysis
 % Date: 2025
 
 clear; clc; close all;
 
-%% Configuration
+%% ==================== CONFIGURATION ====================
+% Patient and session to analyze
 patientID = '1194203';
 sessionName = 'Session_1';
 
-% Base directory
-baseDir = '/mnt/weka/home/80030361/ETHOS_Simulations';
-dataDir = fullfile(baseDir, 'SegmentDoses', patientID, sessionName);
-outputDir = fullfile(dataDir, 'Visualizations');
+% Base directory (must match calculate_field_dose.m)
+wd = '/mnt/weka/home/80030361/ETHOS_Simulations';
 
-% Visualization options
-saveAllFigures = true;
-figureFormat = 'png';  % 'png', 'fig', or 'both'
-dpi = 150;
+% Output directory for figures
+figureOutputDir = fullfile(wd, 'Figures', patientID, sessionName);
 
 % Gamma analysis parameters
-gammaDoseThreshold = 3;    % % dose difference criterion
-gammaDTAThreshold = 3;     % mm distance-to-agreement criterion
-gammaDoseCutoff = 10;      % % of max dose (exclude low dose regions)
+gammaDistCriteria = 3;    % mm (distance-to-agreement)
+gammaDoseCriteria = 3;    % % (dose difference)
+gammaThreshold = 10;      % % of max dose (exclude low dose regions)
 
-%% Create output directory
-if ~exist(outputDir, 'dir')
-    mkdir(outputDir);
+% Plot settings
+colormap_dose = 'jet';
+figureVisible = 'on';       % 'on' or 'off' (off for batch processing)
+
+%% ==================== INITIALIZATION ====================
+fprintf('==========================================================\n');
+fprintf('  ETHOS Segment Dose Verification\n');
+fprintf('  Patient: %s, Session: %s\n', patientID, sessionName);
+fprintf('==========================================================\n\n');
+
+% Define paths
+dataPath = fullfile(wd, 'SegmentDoses', patientID, sessionName);
+
+% Create figure output directory
+if ~exist(figureOutputDir, 'dir')
+    mkdir(figureOutputDir);
+    fprintf('Created figure output directory: %s\n', figureOutputDir);
 end
 
-%% Load data
-fprintf('=======================================================\n');
-fprintf('  ETHOS Segment Dose Verification Visualizer\n');
-fprintf('=======================================================\n\n');
+%% ==================== LOAD DATA ====================
+fprintf('[1/6] Loading data...\n');
 
-fprintf('[1/9] Loading data...\n');
-
-% Load segment doses (RTDOSE grid)
-segmentDoseFile = fullfile(dataDir, 'segmentDoses.mat');
-if exist(segmentDoseFile, 'file')
-    fprintf('  Loading: segmentDoses.mat\n');
-    data = load(segmentDoseFile);
-    segmentDoses = data.segmentDosesResampled;
-    beamDoses = data.beamDosesResampled;
-    totalDose = data.totalDoseResampled;
-    referenceDose = data.referenceDose;
-    doseGrid = data.doseGrid;
-    useResampled = true;
-else
-    % Fall back to CT grid data
-    segmentDoseFile = fullfile(dataDir, 'segmentDoses_CTgrid.mat');
-    if exist(segmentDoseFile, 'file')
-        fprintf('  Loading: segmentDoses_CTgrid.mat (CT grid)\n');
-        data = load(segmentDoseFile);
-        segmentDoses = data.segmentDoses;
-        beamDoses = data.beamDoses;
-        totalDose = data.totalDose;
-        referenceDose = [];
-        doseGrid = [];
-        useResampled = false;
-    else
-        error('No segment dose file found in %s', dataDir);
+% Check for required files
+requiredFiles = {'segmentDoses.mat', 'segmentData.mat'};
+for i = 1:length(requiredFiles)
+    if ~exist(fullfile(dataPath, requiredFiles{i}), 'file')
+        error('Required file not found: %s\nRun calculate_field_dose.m first.', requiredFiles{i});
     end
 end
 
-% Load segment data (RTPLAN info)
-segmentDataFile = fullfile(dataDir, 'segmentData.mat');
-if exist(segmentDataFile, 'file')
-    fprintf('  Loading: segmentData.mat\n');
-    segData = load(segmentDataFile);
-    segmentInfo = segData.segmentData;
-else
-    segmentInfo = [];
-    fprintf('  WARNING: segmentData.mat not found\n');
-end
+% Load main results
+fprintf('  Loading segmentDoses.mat...\n');
+load(fullfile(dataPath, 'segmentDoses.mat'));
+fprintf('  Loading segmentData.mat...\n');
+load(fullfile(dataPath, 'segmentData.mat'));
 
 % Load comparison if available
-comparisonFile = fullfile(dataDir, 'doseComparison.mat');
-if exist(comparisonFile, 'file')
-    fprintf('  Loading: doseComparison.mat\n');
-    compData = load(comparisonFile);
-    comparison = compData.comparison;
+if exist(fullfile(dataPath, 'doseComparison.mat'), 'file')
+    fprintf('  Loading doseComparison.mat...\n');
+    load(fullfile(dataPath, 'doseComparison.mat'));
+    hasComparison = true;
 else
-    comparison = [];
+    hasComparison = false;
+    fprintf('  No doseComparison.mat found (reference dose comparison unavailable)\n');
 end
 
-% Get grid dimensions
-gridSize = size(totalDose);
-fprintf('  Dose grid size: %d x %d x %d\n', gridSize(1), gridSize(2), gridSize(3));
-
-% Calculate grid coordinates (in mm)
-if ~isempty(doseGrid)
-    dx = doseGrid.resolution(1);
-    dy = doseGrid.resolution(2);
-    dz = doseGrid.resolution(3);
+% Load CT if available
+if exist(fullfile(dataPath, 'ctResampled.mat'), 'file')
+    fprintf('  Loading ctResampled.mat...\n');
+    load(fullfile(dataPath, 'ctResampled.mat'));
+    hasCT = true;
 else
-    dx = 2.5; dy = 2.5; dz = 2.5;  % Default
+    hasCT = false;
+    fprintf('  No ctResampled.mat found\n');
 end
-xVec = (0:gridSize(2)-1) * dx;
-yVec = (0:gridSize(1)-1) * dy;
-zVec = (0:gridSize(3)-1) * dz;
 
-% Count valid data
-numBeams = length(beamDoses);
-numSegments = sum(~cellfun(@isempty, segmentDoses));
-fprintf('  Beams: %d, Segments: %d\n\n', numBeams, numSegments);
+fprintf('  Data loaded successfully\n\n');
 
-%% [2/9] Overview: Total Dose vs Reference
-fprintf('[2/9] Generating dose overview comparison...\n');
+% Extract key variables
+calcDose = totalDoseResampled;
+if exist('referenceDose', 'var') && ~isempty(referenceDose)
+    refDose = referenceDose;
+    hasRefDose = true;
+else
+    hasRefDose = false;
+end
+
+doseSize = size(calcDose);
+fprintf('  Dose grid size: [%d, %d, %d]\n', doseSize(1), doseSize(2), doseSize(3));
+fprintf('  Dose grid resolution: [%.2f, %.2f, %.2f] mm\n', ...
+    doseGrid.resolution(1), doseGrid.resolution(2), doseGrid.resolution(3));
+fprintf('  Calculated max dose: %.4f Gy\n', max(calcDose(:)));
+if hasRefDose
+    fprintf('  Reference max dose: %.4f Gy\n', max(refDose(:)));
+end
+fprintf('  Number of beams: %d\n', segmentData.numBeams);
+fprintf('  Total segments: %d\n', segmentData.totalSegments);
+
+%% ==================== FIGURE 1: DOSE OVERVIEW ====================
+fprintf('\n[2/6] Creating dose overview figure...\n');
 
 % Find slice with maximum dose
-[maxDose, maxIdx] = max(totalDose(:));
-[maxRow, maxCol, maxSlice] = ind2sub(gridSize, maxIdx);
+[maxDose, maxIdx] = max(calcDose(:));
+[maxI, maxJ, maxK] = ind2sub(doseSize, maxIdx);
 
-fig1 = figure('Name', 'Dose Overview', 'Position', [50, 50, 1600, 900], 'Color', 'w');
+fig1 = figure('Name', 'Dose Overview', 'Position', [50, 50, 1600, 900], ...
+    'Visible', figureVisible, 'Color', 'w');
 
-% Calculated dose - Axial
-subplot(2, 4, 1);
-imagesc(xVec, yVec, squeeze(totalDose(:, :, maxSlice)));
-colorbar;
-colormap(gca, 'jet');
-title(sprintf('Calculated - Axial (Z=%d)', maxSlice));
-xlabel('X (mm)'); ylabel('Y (mm)');
-axis image;
-hold on;
-plot(maxCol*dx, maxRow*dy, 'w+', 'MarkerSize', 15, 'LineWidth', 2);
+% Create coordinate vectors for plotting (in mm)
+xVec = (0:doseSize(2)-1) * doseGrid.resolution(2);
+yVec = (0:doseSize(1)-1) * doseGrid.resolution(1);
+zVec = (0:doseSize(3)-1) * doseGrid.resolution(3);
 
-% Calculated dose - Coronal
-subplot(2, 4, 2);
-imagesc(xVec, zVec, squeeze(totalDose(maxRow, :, :))');
-colorbar;
-colormap(gca, 'jet');
-title(sprintf('Calculated - Coronal (Y=%d)', maxRow));
-xlabel('X (mm)'); ylabel('Z (mm)');
-axis image;
-
-% Calculated dose - Sagittal
-subplot(2, 4, 3);
-imagesc(yVec, zVec, squeeze(totalDose(:, maxCol, :))');
-colorbar;
-colormap(gca, 'jet');
-title(sprintf('Calculated - Sagittal (X=%d)', maxCol));
-xlabel('Y (mm)'); ylabel('Z (mm)');
-axis image;
-
-% Dose histogram
-subplot(2, 4, 4);
-validDose = totalDose(totalDose > 0.01 * maxDose);
-histogram(validDose, 50, 'FaceColor', [0.2 0.4 0.8]);
-xlabel('Dose (Gy)');
-ylabel('Voxels');
-title('Dose Histogram (Calculated)');
-grid on;
-
-if ~isempty(referenceDose)
-    % Reference dose - Axial
-    subplot(2, 4, 5);
-    imagesc(xVec, yVec, squeeze(referenceDose(:, :, maxSlice)));
-    colorbar;
-    colormap(gca, 'jet');
-    title(sprintf('Reference - Axial (Z=%d)', maxSlice));
+if hasRefDose
+    % 3x3 layout: Calc, Ref, Diff for each plane
+    
+    % Row 1: Axial slices (XY plane at max dose Z)
+    subplot(3, 3, 1);
+    imagesc(xVec, yVec, squeeze(calcDose(:, :, maxK)));
+    axis image; colorbar; colormap(gca, colormap_dose);
+    title(sprintf('Calculated - Axial (Z=%d)', maxK));
     xlabel('X (mm)'); ylabel('Y (mm)');
-    axis image;
     
-    % Reference dose - Coronal
-    subplot(2, 4, 6);
-    imagesc(xVec, zVec, squeeze(referenceDose(maxRow, :, :))');
-    colorbar;
-    colormap(gca, 'jet');
-    title(sprintf('Reference - Coronal (Y=%d)', maxRow));
-    xlabel('X (mm)'); ylabel('Z (mm)');
-    axis image;
+    subplot(3, 3, 2);
+    imagesc(xVec, yVec, squeeze(refDose(:, :, maxK)));
+    axis image; colorbar; colormap(gca, colormap_dose);
+    title(sprintf('Reference - Axial (Z=%d)', maxK));
+    xlabel('X (mm)'); ylabel('Y (mm)');
     
-    % Difference
-    subplot(2, 4, 7);
-    doseDiff = totalDose - referenceDose;
-    maxAbsDiff = max(abs(doseDiff(:)));
-    imagesc(xVec, yVec, squeeze(doseDiff(:, :, maxSlice)));
-    colorbar;
-    colormap(gca, 'coolwarm');
-    caxis([-maxAbsDiff, maxAbsDiff]);
+    subplot(3, 3, 3);
+    diffSlice = squeeze(calcDose(:, :, maxK) - refDose(:, :, maxK));
+    maxDiff = max(abs(diffSlice(:)));
+    imagesc(xVec, yVec, diffSlice, [-maxDiff, maxDiff]);
+    axis image; colorbar;
     title('Difference (Calc - Ref)');
     xlabel('X (mm)'); ylabel('Y (mm)');
-    axis image;
     
-    % Scatter plot: Calculated vs Reference
-    subplot(2, 4, 8);
-    mask = referenceDose > 0.1 * max(referenceDose(:));
-    scatter(referenceDose(mask), totalDose(mask), 1, 'b', 'filled', 'MarkerFaceAlpha', 0.3);
+    % Row 2: Coronal slices (XZ plane at max dose Y)
+    subplot(3, 3, 4);
+    imagesc(xVec, zVec, squeeze(calcDose(maxI, :, :))');
+    axis image; colorbar; colormap(gca, colormap_dose);
+    title(sprintf('Calculated - Coronal (Y=%d)', maxI));
+    xlabel('X (mm)'); ylabel('Z (mm)');
+    
+    subplot(3, 3, 5);
+    imagesc(xVec, zVec, squeeze(refDose(maxI, :, :))');
+    axis image; colorbar; colormap(gca, colormap_dose);
+    title(sprintf('Reference - Coronal (Y=%d)', maxI));
+    xlabel('X (mm)'); ylabel('Z (mm)');
+    
+    subplot(3, 3, 6);
+    diffSlice = squeeze(calcDose(maxI, :, :) - refDose(maxI, :, :))';
+    maxDiff = max(abs(diffSlice(:)));
+    imagesc(xVec, zVec, diffSlice, [-maxDiff, maxDiff]);
+    axis image; colorbar;
+    title('Difference (Calc - Ref)');
+    xlabel('X (mm)'); ylabel('Z (mm)');
+    
+    % Row 3: Sagittal slices (YZ plane at max dose X)
+    subplot(3, 3, 7);
+    imagesc(yVec, zVec, squeeze(calcDose(:, maxJ, :))');
+    axis image; colorbar; colormap(gca, colormap_dose);
+    title(sprintf('Calculated - Sagittal (X=%d)', maxJ));
+    xlabel('Y (mm)'); ylabel('Z (mm)');
+    
+    subplot(3, 3, 8);
+    imagesc(yVec, zVec, squeeze(refDose(:, maxJ, :))');
+    axis image; colorbar; colormap(gca, colormap_dose);
+    title(sprintf('Reference - Sagittal (X=%d)', maxJ));
+    xlabel('Y (mm)'); ylabel('Z (mm)');
+    
+    subplot(3, 3, 9);
+    diffSlice = squeeze(calcDose(:, maxJ, :) - refDose(:, maxJ, :))';
+    maxDiff = max(abs(diffSlice(:)));
+    imagesc(yVec, zVec, diffSlice, [-maxDiff, maxDiff]);
+    axis image; colorbar;
+    title('Difference (Calc - Ref)');
+    xlabel('Y (mm)'); ylabel('Z (mm)');
+    
+else
+    % 1x3 layout: Just calculated dose
+    subplot(1, 3, 1);
+    imagesc(xVec, yVec, squeeze(calcDose(:, :, maxK)));
+    axis image; colorbar; colormap(gca, colormap_dose);
+    title(sprintf('Axial (Z=%d)', maxK));
+    xlabel('X (mm)'); ylabel('Y (mm)');
+    
+    subplot(1, 3, 2);
+    imagesc(xVec, zVec, squeeze(calcDose(maxI, :, :))');
+    axis image; colorbar; colormap(gca, colormap_dose);
+    title(sprintf('Coronal (Y=%d)', maxI));
+    xlabel('X (mm)'); ylabel('Z (mm)');
+    
+    subplot(1, 3, 3);
+    imagesc(yVec, zVec, squeeze(calcDose(:, maxJ, :))');
+    axis image; colorbar; colormap(gca, colormap_dose);
+    title(sprintf('Sagittal (X=%d)', maxJ));
+    xlabel('Y (mm)'); ylabel('Z (mm)');
+end
+
+sgtitle(sprintf('Dose Distribution Overview - Patient %s', patientID), 'FontSize', 14, 'FontWeight', 'bold');
+
+% Save figure
+saveas(fig1, fullfile(figureOutputDir, 'dose_overview.png'));
+saveas(fig1, fullfile(figureOutputDir, 'dose_overview.fig'));
+fprintf('  Saved: dose_overview.png\n');
+
+%% ==================== FIGURE 2: DOSE PROFILES ====================
+fprintf('\n[3/6] Creating dose profile figure...\n');
+
+fig2 = figure('Name', 'Dose Profiles', 'Position', [100, 100, 1400, 500], ...
+    'Visible', figureVisible, 'Color', 'w');
+
+% Profile through max dose point in each direction
+% X profile (lateral)
+subplot(1, 3, 1);
+xProfile_calc = squeeze(calcDose(maxI, :, maxK));
+plot(xVec, xProfile_calc, 'b-', 'LineWidth', 2, 'DisplayName', 'Calculated');
+hold on;
+if hasRefDose
+    xProfile_ref = squeeze(refDose(maxI, :, maxK));
+    plot(xVec, xProfile_ref, 'r--', 'LineWidth', 2, 'DisplayName', 'Reference');
+end
+xlabel('X Position (mm)');
+ylabel('Dose (Gy)');
+title(sprintf('Lateral Profile (Y=%d, Z=%d)', maxI, maxK));
+legend('Location', 'best');
+grid on;
+
+% Y profile (AP)
+subplot(1, 3, 2);
+yProfile_calc = squeeze(calcDose(:, maxJ, maxK));
+plot(yVec, yProfile_calc, 'b-', 'LineWidth', 2, 'DisplayName', 'Calculated');
+hold on;
+if hasRefDose
+    yProfile_ref = squeeze(refDose(:, maxJ, maxK));
+    plot(yVec, yProfile_ref, 'r--', 'LineWidth', 2, 'DisplayName', 'Reference');
+end
+xlabel('Y Position (mm)');
+ylabel('Dose (Gy)');
+title(sprintf('AP Profile (X=%d, Z=%d)', maxJ, maxK));
+legend('Location', 'best');
+grid on;
+
+% Z profile (SI / depth)
+subplot(1, 3, 3);
+zProfile_calc = squeeze(calcDose(maxI, maxJ, :));
+plot(zVec, zProfile_calc, 'b-', 'LineWidth', 2, 'DisplayName', 'Calculated');
+hold on;
+if hasRefDose
+    zProfile_ref = squeeze(refDose(maxI, maxJ, :));
+    plot(zVec, zProfile_ref, 'r--', 'LineWidth', 2, 'DisplayName', 'Reference');
+end
+xlabel('Z Position (mm)');
+ylabel('Dose (Gy)');
+title(sprintf('SI Profile (X=%d, Y=%d)', maxJ, maxI));
+legend('Location', 'best');
+grid on;
+
+sgtitle(sprintf('Dose Profiles Through Maximum - Patient %s', patientID), 'FontSize', 14, 'FontWeight', 'bold');
+
+saveas(fig2, fullfile(figureOutputDir, 'dose_profiles.png'));
+saveas(fig2, fullfile(figureOutputDir, 'dose_profiles.fig'));
+fprintf('  Saved: dose_profiles.png\n');
+
+%% ==================== FIGURE 3: BEAM CONTRIBUTIONS ====================
+fprintf('\n[4/6] Creating beam contribution figure...\n');
+
+numBeams = length(beamDosesResampled);
+validBeams = find(~cellfun(@isempty, beamDosesResampled));
+numValidBeams = length(validBeams);
+
+% Determine subplot layout
+nCols = min(4, numValidBeams);
+nRows = ceil(numValidBeams / nCols);
+
+fig3 = figure('Name', 'Beam Contributions', 'Position', [100, 100, 400*nCols, 350*nRows], ...
+    'Visible', figureVisible, 'Color', 'w');
+
+for idx = 1:numValidBeams
+    beamIdx = validBeams(idx);
+    beamData = beamDosesResampled{beamIdx};
+    
+    subplot(nRows, nCols, idx);
+    
+    % Show axial slice at max dose location
+    beamSlice = squeeze(beamData.physicalDose(:, :, maxK));
+    imagesc(xVec, yVec, beamSlice);
+    axis image; colorbar; colormap(gca, colormap_dose);
+    
+    title(sprintf('Beam %d: %s\nGantry=%.0f°, Max=%.3f Gy', ...
+        beamIdx, beamData.beamName, beamData.gantryAngle, beamData.maxDose));
+    xlabel('X (mm)'); ylabel('Y (mm)');
+end
+
+sgtitle(sprintf('Individual Beam Contributions (Axial Z=%d) - Patient %s', maxK, patientID), ...
+    'FontSize', 14, 'FontWeight', 'bold');
+
+saveas(fig3, fullfile(figureOutputDir, 'beam_contributions.png'));
+saveas(fig3, fullfile(figureOutputDir, 'beam_contributions.fig'));
+fprintf('  Saved: beam_contributions.png\n');
+
+%% ==================== FIGURE 4: BEAM STATISTICS ====================
+fprintf('\n[5/6] Creating beam statistics figure...\n');
+
+fig4 = figure('Name', 'Beam Statistics', 'Position', [100, 100, 1200, 800], ...
+    'Visible', figureVisible, 'Color', 'w');
+
+% Collect beam statistics
+beamNames = cell(numValidBeams, 1);
+beamMetersets = zeros(numValidBeams, 1);
+beamMaxDoses = zeros(numValidBeams, 1);
+beamGantryAngles = zeros(numValidBeams, 1);
+beamNumSegments = zeros(numValidBeams, 1);
+
+for idx = 1:numValidBeams
+    beamIdx = validBeams(idx);
+    beamData = beamDosesResampled{beamIdx};
+    segData = segmentData.beams{beamIdx};
+    
+    beamNames{idx} = beamData.beamName;
+    beamMetersets(idx) = beamData.beamMeterset;
+    beamMaxDoses(idx) = beamData.maxDose;
+    beamGantryAngles(idx) = beamData.gantryAngle;
+    beamNumSegments(idx) = length(segData.segments);
+end
+
+% Subplot 1: Beam metersets (MU)
+subplot(2, 2, 1);
+bar(beamMetersets);
+xlabel('Beam Index');
+ylabel('Meterset (MU)');
+title('Beam Metersets');
+xticks(1:numValidBeams);
+xticklabels(beamNames);
+xtickangle(45);
+grid on;
+
+% Subplot 2: Max dose per beam
+subplot(2, 2, 2);
+bar(beamMaxDoses);
+xlabel('Beam Index');
+ylabel('Max Dose (Gy)');
+title('Maximum Dose per Beam');
+xticks(1:numValidBeams);
+xticklabels(beamNames);
+xtickangle(45);
+grid on;
+
+% Subplot 3: Gantry angles (polar plot)
+subplot(2, 2, 3);
+theta = deg2rad(beamGantryAngles);
+rho = beamMetersets / max(beamMetersets);  % Normalize for visualization
+polarplot(theta, rho, 'o', 'MarkerSize', 10, 'MarkerFaceColor', 'b');
+title('Beam Gantry Angles (radius = relative MU)');
+thetalim([0 360]);
+
+% Subplot 4: Segments per beam
+subplot(2, 2, 4);
+bar(beamNumSegments);
+xlabel('Beam Index');
+ylabel('Number of Segments');
+title('Segments per Beam');
+xticks(1:numValidBeams);
+xticklabels(beamNames);
+xtickangle(45);
+grid on;
+
+sgtitle(sprintf('Beam Statistics - Patient %s', patientID), 'FontSize', 14, 'FontWeight', 'bold');
+
+saveas(fig4, fullfile(figureOutputDir, 'beam_statistics.png'));
+saveas(fig4, fullfile(figureOutputDir, 'beam_statistics.fig'));
+fprintf('  Saved: beam_statistics.png\n');
+
+%% ==================== FIGURE 5: DOSE DIFFERENCE ANALYSIS ====================
+if hasRefDose
+    fprintf('\n[6/6] Creating dose difference analysis figure...\n');
+    
+    fig5 = figure('Name', 'Dose Difference Analysis', 'Position', [100, 100, 1400, 900], ...
+        'Visible', figureVisible, 'Color', 'w');
+    
+    % Calculate difference
+    doseDiff = calcDose - refDose;
+    
+    % Calculate relative difference (where reference > threshold)
+    doseThreshold = 0.1 * max(refDose(:));  % 10% of max
+    validMask = refDose > doseThreshold;
+    relativeDiff = zeros(size(doseDiff));
+    relativeDiff(validMask) = (doseDiff(validMask) ./ refDose(validMask)) * 100;
+    
+    % Subplot 1: Absolute difference histogram
+    subplot(2, 3, 1);
+    histogram(doseDiff(:), 100, 'FaceColor', 'b', 'EdgeColor', 'none');
+    xlabel('Dose Difference (Gy)');
+    ylabel('Voxel Count');
+    title('Absolute Difference Distribution');
+    xline(0, 'r--', 'LineWidth', 2);
+    grid on;
+    
+    % Subplot 2: Relative difference histogram (high dose region only)
+    subplot(2, 3, 2);
+    histogram(relativeDiff(validMask), 100, 'FaceColor', 'g', 'EdgeColor', 'none');
+    xlabel('Relative Difference (%)');
+    ylabel('Voxel Count');
+    title(sprintf('Relative Difference (>%.0f%% max dose)', 10));
+    xline(0, 'r--', 'LineWidth', 2);
+    grid on;
+    
+    % Subplot 3: Scatter plot - Calculated vs Reference
+    subplot(2, 3, 3);
+    % Subsample for performance
+    subsampleFactor = max(1, round(numel(calcDose) / 50000));
+    calcSub = calcDose(1:subsampleFactor:end);
+    refSub = refDose(1:subsampleFactor:end);
+    scatter(refSub(:), calcSub(:), 1, 'b', 'filled', 'MarkerFaceAlpha', 0.3);
     hold on;
-    maxVal = max([max(referenceDose(:)), max(totalDose(:))]);
+    maxVal = max([max(calcSub(:)), max(refSub(:))]);
     plot([0, maxVal], [0, maxVal], 'r-', 'LineWidth', 2);
     xlabel('Reference Dose (Gy)');
     ylabel('Calculated Dose (Gy)');
-    title('Dose Correlation');
+    title('Calculated vs Reference');
     axis equal;
     xlim([0, maxVal]);
     ylim([0, maxVal]);
     grid on;
     
     % Calculate correlation
-    corrCoef = corrcoef(referenceDose(mask), totalDose(mask));
-    text(0.1*maxVal, 0.9*maxVal, sprintf('R = %.4f', corrCoef(1,2)), 'FontSize', 12);
-end
-
-sgtitle(sprintf('Dose Overview: Patient %s - %s', patientID, sessionName), 'FontSize', 14);
-
-if saveAllFigures
-    saveFigure(fig1, fullfile(outputDir, '01_DoseOverview'), figureFormat, dpi);
-end
-
-%% [3/9] Beam-by-Beam Dose Contributions
-fprintf('[3/9] Generating beam dose contributions...\n');
-
-fig2 = figure('Name', 'Beam Contributions', 'Position', [50, 50, 1600, 900], 'Color', 'w');
-
-numValidBeams = sum(~cellfun(@isempty, beamDoses));
-nRows = ceil(sqrt(numValidBeams + 1));
-nCols = ceil((numValidBeams + 1) / nRows);
-
-beamIdx = 0;
-beamMaxDoses = zeros(numValidBeams, 1);
-beamNames = cell(numValidBeams, 1);
-
-for i = 1:length(beamDoses)
-    if ~isempty(beamDoses{i})
-        beamIdx = beamIdx + 1;
-        
-        subplot(nRows, nCols, beamIdx);
-        beamDose = beamDoses{i}.physicalDose;
-        imagesc(xVec, yVec, squeeze(beamDose(:, :, maxSlice)));
-        colorbar;
-        colormap(gca, 'jet');
-        
-        titleStr = sprintf('Beam %d: %.1f°', i, beamDoses{i}.gantryAngle);
-        if isfield(beamDoses{i}, 'beamName')
-            titleStr = sprintf('%s\n%s', beamDoses{i}.beamName, titleStr);
-        end
-        title(titleStr, 'FontSize', 9);
-        xlabel('X (mm)'); ylabel('Y (mm)');
-        axis image;
-        
-        beamMaxDoses(beamIdx) = beamDoses{i}.maxDose;
-        beamNames{beamIdx} = sprintf('B%d (%.0f°)', i, beamDoses{i}.gantryAngle);
-    end
-end
-
-% Bar chart of beam contributions
-subplot(nRows, nCols, beamIdx + 1);
-bar(beamMaxDoses, 'FaceColor', [0.3 0.6 0.9]);
-set(gca, 'XTickLabel', beamNames, 'XTickLabelRotation', 45);
-ylabel('Max Dose (Gy)');
-title('Beam Max Doses');
-grid on;
-
-sgtitle(sprintf('Beam Dose Contributions (Axial Z=%d)', maxSlice), 'FontSize', 14);
-
-if saveAllFigures
-    saveFigure(fig2, fullfile(outputDir, '02_BeamContributions'), figureFormat, dpi);
-end
-
-%% [4/9] Segment Analysis
-fprintf('[4/9] Generating segment analysis...\n');
-
-if ~isempty(segmentInfo)
-    fig3 = figure('Name', 'Segment Analysis', 'Position', [50, 50, 1400, 800], 'Color', 'w');
-    
-    % Collect segment data
-    allSegmentWeights = [];
-    allSegmentMetersets = [];
-    segmentBeamLabels = [];
-    
-    for beamIdx = 1:length(segmentInfo.beams)
-        beam = segmentInfo.beams{beamIdx};
-        numSegs = length(beam.segments);
-        
-        for segIdx = 1:numSegs
-            seg = beam.segments{segIdx};
-            allSegmentWeights(end+1) = seg.segmentWeight;
-            allSegmentMetersets(end+1) = seg.segmentMeterset;
-            segmentBeamLabels(end+1) = beamIdx;
-        end
+    validIdx = refSub > 0.01;
+    if any(validIdx)
+        R = corrcoef(refSub(validIdx), calcSub(validIdx));
+        text(0.1*maxVal, 0.9*maxVal, sprintf('R = %.4f', R(1,2)), 'FontSize', 12);
     end
     
-    % Segment weight distribution
-    subplot(2, 3, 1);
-    histogram(allSegmentWeights, 30, 'FaceColor', [0.4 0.7 0.4]);
-    xlabel('Segment Weight');
-    ylabel('Count');
-    title('Segment Weight Distribution');
-    grid on;
-    
-    % Segment meterset distribution
-    subplot(2, 3, 2);
-    histogram(allSegmentMetersets, 30, 'FaceColor', [0.7 0.4 0.4]);
-    xlabel('Segment Meterset (MU)');
-    ylabel('Count');
-    title('Segment Meterset Distribution');
-    grid on;
-    
-    % Segments per beam
-    subplot(2, 3, 3);
-    segsPerBeam = zeros(length(segmentInfo.beams), 1);
-    for i = 1:length(segmentInfo.beams)
-        segsPerBeam(i) = length(segmentInfo.beams{i}.segments);
-    end
-    bar(segsPerBeam, 'FaceColor', [0.5 0.5 0.8]);
-    xlabel('Beam Index');
-    ylabel('Number of Segments');
-    title('Segments per Beam');
-    grid on;
-    
-    % Cumulative segment weights by beam
+    % Subplot 4: Absolute difference map (axial)
     subplot(2, 3, 4);
-    hold on;
-    colors = lines(length(segmentInfo.beams));
-    for beamIdx = 1:length(segmentInfo.beams)
-        beam = segmentInfo.beams{beamIdx};
-        weights = cellfun(@(s) s.segmentWeight, beam.segments);
-        cumWeights = cumsum(weights);
-        plot(1:length(weights), cumWeights, '-o', 'Color', colors(beamIdx,:), ...
-            'LineWidth', 1.5, 'DisplayName', sprintf('Beam %d', beamIdx));
-    end
-    xlabel('Segment Index');
-    ylabel('Cumulative Weight');
-    title('Cumulative Segment Weights');
-    legend('Location', 'best', 'FontSize', 8);
-    grid on;
+    diffSlice = squeeze(doseDiff(:, :, maxK));
+    maxAbsDiff = max(abs(diffSlice(:)));
+    imagesc(xVec, yVec, diffSlice, [-maxAbsDiff, maxAbsDiff]);
+    axis image; colorbar;
+    title(sprintf('Absolute Diff - Axial (Z=%d)', maxK));
+    xlabel('X (mm)'); ylabel('Y (mm)');
     
-    % Beam meterset pie chart
+    % Subplot 5: Relative difference map (axial)
     subplot(2, 3, 5);
-    beamMetersets = zeros(length(segmentInfo.beams), 1);
-    beamLabels = cell(length(segmentInfo.beams), 1);
-    for i = 1:length(segmentInfo.beams)
-        beamMetersets(i) = segmentInfo.beams{i}.beamMeterset;
-        beamLabels{i} = sprintf('B%d: %.0f MU', i, beamMetersets(i));
-    end
-    pie(beamMetersets, beamLabels);
-    title('Beam Meterset Distribution');
+    relDiffSlice = squeeze(relativeDiff(:, :, maxK));
+    maxRelDiff = min(50, max(abs(relDiffSlice(:))));  % Cap at 50%
+    imagesc(xVec, yVec, relDiffSlice, [-maxRelDiff, maxRelDiff]);
+    axis image; colorbar;
+    title(sprintf('Relative Diff (%%) - Axial (Z=%d)', maxK));
+    xlabel('X (mm)'); ylabel('Y (mm)');
     
-    % Summary statistics text
+    % Subplot 6: Statistics text box
     subplot(2, 3, 6);
     axis off;
-    textStr = {
-        sprintf('Total Beams: %d', length(segmentInfo.beams));
-        sprintf('Total Segments: %d', segmentInfo.totalSegments);
-        sprintf('Total Meterset: %.1f MU', sum(beamMetersets));
-        '';
-        sprintf('Avg Segments/Beam: %.1f', mean(segsPerBeam));
-        sprintf('Min Segment Weight: %.4f', min(allSegmentWeights));
-        sprintf('Max Segment Weight: %.4f', max(allSegmentWeights));
-        sprintf('Mean Segment Weight: %.4f', mean(allSegmentWeights));
-    };
-    text(0.1, 0.9, textStr, 'FontSize', 11, 'VerticalAlignment', 'top', ...
-        'FontName', 'FixedWidth');
-    title('Summary Statistics');
     
-    sgtitle(sprintf('Segment Analysis: Patient %s', patientID), 'FontSize', 14);
+    % Calculate statistics
+    stats = struct();
+    stats.meanAbsDiff = mean(abs(doseDiff(:)));
+    stats.maxAbsDiff = max(abs(doseDiff(:)));
+    stats.stdAbsDiff = std(doseDiff(:));
+    stats.rmsDiff = sqrt(mean(doseDiff(:).^2));
     
-    if saveAllFigures
-        saveFigure(fig3, fullfile(outputDir, '03_SegmentAnalysis'), figureFormat, dpi);
-    end
-end
-
-%% [5/9] Individual Segment Doses (Sample)
-fprintf('[5/9] Generating sample segment dose display...\n');
-
-% Show first few segments from first beam
-numSampleSegments = min(9, numSegments);
-fig4 = figure('Name', 'Sample Segment Doses', 'Position', [50, 50, 1200, 1000], 'Color', 'w');
-
-segCount = 0;
-nRowsSeg = ceil(sqrt(numSampleSegments));
-nColsSeg = ceil(numSampleSegments / nRowsSeg);
-
-for i = 1:length(segmentDoses)
-    if ~isempty(segmentDoses{i}) && segCount < numSampleSegments
-        segCount = segCount + 1;
-        
-        subplot(nRowsSeg, nColsSeg, segCount);
-        segDose = segmentDoses{i}.physicalDose;
-        imagesc(xVec, yVec, squeeze(segDose(:, :, maxSlice)));
-        colorbar;
-        colormap(gca, 'jet');
-        
-        title(sprintf('B%d-S%d (W=%.3f)', ...
-            segmentDoses{i}.beamIdx, segmentDoses{i}.segmentIdx, ...
-            segmentDoses{i}.segmentWeight), 'FontSize', 9);
-        xlabel('X'); ylabel('Y');
-        axis image;
-    end
-end
-
-sgtitle(sprintf('Sample Segment Doses (Axial Z=%d)', maxSlice), 'FontSize', 14);
-
-if saveAllFigures
-    saveFigure(fig4, fullfile(outputDir, '04_SampleSegmentDoses'), figureFormat, dpi);
-end
-
-%% [6/9] Dose Profiles
-fprintf('[6/9] Generating dose profiles...\n');
-
-fig5 = figure('Name', 'Dose Profiles', 'Position', [50, 50, 1400, 800], 'Color', 'w');
-
-% Central axis depth dose (along Y through max)
-subplot(2, 3, 1);
-calcProfile = squeeze(totalDose(maxRow, maxCol, :));
-plot(zVec, calcProfile, 'b-', 'LineWidth', 2, 'DisplayName', 'Calculated');
-hold on;
-if ~isempty(referenceDose)
-    refProfile = squeeze(referenceDose(maxRow, maxCol, :));
-    plot(zVec, refProfile, 'r--', 'LineWidth', 2, 'DisplayName', 'Reference');
-end
-xlabel('Z Position (mm)');
-ylabel('Dose (Gy)');
-title(sprintf('Depth Profile (X=%d, Y=%d)', maxCol, maxRow));
-legend('Location', 'best');
-grid on;
-
-% Lateral profile X (through max)
-subplot(2, 3, 2);
-calcProfileX = squeeze(totalDose(maxRow, :, maxSlice));
-plot(xVec, calcProfileX, 'b-', 'LineWidth', 2, 'DisplayName', 'Calculated');
-hold on;
-if ~isempty(referenceDose)
-    refProfileX = squeeze(referenceDose(maxRow, :, maxSlice));
-    plot(xVec, refProfileX, 'r--', 'LineWidth', 2, 'DisplayName', 'Reference');
-end
-xlabel('X Position (mm)');
-ylabel('Dose (Gy)');
-title(sprintf('Lateral Profile X (Y=%d, Z=%d)', maxRow, maxSlice));
-legend('Location', 'best');
-grid on;
-
-% Lateral profile Y (through max)
-subplot(2, 3, 3);
-calcProfileY = squeeze(totalDose(:, maxCol, maxSlice));
-plot(yVec, calcProfileY, 'b-', 'LineWidth', 2, 'DisplayName', 'Calculated');
-hold on;
-if ~isempty(referenceDose)
-    refProfileY = squeeze(referenceDose(:, maxCol, maxSlice));
-    plot(yVec, refProfileY, 'r--', 'LineWidth', 2, 'DisplayName', 'Reference');
-end
-xlabel('Y Position (mm)');
-ylabel('Dose (Gy)');
-title(sprintf('Lateral Profile Y (X=%d, Z=%d)', maxCol, maxSlice));
-legend('Location', 'best');
-grid on;
-
-% Profile differences
-if ~isempty(referenceDose)
-    subplot(2, 3, 4);
-    plot(zVec, calcProfile - refProfile, 'k-', 'LineWidth', 1.5);
-    xlabel('Z Position (mm)');
-    ylabel('Dose Difference (Gy)');
-    title('Depth Profile Difference');
-    grid on;
-    yline(0, 'r--');
-    
-    subplot(2, 3, 5);
-    plot(xVec, calcProfileX - refProfileX, 'k-', 'LineWidth', 1.5);
-    xlabel('X Position (mm)');
-    ylabel('Dose Difference (Gy)');
-    title('Lateral X Profile Difference');
-    grid on;
-    yline(0, 'r--');
-    
-    subplot(2, 3, 6);
-    plot(yVec, calcProfileY - refProfileY, 'k-', 'LineWidth', 1.5);
-    xlabel('Y Position (mm)');
-    ylabel('Dose Difference (Gy)');
-    title('Lateral Y Profile Difference');
-    grid on;
-    yline(0, 'r--');
-end
-
-sgtitle('Dose Profiles Through Maximum Dose Point', 'FontSize', 14);
-
-if saveAllFigures
-    saveFigure(fig5, fullfile(outputDir, '05_DoseProfiles'), figureFormat, dpi);
-end
-
-%% [7/9] Gamma Analysis
-fprintf('[7/9] Performing gamma analysis...\n');
-
-if ~isempty(referenceDose)
-    fig6 = figure('Name', 'Gamma Analysis', 'Position', [50, 50, 1400, 600], 'Color', 'w');
-    
-    % Calculate gamma index (simplified 2D for display slice)
-    refSlice = squeeze(referenceDose(:, :, maxSlice));
-    calcSlice = squeeze(totalDose(:, :, maxSlice));
-    
-    % Normalize doses
-    maxRefDose = max(referenceDose(:));
-    
-    % Dose difference criterion (as fraction)
-    doseCrit = gammaDoseThreshold / 100;
-    
-    % DTA criterion (in voxels)
-    dtaCritVoxels = gammaDTAThreshold / dx;
-    
-    % Calculate gamma (simplified version)
-    [gammaMap, passRate] = calculateGamma2D(refSlice, calcSlice, maxRefDose, ...
-        doseCrit, dtaCritVoxels, gammaDoseCutoff/100);
-    
-    % Gamma map
-    subplot(1, 3, 1);
-    imagesc(xVec, yVec, gammaMap);
-    colorbar;
-    caxis([0, 2]);
-    colormap(gca, 'jet');
-    title(sprintf('Gamma Map (%.0f%%/%.0fmm)', gammaDoseThreshold, gammaDTAThreshold));
-    xlabel('X (mm)'); ylabel('Y (mm)');
-    axis image;
-    
-    % Gamma pass/fail map
-    subplot(1, 3, 2);
-    passMap = gammaMap <= 1;
-    imagesc(xVec, yVec, passMap);
-    colorbar;
-    colormap(gca, [1 0 0; 0 1 0]);  % Red=fail, Green=pass
-    title(sprintf('Pass/Fail (Pass Rate: %.1f%%)', passRate));
-    xlabel('X (mm)'); ylabel('Y (mm)');
-    axis image;
-    
-    % Gamma histogram
-    subplot(1, 3, 3);
-    validGamma = gammaMap(gammaMap < 10 & ~isnan(gammaMap));
-    histogram(validGamma, 50, 'FaceColor', [0.3 0.5 0.8]);
-    xlabel('Gamma Index');
-    ylabel('Voxels');
-    title('Gamma Distribution');
-    xline(1, 'r-', 'LineWidth', 2);
-    grid on;
-    
-    % Add statistics text
-    text(1.5, 0.8*max(histcounts(validGamma, 50)), ...
-        {sprintf('Mean: %.2f', mean(validGamma)), ...
-         sprintf('Median: %.2f', median(validGamma)), ...
-         sprintf('Pass: %.1f%%', passRate)}, 'FontSize', 10);
-    
-    sgtitle(sprintf('Gamma Analysis: %d%%/%dmm (Cutoff: %d%%)', ...
-        gammaDoseThreshold, gammaDTAThreshold, gammaDoseCutoff), 'FontSize', 14);
-    
-    if saveAllFigures
-        saveFigure(fig6, fullfile(outputDir, '06_GammaAnalysis'), figureFormat, dpi);
-    end
-    
-    fprintf('  Gamma pass rate (%.0f%%/%.0fmm): %.1f%%\n', ...
-        gammaDoseThreshold, gammaDTAThreshold, passRate);
-end
-
-%% [8/9] MLC Aperture Visualization
-fprintf('[8/9] Generating MLC aperture visualization...\n');
-
-if ~isempty(segmentInfo)
-    fig7 = figure('Name', 'MLC Apertures', 'Position', [50, 50, 1400, 800], 'Color', 'w');
-    
-    % Show MLC apertures for first beam's segments
-    beam1 = segmentInfo.beams{1};
-    numSegsToShow = min(6, length(beam1.segments));
-    
-    if beam1.numLeafPairs > 0 && ~isempty(beam1.leafBoundaries)
-        leafBoundaries = beam1.leafBoundaries;
-        
-        for segIdx = 1:numSegsToShow
-            subplot(2, 3, segIdx);
-            
-            seg = beam1.segments{segIdx};
-            mlcPos = seg.mlcPositions;
-            
-            if ~isempty(mlcPos)
-                numLeaves = beam1.numLeafPairs;
-                leftBank = mlcPos(1:numLeaves);
-                rightBank = mlcPos(numLeaves+1:end);
-                
-                % Draw leaf pairs
-                hold on;
-                for leafIdx = 1:numLeaves
-                    yBottom = leafBoundaries(leafIdx);
-                    yTop = leafBoundaries(leafIdx + 1);
-                    
-                    % Left leaf (closed region)
-                    fill([-200, leftBank(leafIdx), leftBank(leafIdx), -200], ...
-                         [yBottom, yBottom, yTop, yTop], ...
-                         [0.5 0.5 0.5], 'EdgeColor', 'k');
-                    
-                    % Right leaf (closed region)
-                    fill([rightBank(leafIdx), 200, 200, rightBank(leafIdx)], ...
-                         [yBottom, yBottom, yTop, yTop], ...
-                         [0.5 0.5 0.5], 'EdgeColor', 'k');
-                    
-                    % Open region
-                    fill([leftBank(leafIdx), rightBank(leafIdx), rightBank(leafIdx), leftBank(leafIdx)], ...
-                         [yBottom, yBottom, yTop, yTop], ...
-                         [1 1 0.8], 'EdgeColor', 'none', 'FaceAlpha', 0.5);
-                end
-                
-                % Draw jaws if available
-                if ~isempty(seg.jawX)
-                    xline(seg.jawX(1), 'r-', 'LineWidth', 2);
-                    xline(seg.jawX(2), 'r-', 'LineWidth', 2);
-                end
-                if ~isempty(seg.jawY)
-                    yline(seg.jawY(1), 'b-', 'LineWidth', 2);
-                    yline(seg.jawY(2), 'b-', 'LineWidth', 2);
-                end
-                
-                xlim([-150, 150]);
-                ylim([min(leafBoundaries)-10, max(leafBoundaries)+10]);
-                xlabel('X (mm)');
-                ylabel('Y (mm)');
-                title(sprintf('Segment %d (W=%.3f)', segIdx, seg.segmentWeight));
-                axis equal;
-                grid on;
-            else
-                text(0.5, 0.5, 'No MLC data', 'HorizontalAlignment', 'center');
-                axis off;
-            end
-        end
-        
-        sgtitle(sprintf('MLC Apertures - Beam 1 (%s)', beam1.beamName), 'FontSize', 14);
+    if any(validMask(:))
+        stats.meanRelDiff = mean(abs(relativeDiff(validMask)));
+        stats.maxRelDiff = max(abs(relativeDiff(validMask)));
     else
-        text(0.5, 0.5, 'No MLC boundary data available', ...
-            'HorizontalAlignment', 'center', 'FontSize', 14);
-        axis off;
+        stats.meanRelDiff = NaN;
+        stats.maxRelDiff = NaN;
     end
     
-    if saveAllFigures
-        saveFigure(fig7, fullfile(outputDir, '07_MLCApertures'), figureFormat, dpi);
-    end
+    % Calculate percentage of voxels within tolerance
+    tolerance3pct = sum(abs(relativeDiff(validMask)) <= 3) / sum(validMask(:)) * 100;
+    tolerance5pct = sum(abs(relativeDiff(validMask)) <= 5) / sum(validMask(:)) * 100;
+    
+    statsText = {
+        sprintf('DOSE DIFFERENCE STATISTICS')
+        sprintf('================================')
+        sprintf('')
+        sprintf('Absolute Differences:')
+        sprintf('  Mean: %.4f Gy', stats.meanAbsDiff)
+        sprintf('  Max:  %.4f Gy', stats.maxAbsDiff)
+        sprintf('  Std:  %.4f Gy', stats.stdAbsDiff)
+        sprintf('  RMS:  %.4f Gy', stats.rmsDiff)
+        sprintf('')
+        sprintf('Relative Differences (>10%% max):')
+        sprintf('  Mean: %.2f %%', stats.meanRelDiff)
+        sprintf('  Max:  %.2f %%', stats.maxRelDiff)
+        sprintf('')
+        sprintf('Tolerance Analysis:')
+        sprintf('  Within 3%%: %.1f %%', tolerance3pct)
+        sprintf('  Within 5%%: %.1f %%', tolerance5pct)
+    };
+    
+    text(0.1, 0.9, statsText, 'FontSize', 11, 'FontName', 'FixedWidth', ...
+        'VerticalAlignment', 'top', 'HorizontalAlignment', 'left');
+    
+    sgtitle(sprintf('Dose Difference Analysis - Patient %s', patientID), 'FontSize', 14, 'FontWeight', 'bold');
+    
+    saveas(fig5, fullfile(figureOutputDir, 'dose_difference_analysis.png'));
+    saveas(fig5, fullfile(figureOutputDir, 'dose_difference_analysis.fig'));
+    fprintf('  Saved: dose_difference_analysis.png\n');
+    
+else
+    fprintf('\n[6/6] Skipping dose difference analysis (no reference dose)\n');
+    stats = struct();
+    tolerance3pct = NaN;
+    tolerance5pct = NaN;
 end
 
-%% [9/9] Summary Statistics and Report
-fprintf('[9/9] Generating summary report...\n');
-
-fig8 = figure('Name', 'Summary Report', 'Position', [50, 50, 1000, 800], 'Color', 'w');
-axis off;
-
-% Build report text
-reportLines = {
-    '═══════════════════════════════════════════════════════════════';
-    sprintf('  SEGMENT DOSE CALCULATION VERIFICATION REPORT');
-    '═══════════════════════════════════════════════════════════════';
-    '';
-    sprintf('  Patient ID:        %s', patientID);
-    sprintf('  Session:           %s', sessionName);
-    sprintf('  Analysis Date:     %s', datestr(now));
-    '';
-    '───────────────────────────────────────────────────────────────';
-    '  PLAN SUMMARY';
-    '───────────────────────────────────────────────────────────────';
-};
-
-if ~isempty(segmentInfo)
-    reportLines{end+1} = sprintf('  Number of Beams:       %d', segmentInfo.numBeams);
-    reportLines{end+1} = sprintf('  Total Segments:        %d', segmentInfo.totalSegments);
-    reportLines{end+1} = sprintf('  Segments Calculated:   %d', numSegments);
+%% ==================== FIGURE 6: CT WITH DOSE OVERLAY ====================
+if hasCT && isfield(ctResampled_struct, 'cubeHU') && ~isempty(ctResampled_struct.cubeHU{1})
+    fprintf('\n[Bonus] Creating CT with dose overlay figure...\n');
     
-    totalMU = 0;
-    for i = 1:length(segmentInfo.beams)
-        totalMU = totalMU + segmentInfo.beams{i}.beamMeterset;
-    end
-    reportLines{end+1} = sprintf('  Total Meterset:        %.1f MU', totalMU);
+    fig6 = figure('Name', 'CT with Dose Overlay', 'Position', [100, 100, 1200, 400], ...
+        'Visible', figureVisible, 'Color', 'w');
+    
+    ctData = ctResampled_struct.cubeHU{1};
+    
+    % Normalize dose for overlay
+    doseNorm = calcDose / max(calcDose(:));
+    
+    % Axial
+    subplot(1, 3, 1);
+    ctSlice = squeeze(ctData(:, :, maxK));
+    imagesc(xVec, yVec, ctSlice, [-200, 200]);
+    colormap(gca, 'gray');
+    hold on;
+    doseSlice = squeeze(doseNorm(:, :, maxK));
+    h = imagesc(xVec, yVec, doseSlice);
+    set(h, 'AlphaData', doseSlice * 0.6);
+    axis image;
+    title(sprintf('Axial (Z=%d)', maxK));
+    xlabel('X (mm)'); ylabel('Y (mm)');
+    
+    % Coronal
+    subplot(1, 3, 2);
+    ctSlice = squeeze(ctData(maxI, :, :))';
+    imagesc(xVec, zVec, ctSlice, [-200, 200]);
+    colormap(gca, 'gray');
+    hold on;
+    doseSlice = squeeze(doseNorm(maxI, :, :))';
+    h = imagesc(xVec, zVec, doseSlice);
+    set(h, 'AlphaData', doseSlice * 0.6);
+    axis image;
+    title(sprintf('Coronal (Y=%d)', maxI));
+    xlabel('X (mm)'); ylabel('Z (mm)');
+    
+    % Sagittal
+    subplot(1, 3, 3);
+    ctSlice = squeeze(ctData(:, maxJ, :))';
+    imagesc(yVec, zVec, ctSlice, [-200, 200]);
+    colormap(gca, 'gray');
+    hold on;
+    doseSlice = squeeze(doseNorm(:, maxJ, :))';
+    h = imagesc(yVec, zVec, doseSlice);
+    set(h, 'AlphaData', doseSlice * 0.6);
+    axis image;
+    title(sprintf('Sagittal (X=%d)', maxJ));
+    xlabel('Y (mm)'); ylabel('Z (mm)');
+    
+    sgtitle(sprintf('CT with Dose Overlay - Patient %s', patientID), 'FontSize', 14, 'FontWeight', 'bold');
+    
+    saveas(fig6, fullfile(figureOutputDir, 'ct_dose_overlay.png'));
+    saveas(fig6, fullfile(figureOutputDir, 'ct_dose_overlay.fig'));
+    fprintf('  Saved: ct_dose_overlay.png\n');
 end
 
-reportLines{end+1} = '';
-reportLines{end+1} = '───────────────────────────────────────────────────────────────';
-reportLines{end+1} = '  DOSE STATISTICS';
-reportLines{end+1} = '───────────────────────────────────────────────────────────────';
-reportLines{end+1} = sprintf('  Calculated Max Dose:   %.4f Gy', max(totalDose(:)));
-reportLines{end+1} = sprintf('  Calculated Mean Dose:  %.4f Gy', mean(totalDose(totalDose > 0)));
-
-if ~isempty(referenceDose)
-    reportLines{end+1} = sprintf('  Reference Max Dose:    %.4f Gy', max(referenceDose(:)));
-    reportLines{end+1} = sprintf('  Reference Mean Dose:   %.4f Gy', mean(referenceDose(referenceDose > 0)));
+%% ==================== FIGURE 7: DVH COMPARISON ====================
+if hasRefDose
+    fprintf('\n[Bonus] Creating DVH comparison figure...\n');
     
-    reportLines{end+1} = '';
-    reportLines{end+1} = '───────────────────────────────────────────────────────────────';
-    reportLines{end+1} = '  COMPARISON METRICS';
-    reportLines{end+1} = '───────────────────────────────────────────────────────────────';
+    fig7 = figure('Name', 'DVH Comparison', 'Position', [100, 100, 800, 600], ...
+        'Visible', figureVisible, 'Color', 'w');
     
-    if ~isempty(comparison)
-        reportLines{end+1} = sprintf('  Mean Abs Difference:   %.4f Gy', comparison.metrics.meanAbsDiff);
-        reportLines{end+1} = sprintf('  Max Difference:        %.4f Gy', comparison.metrics.maxDiff);
-        reportLines{end+1} = sprintf('  RMS Difference:        %.4f Gy', comparison.metrics.rmsDiff);
-        if isfield(comparison.metrics, 'meanRelativeDiff')
-            reportLines{end+1} = sprintf('  Mean Rel Diff (>50%%):  %.2f%%', comparison.metrics.meanRelativeDiff);
-        end
+    % Calculate cumulative DVH for whole volume
+    maxDoseVal = max([max(calcDose(:)), max(refDose(:))]);
+    doseBins = linspace(0, maxDoseVal, 100);
+    
+    dvh_calc = zeros(size(doseBins));
+    dvh_ref = zeros(size(doseBins));
+    totalVoxels = numel(calcDose);
+    
+    for i = 1:length(doseBins)
+        dvh_calc(i) = sum(calcDose(:) >= doseBins(i)) / totalVoxels * 100;
+        dvh_ref(i) = sum(refDose(:) >= doseBins(i)) / totalVoxels * 100;
     end
     
-    if exist('passRate', 'var')
-        reportLines{end+1} = '';
-        reportLines{end+1} = sprintf('  Gamma Pass Rate:       %.1f%% (%d%%/%dmm)', ...
-            passRate, gammaDoseThreshold, gammaDTAThreshold);
-    end
+    plot(doseBins, dvh_calc, 'b-', 'LineWidth', 2, 'DisplayName', 'Calculated');
+    hold on;
+    plot(doseBins, dvh_ref, 'r--', 'LineWidth', 2, 'DisplayName', 'Reference');
+    
+    xlabel('Dose (Gy)');
+    ylabel('Volume (%)');
+    title(sprintf('Dose-Volume Histogram - Patient %s', patientID));
+    legend('Location', 'best');
+    grid on;
+    xlim([0, maxDoseVal]);
+    ylim([0, 100]);
+    
+    saveas(fig7, fullfile(figureOutputDir, 'dvh_comparison.png'));
+    saveas(fig7, fullfile(figureOutputDir, 'dvh_comparison.fig'));
+    fprintf('  Saved: dvh_comparison.png\n');
 end
 
-reportLines{end+1} = '';
-reportLines{end+1} = '───────────────────────────────────────────────────────────────';
-reportLines{end+1} = '  GRID INFORMATION';
-reportLines{end+1} = '───────────────────────────────────────────────────────────────';
-reportLines{end+1} = sprintf('  Grid Dimensions:       %d x %d x %d', gridSize(1), gridSize(2), gridSize(3));
-reportLines{end+1} = sprintf('  Voxel Size:            %.2f x %.2f x %.2f mm', dx, dy, dz);
+%% ==================== SUMMARY REPORT ====================
+fprintf('\n==========================================================\n');
+fprintf('  VERIFICATION COMPLETE\n');
+fprintf('==========================================================\n\n');
 
-reportLines{end+1} = '';
-reportLines{end+1} = '═══════════════════════════════════════════════════════════════';
+fprintf('Patient: %s\n', patientID);
+fprintf('Session: %s\n', sessionName);
+fprintf('\n');
 
-% Display report
-text(0.05, 0.98, reportLines, 'FontSize', 10, 'FontName', 'FixedWidth', ...
-    'VerticalAlignment', 'top', 'HorizontalAlignment', 'left');
-
-if saveAllFigures
-    saveFigure(fig8, fullfile(outputDir, '08_SummaryReport'), figureFormat, dpi);
+fprintf('DOSE SUMMARY:\n');
+fprintf('  Calculated max dose: %.4f Gy\n', max(calcDose(:)));
+if hasRefDose
+    fprintf('  Reference max dose:  %.4f Gy\n', max(refDose(:)));
+    fprintf('  Max absolute diff:   %.4f Gy\n', stats.maxAbsDiff);
+    fprintf('  Mean absolute diff:  %.4f Gy\n', stats.meanAbsDiff);
+    fprintf('  RMS difference:      %.4f Gy\n', stats.rmsDiff);
 end
+fprintf('\n');
 
-% Also save report as text file
-reportFile = fullfile(outputDir, 'VerificationReport.txt');
-fid = fopen(reportFile, 'w');
-for i = 1:length(reportLines)
-    fprintf(fid, '%s\n', reportLines{i});
+fprintf('BEAM SUMMARY:\n');
+fprintf('  Total beams: %d\n', numValidBeams);
+fprintf('  Total segments: %d\n', sum(beamNumSegments));
+fprintf('  Total MU: %.2f\n', sum(beamMetersets));
+fprintf('\n');
+
+fprintf('Figures saved to: %s\n', figureOutputDir);
+fprintf('\n');
+
+% Save summary to text file
+summaryFile = fullfile(figureOutputDir, 'verification_summary.txt');
+fid = fopen(summaryFile, 'w');
+fprintf(fid, 'ETHOS Segment Dose Verification Summary\n');
+fprintf(fid, '========================================\n\n');
+fprintf(fid, 'Patient: %s\n', patientID);
+fprintf(fid, 'Session: %s\n', sessionName);
+fprintf(fid, 'Generated: %s\n\n', datestr(now));
+fprintf(fid, 'DOSE SUMMARY:\n');
+fprintf(fid, '  Calculated max dose: %.4f Gy\n', max(calcDose(:)));
+if hasRefDose
+    fprintf(fid, '  Reference max dose:  %.4f Gy\n', max(refDose(:)));
+    fprintf(fid, '  Max absolute diff:   %.4f Gy\n', stats.maxAbsDiff);
+    fprintf(fid, '  Mean absolute diff:  %.4f Gy\n', stats.meanAbsDiff);
+    fprintf(fid, '  RMS difference:      %.4f Gy\n', stats.rmsDiff);
+    fprintf(fid, '  Within 3%%: %.1f %%\n', tolerance3pct);
+    fprintf(fid, '  Within 5%%: %.1f %%\n', tolerance5pct);
+end
+fprintf(fid, '\nBEAM SUMMARY:\n');
+for idx = 1:numValidBeams
+    beamIdx = validBeams(idx);
+    fprintf(fid, '  Beam %d: %s\n', beamIdx, beamNames{idx});
+    fprintf(fid, '    Gantry: %.1f deg\n', beamGantryAngles(idx));
+    fprintf(fid, '    MU: %.2f\n', beamMetersets(idx));
+    fprintf(fid, '    Segments: %d\n', beamNumSegments(idx));
+    fprintf(fid, '    Max dose: %.4f Gy\n', beamMaxDoses(idx));
 end
 fclose(fid);
-fprintf('  Report saved to: %s\n', reportFile);
+fprintf('Summary saved to: %s\n', summaryFile);
 
-%% Finish
-fprintf('\n=======================================================\n');
-fprintf('  Visualization Complete\n');
-fprintf('=======================================================\n');
-fprintf('  Output directory: %s\n', outputDir);
-fprintf('  Figures saved: %d\n', 8);
-fprintf('=======================================================\n\n');
-
-%% Helper Functions
-
-function [gammaMap, passRate] = calculateGamma2D(ref, calc, maxDose, doseCrit, dtaCrit, doseCutoff)
-    % Simplified 2D gamma calculation
-    % doseCrit: dose difference criterion as fraction (e.g., 0.03 for 3%)
-    % dtaCrit: distance-to-agreement criterion in voxels
-    % doseCutoff: minimum dose threshold as fraction of max
-    
-    [ny, nx] = size(ref);
-    gammaMap = inf(ny, nx);
-    
-    % Create dose threshold mask
-    doseMask = ref >= (doseCutoff * maxDose);
-    
-    % Search radius in voxels
-    searchRadius = ceil(dtaCrit * 2);
-    
-    for i = 1:ny
-        for j = 1:nx
-            if ~doseMask(i, j)
-                gammaMap(i, j) = NaN;
-                continue;
-            end
-            
-            refDose = ref(i, j);
-            calcDose = calc(i, j);
-            
-            minGamma = inf;
-            
-            % Search neighboring points
-            for di = -searchRadius:searchRadius
-                for dj = -searchRadius:searchRadius
-                    ni = i + di;
-                    nj = j + dj;
-                    
-                    if ni < 1 || ni > ny || nj < 1 || nj > nx
-                        continue;
-                    end
-                    
-                    % Distance in voxels
-                    dist = sqrt(di^2 + dj^2);
-                    
-                    % Dose difference
-                    doseDiff = abs(calc(ni, nj) - refDose) / (doseCrit * maxDose);
-                    
-                    % Gamma
-                    gamma = sqrt((dist/dtaCrit)^2 + doseDiff^2);
-                    
-                    if gamma < minGamma
-                        minGamma = gamma;
-                    end
-                end
-            end
-            
-            gammaMap(i, j) = minGamma;
-        end
-    end
-    
-    % Calculate pass rate
-    validGamma = gammaMap(doseMask);
-    passRate = 100 * sum(validGamma <= 1) / length(validGamma);
-end
-
-function saveFigure(fig, filename, format, dpi)
-    % Save figure in specified format(s)
-    switch format
-        case 'png'
-            print(fig, filename, '-dpng', sprintf('-r%d', dpi));
-        case 'fig'
-            savefig(fig, [filename, '.fig']);
-        case 'both'
-            print(fig, filename, '-dpng', sprintf('-r%d', dpi));
-            savefig(fig, [filename, '.fig']);
-    end
-end
+fprintf('\n==========================================================\n');
