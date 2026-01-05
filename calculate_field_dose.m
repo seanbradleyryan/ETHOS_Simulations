@@ -103,117 +103,6 @@ for i = 1:length(essentialFunctions)
     end
 end
 
-%% ==================== HELPER FUNCTION: DOWNSAMPLE CT ====================
-function [ct_ds, cst_ds] = downsampleCTComplete(ct, cst, factor)
-    % Comprehensive CT downsampling that updates ALL necessary fields
-    % for MATRAD compatibility
-    
-    if factor == 1
-        ct_ds = ct;
-        cst_ds = cst;
-        return;
-    end
-    
-    ct_ds = ct;
-    originalSize = ct.cubeDim;
-    
-    % Calculate new size (ensure at least 1 in each dimension)
-    newSize = max(1, round(originalSize / factor));
-    
-    fprintf('    Downsampling CT: [%d,%d,%d] -> [%d,%d,%d]\n', ...
-        originalSize(1), originalSize(2), originalSize(3), ...
-        newSize(1), newSize(2), newSize(3));
-    
-    % Store original resolution for reference
-    origRes = [ct.resolution.x, ct.resolution.y, ct.resolution.z];
-    
-    % Update resolution FIRST (needed for coordinate calculations)
-    ct_ds.resolution.x = ct.resolution.x * (originalSize(2) / newSize(2));
-    ct_ds.resolution.y = ct.resolution.y * (originalSize(1) / newSize(1));
-    ct_ds.resolution.z = ct.resolution.z * (originalSize(3) / newSize(3));
-    
-    newRes = [ct_ds.resolution.x, ct_ds.resolution.y, ct_ds.resolution.z];
-    fprintf('    Resolution: [%.2f,%.2f,%.2f] -> [%.2f,%.2f,%.2f] mm\n', ...
-        origRes(1), origRes(2), origRes(3), newRes(1), newRes(2), newRes(3));
-    
-    % Update dimensions
-    ct_ds.cubeDim = newSize;
-    
-    % Downsample the HU cube(s)
-    if isfield(ct, 'cubeHU') && ~isempty(ct.cubeHU)
-        for i = 1:length(ct.cubeHU)
-            if ~isempty(ct.cubeHU{i})
-                ct_ds.cubeHU{i} = imresize3(ct.cubeHU{i}, newSize, 'linear');
-            end
-        end
-    end
-    
-    % Downsample density cube if it exists
-    if isfield(ct, 'cube') && ~isempty(ct.cube)
-        for i = 1:length(ct.cube)
-            if ~isempty(ct.cube{i})
-                ct_ds.cube{i} = imresize3(ct.cube{i}, newSize, 'linear');
-            end
-        end
-    end
-    
-    % Update coordinate vectors if they exist
-    % These are critical for MATRAD's grid calculations
-    if isfield(ct, 'x') && ~isempty(ct.x)
-        % Create new coordinate vectors based on new resolution
-        % Keep the same physical extent, but with fewer points
-        xMin = min(ct.x);
-        xMax = max(ct.x);
-        ct_ds.x = linspace(xMin, xMax, newSize(2));
-    end
-    
-    if isfield(ct, 'y') && ~isempty(ct.y)
-        yMin = min(ct.y);
-        yMax = max(ct.y);
-        ct_ds.y = linspace(yMin, yMax, newSize(1));
-    end
-    
-    if isfield(ct, 'z') && ~isempty(ct.z)
-        zMin = min(ct.z);
-        zMax = max(ct.z);
-        ct_ds.z = linspace(zMin, zMax, newSize(3));
-    end
-    
-    % Update numOfCtScen if it exists
-    if isfield(ct, 'numOfCtScen')
-        ct_ds.numOfCtScen = ct.numOfCtScen;
-    end
-    
-    % Adjust CST structure indices
-    cst_ds = cst;
-    scaleFactor = newSize ./ originalSize;
-    
-    for i = 1:size(cst, 1)
-        if size(cst, 2) >= 4 && ~isempty(cst{i, 4})
-            % Handle cell array of indices (for multiple scenarios)
-            for scen = 1:length(cst{i, 4})
-                if ~isempty(cst{i, 4}{scen})
-                    originalIndices = cst{i, 4}{scen};
-                    
-                    % Convert to subscripts in original grid
-                    [r, c, s] = ind2sub(originalSize, originalIndices);
-                    
-                    % Scale subscripts to new grid
-                    r_new = max(1, min(newSize(1), round(r * scaleFactor(1))));
-                    c_new = max(1, min(newSize(2), round(c * scaleFactor(2))));
-                    s_new = max(1, min(newSize(3), round(s * scaleFactor(3))));
-                    
-                    % Convert back to linear indices and remove duplicates
-                    newIndices = sub2ind(newSize, r_new, c_new, s_new);
-                    cst_ds{i, 4}{scen} = unique(newIndices);
-                end
-            end
-        end
-    end
-    
-    fprintf('    CT downsampling complete\n');
-end
-
 %% ==================== MAIN PROCESSING LOOP ====================
 for idxID = 1:length(ids)
     for idxSession = 1:length(sessions)
@@ -296,7 +185,7 @@ for idxID = 1:length(ids)
                 load(dsCacheFile, 'ct', 'cst');
                 fprintf('    Loaded from cache: [%d,%d,%d]\n', ct.cubeDim(1), ct.cubeDim(2), ct.cubeDim(3));
             else
-                % Perform downsampling
+                % Perform downsampling using helper function (defined at end of script)
                 [ct, cst] = downsampleCTComplete(ct_original, cst_original, ctDownsampleFactor);
                 
                 % Cache downsampled CT
@@ -1039,3 +928,126 @@ end
 fprintf('All processing complete!\n');
 fprintf('\nTIP: Run again to use cached results for instant completion.\n');
 fprintf('     Delete cache directory to force full recalculation.\n');
+
+%% ==================== HELPER FUNCTIONS ====================
+% Local functions must be defined at the end of the script in MATLAB
+
+function [ct_ds, cst_ds] = downsampleCTComplete(ct, cst, factor)
+    % DOWNSAMPLECTCOMPLETE - Comprehensive CT downsampling for MATRAD compatibility
+    %
+    % This function downsamples a CT structure and adjusts all necessary fields
+    % that MATRAD uses for dose calculation, including coordinate vectors.
+    %
+    % Inputs:
+    %   ct     - Original CT structure from MATRAD DICOM import
+    %   cst    - Original CST (contour) structure
+    %   factor - Downsampling factor (2 = half resolution, 3 = third, etc.)
+    %
+    % Outputs:
+    %   ct_ds  - Downsampled CT structure
+    %   cst_ds - Adjusted CST structure with rescaled indices
+    
+    if factor == 1
+        ct_ds = ct;
+        cst_ds = cst;
+        return;
+    end
+    
+    ct_ds = ct;
+    originalSize = ct.cubeDim;
+    
+    % Calculate new size (ensure at least 1 in each dimension)
+    newSize = max(1, round(originalSize / factor));
+    
+    fprintf('    Downsampling CT: [%d,%d,%d] -> [%d,%d,%d]\n', ...
+        originalSize(1), originalSize(2), originalSize(3), ...
+        newSize(1), newSize(2), newSize(3));
+    
+    % Store original resolution for reference
+    origRes = [ct.resolution.x, ct.resolution.y, ct.resolution.z];
+    
+    % Update resolution based on actual size change (not just factor)
+    % This accounts for rounding in newSize calculation
+    ct_ds.resolution.x = ct.resolution.x * (originalSize(2) / newSize(2));
+    ct_ds.resolution.y = ct.resolution.y * (originalSize(1) / newSize(1));
+    ct_ds.resolution.z = ct.resolution.z * (originalSize(3) / newSize(3));
+    
+    newRes = [ct_ds.resolution.x, ct_ds.resolution.y, ct_ds.resolution.z];
+    fprintf('    Resolution: [%.2f,%.2f,%.2f] -> [%.2f,%.2f,%.2f] mm\n', ...
+        origRes(1), origRes(2), origRes(3), newRes(1), newRes(2), newRes(3));
+    
+    % Update dimensions
+    ct_ds.cubeDim = newSize;
+    
+    % Downsample the HU cube(s)
+    if isfield(ct, 'cubeHU') && ~isempty(ct.cubeHU)
+        for i = 1:length(ct.cubeHU)
+            if ~isempty(ct.cubeHU{i})
+                ct_ds.cubeHU{i} = imresize3(ct.cubeHU{i}, newSize, 'linear');
+            end
+        end
+    end
+    
+    % Downsample density cube if it exists
+    if isfield(ct, 'cube') && ~isempty(ct.cube)
+        for i = 1:length(ct.cube)
+            if ~isempty(ct.cube{i})
+                ct_ds.cube{i} = imresize3(ct.cube{i}, newSize, 'linear');
+            end
+        end
+    end
+    
+    % Update coordinate vectors - CRITICAL for MATRAD grid calculations
+    % These vectors define the physical positions of voxel centers
+    if isfield(ct, 'x') && ~isempty(ct.x)
+        xMin = min(ct.x);
+        xMax = max(ct.x);
+        ct_ds.x = linspace(xMin, xMax, newSize(2));
+    end
+    
+    if isfield(ct, 'y') && ~isempty(ct.y)
+        yMin = min(ct.y);
+        yMax = max(ct.y);
+        ct_ds.y = linspace(yMin, yMax, newSize(1));
+    end
+    
+    if isfield(ct, 'z') && ~isempty(ct.z)
+        zMin = min(ct.z);
+        zMax = max(ct.z);
+        ct_ds.z = linspace(zMin, zMax, newSize(3));
+    end
+    
+    % Update numOfCtScen if it exists
+    if isfield(ct, 'numOfCtScen')
+        ct_ds.numOfCtScen = ct.numOfCtScen;
+    end
+    
+    % Adjust CST structure indices for the new grid size
+    cst_ds = cst;
+    scaleFactor = newSize ./ originalSize;
+    
+    for i = 1:size(cst, 1)
+        if size(cst, 2) >= 4 && ~isempty(cst{i, 4})
+            % Handle cell array of indices (for multiple scenarios)
+            for scen = 1:length(cst{i, 4})
+                if ~isempty(cst{i, 4}{scen})
+                    originalIndices = cst{i, 4}{scen};
+                    
+                    % Convert to subscripts in original grid
+                    [r, c, s] = ind2sub(originalSize, originalIndices);
+                    
+                    % Scale subscripts to new grid
+                    r_new = max(1, min(newSize(1), round(r * scaleFactor(1))));
+                    c_new = max(1, min(newSize(2), round(c * scaleFactor(2))));
+                    s_new = max(1, min(newSize(3), round(s * scaleFactor(3))));
+                    
+                    % Convert back to linear indices and remove duplicates
+                    newIndices = sub2ind(newSize, r_new, c_new, s_new);
+                    cst_ds{i, 4}{scen} = unique(newIndices);
+                end
+            end
+        end
+    end
+    
+    fprintf('    CT downsampling complete\n');
+end
