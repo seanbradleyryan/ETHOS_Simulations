@@ -103,6 +103,117 @@ for i = 1:length(essentialFunctions)
     end
 end
 
+%% ==================== HELPER FUNCTION: DOWNSAMPLE CT ====================
+function [ct_ds, cst_ds] = downsampleCTComplete(ct, cst, factor)
+    % Comprehensive CT downsampling that updates ALL necessary fields
+    % for MATRAD compatibility
+    
+    if factor == 1
+        ct_ds = ct;
+        cst_ds = cst;
+        return;
+    end
+    
+    ct_ds = ct;
+    originalSize = ct.cubeDim;
+    
+    % Calculate new size (ensure at least 1 in each dimension)
+    newSize = max(1, round(originalSize / factor));
+    
+    fprintf('    Downsampling CT: [%d,%d,%d] -> [%d,%d,%d]\n', ...
+        originalSize(1), originalSize(2), originalSize(3), ...
+        newSize(1), newSize(2), newSize(3));
+    
+    % Store original resolution for reference
+    origRes = [ct.resolution.x, ct.resolution.y, ct.resolution.z];
+    
+    % Update resolution FIRST (needed for coordinate calculations)
+    ct_ds.resolution.x = ct.resolution.x * (originalSize(2) / newSize(2));
+    ct_ds.resolution.y = ct.resolution.y * (originalSize(1) / newSize(1));
+    ct_ds.resolution.z = ct.resolution.z * (originalSize(3) / newSize(3));
+    
+    newRes = [ct_ds.resolution.x, ct_ds.resolution.y, ct_ds.resolution.z];
+    fprintf('    Resolution: [%.2f,%.2f,%.2f] -> [%.2f,%.2f,%.2f] mm\n', ...
+        origRes(1), origRes(2), origRes(3), newRes(1), newRes(2), newRes(3));
+    
+    % Update dimensions
+    ct_ds.cubeDim = newSize;
+    
+    % Downsample the HU cube(s)
+    if isfield(ct, 'cubeHU') && ~isempty(ct.cubeHU)
+        for i = 1:length(ct.cubeHU)
+            if ~isempty(ct.cubeHU{i})
+                ct_ds.cubeHU{i} = imresize3(ct.cubeHU{i}, newSize, 'linear');
+            end
+        end
+    end
+    
+    % Downsample density cube if it exists
+    if isfield(ct, 'cube') && ~isempty(ct.cube)
+        for i = 1:length(ct.cube)
+            if ~isempty(ct.cube{i})
+                ct_ds.cube{i} = imresize3(ct.cube{i}, newSize, 'linear');
+            end
+        end
+    end
+    
+    % Update coordinate vectors if they exist
+    % These are critical for MATRAD's grid calculations
+    if isfield(ct, 'x') && ~isempty(ct.x)
+        % Create new coordinate vectors based on new resolution
+        % Keep the same physical extent, but with fewer points
+        xMin = min(ct.x);
+        xMax = max(ct.x);
+        ct_ds.x = linspace(xMin, xMax, newSize(2));
+    end
+    
+    if isfield(ct, 'y') && ~isempty(ct.y)
+        yMin = min(ct.y);
+        yMax = max(ct.y);
+        ct_ds.y = linspace(yMin, yMax, newSize(1));
+    end
+    
+    if isfield(ct, 'z') && ~isempty(ct.z)
+        zMin = min(ct.z);
+        zMax = max(ct.z);
+        ct_ds.z = linspace(zMin, zMax, newSize(3));
+    end
+    
+    % Update numOfCtScen if it exists
+    if isfield(ct, 'numOfCtScen')
+        ct_ds.numOfCtScen = ct.numOfCtScen;
+    end
+    
+    % Adjust CST structure indices
+    cst_ds = cst;
+    scaleFactor = newSize ./ originalSize;
+    
+    for i = 1:size(cst, 1)
+        if size(cst, 2) >= 4 && ~isempty(cst{i, 4})
+            % Handle cell array of indices (for multiple scenarios)
+            for scen = 1:length(cst{i, 4})
+                if ~isempty(cst{i, 4}{scen})
+                    originalIndices = cst{i, 4}{scen};
+                    
+                    % Convert to subscripts in original grid
+                    [r, c, s] = ind2sub(originalSize, originalIndices);
+                    
+                    % Scale subscripts to new grid
+                    r_new = max(1, min(newSize(1), round(r * scaleFactor(1))));
+                    c_new = max(1, min(newSize(2), round(c * scaleFactor(2))));
+                    s_new = max(1, min(newSize(3), round(s * scaleFactor(3))));
+                    
+                    % Convert back to linear indices and remove duplicates
+                    newIndices = sub2ind(newSize, r_new, c_new, s_new);
+                    cst_ds{i, 4}{scen} = unique(newIndices);
+                end
+            end
+        end
+    end
+    
+    fprintf('    CT downsampling complete\n');
+end
+
 %% ==================== MAIN PROCESSING LOOP ====================
 for idxID = 1:length(ids)
     for idxSession = 1:length(sessions)
@@ -134,11 +245,11 @@ for idxID = 1:length(ids)
         %% Step 1: Import DICOM data (with caching)
         fprintf('\n[1/8] Importing DICOM data...\n');
         
-        dicomCacheFile = fullfile(cacheDir, currentID, currentSession, 'dicom_import.mat');
         dicomCacheDir = fullfile(cacheDir, currentID, currentSession);
         if ~exist(dicomCacheDir, 'dir')
             mkdir(dicomCacheDir);
         end
+        dicomCacheFile = fullfile(dicomCacheDir, 'dicom_import.mat');
         
         if enableCaching && exist(dicomCacheFile, 'file')
             fprintf('  Loading cached DICOM import...\n');
@@ -166,6 +277,7 @@ for idxID = 1:length(ids)
         
         % Store original CT for reference
         ct_original = ct;
+        cst_original = cst;
         originalCTSize = ct.cubeDim;
         
         fprintf('  - Original CT dimensions: %d x %d x %d\n', ct.cubeDim(1), ct.cubeDim(2), ct.cubeDim(3));
@@ -174,37 +286,25 @@ for idxID = 1:length(ids)
         
         %% Step 1b: Downsample CT if requested
         if ctDownsampleFactor > 1
-            fprintf('\n  Downsampling CT by factor of %d...\n', ctDownsampleFactor);
+            fprintf('\n  Applying CT downsampling (factor=%d)...\n', ctDownsampleFactor);
             
-            % Downsample CT cube
-            originalCube = ct.cubeHU{1};
-            newSize = max(1, round(originalCTSize / ctDownsampleFactor));
+            % Check for cached downsampled CT
+            dsCacheFile = fullfile(patientCacheDir, 'ct_downsampled.mat');
             
-            ct.cubeHU{1} = imresize3(originalCube, newSize, 'linear');
-            ct.cubeDim = size(ct.cubeHU{1});
-            ct.resolution.x = ct_original.resolution.x * ctDownsampleFactor;
-            ct.resolution.y = ct_original.resolution.y * ctDownsampleFactor;
-            ct.resolution.z = ct_original.resolution.z * ctDownsampleFactor;
-            
-            % Adjust CST indices for downsampled CT
-            scaleFactor = newSize ./ originalCTSize;
-            for i = 1:size(cst, 1)
-                if ~isempty(cst{i, 4})
-                    originalIndices = cst{i, 4}{1};
-                    [r, c, s] = ind2sub(originalCTSize, originalIndices);
-                    r_new = max(1, min(newSize(1), round(r * scaleFactor(1))));
-                    c_new = max(1, min(newSize(2), round(c * scaleFactor(2))));
-                    s_new = max(1, min(newSize(3), round(s * scaleFactor(3))));
-                    cst{i, 4}{1} = unique(sub2ind(newSize, r_new, c_new, s_new));
+            if enableCaching && exist(dsCacheFile, 'file')
+                fprintf('    Loading cached downsampled CT...\n');
+                load(dsCacheFile, 'ct', 'cst');
+                fprintf('    Loaded from cache: [%d,%d,%d]\n', ct.cubeDim(1), ct.cubeDim(2), ct.cubeDim(3));
+            else
+                % Perform downsampling
+                [ct, cst] = downsampleCTComplete(ct_original, cst_original, ctDownsampleFactor);
+                
+                % Cache downsampled CT
+                if enableCaching
+                    save(dsCacheFile, 'ct', 'cst', '-v7.3');
+                    fprintf('    Cached downsampled CT\n');
                 end
             end
-            
-            fprintf('    CT downsampled: [%d,%d,%d] -> [%d,%d,%d]\n', ...
-                originalCTSize(1), originalCTSize(2), originalCTSize(3), ...
-                newSize(1), newSize(2), newSize(3));
-            fprintf('    Resolution: [%.2f,%.2f,%.2f] -> [%.2f,%.2f,%.2f] mm\n', ...
-                ct_original.resolution.x, ct_original.resolution.y, ct_original.resolution.z, ...
-                ct.resolution.x, ct.resolution.y, ct.resolution.z);
         end
         
         %% Step 2: Load reference RTDOSE and spatial coordinates
@@ -214,7 +314,7 @@ for idxID = 1:length(ids)
         doseSpatial = struct();
         
         try
-            % Extract CT spatial coordinates
+            % Extract CT spatial coordinates from ORIGINAL CT files
             ctFiles = dir(fullfile(dicomPath, 'CT*.dcm'));
             if isempty(ctFiles)
                 ctFiles = dir(fullfile(dicomPath, '*CT*.dcm'));
@@ -303,7 +403,7 @@ for idxID = 1:length(ids)
         fprintf('\n[3/8] Extracting segment information from RTPLAN...\n');
         
         % Segment data is independent of CT resolution, so cache at patient level
-        segmentCacheFile = fullfile(cacheDir, currentID, currentSession, 'segmentData.mat');
+        segmentCacheFile = fullfile(dicomCacheDir, 'segmentData.mat');
         
         if enableCaching && exist(segmentCacheFile, 'file')
             fprintf('  Loading cached segment data...\n');
@@ -503,11 +603,15 @@ for idxID = 1:length(ids)
             pln.machine = 'Generic';
         end
         
+        % Set bixel width
         pln.propStf.bixelWidth = 5;
+        
+        % IMPORTANT: Set dose grid resolution to match the (possibly downsampled) CT
         pln.propDoseCalc.doseGrid.resolution.x = ct.resolution.x;
         pln.propDoseCalc.doseGrid.resolution.y = ct.resolution.y;
         pln.propDoseCalc.doseGrid.resolution.z = ct.resolution.z;
         
+        % Set algorithm
         if strcmp(pln.radiationMode, 'photons')
             pln.propDoseCalc.engine = 'pencilBeam';
         else
@@ -516,8 +620,9 @@ for idxID = 1:length(ids)
         
         fprintf('  - Machine: %s\n', pln.machine);
         fprintf('  - Dose engine: %s\n', pln.propDoseCalc.engine);
-        fprintf('  - Grid resolution: [%.2f, %.2f, %.2f] mm\n', ...
+        fprintf('  - Dose grid resolution: [%.2f, %.2f, %.2f] mm\n', ...
             ct.resolution.x, ct.resolution.y, ct.resolution.z);
+        fprintf('  - CT dimensions: [%d, %d, %d]\n', ct.cubeDim(1), ct.cubeDim(2), ct.cubeDim(3));
         
         %% Step 5: Generate steering information (with caching)
         fprintf('\n[5/8] Generating steering information...\n');
@@ -530,6 +635,7 @@ for idxID = 1:length(ids)
             fprintf('  - Loaded %d beams from cache\n', length(stf));
         else
             try
+                fprintf('  Generating stf (this may take a moment)...\n');
                 stf = matRad_generateStf(ct, cst, pln);
                 fprintf('  - Generated steering file for %d beams\n', length(stf));
                 
@@ -539,6 +645,10 @@ for idxID = 1:length(ids)
                 end
             catch ME
                 fprintf('Error generating steering file: %s\n', ME.message);
+                fprintf('  Error details: %s\n', ME.message);
+                for k = 1:length(ME.stack)
+                    fprintf('    %s (line %d)\n', ME.stack(k).name, ME.stack(k).line);
+                end
                 continue;
             end
         end
@@ -617,6 +727,9 @@ for idxID = 1:length(ids)
                     end
                 catch ME
                     fprintf('    ERROR calculating dij: %s\n', ME.message);
+                    for k = 1:length(ME.stack)
+                        fprintf('      %s (line %d)\n', ME.stack(k).name, ME.stack(k).line);
+                    end
                     continue;
                 end
             end
