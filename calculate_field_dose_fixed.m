@@ -306,7 +306,7 @@ for idxID = 1:length(ids)
         fprintf('\n[3/8] Extracting segment information from RTPLAN (with MLC inheritance)...\n');
         
         % Segment data is independent of CT resolution, so cache at patient level
-        segmentCacheFile = fullfile(dicomCacheDir, 'segmentData_v2_multilayer.mat');
+        segmentCacheFile = fullfile(dicomCacheDir, 'segmentData_v3_matched.mat');
         
         if enableCaching && exist(segmentCacheFile, 'file')
             fprintf('  Loading cached segment data...\n');
@@ -633,13 +633,63 @@ for idxID = 1:length(ids)
             fprintf('    Beam %d: Gantry=%.1f, Rays=%d\n', i, stf(i).gantryAngle, stf(i).numOfRays);
         end
         
+        %% Step 5b: Match stf beams to segmentData beams by gantry angle
+        fprintf('\n  Matching stf beams to RTPLAN beams by gantry angle...\n');
+        
+        % Extract gantry angles from both sources
+        stfGantryAngles = zeros(length(stf), 1);
+        for i = 1:length(stf)
+            stfGantryAngles(i) = stf(i).gantryAngle;
+        end
+        
+        segmentGantryAngles = zeros(segmentData.numBeams, 1);
+        for i = 1:segmentData.numBeams
+            segmentGantryAngles(i) = segmentData.beams{i}.gantryAngle;
+        end
+        
+        % Create mapping: stfToSegment(stfIdx) = segmentDataIdx
+        % For each stf beam, find the matching segmentData beam
+        stfToSegment = zeros(length(stf), 1);
+        angleTolerance = 1.0;  % degrees tolerance for matching
+        
+        for stfIdx = 1:length(stf)
+            stfAngle = stfGantryAngles(stfIdx);
+            
+            % Find matching segment beam
+            angleDiffs = abs(segmentGantryAngles - stfAngle);
+            % Handle wrap-around (e.g., 359° vs 1°)
+            angleDiffs = min(angleDiffs, 360 - angleDiffs);
+            
+            [minDiff, matchIdx] = min(angleDiffs);
+            
+            if minDiff <= angleTolerance
+                stfToSegment(stfIdx) = matchIdx;
+                fprintf('    stf(%d) Gantry=%.1f° -> segmentData.beams{%d} Gantry=%.1f°\n', ...
+                    stfIdx, stfAngle, matchIdx, segmentGantryAngles(matchIdx));
+            else
+                fprintf('    WARNING: stf(%d) Gantry=%.1f° has no match (closest diff=%.1f°)\n', ...
+                    stfIdx, stfAngle, minDiff);
+                stfToSegment(stfIdx) = 0;  % No match
+            end
+        end
+        
+        % Verify all segment beams are matched
+        matchedSegmentBeams = unique(stfToSegment(stfToSegment > 0));
+        if length(matchedSegmentBeams) < segmentData.numBeams
+            unmatchedSegment = setdiff(1:segmentData.numBeams, matchedSegmentBeams);
+            fprintf('    WARNING: %d segment beams unmatched: %s\n', ...
+                length(unmatchedSegment), mat2str(unmatchedSegment));
+        end
+        
         %% Step 6: Calculate segment-by-segment doses (FIXED MEMORY MANAGEMENT)
         fprintf('\n[6/8] Calculating segment-by-segment doses...\n');
+        fprintf('  NOTE: Using segmentWeight (fractional, 0-1) for weight vector\n');
+        fprintf('        NOT segmentMeterset (MU values) - this is the key fix!\n\n');
         
         % Initialize storage - ONLY store beam totals, not individual segments
         calculatedGridSize = ct.cubeDim;
         totalDose = zeros(calculatedGridSize);
-        beamDoses = cell(length(stf), 1);
+        beamDoses = cell(segmentData.numBeams, 1);  % Index by segment beam number
         
         % Statistics tracking
         totalCalcTime = 0;
@@ -647,21 +697,37 @@ for idxID = 1:length(ids)
         calculatedBeams = 0;
         totalSegmentsProcessed = 0;
         
-        for beamIdx = 1:length(stf)
-            beamData = segmentData.beams{beamIdx};
+        for stfIdx = 1:length(stf)
+            % Get the MATCHED segment beam for this stf beam
+            segmentBeamIdx = stfToSegment(stfIdx);
+            
+            if segmentBeamIdx == 0
+                fprintf('\n  Skipping stf beam %d (no matching segment data)\n', stfIdx);
+                continue;
+            end
+            
+            beamData = segmentData.beams{segmentBeamIdx};
             numSegments = length(beamData.segments);
             
-            fprintf('\n  Beam %d/%d (%s): %d segments, %.1f MU\n', ...
-                beamIdx, length(stf), beamData.beamName, numSegments, beamData.beamMeterset);
+            fprintf('\n  stf Beam %d/%d (Gantry=%.1f°) -> Segment Beam %d (%s): %d segments, %.1f MU\n', ...
+                stfIdx, length(stf), stf(stfIdx).gantryAngle, segmentBeamIdx, beamData.beamName, numSegments, beamData.beamMeterset);
             
-            % Check for cached beam dose
-            beamDoseCacheFile = fullfile(patientCacheDir, sprintf('beam_%02d_dose_v2.mat', beamIdx));
+            % Verify gantry angle match
+            gantryDiff = abs(stf(stfIdx).gantryAngle - beamData.gantryAngle);
+            gantryDiff = min(gantryDiff, 360 - gantryDiff);
+            if gantryDiff > 1.0
+                fprintf('    WARNING: Gantry angle mismatch! stf=%.1f°, segment=%.1f°\n', ...
+                    stf(stfIdx).gantryAngle, beamData.gantryAngle);
+            end
+            
+            % Check for cached beam dose (use segmentBeamIdx for cache file naming for consistency)
+            beamDoseCacheFile = fullfile(patientCacheDir, sprintf('beam_%02d_dose_v4.mat', segmentBeamIdx));
             
             if enableCaching && exist(beamDoseCacheFile, 'file')
                 fprintf('    Loading cached beam dose...\n');
                 load(beamDoseCacheFile, 'beamDoseResult');
                 
-                beamDoses{beamIdx} = beamDoseResult;
+                beamDoses{segmentBeamIdx} = beamDoseResult;
                 totalDose = totalDose + beamDoseResult.physicalDose;
                 cachedBeams = cachedBeams + 1;
                 totalSegmentsProcessed = totalSegmentsProcessed + numSegments;
@@ -671,12 +737,13 @@ for idxID = 1:length(ids)
             end
             
             % Calculate dij for this beam (with caching)
-            dijCacheFile = fullfile(patientCacheDir, sprintf('beam_%02d_dij.mat', beamIdx));
+            % Use stfIdx for dij cache since dij depends on stf geometry (gantry angle)
+            dijCacheFile = fullfile(patientCacheDir, sprintf('stf_%02d_dij.mat', stfIdx));
             
             plnSingle = pln;
             plnSingle.propStf.numOfBeams = 1;
-            plnSingle.propStf.isoCenter = stf(beamIdx).isoCenter;
-            stfSingle = stf(beamIdx);
+            plnSingle.propStf.isoCenter = stf(stfIdx).isoCenter;
+            stfSingle = stf(stfIdx);
             
             if enableCaching && exist(dijCacheFile, 'file')
                 fprintf('    Loading cached dij matrix...\n');
@@ -737,6 +804,8 @@ for idxID = 1:length(ids)
                 % Diagnostic output for first segment
                 if firstSegmentDiagnostics && verboseOutput
                     fprintf('    First segment MLC diagnostics:\n');
+                    fprintf('      Segment weight: %.6f (fractional)\n', segment.segmentWeight);
+                    fprintf('      Segment meterset: %.2f MU (NOT used for weights)\n', segment.segmentMeterset);
                     if iscell(mlcLayers) && ~isempty(mlcLayers)
                         fprintf('      MLC layers: %d\n', length(mlcLayers));
                         for lIdx = 1:length(mlcLayers)
@@ -842,7 +911,9 @@ for idxID = 1:length(ids)
                         for energyIdx = 1:numEnergies
                             bixelIdx = bixelIdx + 1;
                             if inAllMlcLayers
-                                w(bixelIdx) = segment.segmentMeterset;  % Use segment MU directly
+                                % Use segmentWeight (fractional, sums to 1.0 per beam)
+                                % NOT segmentMeterset (MU values, much larger)
+                                w(bixelIdx) = segment.segmentWeight;
                                 openBixelsThisSegment = openBixelsThisSegment + 1;
                             end
                         end
@@ -892,7 +963,7 @@ for idxID = 1:length(ids)
                             for energyIdx = 1:numEnergies
                                 bixelIdx = bixelIdx + 1;
                                 if inMLC
-                                    w(bixelIdx) = segment.segmentMeterset;
+                                    w(bixelIdx) = segment.segmentWeight;
                                     openBixelsThisSegment = openBixelsThisSegment + 1;
                                 end
                             end
@@ -903,7 +974,7 @@ for idxID = 1:length(ids)
                 else
                     % No MLC data - this shouldn't happen with inheritance fix
                     fprintf('      Seg %d: WARNING - No MLC data, using uniform weights\n', segIdx);
-                    w(:) = segment.segmentMeterset / dij.totalNumOfBixels;
+                    w(:) = segment.segmentWeight / dij.totalNumOfBixels;
                     openBixelsThisSegment = dij.totalNumOfBixels;
                 end
                 
@@ -938,7 +1009,8 @@ for idxID = 1:length(ids)
             
             % Store beam dose (only the accumulated total)
             beamDoseResult = struct();
-            beamDoseResult.beamIdx = beamIdx;
+            beamDoseResult.beamIdx = segmentBeamIdx;
+            beamDoseResult.stfIdx = stfIdx;
             beamDoseResult.beamName = beamData.beamName;
             beamDoseResult.gantryAngle = beamData.gantryAngle;
             beamDoseResult.couchAngle = beamData.couchAngle;
@@ -949,7 +1021,7 @@ for idxID = 1:length(ids)
             beamDoseResult.physicalDose = beamDoseAccum;
             beamDoseResult.maxDose = max(beamDoseAccum(:));
             
-            beamDoses{beamIdx} = beamDoseResult;
+            beamDoses{segmentBeamIdx} = beamDoseResult;
             totalDose = totalDose + beamDoseAccum;
             calculatedBeams = calculatedBeams + 1;
             
@@ -958,7 +1030,7 @@ for idxID = 1:length(ids)
                 save(beamDoseCacheFile, 'beamDoseResult', '-v7.3');
             end
             
-            fprintf('    Beam %d complete: Max=%.4f Gy\n', beamIdx, beamDoseResult.maxDose);
+            fprintf('    Segment Beam %d complete: Max=%.4f Gy\n', segmentBeamIdx, beamDoseResult.maxDose);
             
             % Clear dij to save memory before next beam
             if aggressiveMemoryCleanup
