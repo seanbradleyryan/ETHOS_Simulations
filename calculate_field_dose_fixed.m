@@ -306,7 +306,7 @@ for idxID = 1:length(ids)
         fprintf('\n[3/8] Extracting segment information from RTPLAN (with MLC inheritance)...\n');
         
         % Segment data is independent of CT resolution, so cache at patient level
-        segmentCacheFile = fullfile(dicomCacheDir, 'segmentData_fixed.mat');
+        segmentCacheFile = fullfile(dicomCacheDir, 'segmentData_v2_multilayer.mat');
         
         if enableCaching && exist(segmentCacheFile, 'file')
             fprintf('  Loading cached segment data...\n');
@@ -379,7 +379,9 @@ for idxID = 1:length(ids)
                     end
                     
                     % Get leaf boundaries and detect dual-layer MLC
-                    mlcDeviceTypes = {};
+                    % Store ALL MLC device info for proper dual-layer handling
+                    beamData.mlcDevices = {};  % Cell array of MLC device info
+                    
                     if isfield(beam, 'BeamLimitingDeviceSequence')
                         numDevices = length(fieldnames(beam.BeamLimitingDeviceSequence));
                         for devIdx = 1:numDevices
@@ -387,10 +389,24 @@ for idxID = 1:length(ids)
                             if isfield(device, 'RTBeamLimitingDeviceType')
                                 devType = device.RTBeamLimitingDeviceType;
                                 if contains(devType, 'MLC', 'IgnoreCase', true)
-                                    mlcDeviceTypes{end+1} = devType;
+                                    mlcDeviceInfo = struct();
+                                    mlcDeviceInfo.type = devType;
+                                    mlcDeviceInfo.leafBoundaries = [];
+                                    mlcDeviceInfo.numLeafPairs = 0;
+                                    
                                     if isfield(device, 'LeafPositionBoundaries')
-                                        beamData.leafBoundaries = device.LeafPositionBoundaries;
-                                        beamData.numLeafPairs = length(beamData.leafBoundaries) - 1;
+                                        mlcDeviceInfo.leafBoundaries = device.LeafPositionBoundaries;
+                                        mlcDeviceInfo.numLeafPairs = length(device.LeafPositionBoundaries) - 1;
+                                    elseif isfield(device, 'NumberOfLeafJawPairs')
+                                        mlcDeviceInfo.numLeafPairs = device.NumberOfLeafJawPairs;
+                                    end
+                                    
+                                    beamData.mlcDevices{end+1} = mlcDeviceInfo;
+                                    
+                                    % Keep first device as default for backward compatibility
+                                    if isempty(beamData.leafBoundaries) && ~isempty(mlcDeviceInfo.leafBoundaries)
+                                        beamData.leafBoundaries = mlcDeviceInfo.leafBoundaries;
+                                        beamData.numLeafPairs = mlcDeviceInfo.numLeafPairs;
                                     end
                                 end
                             end
@@ -398,9 +414,14 @@ for idxID = 1:length(ids)
                     end
                     
                     % Check for dual-layer MLC (ETHOS/Halcyon)
-                    if length(mlcDeviceTypes) > 1
+                    if length(beamData.mlcDevices) > 1
                         beamData.hasDualLayerMLC = true;
-                        fprintf('    Beam %d: Dual-layer MLC detected (%s)\n', beamIdx, strjoin(mlcDeviceTypes, ', '));
+                        mlcTypes = cellfun(@(x) x.type, beamData.mlcDevices, 'UniformOutput', false);
+                        fprintf('    Beam %d: Dual-layer MLC detected (%s)\n', beamIdx, strjoin(mlcTypes, ', '));
+                        for mlcIdx = 1:length(beamData.mlcDevices)
+                            fprintf('      Layer %d (%s): %d leaf pairs\n', mlcIdx, ...
+                                beamData.mlcDevices{mlcIdx}.type, beamData.mlcDevices{mlcIdx}.numLeafPairs);
+                        end
                     end
                     
                     % Process control points WITH INHERITANCE
@@ -492,12 +513,9 @@ for idxID = 1:length(ids)
                             segment.jawX = cpStart.jawX;
                             segment.jawY = cpStart.jawY;
                             
-                            % REDUCE DUAL-LAYER MLC TO SINGLE LAYER
-                            if iscell(cpStart.mlcPositions) && ~isempty(cpStart.mlcPositions)
-                                segment.mlcPositions = reduceDualLayerMLC(cpStart.mlcPositions, beamData.numLeafPairs);
-                            else
-                                segment.mlcPositions = [];
-                            end
+                            % Store ALL MLC layers - do NOT reduce here
+                            % Reduction will happen during weight calculation where we check all layers
+                            segment.mlcLayers = cpStart.mlcPositions;  % Cell array of layer structs
                             
                             beamData.segments{segIdx} = segment;
                             totalSegments = totalSegments + 1;
@@ -637,7 +655,7 @@ for idxID = 1:length(ids)
                 beamIdx, length(stf), beamData.beamName, numSegments, beamData.beamMeterset);
             
             % Check for cached beam dose
-            beamDoseCacheFile = fullfile(patientCacheDir, sprintf('beam_%02d_dose_fixed.mat', beamIdx));
+            beamDoseCacheFile = fullfile(patientCacheDir, sprintf('beam_%02d_dose_v2.mat', beamIdx));
             
             if enableCaching && exist(beamDoseCacheFile, 'file')
                 fprintf('    Loading cached beam dose...\n');
@@ -697,6 +715,8 @@ for idxID = 1:length(ids)
             
             % Process each segment - ACCUMULATE ONLY, don't store individual segment doses
             tic;
+            firstSegmentDiagnostics = true;  % Show diagnostics for first valid segment
+            
             for segIdx = 1:numSegments
                 segment = beamData.segments{segIdx};
                 
@@ -708,27 +728,40 @@ for idxID = 1:length(ids)
                 % Create weight vector based on MLC aperture
                 w = zeros(dij.totalNumOfBixels, 1);
                 
-                mlcPos = segment.mlcPositions;
+                mlcLayers = segment.mlcLayers;  % Cell array of MLC layer data
                 jawX = segment.jawX;
                 jawY = segment.jawY;
                 
                 openBixelsThisSegment = 0;
                 
-                if ~isempty(mlcPos) && ~isempty(beamData.leafBoundaries)
-                    numLeafPairs = beamData.numLeafPairs;
-                    leafBoundaries = beamData.leafBoundaries;
-                    
-                    % Handle the reduced single-layer MLC positions
-                    if length(mlcPos) >= 2 * numLeafPairs
-                        leftBank = mlcPos(1:numLeafPairs);
-                        rightBank = mlcPos(numLeafPairs+1:2*numLeafPairs);
+                % Diagnostic output for first segment
+                if firstSegmentDiagnostics && verboseOutput
+                    fprintf('    First segment MLC diagnostics:\n');
+                    if iscell(mlcLayers) && ~isempty(mlcLayers)
+                        fprintf('      MLC layers: %d\n', length(mlcLayers));
+                        for lIdx = 1:length(mlcLayers)
+                            if ~isempty(mlcLayers{lIdx}) && isfield(mlcLayers{lIdx}, 'positions')
+                                fprintf('        Layer %d: %d positions\n', lIdx, length(mlcLayers{lIdx}.positions));
+                            end
+                        end
                     else
-                        % Fallback if MLC data is incomplete
-                        fprintf('      Seg %d: Incomplete MLC data (%d positions, expected %d)\n', ...
-                            segIdx, length(mlcPos), 2*numLeafPairs);
-                        continue;
+                        fprintf('      WARNING: No MLC layer data!\n');
                     end
-                    
+                    if isfield(beamData, 'mlcDevices')
+                        fprintf('      MLC devices with boundaries: %d\n', length(beamData.mlcDevices));
+                        for dIdx = 1:length(beamData.mlcDevices)
+                            dev = beamData.mlcDevices{dIdx};
+                            fprintf('        Device %d (%s): %d leaf pairs\n', dIdx, dev.type, dev.numLeafPairs);
+                        end
+                    end
+                    firstSegmentDiagnostics = false;
+                end
+                
+                % Check if we have MLC data and device info
+                hasMlcData = ~isempty(mlcLayers) && iscell(mlcLayers) && ~isempty(mlcLayers);
+                hasMlcDevices = isfield(beamData, 'mlcDevices') && ~isempty(beamData.mlcDevices);
+                
+                if hasMlcData && hasMlcDevices
                     numRays = stfSingle.numOfRays;
                     bixelIdx = 0;
                     
@@ -737,18 +770,69 @@ for idxID = 1:length(ids)
                         rayPosX = ray.rayPos_bev(1);
                         rayPosY = ray.rayPos_bev(2);
                         
-                        % Check jaw limits
+                        % Check jaw limits first
                         inJawX = isempty(jawX) || (length(jawX) >= 2 && rayPosX >= jawX(1) && rayPosX <= jawX(2));
                         inJawY = isempty(jawY) || (length(jawY) >= 2 && rayPosY >= jawY(1) && rayPosY <= jawY(2));
                         
-                        % Check MLC aperture
-                        inMLC = false;
-                        if inJawX && inJawY
-                            for leafIdx = 1:numLeafPairs
-                                if rayPosY >= leafBoundaries(leafIdx) && rayPosY < leafBoundaries(leafIdx + 1)
-                                    if rayPosX >= leftBank(leafIdx) && rayPosX <= rightBank(leafIdx)
-                                        inMLC = true;
+                        % Check ALL MLC layers - ray must pass through ALL
+                        inAllMlcLayers = inJawX && inJawY;  % Start assuming open if within jaws
+                        
+                        if inAllMlcLayers
+                            % Check each MLC layer
+                            for layerIdx = 1:length(mlcLayers)
+                                mlcLayer = mlcLayers{layerIdx};
+                                
+                                if isempty(mlcLayer) || ~isfield(mlcLayer, 'positions')
+                                    continue;  % Skip if no data for this layer
+                                end
+                                
+                                mlcPos = mlcLayer.positions;
+                                
+                                % Get the corresponding device info for leaf boundaries
+                                if layerIdx <= length(beamData.mlcDevices)
+                                    deviceInfo = beamData.mlcDevices{layerIdx};
+                                    leafBoundaries = deviceInfo.leafBoundaries;
+                                    numLeafPairs = deviceInfo.numLeafPairs;
+                                else
+                                    % Fallback: try to infer from positions
+                                    numLeafPairs = length(mlcPos) / 2;
+                                    leafBoundaries = [];
+                                end
+                                
+                                if isempty(leafBoundaries)
+                                    % Can't check this layer without boundaries
+                                    continue;
+                                end
+                                
+                                % Extract left and right banks for this layer
+                                if length(mlcPos) >= 2 * numLeafPairs
+                                    leftBank = mlcPos(1:numLeafPairs);
+                                    rightBank = mlcPos(numLeafPairs+1:2*numLeafPairs);
+                                else
+                                    % Incomplete MLC data for this layer
+                                    continue;
+                                end
+                                
+                                % Check if ray is within aperture for THIS layer
+                                inThisLayer = false;
+                                for leafIdx = 1:numLeafPairs
+                                    if leafIdx < length(leafBoundaries)
+                                        leafYMin = leafBoundaries(leafIdx);
+                                        leafYMax = leafBoundaries(leafIdx + 1);
+                                        
+                                        if rayPosY >= leafYMin && rayPosY < leafYMax
+                                            % This leaf covers the ray's Y position
+                                            if rayPosX >= leftBank(leafIdx) && rayPosX <= rightBank(leafIdx)
+                                                inThisLayer = true;
+                                            end
+                                            break;  % Found the covering leaf, no need to check others
+                                        end
                                     end
+                                end
+                                
+                                % If blocked by ANY layer, ray is blocked
+                                if ~inThisLayer
+                                    inAllMlcLayers = false;
                                     break;
                                 end
                             end
@@ -757,15 +841,67 @@ for idxID = 1:length(ids)
                         numEnergies = length(ray.energy);
                         for energyIdx = 1:numEnergies
                             bixelIdx = bixelIdx + 1;
-                            if inMLC
+                            if inAllMlcLayers
                                 w(bixelIdx) = segment.segmentMeterset;  % Use segment MU directly
                                 openBixelsThisSegment = openBixelsThisSegment + 1;
                             end
                         end
                     end
+                elseif hasMlcData && ~isempty(beamData.leafBoundaries)
+                    % Fallback: single layer mode using default boundaries
+                    % This handles cases where mlcDevices wasn't populated
+                    numLeafPairs = beamData.numLeafPairs;
+                    leafBoundaries = beamData.leafBoundaries;
+                    
+                    % Get positions from first layer
+                    mlcPos = [];
+                    if iscell(mlcLayers) && ~isempty(mlcLayers{1})
+                        if isfield(mlcLayers{1}, 'positions')
+                            mlcPos = mlcLayers{1}.positions;
+                        end
+                    end
+                    
+                    if ~isempty(mlcPos) && length(mlcPos) >= 2 * numLeafPairs
+                        leftBank = mlcPos(1:numLeafPairs);
+                        rightBank = mlcPos(numLeafPairs+1:2*numLeafPairs);
+                        
+                        numRays = stfSingle.numOfRays;
+                        bixelIdx = 0;
+                        
+                        for rayIdx = 1:numRays
+                            ray = stfSingle.ray(rayIdx);
+                            rayPosX = ray.rayPos_bev(1);
+                            rayPosY = ray.rayPos_bev(2);
+                            
+                            inJawX = isempty(jawX) || (length(jawX) >= 2 && rayPosX >= jawX(1) && rayPosX <= jawX(2));
+                            inJawY = isempty(jawY) || (length(jawY) >= 2 && rayPosY >= jawY(1) && rayPosY <= jawY(2));
+                            
+                            inMLC = false;
+                            if inJawX && inJawY
+                                for leafIdx = 1:numLeafPairs
+                                    if rayPosY >= leafBoundaries(leafIdx) && rayPosY < leafBoundaries(leafIdx + 1)
+                                        if rayPosX >= leftBank(leafIdx) && rayPosX <= rightBank(leafIdx)
+                                            inMLC = true;
+                                        end
+                                        break;
+                                    end
+                                end
+                            end
+                            
+                            numEnergies = length(ray.energy);
+                            for energyIdx = 1:numEnergies
+                                bixelIdx = bixelIdx + 1;
+                                if inMLC
+                                    w(bixelIdx) = segment.segmentMeterset;
+                                    openBixelsThisSegment = openBixelsThisSegment + 1;
+                                end
+                            end
+                        end
+                    else
+                        fprintf('      Seg %d: WARNING - Incomplete MLC data in fallback mode\n', segIdx);
+                    end
                 else
                     % No MLC data - this shouldn't happen with inheritance fix
-                    % Use uniform weights as fallback (divide by number of bixels)
                     fprintf('      Seg %d: WARNING - No MLC data, using uniform weights\n', segIdx);
                     w(:) = segment.segmentMeterset / dij.totalNumOfBixels;
                     openBixelsThisSegment = dij.totalNumOfBixels;
@@ -990,63 +1126,6 @@ end
 fprintf('All processing complete!\n');
 
 %% ==================== HELPER FUNCTIONS ====================
-
-function reducedMLC = reduceDualLayerMLC(mlcLayers, numLeafPairs)
-    % REDUCEDUALLAYERMLC - Reduce dual-layer MLC to single effective layer
-    %
-    % For Halcyon/ETHOS dual-layer MLC:
-    %   - Left bank (A-bank): Take MAX of both layers (most closed position)
-    %   - Right bank (B-bank): Take MIN of both layers (most closed position)
-    %
-    % This ensures the combined aperture is at least as restrictive as
-    % the original dual-layer system.
-    
-    if isempty(mlcLayers) || ~iscell(mlcLayers)
-        reducedMLC = [];
-        return;
-    end
-    
-    numLayers = length(mlcLayers);
-    
-    if numLayers == 1
-        % Single layer - just extract positions
-        reducedMLC = mlcLayers{1}.positions;
-        return;
-    end
-    
-    % Get positions from first two layers
-    layer1 = mlcLayers{1}.positions;
-    layer2 = mlcLayers{2}.positions;
-    
-    % Determine number of leaf pairs from the data
-    nPos1 = length(layer1);
-    nPos2 = length(layer2);
-    
-    if nPos1 ~= nPos2
-        % Layers have different sizes - use the first layer as fallback
-        warning('MLC layers have different sizes (%d vs %d), using first layer only', nPos1, nPos2);
-        reducedMLC = layer1;
-        return;
-    end
-    
-    effectiveLeafPairs = nPos1 / 2;
-    
-    % Initialize reduced positions
-    reducedMLC = zeros(effectiveLeafPairs * 2, 1);
-    
-    % Left bank (indices 1:numLeafPairs): Take MAX (most closed for left bank)
-    % Left bank positions are typically negative, so MAX gives less negative = more closed
-    for i = 1:effectiveLeafPairs
-        reducedMLC(i) = max(layer1(i), layer2(i));
-    end
-    
-    % Right bank (indices numLeafPairs+1:end): Take MIN (most closed for right bank)
-    % Right bank positions are typically positive, so MIN gives less positive = more closed
-    for i = 1:effectiveLeafPairs
-        idx = effectiveLeafPairs + i;
-        reducedMLC(idx) = min(layer1(idx), layer2(idx));
-    end
-end
 
 function [ct_ds, cst_ds] = downsampleCTComplete(ct, cst, factor)
     % DOWNSAMPLECTCOMPLETE - Comprehensive CT downsampling for MATRAD compatibility
