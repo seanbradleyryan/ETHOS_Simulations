@@ -1,11 +1,12 @@
 ==========================================================
   ETHOS IMRT Segment-by-Segment Dose Calculator
-  OPTIMIZED VERSION
+  FIXED VERSION - Memory + MLC Inheritance + Dual-Layer
 ==========================================================
 
 Optimization Settings:
-  - CT Downsample Factor: 2 (8x speedup estimate)
+  - CT Downsample Factor: 3
   - Caching Enabled: false
+  - Aggressive Memory Cleanup: true
   - Cache Directory: /mnt/weka/home/80030361/ETHOS_Simulations/Cache
 
 Verifying paths...
@@ -80,9 +81,9 @@ finished!
   - Original CT dimensions: 598 x 598 x 134
   - Original CT resolution: 1.17 x 1.17 x 3.00 mm
 
-  Applying CT downsampling (factor=2)...
-    Downsampling CT: [598,598,134] -> [299,299,67]
-    Resolution: [1.17,1.17,3.00] -> [2.34,2.34,6.00] mm
+  Applying CT downsampling (factor=3)...
+    Downsampling CT: [598,598,134] -> [199,199,45]
+    Resolution: [1.17,1.17,3.00] -> [3.52,3.52,8.93] mm
     CT downsampling complete
 
 [2/8] Loading reference RTDOSE and extracting spatial coordinates...
@@ -90,30 +91,100 @@ finished!
   - Reference dose: 95 x 140 x 115, Max: 71.34 Gy
   WARNING: PLAN dose detected, dividing by 10 fractions
 
-[3/8] Extracting segment information from RTPLAN...
-    Beam 1: Field 1, 408.0 MU, 165 segments
-    Beam 2: Field 2, 217.8 MU, 165 segments
-    Beam 3: Field 3, 219.4 MU, 165 segments
-    Beam 4: Field 4, 417.4 MU, 165 segments
-    Beam 5: Field 5, 326.2 MU, 165 segments
-    Beam 6: Field 6, 317.0 MU, 165 segments
-    Beam 7: Field 7, 443.3 MU, 165 segments
-    Beam 8: Field 8, 359.4 MU, 165 segments
-    Beam 9: Field 9, 468.4 MU, 165 segments
-    Beam 10: Field 10, 342.6 MU, 165 segments
-    Beam 11: Field 11, 405.7 MU, 165 segments
-    Beam 12: Field 12, 496.1 MU, 165 segments
-    Beam 13: Field 13, 442.4 MU, 165 segments
-    Beam 14: Field 14, 419.5 MU, 165 segments
-    Beam 15: Field 15, 441.4 MU, 165 segments
-    Beam 16: Field 16, 251.6 MU, 165 segments
-    Beam 17: Field 17, 188.7 MU, 165 segments
+[3/8] Extracting segment information from RTPLAN (with MLC inheritance)...
+    Beam 1: Dual-layer MLC detected (MLCX1, MLCX2)
+      Layer 1 (MLCX1): 28 leaf pairs
+      Layer 2 (MLCX2): 29 leaf pairs
+    Beam 1: Field 1, Gantry=181.0, 408.0 MU, 165 segments
+    Beam 2: Dual-layer MLC detected (MLCX1, MLCX2)
+      Layer 1 (MLCX1): 28 leaf pairs
+      Layer 2 (MLCX2): 29 leaf pairs
+    Beam 2: Field 2, Gantry=201.0, 217.8 MU, 165 segments
+    Beam 3: Dual-layer MLC detected (MLCX1, MLCX2)
+      Layer 1 (MLCX1): 28 leaf pairs
+      Layer 2 (MLCX2): 29 leaf pairs
+    Beam 3: Field 3, Gantry=222.0, 219.4 MU, 165 segments
+    Beam 4: Dual-layer MLC detected (MLCX1, MLCX2)
+      Layer 1 (MLCX1): 28 leaf pairs
+      Layer 2 (MLCX2): 29 leaf pairs
+    Beam 4: Field 4, Gantry=244.0, 417.4 MU, 165 segments
+    Beam 5: Dual-layer MLC detected (MLCX1, MLCX2)
+      Layer 1 (MLCX1): 28 leaf pairs
+      Layer 2 (MLCX2): 29 leaf pairs
+    Beam 5: Field 5, Gantry=265.0, 326.2 MU, 165 segments
+    Beam 6: Dual-layer MLC detected (MLCX1, MLCX2)
+      Layer 1 (MLCX1): 28 leaf pairs
+      Layer 2 (MLCX2): 29 leaf pairs
+    Beam 6: Field 6, Gantry=286.0, 317.0 MU, 165 segments
+    Beam 7: Dual-layer MLC detected (MLCX1, MLCX2)
+      Layer 1 (MLCX1): 28 leaf pairs
+      Layer 2 (MLCX2): 29 leaf pairs
+    Beam 7: Field 7, Gantry=307.0, 443.3 MU, 165 segments
+    Beam 8: Dual-layer MLC detected (MLCX1, MLCX2)
+      Layer 1 (MLCX1): 28 leaf pairs
+      Layer 2 (MLCX2): 29 leaf pairs
+    Beam 8: Field 8, Gantry=328.0, 359.4 MU, 165 segments
+    Beam 9: Dual-layer MLC detected (MLCX1, MLCX2)
+      Layer 1 (MLCX1): 28 leaf pairs
+      Layer 2 (MLCX2): 29 leaf pairs
+    Beam 9: Field 9, Gantry=349.0, 468.4 MU, 165 segments
+    Beam 10: Dual-layer MLC detected (MLCX1, MLCX2)
+      Layer 1 (MLCX1): 28 leaf pairs
+      Layer 2 (MLCX2): 29 leaf pairs
+    Beam 10: Field 10, Gantry=11.0, 342.6 MU, 165 segments
+    Beam 11: Dual-layer MLC detected (MLCX1, MLCX2)
+      Layer 1 (MLCX1): 28 leaf pairs
+      Layer 2 (MLCX2): 29 leaf pairs
+    Beam 11: Field 11, Gantry=32.0, 405.7 MU, 165 segments
+    Beam 12: Dual-layer MLC detected (MLCX1, MLCX2)
+      Layer 1 (MLCX1): 28 leaf pairs
+      Layer 2 (MLCX2): 29 leaf pairs
+    Beam 12: Field 12, Gantry=53.0, 496.1 MU, 165 segments
+    Beam 13: Dual-layer MLC detected (MLCX1, MLCX2)
+      Layer 1 (MLCX1): 28 leaf pairs
+      Layer 2 (MLCX2): 29 leaf pairs
+    Beam 13: Field 13, Gantry=74.0, 442.4 MU, 165 segments
+    Beam 14: Dual-layer MLC detected (MLCX1, MLCX2)
+      Layer 1 (MLCX1): 28 leaf pairs
+      Layer 2 (MLCX2): 29 leaf pairs
+    Beam 14: Field 14, Gantry=95.0, 419.5 MU, 165 segments
+    Beam 15: Dual-layer MLC detected (MLCX1, MLCX2)
+      Layer 1 (MLCX1): 28 leaf pairs
+      Layer 2 (MLCX2): 29 leaf pairs
+    Beam 15: Field 15, Gantry=116.0, 441.4 MU, 165 segments
+    Beam 16: Dual-layer MLC detected (MLCX1, MLCX2)
+      Layer 1 (MLCX1): 28 leaf pairs
+      Layer 2 (MLCX2): 29 leaf pairs
+    Beam 16: Field 16, Gantry=138.0, 251.6 MU, 165 segments
+    Beam 17: Dual-layer MLC detected (MLCX1, MLCX2)
+      Layer 1 (MLCX1): 28 leaf pairs
+      Layer 2 (MLCX2): 29 leaf pairs
+    Beam 17: Field 17, Gantry=159.0, 188.7 MU, 165 segments
+
+  Verifying segment weights...
+    Beam 1: Total weight = 1.000000 (should be ~1.0)
+    Beam 2: Total weight = 1.000000 (should be ~1.0)
+    Beam 3: Total weight = 1.000000 (should be ~1.0)
+    Beam 4: Total weight = 1.000000 (should be ~1.0)
+    Beam 5: Total weight = 1.000000 (should be ~1.0)
+    Beam 6: Total weight = 1.000000 (should be ~1.0)
+    Beam 7: Total weight = 1.000000 (should be ~1.0)
+    Beam 8: Total weight = 1.000000 (should be ~1.0)
+    Beam 9: Total weight = 1.000000 (should be ~1.0)
+    Beam 10: Total weight = 1.000000 (should be ~1.0)
+    Beam 11: Total weight = 1.000000 (should be ~1.0)
+    Beam 12: Total weight = 1.000000 (should be ~1.0)
+    Beam 13: Total weight = 1.000000 (should be ~1.0)
+    Beam 14: Total weight = 1.000000 (should be ~1.0)
+    Beam 15: Total weight = 1.000000 (should be ~1.0)
+    Beam 16: Total weight = 1.000000 (should be ~1.0)
+    Beam 17: Total weight = 1.000000 (should be ~1.0)
 
 [4/8] Configuring dose calculation...
   - Machine: Generic
   - Dose engine: pencilBeam
-  - Dose grid resolution: [2.34, 2.34, 6.00] mm
-  - CT dimensions: [299, 299, 67]
+  - Dose grid resolution: [3.52, 3.52, 8.93] mm
+  - CT dimensions: [199, 199, 45]
 
 [5/8] Generating steering information...
   Generating stf (this may take a moment)...
@@ -121,23 +192,24 @@ Warning: Not able to assign property 'collimation' from pln.propStf to stf gener
 Warning: Using default stf generator Photon IMRT stf Generator!
 matRad: Generating stf struct with generator 'Photon IMRT stf Generator'... Progress: 5.88 %Progress: 110100.00 %
   - Generated steering file for 17 beams
-    Beam 1: Gantry=11.0, Rays=686
-    Beam 2: Gantry=32.0, Rays=721
-    Beam 3: Gantry=53.0, Rays=718
-    Beam 4: Gantry=74.0, Rays=698
-    Beam 5: Gantry=95.0, Rays=651
-    Beam 6: Gantry=116.0, Rays=632
-    Beam 7: Gantry=138.0, Rays=605
-    Beam 8: Gantry=159.0, Rays=627
-    Beam 9: Gantry=181.0, Rays=660
-    Beam 10: Gantry=201.0, Rays=717
-    Beam 11: Gantry=222.0, Rays=739
-    Beam 12: Gantry=244.0, Rays=728
-    Beam 13: Gantry=265.0, Rays=680
-    Beam 14: Gantry=286.0, Rays=660
-    Beam 15: Gantry=307.0, Rays=630
-    Beam 16: Gantry=328.0, Rays=629
-    Beam 17: Gantry=349.0, Rays=651
+    Beam 1: Gantry=11.0, Rays=714
+    Beam 2: Gantry=32.0, Rays=726
+    Beam 3: Gantry=53.0, Rays=728
+    Beam 4: Gantry=74.0, Rays=707
+    Beam 5: Gantry=95.0, Rays=665
+    Beam 6: Gantry=116.0, Rays=637
+    Beam 7: Gantry=138.0, Rays=607
+    Beam 8: Gantry=159.0, Rays=634
+    Beam 9: Gantry=181.0, Rays=658
+    Beam 10: Gantry=201.0, Rays=727
+    Beam 11: Gantry=222.0, Rays=749
+    Beam 12: Gantry=244.0, Rays=748
+    Beam 13: Gantry=265.0, Rays=719
+    Beam 14: Gantry=286.0, Rays=686
+    Beam 15: Gantry=307.0, Rays=651
+    Beam 16: Gantry=328.0, Rays=662
+    Beam 17: Gantry=349.0, Rays=673
+637         fprintf('\n[6/8] Calculating segment-by-segment doses...\n');
 
 [6/8] Calculating segment-by-segment doses...
 
@@ -147,378 +219,7 @@ Warning: Inconsistent dose engines given! pln asks for 'pencilBeam', but you are
 'SVDPB'!
 Warning: Using default dose calculation engine SVD Pencil Beam!
 Dose influence matrix calculation using  'SVD Pencil Beam' Dose Engine...
-Dose grid has dimensions 299x299x67
-Adjusting structures for overlap... Done!
-Resampling structure set... Warning: Resizing the cst to the dose grid created an empty structure 35 opti in scenario 1
-(cst{13,4}{1})!
-Warning: Resizing the cst to the dose grid created an empty structure 60 opti in scenario 1
-(cst{14,4}{1})!
-Warning: Resizing the cst to the dose grid created an empty structure OAReval in scenario 1
-(cst{16,4}{1})!
-Warning: Resizing the cst to the dose grid created an empty structure LowDoseControl in
-scenario 1 (cst{22,4}{1})!
-Warning: Resizing the cst to the dose grid created an empty structure 35opti 60opti in
-scenario 1 (cst{23,4}{1})!
-Done!
-Adjusting structures for overlap... Done!
-Warning: Could not find HLUT Varian Medical Systems-Ethos Treatment
-Planning-ConvolutionKernel-0_photons.hlut in hlutLibrary folder. matRad default HLUT loaded
-Warning: projecting out of range HU values
-Warning: Kernel Cut-Off 'Inf mm' larger than machine data range of '179.500000 mm'. Using
-'179.500000 mm'!
-matRad: calculate radiological depth cube... done.
-	SSD = 906 mm ...
-	Uniform primary photon fluence -> pre-compute kernel convolution...
-Progress: 100.00 %
-Dose calculation finished in 36.0884 seconds!
-    Calculated dij (686 bixels) in 36.1 sec
-      Seg 2: Max=1.9068 Gy (0.06s)
-      Seg 3: Max=1.9068 Gy (0.07s)
-      Seg 4: Max=1.9068 Gy (0.05s)
-      Seg 5: Max=1.9068 Gy (0.05s)
-      Seg 6: Max=1.9068 Gy (0.06s)
-      Seg 7: Max=1.9068 Gy (0.07s)
-      Seg 8: Max=1.9068 Gy (0.07s)
-      Seg 9: Max=1.9068 Gy (0.07s)
-      Seg 10: Max=1.9068 Gy (0.07s)
-      Seg 11: Max=1.9068 Gy (0.07s)
-      Seg 12: Max=1.9068 Gy (0.07s)
-      Seg 13: Max=1.9068 Gy (0.07s)
-      Seg 14: Max=1.9068 Gy (0.07s)
-      Seg 15: Max=1.9068 Gy (0.07s)
-      Seg 16: Max=1.9068 Gy (0.07s)
-      Seg 17: Max=1.9068 Gy (0.07s)
-      Seg 18: Max=1.9068 Gy (0.07s)
-      Seg 19: Max=1.9068 Gy (0.07s)
-      Seg 20: Max=1.9068 Gy (0.07s)
-      Seg 21: Max=1.9068 Gy (0.07s)
-      Seg 22: Max=1.9068 Gy (0.07s)
-      Seg 23: Max=1.9068 Gy (0.06s)
-      Seg 24: Max=1.9068 Gy (0.06s)
-      Seg 25: Max=1.9068 Gy (0.06s)
-      Seg 26: Max=1.9068 Gy (0.06s)
-      Seg 27: Max=1.9068 Gy (0.06s)
-      Seg 28: Max=1.9068 Gy (0.06s)
-      Seg 29: Max=1.9068 Gy (0.06s)
-      Seg 30: Max=1.9068 Gy (0.06s)
-      Seg 31: Max=1.9068 Gy (0.06s)
-      Seg 32: Max=1.9068 Gy (0.06s)
-      Seg 33: Max=1.9068 Gy (0.06s)
-      Seg 34: Max=2.6136 Gy (0.06s)
-      Seg 35: Max=2.6136 Gy (0.06s)
-      Seg 36: Max=2.6136 Gy (0.06s)
-      Seg 37: Max=2.6136 Gy (0.06s)
-      Seg 38: Max=2.6136 Gy (0.06s)
-      Seg 39: Max=2.6136 Gy (0.06s)
-      Seg 40: Max=2.6136 Gy (0.06s)
-      Seg 41: Max=2.6136 Gy (0.06s)
-      Seg 42: Max=2.6136 Gy (0.06s)
-      Seg 43: Max=2.6136 Gy (0.06s)
-      Seg 44: Max=2.6136 Gy (0.06s)
-      Seg 45: Max=2.6136 Gy (0.06s)
-      Seg 46: Max=2.6136 Gy (0.06s)
-      Seg 47: Max=2.6136 Gy (0.06s)
-      Seg 48: Max=2.6136 Gy (0.06s)
-      Seg 49: Max=2.6136 Gy (0.06s)
-      Seg 50: Max=2.6136 Gy (0.06s)
-      Seg 51: Max=2.6136 Gy (0.06s)
-      Seg 52: Max=2.6136 Gy (0.06s)
-      Seg 53: Max=2.6136 Gy (0.06s)
-      Seg 54: Max=2.6136 Gy (0.06s)
-      Seg 55: Max=2.6136 Gy (0.06s)
-      Seg 56: Max=2.6136 Gy (0.06s)
-      Seg 57: Max=2.6136 Gy (0.06s)
-      Seg 58: Max=2.6136 Gy (0.06s)
-      Seg 59: Max=2.6136 Gy (0.06s)
-      Seg 60: Max=2.6136 Gy (0.06s)
-      Seg 61: Max=2.6136 Gy (0.06s)
-      Seg 62: Max=2.6136 Gy (0.06s)
-      Seg 63: Max=2.6136 Gy (0.06s)
-      Seg 64: Max=2.6136 Gy (0.06s)
-      Seg 65: Max=2.6136 Gy (0.06s)
-      Seg 66: Max=2.6136 Gy (0.06s)
-      Seg 67: Max=2.6136 Gy (0.06s)
-      Seg 68: Max=2.6136 Gy (0.06s)
-      Seg 69: Max=2.6136 Gy (0.06s)
-      Seg 70: Max=2.6136 Gy (0.06s)
-      Seg 71: Max=2.6136 Gy (0.06s)
-      Seg 72: Max=2.6136 Gy (0.06s)
-      Seg 73: Max=2.6136 Gy (0.06s)
-      Seg 74: Max=2.8128 Gy (0.06s)
-      Seg 75: Max=2.8128 Gy (0.06s)
-      Seg 76: Max=2.6187 Gy (0.06s)
-      Seg 77: Max=2.6187 Gy (0.06s)
-      Seg 78: Max=2.6187 Gy (0.06s)
-      Seg 79: Max=2.6187 Gy (0.06s)
-      Seg 80: Max=2.6187 Gy (0.06s)
-      Seg 81: Max=2.8280 Gy (0.06s)
-      Seg 82: Max=2.8280 Gy (0.06s)
-      Seg 83: Max=2.8280 Gy (0.06s)
-      Seg 84: Max=2.8280 Gy (0.06s)
-      Seg 85: Max=2.8280 Gy (0.06s)
-      Seg 86: Max=2.8280 Gy (0.06s)
-      Seg 87: Max=2.9208 Gy (0.06s)
-      Seg 88: Max=2.8328 Gy (0.06s)
-      Seg 89: Max=2.8328 Gy (0.06s)
-      Seg 90: Max=2.8328 Gy (0.06s)
-      Seg 91: Max=2.8328 Gy (0.06s)
-      Seg 92: Max=2.9244 Gy (0.06s)
-      Seg 93: Max=2.9244 Gy (0.06s)
-      Seg 94: Max=2.9774 Gy (0.06s)
-      Seg 95: Max=2.9774 Gy (0.06s)
-      Seg 96: Max=2.9774 Gy (0.06s)
-      Seg 97: Max=2.9774 Gy (0.06s)
-      Seg 98: Max=2.9292 Gy (0.06s)
-      Seg 99: Max=2.9292 Gy (0.06s)
-      Seg 100: Max=2.9292 Gy (0.06s)
-      Seg 101: Max=2.9292 Gy (0.06s)
-      Seg 102: Max=2.9872 Gy (0.06s)
-      Seg 103: Max=2.9872 Gy (0.06s)
-      Seg 104: Max=2.9872 Gy (0.06s)
-      Seg 105: Max=2.9872 Gy (0.06s)
-      Seg 106: Max=2.9341 Gy (0.06s)
-      Seg 107: Max=2.9341 Gy (0.06s)
-      Seg 108: Max=2.9341 Gy (0.06s)
-      Seg 109: Max=2.9341 Gy (0.06s)
-      Seg 110: Max=2.9341 Gy (0.06s)
-      Seg 111: Max=2.9345 Gy (0.06s)
-      Seg 112: Max=2.9345 Gy (0.06s)
-      Seg 113: Max=2.9345 Gy (0.06s)
-      Seg 114: Max=2.9345 Gy (0.06s)
-      Seg 115: Max=2.8492 Gy (0.06s)
-      Seg 116: Max=2.8494 Gy (0.06s)
-      Seg 117: Max=2.8494 Gy (0.06s)
-      Seg 118: Max=2.8494 Gy (0.06s)
-      Seg 119: Max=2.8494 Gy (0.06s)
-      Seg 120: Max=2.8494 Gy (0.06s)
-      Seg 121: Max=2.8494 Gy (0.06s)
-      Seg 122: Max=2.8494 Gy (0.06s)
-      Seg 123: Max=2.8494 Gy (0.06s)
-      Seg 124: Max=2.8494 Gy (0.06s)
-      Seg 125: Max=2.6530 Gy (0.06s)
-      Seg 126: Max=2.6530 Gy (0.06s)
-      Seg 127: Max=2.6530 Gy (0.06s)
-      Seg 128: Max=2.6530 Gy (0.06s)
-      Seg 129: Max=2.6530 Gy (0.06s)
-      Seg 130: Max=2.6530 Gy (0.06s)
-      Seg 131: Max=2.6530 Gy (0.06s)
-      Seg 132: Max=2.6530 Gy (0.06s)
-      Seg 133: Max=2.6530 Gy (0.06s)
-      Seg 134: Max=1.9450 Gy (0.06s)
-      Seg 135: Max=2.6560 Gy (0.06s)
-      Seg 136: Max=1.9466 Gy (0.06s)
-      Seg 137: Max=1.9466 Gy (0.06s)
-      Seg 138: Max=1.9466 Gy (0.06s)
-      Seg 139: Max=1.9466 Gy (0.06s)
-      Seg 140: Max=1.9466 Gy (0.06s)
-      Seg 141: Max=1.9466 Gy (0.06s)
-      Seg 142: Max=1.9466 Gy (0.06s)
-      Seg 143: Max=1.9466 Gy (0.06s)
-      Seg 144: Max=1.9466 Gy (0.06s)
-      Seg 145: Max=1.9466 Gy (0.06s)
-      Seg 146: Max=1.9466 Gy (0.06s)
-      Seg 147: Max=1.9466 Gy (0.06s)
-      Seg 148: Max=1.9466 Gy (0.06s)
-      Seg 149: Max=1.9466 Gy (0.06s)
-      Seg 150: Max=1.9466 Gy (0.06s)
-      Seg 151: Max=1.9466 Gy (0.06s)
-      Seg 152: Max=1.9466 Gy (0.06s)
-      Seg 153: Max=1.9466 Gy (0.06s)
-      Seg 154: Max=1.9466 Gy (0.06s)
-      Seg 155: Max=1.9466 Gy (0.06s)
-    Beam 1 complete: Max=179.0027 Gy
-
-  Beam 2/17 (Field 2): 165 segments, 217.8 MU
-    Calculating dij matrix...
-Warning: Inconsistent dose engines given! pln asks for 'pencilBeam', but you are using
-'SVDPB'!
-Warning: Using default dose calculation engine SVD Pencil Beam!
-Dose influence matrix calculation using  'SVD Pencil Beam' Dose Engine...
-Dose grid has dimensions 299x299x67
-Adjusting structures for overlap... Done!
-Resampling structure set... Warning: Resizing the cst to the dose grid created an empty structure 35 opti in scenario 1
-(cst{13,4}{1})!
-Warning: Resizing the cst to the dose grid created an empty structure 60 opti in scenario 1
-(cst{14,4}{1})!
-Warning: Resizing the cst to the dose grid created an empty structure OAReval in scenario 1
-(cst{16,4}{1})!
-Warning: Resizing the cst to the dose grid created an empty structure LowDoseControl in
-scenario 1 (cst{22,4}{1})!
-Warning: Resizing the cst to the dose grid created an empty structure 35opti 60opti in
-scenario 1 (cst{23,4}{1})!
-Done!
-Adjusting structures for overlap... Done!
-Warning: Could not find HLUT Varian Medical Systems-Ethos Treatment
-Planning-ConvolutionKernel-0_photons.hlut in hlutLibrary folder. matRad default HLUT loaded
-Warning: projecting out of range HU values
-Warning: Kernel Cut-Off 'Inf mm' larger than machine data range of '179.500000 mm'. Using
-'179.500000 mm'!
-matRad: calculate radiological depth cube... done.
-	SSD = 901 mm ...
-	Uniform primary photon fluence -> pre-compute kernel convolution...
-Progress: 100.00 %
-Dose calculation finished in 43.5136 seconds!
-    Calculated dij (721 bixels) in 43.6 sec
-      Seg 1: Max=0.9999 Gy (0.08s)
-      Seg 2: Max=0.9999 Gy (0.08s)
-      Seg 3: Max=0.9999 Gy (0.08s)
-      Seg 4: Max=0.9999 Gy (0.08s)
-      Seg 5: Max=0.9999 Gy (0.08s)
-      Seg 6: Max=0.9999 Gy (0.08s)
-      Seg 7: Max=0.9999 Gy (0.08s)
-      Seg 8: Max=0.9999 Gy (0.07s)
-      Seg 9: Max=0.9999 Gy (0.07s)
-      Seg 10: Max=0.9999 Gy (0.07s)
-      Seg 11: Max=0.9999 Gy (0.07s)
-      Seg 12: Max=0.9999 Gy (0.07s)
-      Seg 22: Max=1.0378 Gy (0.07s)
-      Seg 23: Max=1.0378 Gy (0.07s)
-      Seg 24: Max=1.4135 Gy (0.07s)
-      Seg 25: Max=1.4135 Gy (0.07s)
-      Seg 26: Max=1.4135 Gy (0.07s)
-      Seg 27: Max=1.4135 Gy (0.07s)
-      Seg 28: Max=1.4135 Gy (0.07s)
-      Seg 29: Max=1.4135 Gy (0.07s)
-      Seg 30: Max=1.4135 Gy (0.07s)
-      Seg 31: Max=1.4135 Gy (0.07s)
-      Seg 32: Max=1.4135 Gy (0.07s)
-      Seg 33: Max=1.5228 Gy (0.07s)
-      Seg 34: Max=1.5228 Gy (0.07s)
-      Seg 35: Max=1.5228 Gy (0.07s)
-      Seg 36: Max=1.5228 Gy (0.07s)
-      Seg 37: Max=1.5228 Gy (0.07s)
-      Seg 38: Max=1.5228 Gy (0.07s)
-      Seg 39: Max=1.5228 Gy (0.07s)
-      Seg 40: Max=1.5228 Gy (0.07s)
-      Seg 41: Max=1.5228 Gy (0.07s)
-      Seg 42: Max=1.5228 Gy (0.07s)
-      Seg 43: Max=1.5228 Gy (0.07s)
-      Seg 44: Max=1.5228 Gy (0.07s)
-      Seg 45: Max=1.5228 Gy (0.07s)
-      Seg 46: Max=1.5228 Gy (0.07s)
-      Seg 47: Max=1.5228 Gy (0.07s)
-      Seg 48: Max=1.5228 Gy (0.07s)
-      Seg 49: Max=1.5228 Gy (0.07s)
-      Seg 50: Max=1.5718 Gy (0.07s)
-      Seg 51: Max=1.5718 Gy (0.07s)
-      Seg 52: Max=1.5718 Gy (0.07s)
-      Seg 53: Max=1.5718 Gy (0.07s)
-      Seg 54: Max=1.5718 Gy (0.07s)
-      Seg 55: Max=1.5276 Gy (0.07s)
-      Seg 56: Max=1.5810 Gy (0.07s)
-      Seg 57: Max=1.5810 Gy (0.07s)
-      Seg 58: Max=1.5810 Gy (0.07s)
-      Seg 59: Max=1.5810 Gy (0.07s)
-      Seg 60: Max=1.5810 Gy (0.07s)
-      Seg 61: Max=1.5810 Gy (0.07s)
-      Seg 62: Max=1.5810 Gy (0.07s)
-      Seg 63: Max=1.5810 Gy (0.07s)
-      Seg 64: Max=1.5810 Gy (0.07s)
-      Seg 65: Max=1.5810 Gy (0.07s)
-      Seg 66: Max=1.6063 Gy (0.07s)
-      Seg 67: Max=1.6063 Gy (0.07s)
-      Seg 68: Max=1.6063 Gy (0.07s)
-      Seg 69: Max=1.5802 Gy (0.08s)
-      Seg 70: Max=1.5802 Gy (0.07s)
-      Seg 71: Max=1.5802 Gy (0.07s)
-      Seg 72: Max=1.5802 Gy (0.07s)
-      Seg 73: Max=1.5802 Gy (0.07s)
-      Seg 74: Max=1.5802 Gy (0.07s)
-      Seg 75: Max=1.5802 Gy (0.07s)
-      Seg 76: Max=1.5802 Gy (0.07s)
-      Seg 77: Max=1.5802 Gy (0.07s)
-      Seg 78: Max=1.6103 Gy (0.07s)
-      Seg 79: Max=1.6103 Gy (0.07s)
-      Seg 80: Max=1.6103 Gy (0.07s)
-      Seg 81: Max=1.6103 Gy (0.07s)
-      Seg 82: Max=1.6103 Gy (0.08s)
-      Seg 83: Max=1.5835 Gy (0.07s)
-      Seg 84: Max=1.5835 Gy (0.07s)
-      Seg 85: Max=1.5835 Gy (0.07s)
-      Seg 86: Max=1.5835 Gy (0.07s)
-      Seg 87: Max=1.5835 Gy (0.07s)
-      Seg 88: Max=1.5835 Gy (0.07s)
-      Seg 89: Max=1.5835 Gy (0.07s)
-      Seg 90: Max=1.6140 Gy (0.07s)
-      Seg 91: Max=1.6140 Gy (0.07s)
-      Seg 92: Max=1.6140 Gy (0.07s)
-      Seg 93: Max=1.6140 Gy (0.07s)
-      Seg 94: Max=1.5864 Gy (0.08s)
-      Seg 95: Max=1.5864 Gy (0.07s)
-      Seg 96: Max=1.5864 Gy (0.07s)
-      Seg 97: Max=1.5864 Gy (0.07s)
-      Seg 98: Max=1.6141 Gy (0.07s)
-      Seg 99: Max=1.6141 Gy (0.07s)
-      Seg 100: Max=1.6141 Gy (0.07s)
-      Seg 101: Max=1.6141 Gy (0.07s)
-      Seg 102: Max=1.6141 Gy (0.07s)
-      Seg 103: Max=1.6141 Gy (0.07s)
-      Seg 104: Max=1.6141 Gy (0.07s)
-      Seg 105: Max=1.6141 Gy (0.07s)
-      Seg 106: Max=1.5857 Gy (0.07s)
-      Seg 107: Max=1.5857 Gy (0.07s)
-      Seg 108: Max=1.5857 Gy (0.07s)
-      Seg 109: Max=1.5857 Gy (0.07s)
-      Seg 110: Max=1.5857 Gy (0.07s)
-      Seg 111: Max=1.5857 Gy (0.07s)
-      Seg 112: Max=1.5857 Gy (0.07s)
-      Seg 113: Max=1.5857 Gy (0.07s)
-      Seg 114: Max=1.5857 Gy (0.07s)
-      Seg 115: Max=1.5857 Gy (0.07s)
-      Seg 116: Max=1.6153 Gy (0.07s)
-      Seg 117: Max=1.6153 Gy (0.07s)
-      Seg 118: Max=1.6153 Gy (0.07s)
-      Seg 119: Max=1.6153 Gy (0.08s)
-      Seg 120: Max=1.6153 Gy (0.07s)
-      Seg 121: Max=1.6153 Gy (0.07s)
-      Seg 122: Max=1.6091 Gy (0.07s)
-      Seg 123: Max=1.6091 Gy (0.07s)
-      Seg 124: Max=1.6091 Gy (0.07s)
-      Seg 125: Max=1.6091 Gy (0.07s)
-      Seg 126: Max=1.6091 Gy (0.07s)
-      Seg 127: Max=1.6091 Gy (0.07s)
-      Seg 128: Max=1.6091 Gy (0.07s)
-      Seg 129: Max=1.6091 Gy (0.07s)
-      Seg 130: Max=1.6091 Gy (0.07s)
-      Seg 131: Max=1.6091 Gy (0.07s)
-      Seg 132: Max=1.6091 Gy (0.08s)
-      Seg 133: Max=1.5787 Gy (0.07s)
-      Seg 134: Max=1.5787 Gy (0.07s)
-      Seg 135: Max=1.5787 Gy (0.07s)
-      Seg 136: Max=1.5787 Gy (0.07s)
-      Seg 137: Max=1.5787 Gy (0.07s)
-      Seg 138: Max=1.5787 Gy (0.07s)
-      Seg 139: Max=1.5787 Gy (0.07s)
-      Seg 140: Max=1.5787 Gy (0.07s)
-      Seg 141: Max=1.5787 Gy (0.07s)
-      Seg 142: Max=1.5787 Gy (0.07s)
-      Seg 143: Max=1.5787 Gy (0.07s)
-      Seg 144: Max=1.5787 Gy (0.08s)
-      Seg 145: Max=1.5787 Gy (0.07s)
-      Seg 146: Max=1.5297 Gy (0.07s)
-      Seg 147: Max=1.4297 Gy (0.07s)
-      Seg 148: Max=1.4297 Gy (0.07s)
-      Seg 149: Max=1.0371 Gy (0.07s)
-      Seg 150: Max=1.0371 Gy (0.07s)
-      Seg 151: Max=1.0371 Gy (0.07s)
-      Seg 152: Max=1.0371 Gy (0.07s)
-      Seg 153: Max=1.0371 Gy (0.07s)
-      Seg 154: Max=1.0371 Gy (0.07s)
-      Seg 155: Max=1.4191 Gy (0.07s)
-      Seg 156: Max=1.4191 Gy (0.07s)
-      Seg 157: Max=1.4191 Gy (0.08s)
-      Seg 158: Max=1.4191 Gy (0.07s)
-      Seg 159: Max=1.0415 Gy (0.07s)
-      Seg 160: Max=1.0415 Gy (0.07s)
-    Beam 2 complete: Max=92.0062 Gy
-
-  Beam 3/17 (Field 3): 165 segments, 219.4 MU
-    Calculating dij matrix...
-Warning: Inconsistent dose engines given! pln asks for 'pencilBeam', but you are using
-'SVDPB'!
-Warning: Using default dose calculation engine SVD Pencil Beam!
-Dose influence matrix calculation using  'SVD Pencil Beam' Dose Engine...
-Dose grid has dimensions 299x299x67
+Dose grid has dimensions 199x199x45
 Adjusting structures for overlap... Done!
 Resampling structure set... Warning: Resizing the cst to the dose grid created an empty structure 35 opti in scenario 1
 (cst{13,4}{1})!
@@ -541,166 +242,122 @@ matRad: calculate radiological depth cube... done.
 	SSD = 904 mm ...
 	Uniform primary photon fluence -> pre-compute kernel convolution...
 Progress:100.00 %
-Dose calculation finished in 44.4184 seconds!
-    Calculated dij (718 bixels) in 44.5 sec
-      Seg 2: Max=1.0443 Gy (0.08s)
-      Seg 3: Max=1.0443 Gy (0.08s)
-      Seg 4: Max=1.0443 Gy (0.08s)
-      Seg 5: Max=1.0443 Gy (0.08s)
-      Seg 6: Max=1.0443 Gy (0.08s)
-      Seg 7: Max=1.0443 Gy (0.08s)
-      Seg 8: Max=1.0443 Gy (0.08s)
-      Seg 9: Max=1.0443 Gy (0.08s)
-      Seg 10: Max=1.0443 Gy (0.07s)
-      Seg 11: Max=1.0443 Gy (0.07s)
-      Seg 12: Max=1.4458 Gy (0.07s)
-      Seg 13: Max=1.4458 Gy (0.08s)
-      Seg 14: Max=1.4458 Gy (0.07s)
-      Seg 15: Max=1.4458 Gy (0.07s)
-      Seg 16: Max=1.4458 Gy (0.08s)
-      Seg 17: Max=1.4458 Gy (0.07s)
-      Seg 18: Max=1.4458 Gy (0.08s)
-      Seg 19: Max=1.0558 Gy (0.07s)
-      Seg 20: Max=1.0558 Gy (0.07s)
-      Seg 21: Max=1.0558 Gy (0.08s)
-      Seg 22: Max=1.0558 Gy (0.07s)
-      Seg 23: Max=1.0558 Gy (0.07s)
-      Seg 24: Max=1.0558 Gy (0.07s)
-      Seg 25: Max=1.0558 Gy (0.07s)
-      Seg 26: Max=1.0558 Gy (0.07s)
-      Seg 27: Max=1.0558 Gy (0.07s)
-      Seg 28: Max=1.0558 Gy (0.07s)
-      Seg 29: Max=1.0558 Gy (0.07s)
-      Seg 30: Max=1.0558 Gy (0.07s)
-      Seg 31: Max=1.0558 Gy (0.07s)
-      Seg 32: Max=1.4381 Gy (0.07s)
-      Seg 33: Max=1.4381 Gy (0.07s)
-      Seg 34: Max=1.5475 Gy (0.07s)
-      Seg 35: Max=1.5475 Gy (0.07s)
-      Seg 36: Max=1.4376 Gy (0.07s)
-      Seg 37: Max=1.4376 Gy (0.07s)
-      Seg 38: Max=1.4376 Gy (0.07s)
-      Seg 39: Max=1.4376 Gy (0.08s)
-      Seg 40: Max=1.0529 Gy (0.07s)
-      Seg 41: Max=1.0529 Gy (0.07s)
-      Seg 42: Max=1.4413 Gy (0.07s)
-      Seg 43: Max=1.4413 Gy (0.07s)
-      Seg 44: Max=1.4413 Gy (0.07s)
-      Seg 45: Max=1.4413 Gy (0.07s)
-      Seg 46: Max=1.4413 Gy (0.07s)
-      Seg 47: Max=1.4413 Gy (0.07s)
-      Seg 48: Max=1.4413 Gy (0.07s)
-      Seg 49: Max=1.4413 Gy (0.07s)
-      Seg 50: Max=1.4413 Gy (0.07s)
-      Seg 51: Max=1.4413 Gy (0.07s)
-      Seg 52: Max=1.0447 Gy (0.07s)
-      Seg 53: Max=1.0447 Gy (0.07s)
-      Seg 54: Max=1.0447 Gy (0.07s)
-      Seg 55: Max=1.0447 Gy (0.07s)
-      Seg 56: Max=1.0447 Gy (0.07s)
-      Seg 57: Max=1.0447 Gy (0.07s)
-      Seg 58: Max=1.4426 Gy (0.07s)
-      Seg 59: Max=1.0531 Gy (0.07s)
-      Seg 60: Max=1.4287 Gy (0.07s)
-      Seg 61: Max=1.4287 Gy (0.07s)
-      Seg 62: Max=1.4287 Gy (0.07s)
-      Seg 63: Max=1.4287 Gy (0.07s)
-      Seg 64: Max=1.4287 Gy (0.07s)
-      Seg 65: Max=1.5404 Gy (0.07s)
-      Seg 66: Max=1.5404 Gy (0.07s)
-      Seg 67: Max=1.5404 Gy (0.07s)
-      Seg 68: Max=1.5404 Gy (0.07s)
-      Seg 69: Max=1.5404 Gy (0.07s)
-      Seg 70: Max=1.5404 Gy (0.07s)
-      Seg 71: Max=1.5404 Gy (0.07s)
-      Seg 72: Max=1.5842 Gy (0.07s)
-      Seg 73: Max=1.5842 Gy (0.07s)
-      Seg 74: Max=1.5842 Gy (0.07s)
-      Seg 75: Max=1.5842 Gy (0.07s)
-      Seg 76: Max=1.5842 Gy (0.07s)
-      Seg 77: Max=1.5842 Gy (0.07s)
-      Seg 78: Max=1.6079 Gy (0.07s)
-      Seg 79: Max=1.6079 Gy (0.07s)
-      Seg 80: Max=1.6079 Gy (0.07s)
-      Seg 81: Max=1.6079 Gy (0.07s)
-      Seg 82: Max=1.6079 Gy (0.07s)
-      Seg 83: Max=1.6079 Gy (0.07s)
-      Seg 84: Max=1.5809 Gy (0.07s)
-      Seg 85: Max=1.5809 Gy (0.07s)
-      Seg 86: Max=1.5809 Gy (0.07s)
-      Seg 87: Max=1.5809 Gy (0.07s)
-      Seg 88: Max=1.5809 Gy (0.07s)
-      Seg 89: Max=1.6053 Gy (0.07s)
-      Seg 90: Max=1.6053 Gy (0.07s)
-      Seg 91: Max=1.6053 Gy (0.07s)
-      Seg 92: Max=1.6053 Gy (0.07s)
-      Seg 93: Max=1.6053 Gy (0.07s)
-      Seg 94: Max=1.6053 Gy (0.07s)
-      Seg 95: Max=1.6053 Gy (0.07s)
-      Seg 96: Max=1.5808 Gy (0.07s)
-      Seg 97: Max=1.5808 Gy (0.07s)
-      Seg 98: Max=1.6089 Gy (0.07s)
-      Seg 99: Max=1.6089 Gy (0.07s)
-      Seg 100: Max=1.6089 Gy (0.07s)
-      Seg 101: Max=1.6089 Gy (0.07s)
-      Seg 102: Max=1.6089 Gy (0.07s)
-      Seg 103: Max=1.6089 Gy (0.07s)
-      Seg 104: Max=1.6089 Gy (0.07s)
-      Seg 105: Max=1.5802 Gy (0.07s)
-      Seg 106: Max=1.5802 Gy (0.07s)
-      Seg 107: Max=1.5802 Gy (0.07s)
-      Seg 108: Max=1.5802 Gy (0.07s)
-      Seg 109: Max=1.5802 Gy (0.07s)
-      Seg 110: Max=1.5802 Gy (0.07s)
-      Seg 111: Max=1.6060 Gy (0.07s)
-      Seg 112: Max=1.6060 Gy (0.07s)
-      Seg 113: Max=1.6060 Gy (0.07s)
-      Seg 114: Max=1.6060 Gy (0.07s)
-      Seg 115: Max=1.6060 Gy (0.07s)
-      Seg 116: Max=1.5736 Gy (0.07s)
-      Seg 117: Max=1.5736 Gy (0.07s)
-      Seg 118: Max=1.5736 Gy (0.07s)
-      Seg 119: Max=1.5736 Gy (0.07s)
-      Seg 120: Max=1.5736 Gy (0.07s)
-      Seg 121: Max=1.5736 Gy (0.07s)
-      Seg 122: Max=1.5272 Gy (0.07s)
-      Seg 123: Max=1.5272 Gy (0.07s)
-      Seg 124: Max=1.5272 Gy (0.07s)
-      Seg 125: Max=1.5272 Gy (0.07s)
-      Seg 126: Max=1.5272 Gy (0.07s)
-      Seg 127: Max=1.4144 Gy (0.07s)
-      Seg 128: Max=1.4144 Gy (0.07s)
-      Seg 129: Max=1.4144 Gy (0.07s)
-      Seg 130: Max=1.4144 Gy (0.07s)
-      Seg 131: Max=1.4144 Gy (0.07s)
-      Seg 132: Max=1.4144 Gy (0.07s)
-      Seg 133: Max=1.4144 Gy (0.07s)
-      Seg 134: Max=1.4144 Gy (0.07s)
-      Seg 135: Max=1.4144 Gy (0.07s)
-      Seg 136: Max=1.4144 Gy (0.07s)
-      Seg 137: Max=1.4144 Gy (0.07s)
-      Seg 138: Max=1.4144 Gy (0.07s)
-      Seg 139: Max=1.4144 Gy (0.07s)
-      Seg 140: Max=1.4144 Gy (0.07s)
-      Seg 141: Max=1.4144 Gy (0.07s)
-      Seg 142: Max=1.4144 Gy (0.07s)
-      Seg 143: Max=1.4144 Gy (0.07s)
-      Seg 144: Max=1.4144 Gy (0.07s)
-      Seg 145: Max=1.4144 Gy (0.07s)
-      Seg 146: Max=1.4144 Gy (0.07s)
-      Seg 147: Max=1.4144 Gy (0.07s)
-      Seg 148: Max=1.0426 Gy (0.07s)
-      Seg 149: Max=1.0426 Gy (0.07s)
-      Seg 150: Max=1.0426 Gy (0.07s)
-      Seg 151: Max=1.0426 Gy (0.07s)
-      Seg 152: Max=1.0426 Gy (0.07s)
-      Seg 153: Max=1.0426 Gy (0.07s)
-      Seg 154: Max=1.0426 Gy (0.07s)
-      Seg 155: Max=1.0426 Gy (0.07s)
-      Seg 156: Max=1.0426 Gy (0.07s)
-      Seg 157: Max=1.0426 Gy (0.07s)
-      Seg 158: Max=1.0426 Gy (0.07s)
-    Beam 3 complete: Max=76.3584 Gy
+Dose calculation finished in 11.5634 seconds!
+    Calculated dij (714 bixels) in 11.6 sec
+    First segment MLC diagnostics:
+      MLC layers: 2
+        Layer 1: 56 positions
+        Layer 2: 58 positions
+      MLC devices with boundaries: 2
+        Device 1 (MLCX1): 28 leaf pairs
+        Device 2 (MLCX2): 29 leaf pairs
+      Seg 20: Open=24 bixels, Max=1.9003 Gy
+      Seg 40: Open=48 bixels, Max=2.6320 Gy
+      Seg 60: Open=48 bixels, Max=2.6320 Gy
+      Seg 80: Open=24 bixels, Max=1.9272 Gy
+      Seg 100: Open=46 bixels, Max=2.6450 Gy
+      Seg 120: Open=69 bixels, Max=2.8516 Gy
+    Processed 134 segments (skipped 0) in 2.0 sec
+    Average open bixels per segment: 43.0 / 714 (6.0%)
+    Beam 1 complete: Max=147.4516 Gy
+
+  Beam 2/17 (Field 2): 165 segments, 217.8 MU
+    Calculating dij matrix...
+Warning: Inconsistent dose engines given! pln asks for 'pencilBeam', but you are using
+'SVDPB'!
+Warning: Using default dose calculation engine SVD Pencil Beam!
+Dose influence matrix calculation using  'SVD Pencil Beam' Dose Engine...
+Dose grid has dimensions 199x199x45
+Adjusting structures for overlap... Done!
+Resampling structure set... Warning: Resizing the cst to the dose grid created an empty structure 35 opti in scenario 1
+(cst{13,4}{1})!
+Warning: Resizing the cst to the dose grid created an empty structure 60 opti in scenario 1
+(cst{14,4}{1})!
+Warning: Resizing the cst to the dose grid created an empty structure OAReval in scenario 1
+(cst{16,4}{1})!
+Warning: Resizing the cst to the dose grid created an empty structure LowDoseControl in
+scenario 1 (cst{22,4}{1})!
+Warning: Resizing the cst to the dose grid created an empty structure 35opti 60opti in
+scenario 1 (cst{23,4}{1})!
+Done!
+Adjusting structures for overlap... Done!
+Warning: Could not find HLUT Varian Medical Systems-Ethos Treatment
+Planning-ConvolutionKernel-0_photons.hlut in hlutLibrary folder. matRad default HLUT loaded
+Warning: projecting out of range HU values
+Warning: Kernel Cut-Off 'Inf mm' larger than machine data range of '179.500000 mm'. Using
+'179.500000 mm'!
+matRad: calculate radiological depth cube... done.
+	SSD = 898 mm ...
+	Uniform primary photon fluence -> pre-compute kernel convolution...
+Progress:100.00 %
+Dose calculation finished in 19.7799 seconds!
+    Calculated dij (726 bixels) in 19.9 sec
+    First segment MLC diagnostics:
+      MLC layers: 2
+        Layer 1: 56 positions
+        Layer 2: 58 positions
+      MLC devices with boundaries: 2
+        Device 1 (MLCX1): 28 leaf pairs
+        Device 2 (MLCX2): 29 leaf pairs
+      Seg 40: Open=44 bixels, Max=1.4092 Gy
+      Seg 60: Open=92 bixels, Max=1.5806 Gy
+      Seg 80: Open=115 bixels, Max=1.6091 Gy
+      Seg 100: Open=92 bixels, Max=1.5834 Gy
+      Seg 120: Open=92 bixels, Max=1.5867 Gy
+      Seg 140: Open=69 bixels, Max=1.5355 Gy
+      Seg 160: Open=23 bixels, Max=1.0310 Gy
+    Processed 138 segments (skipped 0) in 2.3 sec
+    Average open bixels per segment: 76.4 / 726 (10.5%)
+    Beam 2 complete: Max=90.3049 Gy
+
+  Beam 3/17 (Field 3): 165 segments, 219.4 MU
+    Calculating dij matrix...
+Warning: Inconsistent dose engines given! pln asks for 'pencilBeam', but you are using
+'SVDPB'!
+Warning: Using default dose calculation engine SVD Pencil Beam!
+Dose influence matrix calculation using  'SVD Pencil Beam' Dose Engine...
+Dose grid has dimensions 199x199x45
+Adjusting structures for overlap... Done!
+Resampling structure set... Warning: Resizing the cst to the dose grid created an empty structure 35 opti in scenario 1
+(cst{13,4}{1})!
+Warning: Resizing the cst to the dose grid created an empty structure 60 opti in scenario 1
+(cst{14,4}{1})!
+Warning: Resizing the cst to the dose grid created an empty structure OAReval in scenario 1
+(cst{16,4}{1})!
+Warning: Resizing the cst to the dose grid created an empty structure LowDoseControl in
+scenario 1 (cst{22,4}{1})!
+Warning: Resizing the cst to the dose grid created an empty structure 35opti 60opti in
+scenario 1 (cst{23,4}{1})!
+Done!
+Adjusting structures for overlap... Done!
+Warning: Could not find HLUT Varian Medical Systems-Ethos Treatment
+Planning-ConvolutionKernel-0_photons.hlut in hlutLibrary folder. matRad default HLUT loaded
+Warning: projecting out of range HU values
+Warning: Kernel Cut-Off 'Inf mm' larger than machine data range of '179.500000 mm'. Using
+'179.500000 mm'!
+matRad: calculate radiological depth cube... done.
+	SSD = 906 mm ...
+	Uniform primary photon fluence -> pre-compute kernel convolution...
+Progress: 100.00 %
+Dose calculation finished in 34.6765 seconds!
+    Calculated dij (728 bixels) in 34.8 sec
+    First segment MLC diagnostics:
+      MLC layers: 2
+        Layer 1: 56 positions
+        Layer 2: 58 positions
+      MLC devices with boundaries: 2
+        Device 1 (MLCX1): 28 leaf pairs
+        Device 2 (MLCX2): 29 leaf pairs
+      Seg 20: Open=23 bixels, Max=1.0545 Gy
+      Seg 40: Open=23 bixels, Max=1.0364 Gy
+      Seg 60: Open=46 bixels, Max=1.4410 Gy
+      Seg 80: Open=115 bixels, Max=1.6086 Gy
+      Seg 100: Open=92 bixels, Max=1.5780 Gy
+      Seg 120: Open=90 bixels, Max=1.5720 Gy
+      Seg 140: Open=21 bixels, Max=0.9868 Gy
+    Processed 156 segments (skipped 0) in 2.7 sec
+    Average open bixels per segment: 56.9 / 728 (7.8%)
+    Beam 3 complete: Max=70.5398 Gy
 
   Beam 4/17 (Field 4): 165 segments, 417.4 MU
     Calculating dij matrix...
@@ -708,7 +365,7 @@ Warning: Inconsistent dose engines given! pln asks for 'pencilBeam', but you are
 'SVDPB'!
 Warning: Using default dose calculation engine SVD Pencil Beam!
 Dose influence matrix calculation using  'SVD Pencil Beam' Dose Engine...
-Dose grid has dimensions 299x299x67
+Dose grid has dimensions 199x199x45
 Adjusting structures for overlap... Done!
 Resampling structure set... Warning: Resizing the cst to the dose grid created an empty structure 35 opti in scenario 1
 (cst{13,4}{1})!
@@ -728,153 +385,28 @@ Warning: projecting out of range HU values
 Warning: Kernel Cut-Off 'Inf mm' larger than machine data range of '179.500000 mm'. Using
 '179.500000 mm'!
 matRad: calculate radiological depth cube... done.
-	SSD = 902 mm ...
+	SSD = 904 mm ...
 	Uniform primary photon fluence -> pre-compute kernel convolution...
-Progress: 100.00 %
-Dose calculation finished in 38.3455 seconds!
-    Calculated dij (698 bixels) in 38.5 sec
-      Seg 22: Max=2.0216 Gy (0.07s)
-      Seg 23: Max=2.0216 Gy (0.07s)
-      Seg 24: Max=2.0216 Gy (0.07s)
-      Seg 25: Max=2.0216 Gy (0.07s)
-      Seg 26: Max=2.0216 Gy (0.07s)
-      Seg 27: Max=2.0216 Gy (0.07s)
-      Seg 28: Max=2.0216 Gy (0.07s)
-      Seg 29: Max=2.0216 Gy (0.07s)
-      Seg 30: Max=2.0216 Gy (0.07s)
-      Seg 31: Max=2.0216 Gy (0.07s)
-      Seg 32: Max=2.0216 Gy (0.06s)
-      Seg 33: Max=2.0216 Gy (0.06s)
-      Seg 34: Max=2.0216 Gy (0.06s)
-      Seg 35: Max=2.0216 Gy (0.06s)
-      Seg 36: Max=2.7619 Gy (0.06s)
-      Seg 37: Max=2.7619 Gy (0.06s)
-      Seg 38: Max=2.7619 Gy (0.06s)
-      Seg 39: Max=2.7619 Gy (0.06s)
-      Seg 40: Max=2.7619 Gy (0.06s)
-      Seg 41: Max=2.7619 Gy (0.06s)
-      Seg 42: Max=2.7619 Gy (0.06s)
-      Seg 43: Max=2.7619 Gy (0.06s)
-      Seg 44: Max=2.7619 Gy (0.06s)
-      Seg 45: Max=2.7619 Gy (0.06s)
-      Seg 46: Max=2.7619 Gy (0.06s)
-      Seg 47: Max=2.7619 Gy (0.06s)
-      Seg 48: Max=2.7619 Gy (0.06s)
-      Seg 49: Max=2.7619 Gy (0.06s)
-      Seg 50: Max=2.7619 Gy (0.06s)
-      Seg 51: Max=2.7619 Gy (0.06s)
-      Seg 52: Max=2.7619 Gy (0.06s)
-      Seg 53: Max=2.7619 Gy (0.06s)
-      Seg 54: Max=2.7619 Gy (0.06s)
-      Seg 55: Max=2.7619 Gy (0.06s)
-      Seg 56: Max=2.7619 Gy (0.06s)
-      Seg 57: Max=2.7619 Gy (0.06s)
-      Seg 58: Max=2.7619 Gy (0.06s)
-      Seg 59: Max=2.7619 Gy (0.06s)
-      Seg 60: Max=2.7619 Gy (0.06s)
-      Seg 61: Max=2.7619 Gy (0.06s)
-      Seg 62: Max=2.7619 Gy (0.06s)
-      Seg 63: Max=2.7619 Gy (0.06s)
-      Seg 64: Max=2.7619 Gy (0.06s)
-      Seg 65: Max=2.7619 Gy (0.06s)
-      Seg 66: Max=2.7619 Gy (0.06s)
-      Seg 67: Max=2.9590 Gy (0.06s)
-      Seg 68: Max=2.9590 Gy (0.06s)
-      Seg 69: Max=2.9590 Gy (0.06s)
-      Seg 70: Max=2.9590 Gy (0.07s)
-      Seg 71: Max=2.9590 Gy (0.06s)
-      Seg 72: Max=2.9590 Gy (0.06s)
-      Seg 73: Max=2.9590 Gy (0.06s)
-      Seg 74: Max=2.9590 Gy (0.06s)
-      Seg 75: Max=2.9590 Gy (0.06s)
-      Seg 76: Max=2.9590 Gy (0.06s)
-      Seg 77: Max=2.9590 Gy (0.06s)
-      Seg 78: Max=2.9590 Gy (0.06s)
-      Seg 79: Max=2.9590 Gy (0.06s)
-      Seg 80: Max=2.9590 Gy (0.06s)
-      Seg 81: Max=3.0573 Gy (0.06s)
-      Seg 82: Max=3.0573 Gy (0.06s)
-      Seg 83: Max=3.0573 Gy (0.06s)
-      Seg 84: Max=3.0573 Gy (0.06s)
-      Seg 85: Max=2.9566 Gy (0.06s)
-      Seg 86: Max=2.9566 Gy (0.06s)
-      Seg 87: Max=2.9566 Gy (0.06s)
-      Seg 88: Max=2.9566 Gy (0.06s)
-      Seg 89: Max=3.0533 Gy (0.06s)
-      Seg 90: Max=3.0533 Gy (0.06s)
-      Seg 91: Max=3.0533 Gy (0.06s)
-      Seg 92: Max=3.0533 Gy (0.06s)
-      Seg 93: Max=3.0533 Gy (0.06s)
-      Seg 94: Max=3.0533 Gy (0.06s)
-      Seg 95: Max=3.0533 Gy (0.06s)
-      Seg 96: Max=3.0533 Gy (0.06s)
-      Seg 97: Max=3.0533 Gy (0.06s)
-      Seg 98: Max=3.0533 Gy (0.06s)
-      Seg 99: Max=3.0533 Gy (0.06s)
-      Seg 100: Max=3.0533 Gy (0.06s)
-      Seg 101: Max=2.9554 Gy (0.06s)
-      Seg 102: Max=3.0430 Gy (0.06s)
-      Seg 103: Max=3.0430 Gy (0.06s)
-      Seg 104: Max=3.0430 Gy (0.06s)
-      Seg 105: Max=3.0430 Gy (0.06s)
-      Seg 106: Max=3.0430 Gy (0.06s)
-      Seg 107: Max=3.0430 Gy (0.06s)
-      Seg 108: Max=3.0917 Gy (0.06s)
-      Seg 109: Max=3.0917 Gy (0.06s)
-      Seg 110: Max=3.0917 Gy (0.06s)
-      Seg 111: Max=3.0917 Gy (0.06s)
-      Seg 112: Max=3.0917 Gy (0.06s)
-      Seg 113: Max=3.0917 Gy (0.06s)
-      Seg 114: Max=3.0313 Gy (0.06s)
-      Seg 115: Max=3.0313 Gy (0.06s)
-      Seg 116: Max=3.0313 Gy (0.06s)
-      Seg 117: Max=3.0313 Gy (0.06s)
-      Seg 118: Max=3.0313 Gy (0.06s)
-      Seg 119: Max=3.0313 Gy (0.06s)
-      Seg 120: Max=3.0313 Gy (0.06s)
-      Seg 121: Max=3.0313 Gy (0.06s)
-      Seg 122: Max=3.0313 Gy (0.06s)
-      Seg 123: Max=3.0313 Gy (0.06s)
-      Seg 124: Max=3.0313 Gy (0.06s)
-      Seg 125: Max=3.0919 Gy (0.06s)
-      Seg 126: Max=3.0328 Gy (0.06s)
-      Seg 127: Max=3.0328 Gy (0.06s)
-      Seg 128: Max=3.0328 Gy (0.06s)
-      Seg 129: Max=2.9413 Gy (0.06s)
-      Seg 130: Max=2.9413 Gy (0.06s)
-      Seg 131: Max=2.9413 Gy (0.06s)
-      Seg 132: Max=3.0219 Gy (0.06s)
-      Seg 133: Max=3.0219 Gy (0.06s)
-      Seg 134: Max=3.0725 Gy (0.06s)
-      Seg 135: Max=3.0725 Gy (0.06s)
-      Seg 136: Max=3.0725 Gy (0.06s)
-      Seg 137: Max=3.0132 Gy (0.06s)
-      Seg 138: Max=3.0132 Gy (0.06s)
-      Seg 139: Max=3.0697 Gy (0.06s)
-      Seg 140: Max=3.0697 Gy (0.06s)
-      Seg 141: Max=3.0697 Gy (0.06s)
-      Seg 142: Max=3.0697 Gy (0.06s)
-      Seg 143: Max=3.0103 Gy (0.06s)
-      Seg 144: Max=3.0103 Gy (0.06s)
-      Seg 145: Max=3.0103 Gy (0.06s)
-      Seg 146: Max=3.0103 Gy (0.06s)
-      Seg 147: Max=2.9171 Gy (0.06s)
-      Seg 148: Max=2.7177 Gy (0.06s)
-      Seg 149: Max=2.9153 Gy (0.06s)
-      Seg 150: Max=2.9153 Gy (0.06s)
-      Seg 151: Max=3.0026 Gy (0.06s)
-      Seg 152: Max=3.0026 Gy (0.06s)
-      Seg 153: Max=3.0026 Gy (0.06s)
-      Seg 154: Max=3.0026 Gy (0.06s)
-      Seg 155: Max=3.0026 Gy (0.06s)
-      Seg 156: Max=3.0026 Gy (0.06s)
-      Seg 157: Max=3.0026 Gy (0.06s)
-      Seg 158: Max=3.0026 Gy (0.06s)
-      Seg 159: Max=2.9105 Gy (0.06s)
-      Seg 160: Max=2.7112 Gy (0.06s)
-      Seg 161: Max=1.9764 Gy (0.06s)
-      Seg 162: Max=1.9764 Gy (0.06s)
-    Beam 4 complete: Max=190.4229 Gy
+Progress:100.00 %
+Dose calculation finished in 16.3721 seconds!
+    Calculated dij (707 bixels) in 16.4 sec
+    First segment MLC diagnostics:
+      MLC layers: 2
+        Layer 1: 56 positions
+        Layer 2: 58 positions
+      MLC devices with boundaries: 2
+        Device 1 (MLCX1): 28 leaf pairs
+        Device 2 (MLCX2): 29 leaf pairs
+      Seg 40: Open=23 bixels, Max=1.9838 Gy
+      Seg 60: Open=46 bixels, Max=2.7628 Gy
+      Seg 80: Open=69 bixels, Max=2.9357 Gy
+      Seg 100: Open=92 bixels, Max=3.0347 Gy
+      Seg 120: Open=92 bixels, Max=3.0282 Gy
+      Seg 140: Open=115 bixels, Max=3.0657 Gy
+      Seg 160: Open=23 bixels, Max=1.9292 Gy
+    Processed 137 segments (skipped 0) in 1.9 sec
+    Average open bixels per segment: 67.7 / 707 (9.6%)
+    Beam 4 complete: Max=163.6550 Gy
 
   Beam 5/17 (Field 5): 165 segments, 326.2 MU
     Calculating dij matrix...
@@ -882,7 +414,7 @@ Warning: Inconsistent dose engines given! pln asks for 'pencilBeam', but you are
 'SVDPB'!
 Warning: Using default dose calculation engine SVD Pencil Beam!
 Dose influence matrix calculation using  'SVD Pencil Beam' Dose Engine...
-Dose grid has dimensions 299x299x67
+Dose grid has dimensions 199x199x45
 Adjusting structures for overlap... Done!
 Resampling structure set... Warning: Resizing the cst to the dose grid created an empty structure 35 opti in scenario 1
 (cst{13,4}{1})!
@@ -902,139 +434,27 @@ Warning: projecting out of range HU values
 Warning: Kernel Cut-Off 'Inf mm' larger than machine data range of '179.500000 mm'. Using
 '179.500000 mm'!
 matRad: calculate radiological depth cube... done.
-	SSD = 891 mm ...
+	SSD = 893 mm ...
 	Uniform primary photon fluence -> pre-compute kernel convolution...
 Progress:100.00 %
-Dose calculation finished in 33.9144 seconds!
-    Calculated dij (651 bixels) in 34.0 sec
-      Seg 1: Max=1.5430 Gy (0.06s)
-      Seg 2: Max=1.5430 Gy (0.06s)
-      Seg 3: Max=1.5430 Gy (0.06s)
-      Seg 4: Max=1.5430 Gy (0.06s)
-      Seg 5: Max=1.5430 Gy (0.06s)
-      Seg 22: Max=1.5414 Gy (0.06s)
-      Seg 23: Max=1.5414 Gy (0.06s)
-      Seg 24: Max=1.5414 Gy (0.06s)
-      Seg 25: Max=1.5414 Gy (0.06s)
-      Seg 26: Max=1.5414 Gy (0.06s)
-      Seg 27: Max=1.5414 Gy (0.06s)
-      Seg 28: Max=1.5414 Gy (0.06s)
-      Seg 29: Max=2.1174 Gy (0.06s)
-      Seg 30: Max=2.1174 Gy (0.06s)
-      Seg 31: Max=2.2978 Gy (0.06s)
-      Seg 32: Max=2.2978 Gy (0.06s)
-      Seg 33: Max=2.2978 Gy (0.06s)
-      Seg 34: Max=2.3789 Gy (0.06s)
-      Seg 35: Max=2.4265 Gy (0.06s)
-      Seg 36: Max=2.4265 Gy (0.06s)
-      Seg 37: Max=2.4265 Gy (0.06s)
-      Seg 38: Max=2.4265 Gy (0.06s)
-      Seg 39: Max=2.4265 Gy (0.05s)
-      Seg 40: Max=2.4265 Gy (0.06s)
-      Seg 41: Max=2.4265 Gy (0.06s)
-      Seg 42: Max=2.4265 Gy (0.06s)
-      Seg 43: Max=2.4265 Gy (0.06s)
-      Seg 44: Max=2.4265 Gy (0.06s)
-      Seg 45: Max=2.4265 Gy (0.06s)
-      Seg 46: Max=2.4654 Gy (0.06s)
-      Seg 47: Max=2.4654 Gy (0.06s)
-      Seg 48: Max=2.4654 Gy (0.05s)
-      Seg 49: Max=2.4433 Gy (0.06s)
-      Seg 50: Max=2.4433 Gy (0.06s)
-      Seg 51: Max=2.4433 Gy (0.06s)
-      Seg 52: Max=2.4433 Gy (0.05s)
-      Seg 53: Max=2.4762 Gy (0.06s)
-      Seg 54: Max=2.4762 Gy (0.05s)
-      Seg 55: Max=2.4762 Gy (0.05s)
-      Seg 56: Max=2.4762 Gy (0.06s)
-      Seg 57: Max=2.4855 Gy (0.06s)
-      Seg 58: Max=2.4855 Gy (0.06s)
-      Seg 59: Max=2.4855 Gy (0.06s)
-      Seg 60: Max=2.4855 Gy (0.06s)
-      Seg 61: Max=2.4855 Gy (0.06s)
-      Seg 62: Max=2.4855 Gy (0.06s)
-      Seg 63: Max=2.4855 Gy (0.06s)
-      Seg 64: Max=2.4855 Gy (0.06s)
-      Seg 65: Max=2.4855 Gy (0.06s)
-      Seg 66: Max=2.4855 Gy (0.06s)
-      Seg 67: Max=2.4855 Gy (0.06s)
-      Seg 68: Max=2.4619 Gy (0.06s)
-      Seg 69: Max=2.4619 Gy (0.05s)
-      Seg 70: Max=2.4619 Gy (0.06s)
-      Seg 71: Max=2.4619 Gy (0.06s)
-      Seg 72: Max=2.4264 Gy (0.06s)
-      Seg 73: Max=2.4264 Gy (0.06s)
-      Seg 74: Max=2.4711 Gy (0.06s)
-      Seg 75: Max=2.4711 Gy (0.06s)
-      Seg 76: Max=2.4711 Gy (0.06s)
-      Seg 77: Max=2.4711 Gy (0.05s)
-      Seg 78: Max=2.4711 Gy (0.06s)
-      Seg 79: Max=2.4711 Gy (0.06s)
-      Seg 80: Max=2.4711 Gy (0.06s)
-      Seg 81: Max=2.4711 Gy (0.06s)
-      Seg 82: Max=2.5110 Gy (0.06s)
-      Seg 83: Max=2.5110 Gy (0.06s)
-      Seg 84: Max=2.4866 Gy (0.05s)
-      Seg 85: Max=2.4866 Gy (0.06s)
-      Seg 86: Max=2.4866 Gy (0.05s)
-      Seg 87: Max=2.4866 Gy (0.06s)
-      Seg 88: Max=2.4866 Gy (0.06s)
-      Seg 89: Max=2.4866 Gy (0.06s)
-      Seg 90: Max=2.4866 Gy (0.06s)
-      Seg 91: Max=2.4866 Gy (0.06s)
-      Seg 92: Max=2.4866 Gy (0.06s)
-      Seg 93: Max=2.4417 Gy (0.06s)
-      Seg 94: Max=2.3695 Gy (0.06s)
-      Seg 95: Max=2.3695 Gy (0.06s)
-      Seg 96: Max=2.3695 Gy (0.06s)
-      Seg 97: Max=2.3695 Gy (0.05s)
-      Seg 98: Max=2.4459 Gy (0.05s)
-      Seg 99: Max=2.4459 Gy (0.05s)
-      Seg 100: Max=2.4459 Gy (0.07s)
-      Seg 101: Max=2.4459 Gy (0.05s)
-      Seg 102: Max=2.4459 Gy (0.06s)
-      Seg 103: Max=2.4459 Gy (0.06s)
-      Seg 104: Max=2.4459 Gy (0.06s)
-      Seg 105: Max=2.4459 Gy (0.06s)
-      Seg 106: Max=2.4459 Gy (0.06s)
-      Seg 107: Max=2.4459 Gy (0.10s)
-      Seg 108: Max=2.4459 Gy (0.06s)
-      Seg 109: Max=2.4459 Gy (0.05s)
-      Seg 110: Max=2.4459 Gy (0.06s)
-      Seg 111: Max=2.3723 Gy (0.06s)
-      Seg 112: Max=2.3723 Gy (0.06s)
-      Seg 113: Max=2.3723 Gy (0.06s)
-      Seg 114: Max=2.3723 Gy (0.06s)
-      Seg 115: Max=2.3723 Gy (0.06s)
-      Seg 116: Max=2.3723 Gy (0.06s)
-      Seg 117: Max=2.3723 Gy (0.06s)
-      Seg 118: Max=2.3723 Gy (0.06s)
-      Seg 119: Max=2.3723 Gy (0.06s)
-      Seg 120: Max=2.3723 Gy (0.06s)
-      Seg 121: Max=2.1895 Gy (0.06s)
-      Seg 122: Max=2.1895 Gy (0.06s)
-      Seg 123: Max=1.5757 Gy (0.06s)
-      Seg 124: Max=1.5757 Gy (0.06s)
-      Seg 125: Max=1.5757 Gy (0.06s)
-      Seg 126: Max=1.5757 Gy (0.05s)
-      Seg 127: Max=1.5757 Gy (0.05s)
-      Seg 128: Max=2.2060 Gy (0.06s)
-      Seg 129: Max=2.2060 Gy (0.05s)
-      Seg 130: Max=2.2060 Gy (0.06s)
-      Seg 131: Max=2.2060 Gy (0.05s)
-      Seg 132: Max=2.2060 Gy (0.06s)
-      Seg 133: Max=2.2060 Gy (0.06s)
-      Seg 134: Max=2.2060 Gy (0.06s)
-      Seg 135: Max=2.2060 Gy (0.06s)
-      Seg 136: Max=2.2060 Gy (0.06s)
-      Seg 137: Max=1.5929 Gy (0.06s)
-      Seg 138: Max=1.5929 Gy (0.06s)
-      Seg 139: Max=1.5929 Gy (0.06s)
-      Seg 140: Max=1.6090 Gy (0.06s)
-      Seg 141: Max=1.6090 Gy (0.06s)
-      Seg 142: Max=1.6090 Gy (0.06s)
-      Seg 143: Max=1.6090 Gy (0.05s)
-    Beam 5 complete: Max=130.0603 Gy
+Dose calculation finished in 26.7143 seconds!
+    Calculated dij (665 bixels) in 26.8 sec
+    First segment MLC diagnostics:
+      MLC layers: 2
+        Layer 1: 56 positions
+        Layer 2: 58 positions
+      MLC devices with boundaries: 2
+        Device 1 (MLCX1): 28 leaf pairs
+        Device 2 (MLCX2): 29 leaf pairs
+      Seg 40: Open=46 bixels, Max=2.1363 Gy
+      Seg 60: Open=115 bixels, Max=2.4461 Gy
+      Seg 80: Open=115 bixels, Max=2.4673 Gy
+      Seg 100: Open=92 bixels, Max=2.4489 Gy
+      Seg 120: Open=23 bixels, Max=1.5871 Gy
+      Seg 140: Open=23 bixels, Max=1.5498 Gy
+    Processed 121 segments (skipped 0) in 1.6 sec
+    Average open bixels per segment: 72.4 / 665 (10.9%)
+    Beam 5 complete: Max=107.2677 Gy
 
   Beam 6/17 (Field 6): 165 segments, 317.0 MU
     Calculating dij matrix...
@@ -1042,7 +462,7 @@ Warning: Inconsistent dose engines given! pln asks for 'pencilBeam', but you are
 'SVDPB'!
 Warning: Using default dose calculation engine SVD Pencil Beam!
 Dose influence matrix calculation using  'SVD Pencil Beam' Dose Engine...
-Dose grid has dimensions 299x299x67
+Dose grid has dimensions 199x199x45
 Adjusting structures for overlap... Done!
 Resampling structure set... Warning: Resizing the cst to the dose grid created an empty structure 35 opti in scenario 1
 (cst{13,4}{1})!
@@ -1062,171 +482,29 @@ Warning: projecting out of range HU values
 Warning: Kernel Cut-Off 'Inf mm' larger than machine data range of '179.500000 mm'. Using
 '179.500000 mm'!
 matRad: calculate radiological depth cube... done.
-	SSD = 882 mm ...
+	SSD = 885 mm ...
 	Uniform primary photon fluence -> pre-compute kernel convolution...
 Progress:100.00 %
-Dose calculation finished in 30.1396 seconds!
-    Calculated dij (632 bixels) in 30.3 sec
-      Seg 7: Max=1.5968 Gy (0.06s)
-      Seg 8: Max=1.5968 Gy (0.06s)
-      Seg 9: Max=1.5968 Gy (0.05s)
-      Seg 10: Max=1.5968 Gy (0.05s)
-      Seg 11: Max=1.5968 Gy (0.05s)
-      Seg 12: Max=1.5968 Gy (0.05s)
-      Seg 13: Max=1.5968 Gy (0.05s)
-      Seg 14: Max=1.5968 Gy (0.05s)
-      Seg 15: Max=1.5968 Gy (0.05s)
-      Seg 16: Max=1.5968 Gy (0.05s)
-      Seg 17: Max=1.5968 Gy (0.05s)
-      Seg 18: Max=1.5968 Gy (0.05s)
-      Seg 19: Max=1.5968 Gy (0.05s)
-      Seg 20: Max=1.5968 Gy (0.05s)
-      Seg 21: Max=1.5968 Gy (0.05s)
-      Seg 22: Max=1.5968 Gy (0.05s)
-      Seg 23: Max=1.5968 Gy (0.05s)
-      Seg 24: Max=1.5968 Gy (0.05s)
-      Seg 25: Max=1.5968 Gy (0.05s)
-      Seg 26: Max=1.5968 Gy (0.05s)
-      Seg 27: Max=1.5968 Gy (0.05s)
-      Seg 28: Max=1.5968 Gy (0.05s)
-      Seg 29: Max=1.5968 Gy (0.05s)
-      Seg 30: Max=2.1814 Gy (0.05s)
-      Seg 31: Max=2.3359 Gy (0.05s)
-      Seg 32: Max=2.3359 Gy (0.05s)
-      Seg 33: Max=2.3359 Gy (0.05s)
-      Seg 34: Max=2.3359 Gy (0.05s)
-      Seg 35: Max=2.3359 Gy (0.05s)
-      Seg 36: Max=2.3359 Gy (0.05s)
-      Seg 37: Max=2.3359 Gy (0.05s)
-      Seg 38: Max=2.3359 Gy (0.05s)
-      Seg 39: Max=2.3359 Gy (0.05s)
-      Seg 40: Max=2.3359 Gy (0.05s)
-      Seg 41: Max=2.3359 Gy (0.05s)
-      Seg 42: Max=2.1817 Gy (0.05s)
-      Seg 43: Max=2.1817 Gy (0.05s)
-      Seg 44: Max=2.1817 Gy (0.05s)
-      Seg 45: Max=1.5828 Gy (0.05s)
-      Seg 46: Max=1.5828 Gy (0.05s)
-      Seg 47: Max=1.5828 Gy (0.05s)
-      Seg 48: Max=2.1779 Gy (0.05s)
-      Seg 49: Max=2.1779 Gy (0.05s)
-      Seg 50: Max=2.1779 Gy (0.05s)
-      Seg 51: Max=2.1779 Gy (0.05s)
-      Seg 52: Max=2.1779 Gy (0.05s)
-      Seg 53: Max=1.5997 Gy (0.05s)
-      Seg 54: Max=2.1967 Gy (0.05s)
-      Seg 55: Max=2.1967 Gy (0.05s)
-      Seg 56: Max=2.1967 Gy (0.05s)
-      Seg 57: Max=2.1967 Gy (0.05s)
-      Seg 58: Max=2.1967 Gy (0.05s)
-      Seg 59: Max=2.1967 Gy (0.05s)
-      Seg 60: Max=2.1967 Gy (0.05s)
-      Seg 61: Max=2.1967 Gy (0.05s)
-      Seg 62: Max=2.1967 Gy (0.05s)
-      Seg 63: Max=2.1967 Gy (0.05s)
-      Seg 64: Max=2.1967 Gy (0.05s)
-      Seg 65: Max=2.1967 Gy (0.05s)
-      Seg 66: Max=2.1967 Gy (0.05s)
-      Seg 67: Max=2.1967 Gy (0.05s)
-      Seg 68: Max=2.1967 Gy (0.05s)
-      Seg 69: Max=2.1967 Gy (0.05s)
-      Seg 70: Max=2.1967 Gy (0.05s)
-      Seg 71: Max=2.3470 Gy (0.05s)
-      Seg 72: Max=2.3470 Gy (0.05s)
-      Seg 73: Max=2.3470 Gy (0.05s)
-      Seg 74: Max=2.3470 Gy (0.05s)
-      Seg 75: Max=2.3470 Gy (0.05s)
-      Seg 76: Max=2.3470 Gy (0.05s)
-      Seg 77: Max=2.4195 Gy (0.05s)
-      Seg 78: Max=2.4203 Gy (0.05s)
-      Seg 79: Max=2.4203 Gy (0.05s)
-      Seg 80: Max=2.4203 Gy (0.05s)
-      Seg 81: Max=2.4601 Gy (0.05s)
-      Seg 82: Max=2.4601 Gy (0.05s)
-      Seg 83: Max=2.4601 Gy (0.05s)
-      Seg 84: Max=2.4601 Gy (0.05s)
-      Seg 85: Max=2.4601 Gy (0.05s)
-      Seg 86: Max=2.4601 Gy (0.05s)
-      Seg 87: Max=2.4601 Gy (0.05s)
-      Seg 88: Max=2.4601 Gy (0.05s)
-      Seg 89: Max=2.4601 Gy (0.05s)
-      Seg 90: Max=2.4601 Gy (0.05s)
-      Seg 91: Max=2.4601 Gy (0.05s)
-      Seg 92: Max=2.4601 Gy (0.05s)
-      Seg 93: Max=2.4601 Gy (0.05s)
-      Seg 94: Max=2.4601 Gy (0.05s)
-      Seg 95: Max=2.4601 Gy (0.05s)
-      Seg 96: Max=2.4601 Gy (0.05s)
-      Seg 97: Max=2.4601 Gy (0.05s)
-      Seg 98: Max=2.4601 Gy (0.05s)
-      Seg 99: Max=2.4601 Gy (0.05s)
-      Seg 100: Max=2.4601 Gy (0.05s)
-      Seg 101: Max=2.4601 Gy (0.05s)
-      Seg 102: Max=2.4601 Gy (0.05s)
-      Seg 103: Max=2.4601 Gy (0.05s)
-      Seg 104: Max=2.4601 Gy (0.05s)
-      Seg 105: Max=2.4601 Gy (0.05s)
-      Seg 106: Max=2.4601 Gy (0.05s)
-      Seg 107: Max=2.4601 Gy (0.05s)
-      Seg 108: Max=2.4601 Gy (0.05s)
-      Seg 109: Max=2.4622 Gy (0.05s)
-      Seg 110: Max=2.4145 Gy (0.05s)
-      Seg 111: Max=2.4145 Gy (0.05s)
-      Seg 112: Max=2.4145 Gy (0.05s)
-      Seg 113: Max=2.4145 Gy (0.05s)
-      Seg 114: Max=2.4145 Gy (0.05s)
-      Seg 115: Max=2.4145 Gy (0.05s)
-      Seg 116: Max=2.4554 Gy (0.05s)
-      Seg 117: Max=2.4066 Gy (0.05s)
-      Seg 118: Max=2.4066 Gy (0.05s)
-      Seg 119: Max=2.4066 Gy (0.05s)
-      Seg 120: Max=2.4066 Gy (0.05s)
-      Seg 121: Max=2.4066 Gy (0.05s)
-      Seg 122: Max=2.4066 Gy (0.05s)
-      Seg 123: Max=2.4066 Gy (0.05s)
-      Seg 124: Max=2.4066 Gy (0.05s)
-      Seg 125: Max=2.4066 Gy (0.05s)
-      Seg 126: Max=2.4066 Gy (0.05s)
-      Seg 127: Max=2.4066 Gy (0.05s)
-      Seg 128: Max=2.4066 Gy (0.05s)
-      Seg 129: Max=2.4066 Gy (0.05s)
-      Seg 130: Max=2.4422 Gy (0.05s)
-      Seg 131: Max=2.4422 Gy (0.05s)
-      Seg 132: Max=2.4422 Gy (0.05s)
-      Seg 133: Max=2.3970 Gy (0.05s)
-      Seg 134: Max=2.3970 Gy (0.05s)
-      Seg 135: Max=2.3970 Gy (0.05s)
-      Seg 136: Max=2.3970 Gy (0.05s)
-      Seg 137: Max=2.3970 Gy (0.05s)
-      Seg 138: Max=2.3970 Gy (0.05s)
-      Seg 139: Max=2.3970 Gy (0.05s)
-      Seg 140: Max=2.3970 Gy (0.05s)
-      Seg 141: Max=2.3970 Gy (0.05s)
-      Seg 142: Max=2.3970 Gy (0.05s)
-      Seg 143: Max=2.3970 Gy (0.05s)
-      Seg 144: Max=2.3970 Gy (0.05s)
-      Seg 145: Max=2.3192 Gy (0.05s)
-      Seg 146: Max=2.1553 Gy (0.05s)
-      Seg 147: Max=2.1553 Gy (0.05s)
-      Seg 148: Max=2.1553 Gy (0.05s)
-      Seg 149: Max=2.1553 Gy (0.05s)
-      Seg 150: Max=2.1553 Gy (0.05s)
-      Seg 151: Max=2.1553 Gy (0.05s)
-      Seg 152: Max=2.1553 Gy (0.05s)
-      Seg 153: Max=1.5795 Gy (0.05s)
-      Seg 154: Max=1.5795 Gy (0.05s)
-      Seg 155: Max=1.5795 Gy (0.05s)
-      Seg 156: Max=1.5795 Gy (0.05s)
-      Seg 157: Max=1.5795 Gy (0.05s)
-      Seg 158: Max=1.5795 Gy (0.05s)
-      Seg 159: Max=1.5795 Gy (0.05s)
-      Seg 160: Max=1.5795 Gy (0.05s)
-      Seg 161: Max=1.5795 Gy (0.05s)
-      Seg 162: Max=1.5795 Gy (0.05s)
-      Seg 163: Max=1.5795 Gy (0.05s)
-      Seg 164: Max=1.5795 Gy (0.05s)
-      Seg 165: Max=1.5795 Gy (0.05s)
-    Beam 6 complete: Max=146.5160 Gy
+Dose calculation finished in 24.4781 seconds!
+    Calculated dij (637 bixels) in 24.6 sec
+    First segment MLC diagnostics:
+      MLC layers: 2
+        Layer 1: 56 positions
+        Layer 2: 58 positions
+      MLC devices with boundaries: 2
+        Device 1 (MLCX1): 28 leaf pairs
+        Device 2 (MLCX2): 29 leaf pairs
+      Seg 20: Open=23 bixels, Max=1.5542 Gy
+      Seg 40: Open=46 bixels, Max=2.1632 Gy
+      Seg 60: Open=46 bixels, Max=2.1702 Gy
+      Seg 80: Open=92 bixels, Max=2.4185 Gy
+      Seg 100: Open=115 bixels, Max=2.4545 Gy
+      Seg 120: Open=92 bixels, Max=2.3972 Gy
+      Seg 140: Open=46 bixels, Max=2.1553 Gy
+      Seg 160: Open=23 bixels, Max=1.5472 Gy
+    Processed 155 segments (skipped 0) in 1.7 sec
+    Average open bixels per segment: 58.0 / 637 (9.1%)
+    Beam 6 complete: Max=122.0483 Gy
 
   Beam 7/17 (Field 7): 165 segments, 443.3 MU
     Calculating dij matrix...
@@ -1234,7 +512,7 @@ Warning: Inconsistent dose engines given! pln asks for 'pencilBeam', but you are
 'SVDPB'!
 Warning: Using default dose calculation engine SVD Pencil Beam!
 Dose influence matrix calculation using  'SVD Pencil Beam' Dose Engine...
-Dose grid has dimensions 299x299x67
+Dose grid has dimensions 199x199x45
 Adjusting structures for overlap... Done!
 Resampling structure set... Warning: Resizing the cst to the dose grid created an empty structure 35 opti in scenario 1
 (cst{13,4}{1})!
@@ -1254,168 +532,28 @@ Warning: projecting out of range HU values
 Warning: Kernel Cut-Off 'Inf mm' larger than machine data range of '179.500000 mm'. Using
 '179.500000 mm'!
 matRad: calculate radiological depth cube... done.
-	SSD = 718 mm ...
+	SSD = 719 mm ...
 	Uniform primary photon fluence -> pre-compute kernel convolution...
 Progress:100.00 %
-Dose calculation finished in 29.5666 seconds!
-    Calculated dij (605 bixels) in 29.7 sec
-      Seg 2: Max=3.2762 Gy (0.07s)
-      Seg 3: Max=3.2762 Gy (0.06s)
-      Seg 4: Max=3.2762 Gy (0.06s)
-      Seg 5: Max=3.2762 Gy (0.06s)
-      Seg 6: Max=3.2762 Gy (0.06s)
-      Seg 15: Max=3.2660 Gy (0.06s)
-      Seg 16: Max=3.2660 Gy (0.06s)
-      Seg 17: Max=3.2660 Gy (0.06s)
-      Seg 18: Max=3.2660 Gy (0.06s)
-      Seg 19: Max=3.2660 Gy (0.06s)
-      Seg 20: Max=3.2660 Gy (0.06s)
-      Seg 21: Max=3.2660 Gy (0.06s)
-      Seg 22: Max=3.2660 Gy (0.06s)
-      Seg 23: Max=3.2660 Gy (0.06s)
-      Seg 24: Max=3.2660 Gy (0.06s)
-      Seg 25: Max=3.2660 Gy (0.06s)
-      Seg 26: Max=3.2660 Gy (0.06s)
-      Seg 27: Max=3.2660 Gy (0.06s)
-      Seg 28: Max=3.2660 Gy (0.06s)
-      Seg 29: Max=3.2660 Gy (0.06s)
-      Seg 30: Max=3.2660 Gy (0.06s)
-      Seg 31: Max=3.2660 Gy (0.06s)
-      Seg 32: Max=3.2660 Gy (0.06s)
-      Seg 33: Max=3.2660 Gy (0.06s)
-      Seg 34: Max=3.2660 Gy (0.06s)
-      Seg 35: Max=4.5213 Gy (0.06s)
-      Seg 36: Max=4.5213 Gy (0.06s)
-      Seg 37: Max=4.5213 Gy (0.06s)
-      Seg 38: Max=4.5213 Gy (0.06s)
-      Seg 39: Max=4.5213 Gy (0.06s)
-      Seg 40: Max=4.5213 Gy (0.06s)
-      Seg 41: Max=4.5213 Gy (0.06s)
-      Seg 42: Max=4.5213 Gy (0.06s)
-      Seg 43: Max=4.5213 Gy (0.06s)
-      Seg 44: Max=4.5213 Gy (0.06s)
-      Seg 45: Max=4.5213 Gy (0.06s)
-      Seg 46: Max=4.5213 Gy (0.06s)
-      Seg 47: Max=4.5213 Gy (0.05s)
-      Seg 48: Max=4.5213 Gy (0.05s)
-      Seg 49: Max=4.5213 Gy (0.06s)
-      Seg 50: Max=4.5213 Gy (0.05s)
-      Seg 51: Max=4.5213 Gy (0.05s)
-      Seg 52: Max=4.5213 Gy (0.05s)
-      Seg 53: Max=4.9157 Gy (0.05s)
-      Seg 54: Max=4.9157 Gy (0.05s)
-      Seg 55: Max=4.9157 Gy (0.05s)
-      Seg 56: Max=4.9157 Gy (0.05s)
-      Seg 57: Max=4.9157 Gy (0.05s)
-      Seg 58: Max=4.9157 Gy (0.05s)
-      Seg 59: Max=4.9157 Gy (0.05s)
-      Seg 60: Max=4.9157 Gy (0.05s)
-      Seg 61: Max=4.9157 Gy (0.06s)
-      Seg 62: Max=4.9157 Gy (0.05s)
-      Seg 63: Max=4.9157 Gy (0.05s)
-      Seg 64: Max=4.9157 Gy (0.06s)
-      Seg 65: Max=4.9157 Gy (0.05s)
-      Seg 66: Max=4.9157 Gy (0.05s)
-      Seg 67: Max=4.9157 Gy (0.05s)
-      Seg 68: Max=4.9157 Gy (0.05s)
-      Seg 69: Max=4.9157 Gy (0.05s)
-      Seg 70: Max=4.9157 Gy (0.05s)
-      Seg 71: Max=4.9157 Gy (0.05s)
-      Seg 72: Max=4.9157 Gy (0.05s)
-      Seg 73: Max=5.1074 Gy (0.05s)
-      Seg 74: Max=5.1074 Gy (0.05s)
-      Seg 75: Max=5.1074 Gy (0.05s)
-      Seg 76: Max=5.1074 Gy (0.05s)
-      Seg 77: Max=5.1074 Gy (0.05s)
-      Seg 78: Max=5.1074 Gy (0.05s)
-      Seg 79: Max=5.1074 Gy (0.05s)
-      Seg 80: Max=5.1074 Gy (0.05s)
-      Seg 81: Max=5.1074 Gy (0.05s)
-      Seg 82: Max=5.1074 Gy (0.05s)
-      Seg 83: Max=5.1074 Gy (0.05s)
-      Seg 84: Max=5.1074 Gy (0.05s)
-      Seg 85: Max=5.1074 Gy (0.05s)
-      Seg 86: Max=5.1074 Gy (0.05s)
-      Seg 87: Max=5.1074 Gy (0.05s)
-      Seg 88: Max=5.1074 Gy (0.05s)
-      Seg 89: Max=5.2020 Gy (0.05s)
-      Seg 90: Max=5.2020 Gy (0.05s)
-      Seg 91: Max=5.2020 Gy (0.05s)
-      Seg 92: Max=5.2020 Gy (0.05s)
-      Seg 93: Max=5.2020 Gy (0.05s)
-      Seg 94: Max=5.2020 Gy (0.05s)
-      Seg 95: Max=5.2020 Gy (0.05s)
-      Seg 96: Max=5.2020 Gy (0.05s)
-      Seg 97: Max=5.2020 Gy (0.05s)
-      Seg 98: Max=5.2020 Gy (0.05s)
-      Seg 99: Max=5.2743 Gy (0.05s)
-      Seg 100: Max=5.0786 Gy (0.05s)
-      Seg 101: Max=5.0786 Gy (0.05s)
-      Seg 102: Max=5.0786 Gy (0.05s)
-      Seg 103: Max=5.1434 Gy (0.05s)
-      Seg 104: Max=5.1434 Gy (0.05s)
-      Seg 105: Max=5.1434 Gy (0.05s)
-      Seg 106: Max=5.1434 Gy (0.05s)
-      Seg 107: Max=5.1434 Gy (0.05s)
-      Seg 108: Max=5.1434 Gy (0.05s)
-      Seg 109: Max=5.1434 Gy (0.05s)
-      Seg 110: Max=5.1434 Gy (0.05s)
-      Seg 111: Max=5.1434 Gy (0.05s)
-      Seg 112: Max=4.9886 Gy (0.05s)
-      Seg 113: Max=4.9886 Gy (0.05s)
-      Seg 114: Max=4.9886 Gy (0.05s)
-      Seg 115: Max=5.0324 Gy (0.05s)
-      Seg 116: Max=5.0324 Gy (0.05s)
-      Seg 117: Max=5.0324 Gy (0.05s)
-      Seg 118: Max=5.0324 Gy (0.05s)
-      Seg 119: Max=5.0324 Gy (0.05s)
-      Seg 120: Max=5.0324 Gy (0.05s)
-      Seg 121: Max=4.8083 Gy (0.05s)
-      Seg 122: Max=4.4983 Gy (0.05s)
-      Seg 123: Max=4.4983 Gy (0.05s)
-      Seg 124: Max=4.4983 Gy (0.05s)
-      Seg 125: Max=4.4983 Gy (0.05s)
-      Seg 126: Max=4.0660 Gy (0.05s)
-      Seg 127: Max=4.0660 Gy (0.05s)
-      Seg 128: Max=4.0660 Gy (0.05s)
-      Seg 129: Max=4.0660 Gy (0.05s)
-      Seg 130: Max=4.0660 Gy (0.05s)
-      Seg 131: Max=4.0660 Gy (0.05s)
-      Seg 132: Max=4.0660 Gy (0.05s)
-      Seg 133: Max=4.3262 Gy (0.05s)
-      Seg 134: Max=4.3262 Gy (0.05s)
-      Seg 135: Max=4.3262 Gy (0.06s)
-      Seg 136: Max=4.3262 Gy (0.06s)
-      Seg 137: Max=4.3262 Gy (0.05s)
-      Seg 138: Max=4.3262 Gy (0.05s)
-      Seg 139: Max=4.3262 Gy (0.05s)
-      Seg 140: Max=4.0134 Gy (0.05s)
-      Seg 141: Max=4.0134 Gy (0.05s)
-      Seg 142: Max=4.0134 Gy (0.05s)
-      Seg 143: Max=4.0134 Gy (0.05s)
-      Seg 144: Max=4.0134 Gy (0.05s)
-      Seg 145: Max=4.0134 Gy (0.05s)
-      Seg 146: Max=4.0134 Gy (0.05s)
-      Seg 147: Max=4.0134 Gy (0.06s)
-      Seg 148: Max=4.0134 Gy (0.05s)
-      Seg 149: Max=4.0134 Gy (0.05s)
-      Seg 150: Max=4.0134 Gy (0.05s)
-      Seg 151: Max=4.0134 Gy (0.05s)
-      Seg 152: Max=4.0134 Gy (0.05s)
-      Seg 153: Max=4.0134 Gy (0.05s)
-      Seg 154: Max=4.0134 Gy (0.05s)
-      Seg 155: Max=4.0134 Gy (0.05s)
-      Seg 156: Max=4.0134 Gy (0.05s)
-      Seg 157: Max=4.0134 Gy (0.05s)
-      Seg 158: Max=4.0134 Gy (0.05s)
-      Seg 159: Max=4.0134 Gy (0.05s)
-      Seg 160: Max=4.0134 Gy (0.05s)
-      Seg 161: Max=2.9706 Gy (0.05s)
-      Seg 162: Max=2.9706 Gy (0.05s)
-      Seg 163: Max=2.9706 Gy (0.05s)
-      Seg 164: Max=2.9706 Gy (0.05s)
-      Seg 165: Max=2.9706 Gy (0.05s)
-    Beam 7 complete: Max=368.6740 Gy
+Dose calculation finished in 8.56512 seconds!
+    Calculated dij (607 bixels) in 8.6 sec
+    First segment MLC diagnostics:
+      MLC layers: 2
+        Layer 1: 56 positions
+        Layer 2: 58 positions
+      MLC devices with boundaries: 2
+        Device 1 (MLCX1): 28 leaf pairs
+        Device 2 (MLCX2): 29 leaf pairs
+      Seg 20: Open=23 bixels, Max=3.1304 Gy
+      Seg 40: Open=46 bixels, Max=4.4604 Gy
+      Seg 60: Open=69 bixels, Max=4.8973 Gy
+      Seg 80: Open=92 bixels, Max=5.0659 Gy
+      Seg 100: Open=92 bixels, Max=5.0469 Gy
+      Seg 120: Open=46 bixels, Max=3.9618 Gy
+      Seg 140: Open=46 bixels, Max=3.9834 Gy
+    Processed 146 segments (skipped 0) in 1.7 sec
+    Average open bixels per segment: 56.9 / 607 (9.4%)
+    Beam 7 complete: Max=343.5117 Gy
 
   Beam 8/17 (Field 8): 165 segments, 359.4 MU
     Calculating dij matrix...
@@ -1423,7 +561,7 @@ Warning: Inconsistent dose engines given! pln asks for 'pencilBeam', but you are
 'SVDPB'!
 Warning: Using default dose calculation engine SVD Pencil Beam!
 Dose influence matrix calculation using  'SVD Pencil Beam' Dose Engine...
-Dose grid has dimensions 299x299x67
+Dose grid has dimensions 199x199x45
 Adjusting structures for overlap... Done!
 Resampling structure set... Warning: Resizing the cst to the dose grid created an empty structure 35 opti in scenario 1
 (cst{13,4}{1})!
@@ -1443,156 +581,29 @@ Warning: projecting out of range HU values
 Warning: Kernel Cut-Off 'Inf mm' larger than machine data range of '179.500000 mm'. Using
 '179.500000 mm'!
 matRad: calculate radiological depth cube... done.
-	SSD = 760 mm ...
+	SSD = 761 mm ...
 	Uniform primary photon fluence -> pre-compute kernel convolution...
 Progress: 100.00 %
-Dose calculation finished in 29.8925 seconds!
-    Calculated dij (627 bixels) in 30.0 sec
-      Seg 20: Max=1.9105 Gy (0.06s)
-      Seg 21: Max=1.9105 Gy (0.06s)
-      Seg 22: Max=1.9105 Gy (0.06s)
-      Seg 23: Max=1.9105 Gy (0.06s)
-      Seg 24: Max=1.9105 Gy (0.06s)
-      Seg 25: Max=1.9105 Gy (0.06s)
-      Seg 26: Max=1.9105 Gy (0.06s)
-      Seg 27: Max=1.9105 Gy (0.06s)
-      Seg 28: Max=1.9105 Gy (0.06s)
-      Seg 29: Max=1.9105 Gy (0.06s)
-      Seg 30: Max=1.9105 Gy (0.06s)
-      Seg 31: Max=1.9105 Gy (0.06s)
-      Seg 32: Max=1.9105 Gy (0.06s)
-      Seg 33: Max=1.9105 Gy (0.07s)
-      Seg 34: Max=1.9105 Gy (0.07s)
-      Seg 35: Max=1.9105 Gy (0.06s)
-      Seg 36: Max=1.9105 Gy (0.06s)
-      Seg 37: Max=1.9105 Gy (0.06s)
-      Seg 38: Max=1.9105 Gy (0.08s)
-      Seg 39: Max=1.9105 Gy (0.06s)
-      Seg 40: Max=1.9105 Gy (0.05s)
-      Seg 41: Max=1.9105 Gy (0.05s)
-      Seg 42: Max=2.6044 Gy (0.06s)
-      Seg 43: Max=2.6044 Gy (0.05s)
-      Seg 44: Max=1.9014 Gy (0.05s)
-      Seg 45: Max=2.6053 Gy (0.05s)
-      Seg 46: Max=2.7952 Gy (0.05s)
-      Seg 47: Max=2.7952 Gy (0.05s)
-      Seg 48: Max=2.7952 Gy (0.05s)
-      Seg 49: Max=2.7952 Gy (0.05s)
-      Seg 50: Max=2.7952 Gy (0.05s)
-      Seg 51: Max=2.7952 Gy (0.05s)
-      Seg 52: Max=2.7952 Gy (0.05s)
-      Seg 53: Max=2.7952 Gy (0.05s)
-      Seg 54: Max=2.7952 Gy (0.05s)
-      Seg 55: Max=2.7952 Gy (0.05s)
-      Seg 56: Max=2.7952 Gy (0.05s)
-      Seg 57: Max=2.7952 Gy (0.05s)
-      Seg 58: Max=2.7952 Gy (0.05s)
-      Seg 59: Max=2.7952 Gy (0.05s)
-      Seg 60: Max=2.7952 Gy (0.05s)
-      Seg 61: Max=2.7952 Gy (0.05s)
-      Seg 62: Max=2.7952 Gy (0.05s)
-      Seg 63: Max=2.7952 Gy (0.05s)
-      Seg 64: Max=2.7952 Gy (0.05s)
-      Seg 65: Max=2.7952 Gy (0.05s)
-      Seg 66: Max=2.7952 Gy (0.05s)
-      Seg 67: Max=2.7952 Gy (0.05s)
-      Seg 68: Max=2.9694 Gy (0.05s)
-      Seg 69: Max=2.9694 Gy (0.05s)
-      Seg 70: Max=2.9694 Gy (0.05s)
-      Seg 71: Max=2.9694 Gy (0.05s)
-      Seg 72: Max=3.1059 Gy (0.05s)
-      Seg 73: Max=3.1059 Gy (0.05s)
-      Seg 74: Max=3.1059 Gy (0.05s)
-      Seg 75: Max=3.1059 Gy (0.05s)
-      Seg 76: Max=3.1059 Gy (0.05s)
-      Seg 77: Max=3.1059 Gy (0.05s)
-      Seg 78: Max=3.1059 Gy (0.05s)
-      Seg 79: Max=3.1059 Gy (0.05s)
-      Seg 80: Max=3.1964 Gy (0.05s)
-      Seg 81: Max=3.1964 Gy (0.05s)
-      Seg 82: Max=3.1964 Gy (0.05s)
-      Seg 83: Max=3.1744 Gy (0.05s)
-      Seg 84: Max=3.1744 Gy (0.05s)
-      Seg 85: Max=3.1744 Gy (0.05s)
-      Seg 86: Max=3.1744 Gy (0.05s)
-      Seg 87: Max=3.1744 Gy (0.05s)
-      Seg 88: Max=3.1744 Gy (0.05s)
-      Seg 89: Max=3.1744 Gy (0.05s)
-      Seg 90: Max=3.1744 Gy (0.05s)
-      Seg 91: Max=3.1744 Gy (0.05s)
-      Seg 92: Max=3.1744 Gy (0.05s)
-      Seg 93: Max=3.1744 Gy (0.05s)
-      Seg 94: Max=3.1744 Gy (0.05s)
-      Seg 95: Max=3.1744 Gy (0.05s)
-      Seg 96: Max=3.1744 Gy (0.05s)
-      Seg 97: Max=3.1744 Gy (0.05s)
-      Seg 98: Max=3.1744 Gy (0.05s)
-      Seg 99: Max=3.1744 Gy (0.05s)
-      Seg 100: Max=3.1744 Gy (0.05s)
-      Seg 101: Max=3.1744 Gy (0.05s)
-      Seg 102: Max=3.1744 Gy (0.05s)
-      Seg 103: Max=3.1744 Gy (0.05s)
-      Seg 104: Max=3.1744 Gy (0.05s)
-      Seg 105: Max=3.1744 Gy (0.05s)
-      Seg 106: Max=3.1744 Gy (0.05s)
-      Seg 107: Max=3.1744 Gy (0.05s)
-      Seg 108: Max=3.1744 Gy (0.05s)
-      Seg 109: Max=3.1744 Gy (0.05s)
-      Seg 110: Max=3.1744 Gy (0.05s)
-      Seg 111: Max=3.1744 Gy (0.05s)
-      Seg 112: Max=3.1744 Gy (0.05s)
-      Seg 113: Max=3.1744 Gy (0.05s)
-      Seg 114: Max=3.1744 Gy (0.05s)
-      Seg 115: Max=3.1744 Gy (0.05s)
-      Seg 116: Max=3.2218 Gy (0.05s)
-      Seg 117: Max=3.2218 Gy (0.05s)
-      Seg 118: Max=3.2218 Gy (0.05s)
-      Seg 119: Max=3.2218 Gy (0.05s)
-      Seg 120: Max=3.2218 Gy (0.05s)
-      Seg 121: Max=3.2218 Gy (0.05s)
-      Seg 122: Max=3.2218 Gy (0.05s)
-      Seg 123: Max=3.2218 Gy (0.05s)
-      Seg 124: Max=3.2218 Gy (0.05s)
-      Seg 125: Max=3.2218 Gy (0.05s)
-      Seg 126: Max=3.2218 Gy (0.05s)
-      Seg 127: Max=3.2218 Gy (0.05s)
-      Seg 128: Max=3.2218 Gy (0.05s)
-      Seg 129: Max=3.2218 Gy (0.05s)
-      Seg 130: Max=3.2885 Gy (0.05s)
-      Seg 131: Max=3.2885 Gy (0.05s)
-      Seg 132: Max=3.2885 Gy (0.05s)
-      Seg 133: Max=3.2885 Gy (0.05s)
-      Seg 134: Max=3.2885 Gy (0.05s)
-      Seg 135: Max=3.2885 Gy (0.05s)
-      Seg 136: Max=3.2885 Gy (0.05s)
-      Seg 137: Max=3.2610 Gy (0.05s)
-      Seg 138: Max=3.2610 Gy (0.05s)
-      Seg 139: Max=3.2610 Gy (0.05s)
-      Seg 140: Max=3.2610 Gy (0.05s)
-      Seg 141: Max=3.2610 Gy (0.05s)
-      Seg 142: Max=3.2610 Gy (0.05s)
-      Seg 143: Max=3.2610 Gy (0.05s)
-      Seg 144: Max=3.2108 Gy (0.05s)
-      Seg 145: Max=3.2108 Gy (0.05s)
-      Seg 146: Max=3.2108 Gy (0.05s)
-      Seg 147: Max=3.2108 Gy (0.05s)
-      Seg 148: Max=3.1277 Gy (0.05s)
-      Seg 149: Max=3.1277 Gy (0.05s)
-      Seg 150: Max=3.1277 Gy (0.05s)
-      Seg 151: Max=3.1277 Gy (0.05s)
-      Seg 152: Max=3.1277 Gy (0.05s)
-      Seg 153: Max=2.9269 Gy (0.05s)
-      Seg 154: Max=2.9269 Gy (0.05s)
-      Seg 155: Max=2.9269 Gy (0.05s)
-      Seg 156: Max=2.9269 Gy (0.05s)
-      Seg 157: Max=2.9269 Gy (0.05s)
-      Seg 158: Max=2.9269 Gy (0.05s)
-      Seg 159: Max=2.9269 Gy (0.05s)
-      Seg 160: Max=2.1522 Gy (0.05s)
-      Seg 161: Max=2.1522 Gy (0.05s)
-      Seg 164: Max=2.1424 Gy (0.05s)
-      Seg 165: Max=2.1424 Gy (0.05s)
-    Beam 8 complete: Max=261.4466 Gy
+Dose calculation finished in 17.6723 seconds!
+    Calculated dij (634 bixels) in 17.7 sec
+    First segment MLC diagnostics:
+      MLC layers: 2
+        Layer 1: 56 positions
+        Layer 2: 58 positions
+      MLC devices with boundaries: 2
+        Device 1 (MLCX1): 28 leaf pairs
+        Device 2 (MLCX2): 29 leaf pairs
+      Seg 20: Open=23 bixels, Max=1.9054 Gy
+      Seg 40: Open=23 bixels, Max=1.9054 Gy
+      Seg 60: Open=69 bixels, Max=2.7988 Gy
+      Seg 80: Open=138 bixels, Max=3.1791 Gy
+      Seg 100: Open=115 bixels, Max=3.1588 Gy
+      Seg 120: Open=115 bixels, Max=3.2211 Gy
+      Seg 140: Open=92 bixels, Max=3.2046 Gy
+      Seg 160: Open=23 bixels, Max=2.1323 Gy
+    Processed 142 segments (skipped 0) in 1.6 sec
+    Average open bixels per segment: 83.7 / 634 (13.2%)
+    Beam 8 complete: Max=254.9101 Gy
 
   Beam 9/17 (Field 9): 165 segments, 468.4 MU
     Calculating dij matrix...
@@ -1600,7 +611,7 @@ Warning: Inconsistent dose engines given! pln asks for 'pencilBeam', but you are
 'SVDPB'!
 Warning: Using default dose calculation engine SVD Pencil Beam!
 Dose influence matrix calculation using  'SVD Pencil Beam' Dose Engine...
-Dose grid has dimensions 299x299x67
+Dose grid has dimensions 199x199x45
 Adjusting structures for overlap... Done!
 Resampling structure set... Warning: Resizing the cst to the dose grid created an empty structure 35 opti in scenario 1
 (cst{13,4}{1})!
@@ -1620,163 +631,28 @@ Warning: projecting out of range HU values
 Warning: Kernel Cut-Off 'Inf mm' larger than machine data range of '179.500000 mm'. Using
 '179.500000 mm'!
 matRad: calculate radiological depth cube... done.
-	SSD = 818 mm ...
+	SSD = 819 mm ...
 	Uniform primary photon fluence -> pre-compute kernel convolution...
 Progress: 100.00 %
-Dose calculation finished in 27.0012 seconds!
-    Calculated dij (660 bixels) in 27.1 sec
-      Seg 15: Max=2.3169 Gy (0.05s)
-      Seg 16: Max=2.3169 Gy (0.05s)
-      Seg 17: Max=2.3169 Gy (0.05s)
-      Seg 18: Max=2.3169 Gy (0.05s)
-      Seg 19: Max=2.3169 Gy (0.05s)
-      Seg 20: Max=2.3169 Gy (0.05s)
-      Seg 21: Max=2.3169 Gy (0.05s)
-      Seg 22: Max=2.3169 Gy (0.05s)
-      Seg 23: Max=2.3169 Gy (0.05s)
-      Seg 24: Max=2.3169 Gy (0.05s)
-      Seg 25: Max=2.3169 Gy (0.05s)
-      Seg 26: Max=3.2767 Gy (0.05s)
-      Seg 27: Max=3.2767 Gy (0.05s)
-      Seg 28: Max=3.2767 Gy (0.05s)
-      Seg 29: Max=3.2767 Gy (0.05s)
-      Seg 30: Max=3.2767 Gy (0.05s)
-      Seg 31: Max=3.2767 Gy (0.05s)
-      Seg 32: Max=3.2767 Gy (0.05s)
-      Seg 33: Max=3.2767 Gy (0.05s)
-      Seg 34: Max=3.5650 Gy (0.05s)
-      Seg 35: Max=3.5650 Gy (0.05s)
-      Seg 36: Max=3.5650 Gy (0.05s)
-      Seg 37: Max=3.5650 Gy (0.05s)
-      Seg 38: Max=3.5650 Gy (0.05s)
-      Seg 39: Max=3.5708 Gy (0.05s)
-      Seg 40: Max=3.5708 Gy (0.05s)
-      Seg 41: Max=3.5708 Gy (0.05s)
-      Seg 42: Max=3.5708 Gy (0.05s)
-      Seg 43: Max=3.5708 Gy (0.05s)
-      Seg 44: Max=3.5708 Gy (0.05s)
-      Seg 45: Max=3.5708 Gy (0.05s)
-      Seg 46: Max=3.3268 Gy (0.05s)
-      Seg 47: Max=2.4070 Gy (0.05s)
-      Seg 48: Max=2.4070 Gy (0.05s)
-      Seg 49: Max=3.3438 Gy (0.05s)
-      Seg 50: Max=3.7000 Gy (0.05s)
-      Seg 51: Max=3.7000 Gy (0.05s)
-      Seg 52: Max=3.7557 Gy (0.05s)
-      Seg 53: Max=3.6954 Gy (0.05s)
-      Seg 54: Max=3.6954 Gy (0.05s)
-      Seg 55: Max=3.6954 Gy (0.05s)
-      Seg 56: Max=3.6954 Gy (0.05s)
-      Seg 57: Max=3.7558 Gy (0.05s)
-      Seg 58: Max=3.7558 Gy (0.05s)
-      Seg 59: Max=3.7558 Gy (0.05s)
-      Seg 60: Max=3.7558 Gy (0.05s)
-      Seg 61: Max=3.7558 Gy (0.05s)
-      Seg 62: Max=3.7558 Gy (0.05s)
-      Seg 63: Max=3.7558 Gy (0.05s)
-      Seg 64: Max=3.7558 Gy (0.05s)
-      Seg 65: Max=3.7558 Gy (0.05s)
-      Seg 66: Max=3.7558 Gy (0.05s)
-      Seg 67: Max=3.7558 Gy (0.05s)
-      Seg 68: Max=3.7558 Gy (0.05s)
-      Seg 69: Max=3.6944 Gy (0.05s)
-      Seg 70: Max=3.6944 Gy (0.05s)
-      Seg 71: Max=3.7608 Gy (0.05s)
-      Seg 72: Max=3.7608 Gy (0.05s)
-      Seg 73: Max=3.7608 Gy (0.05s)
-      Seg 74: Max=3.7608 Gy (0.05s)
-      Seg 75: Max=3.7608 Gy (0.05s)
-      Seg 76: Max=3.7608 Gy (0.05s)
-      Seg 77: Max=3.7608 Gy (0.05s)
-      Seg 78: Max=3.7608 Gy (0.05s)
-      Seg 79: Max=3.7608 Gy (0.05s)
-      Seg 80: Max=3.7608 Gy (0.05s)
-      Seg 81: Max=3.7608 Gy (0.05s)
-      Seg 82: Max=3.7608 Gy (0.05s)
-      Seg 83: Max=3.7608 Gy (0.05s)
-      Seg 84: Max=3.7608 Gy (0.05s)
-      Seg 85: Max=3.7608 Gy (0.05s)
-      Seg 86: Max=3.7608 Gy (0.05s)
-      Seg 87: Max=3.7608 Gy (0.05s)
-      Seg 88: Max=3.7608 Gy (0.05s)
-      Seg 89: Max=3.7608 Gy (0.05s)
-      Seg 90: Max=3.7608 Gy (0.05s)
-      Seg 91: Max=3.7608 Gy (0.05s)
-      Seg 92: Max=3.7608 Gy (0.05s)
-      Seg 93: Max=3.7608 Gy (0.05s)
-      Seg 94: Max=3.7608 Gy (0.05s)
-      Seg 95: Max=3.7608 Gy (0.05s)
-      Seg 96: Max=3.7608 Gy (0.05s)
-      Seg 97: Max=3.7608 Gy (0.05s)
-      Seg 98: Max=3.7608 Gy (0.05s)
-      Seg 99: Max=3.7608 Gy (0.05s)
-      Seg 100: Max=3.7608 Gy (0.05s)
-      Seg 101: Max=3.7608 Gy (0.05s)
-      Seg 102: Max=3.6933 Gy (0.05s)
-      Seg 103: Max=3.6933 Gy (0.05s)
-      Seg 104: Max=3.6933 Gy (0.05s)
-      Seg 105: Max=3.6933 Gy (0.05s)
-      Seg 106: Max=3.6933 Gy (0.05s)
-      Seg 107: Max=3.6933 Gy (0.05s)
-      Seg 108: Max=3.6933 Gy (0.05s)
-      Seg 109: Max=3.6933 Gy (0.05s)
-      Seg 110: Max=3.6933 Gy (0.05s)
-      Seg 111: Max=3.6933 Gy (0.05s)
-      Seg 112: Max=3.6933 Gy (0.05s)
-      Seg 113: Max=3.6933 Gy (0.05s)
-      Seg 114: Max=3.6933 Gy (0.05s)
-      Seg 115: Max=3.6933 Gy (0.05s)
-      Seg 116: Max=3.6933 Gy (0.05s)
-      Seg 117: Max=3.7547 Gy (0.05s)
-      Seg 118: Max=3.6906 Gy (0.05s)
-      Seg 119: Max=3.6906 Gy (0.05s)
-      Seg 120: Max=3.6906 Gy (0.05s)
-      Seg 121: Max=3.6906 Gy (0.07s)
-      Seg 122: Max=3.6906 Gy (0.05s)
-      Seg 123: Max=3.6906 Gy (0.05s)
-      Seg 124: Max=3.6906 Gy (0.05s)
-      Seg 125: Max=3.6906 Gy (0.07s)
-      Seg 126: Max=3.6906 Gy (0.05s)
-      Seg 127: Max=3.6906 Gy (0.05s)
-      Seg 128: Max=3.6906 Gy (0.05s)
-      Seg 129: Max=3.6906 Gy (0.05s)
-      Seg 130: Max=3.5744 Gy (0.05s)
-      Seg 131: Max=3.5744 Gy (0.05s)
-      Seg 132: Max=3.5744 Gy (0.05s)
-      Seg 133: Max=3.5744 Gy (0.05s)
-      Seg 134: Max=3.5744 Gy (0.05s)
-      Seg 135: Max=3.2950 Gy (0.05s)
-      Seg 136: Max=3.2950 Gy (0.05s)
-      Seg 137: Max=3.2950 Gy (0.05s)
-      Seg 138: Max=3.2950 Gy (0.05s)
-      Seg 139: Max=3.2950 Gy (0.05s)
-      Seg 140: Max=3.2950 Gy (0.05s)
-      Seg 141: Max=3.2950 Gy (0.05s)
-      Seg 142: Max=3.2950 Gy (0.05s)
-      Seg 143: Max=3.2950 Gy (0.05s)
-      Seg 144: Max=3.2950 Gy (0.05s)
-      Seg 145: Max=3.2950 Gy (0.05s)
-      Seg 146: Max=3.2950 Gy (0.05s)
-      Seg 147: Max=3.2950 Gy (0.05s)
-      Seg 148: Max=3.2950 Gy (0.05s)
-      Seg 149: Max=3.2950 Gy (0.05s)
-      Seg 150: Max=3.2950 Gy (0.05s)
-      Seg 151: Max=3.2950 Gy (0.05s)
-      Seg 152: Max=3.2950 Gy (0.05s)
-      Seg 153: Max=3.2950 Gy (0.05s)
-      Seg 154: Max=3.2950 Gy (0.05s)
-      Seg 155: Max=3.2950 Gy (0.05s)
-      Seg 156: Max=3.2950 Gy (0.05s)
-      Seg 157: Max=3.2950 Gy (0.05s)
-      Seg 158: Max=2.3337 Gy (0.05s)
-      Seg 159: Max=2.3337 Gy (0.05s)
-      Seg 160: Max=2.3337 Gy (0.05s)
-      Seg 161: Max=2.3337 Gy (0.05s)
-      Seg 162: Max=2.3337 Gy (0.05s)
-      Seg 163: Max=2.3337 Gy (0.05s)
-      Seg 164: Max=2.3337 Gy (0.05s)
-      Seg 165: Max=2.3337 Gy (0.05s)
-    Beam 9 complete: Max=304.9515 Gy
+Dose calculation finished in 19.2449 seconds!
+    Calculated dij (658 bixels) in 19.3 sec
+    First segment MLC diagnostics:
+      MLC layers: 2
+        Layer 1: 56 positions
+        Layer 2: 58 positions
+      MLC devices with boundaries: 2
+        Device 1 (MLCX1): 28 leaf pairs
+        Device 2 (MLCX2): 29 leaf pairs
+      Seg 40: Open=46 bixels, Max=3.1957 Gy
+      Seg 60: Open=115 bixels, Max=3.7637 Gy
+      Seg 80: Open=115 bixels, Max=3.7510 Gy
+      Seg 100: Open=115 bixels, Max=3.7510 Gy
+      Seg 120: Open=92 bixels, Max=3.6833 Gy
+      Seg 140: Open=46 bixels, Max=3.2007 Gy
+      Seg 160: Open=23 bixels, Max=2.4567 Gy
+    Processed 139 segments (skipped 0) in 1.4 sec
+    Average open bixels per segment: 75.5 / 658 (11.5%)
+    Beam 9 complete: Max=297.5274 Gy
 
   Beam 10/17 (Field 10): 165 segments, 342.6 MU
     Calculating dij matrix...
@@ -1784,7 +660,7 @@ Warning: Inconsistent dose engines given! pln asks for 'pencilBeam', but you are
 'SVDPB'!
 Warning: Using default dose calculation engine SVD Pencil Beam!
 Dose influence matrix calculation using  'SVD Pencil Beam' Dose Engine...
-Dose grid has dimensions 299x299x67
+Dose grid has dimensions 199x199x45
 Adjusting structures for overlap... Done!
 Resampling structure set... Warning: Resizing the cst to the dose grid created an empty structure 35 opti in scenario 1
 (cst{13,4}{1})!
@@ -1804,158 +680,27 @@ Warning: projecting out of range HU values
 Warning: Kernel Cut-Off 'Inf mm' larger than machine data range of '179.500000 mm'. Using
 '179.500000 mm'!
 matRad: calculate radiological depth cube... done.
-	SSD = 806 mm ...
+	SSD = 807 mm ...
 	Uniform primary photon fluence -> pre-compute kernel convolution...
-Progress: 100.00 %
-Dose calculation finished in 31.9725 seconds!
-    Calculated dij (717 bixels) in 32.1 sec
-      Seg 9: Max=1.8336 Gy (0.06s)
-      Seg 10: Max=1.8336 Gy (0.06s)
-      Seg 11: Max=1.8336 Gy (0.06s)
-      Seg 12: Max=1.8336 Gy (0.06s)
-      Seg 13: Max=1.8336 Gy (0.06s)
-      Seg 14: Max=1.8336 Gy (0.06s)
-      Seg 15: Max=1.8336 Gy (0.06s)
-      Seg 16: Max=1.8336 Gy (0.06s)
-      Seg 17: Max=1.8336 Gy (0.06s)
-      Seg 18: Max=1.8336 Gy (0.06s)
-      Seg 19: Max=1.8336 Gy (0.06s)
-      Seg 20: Max=1.8336 Gy (0.05s)
-      Seg 21: Max=1.8336 Gy (0.05s)
-      Seg 22: Max=1.8336 Gy (0.05s)
-      Seg 23: Max=1.8336 Gy (0.05s)
-      Seg 24: Max=1.8336 Gy (0.05s)
-      Seg 25: Max=1.8336 Gy (0.05s)
-      Seg 26: Max=1.8336 Gy (0.05s)
-      Seg 27: Max=1.8336 Gy (0.05s)
-      Seg 28: Max=1.8336 Gy (0.05s)
-      Seg 29: Max=1.8336 Gy (0.05s)
-      Seg 30: Max=1.8336 Gy (0.05s)
-      Seg 31: Max=1.8336 Gy (0.05s)
-      Seg 32: Max=1.8336 Gy (0.05s)
-      Seg 33: Max=1.8336 Gy (0.05s)
-      Seg 39: Max=1.8256 Gy (0.05s)
-      Seg 40: Max=1.8256 Gy (0.05s)
-      Seg 41: Max=1.8256 Gy (0.05s)
-      Seg 42: Max=1.8256 Gy (0.05s)
-      Seg 43: Max=1.8256 Gy (0.05s)
-      Seg 44: Max=1.8256 Gy (0.05s)
-      Seg 45: Max=1.8256 Gy (0.05s)
-      Seg 46: Max=1.8256 Gy (0.05s)
-      Seg 47: Max=1.8256 Gy (0.05s)
-      Seg 48: Max=1.8256 Gy (0.05s)
-      Seg 49: Max=1.8256 Gy (0.05s)
-      Seg 50: Max=1.8256 Gy (0.05s)
-      Seg 51: Max=1.8256 Gy (0.05s)
-      Seg 52: Max=1.8256 Gy (0.05s)
-      Seg 53: Max=1.8256 Gy (0.05s)
-      Seg 54: Max=1.8256 Gy (0.05s)
-      Seg 55: Max=1.8256 Gy (0.05s)
-      Seg 56: Max=1.8256 Gy (0.05s)
-      Seg 57: Max=1.8256 Gy (0.05s)
-      Seg 58: Max=1.8256 Gy (0.05s)
-      Seg 59: Max=1.8256 Gy (0.05s)
-      Seg 60: Max=1.8256 Gy (0.05s)
-      Seg 61: Max=1.8256 Gy (0.05s)
-      Seg 62: Max=1.8256 Gy (0.05s)
-      Seg 63: Max=2.4857 Gy (0.05s)
-      Seg 64: Max=2.4857 Gy (0.05s)
-      Seg 65: Max=2.4857 Gy (0.05s)
-      Seg 66: Max=2.4857 Gy (0.05s)
-      Seg 67: Max=2.4857 Gy (0.05s)
-      Seg 68: Max=2.4857 Gy (0.05s)
-      Seg 69: Max=2.4857 Gy (0.05s)
-      Seg 70: Max=2.4857 Gy (0.05s)
-      Seg 71: Max=2.4857 Gy (0.05s)
-      Seg 72: Max=2.4857 Gy (0.05s)
-      Seg 73: Max=1.8196 Gy (0.05s)
-      Seg 74: Max=1.8196 Gy (0.05s)
-      Seg 75: Max=1.8196 Gy (0.05s)
-      Seg 76: Max=1.8196 Gy (0.05s)
-      Seg 77: Max=1.8196 Gy (0.05s)
-      Seg 78: Max=1.8196 Gy (0.05s)
-      Seg 79: Max=1.8196 Gy (0.05s)
-      Seg 80: Max=1.8196 Gy (0.05s)
-      Seg 81: Max=2.4830 Gy (0.05s)
-      Seg 82: Max=2.4830 Gy (0.05s)
-      Seg 83: Max=2.4830 Gy (0.05s)
-      Seg 84: Max=2.4830 Gy (0.05s)
-      Seg 85: Max=2.4830 Gy (0.05s)
-      Seg 86: Max=2.6602 Gy (0.05s)
-      Seg 87: Max=2.6602 Gy (0.05s)
-      Seg 88: Max=2.6602 Gy (0.05s)
-      Seg 89: Max=2.6602 Gy (0.05s)
-      Seg 90: Max=2.7289 Gy (0.05s)
-      Seg 91: Max=2.7289 Gy (0.05s)
-      Seg 92: Max=2.7289 Gy (0.05s)
-      Seg 93: Max=2.7289 Gy (0.05s)
-      Seg 94: Max=2.7289 Gy (0.05s)
-      Seg 95: Max=2.6452 Gy (0.05s)
-      Seg 96: Max=2.4587 Gy (0.05s)
-      Seg 97: Max=2.4587 Gy (0.05s)
-      Seg 98: Max=2.4587 Gy (0.05s)
-      Seg 99: Max=2.4587 Gy (0.05s)
-      Seg 100: Max=1.7986 Gy (0.05s)
-      Seg 101: Max=1.7986 Gy (0.05s)
-      Seg 102: Max=1.7986 Gy (0.05s)
-      Seg 103: Max=1.7986 Gy (0.05s)
-      Seg 104: Max=1.7986 Gy (0.05s)
-      Seg 105: Max=2.4453 Gy (0.05s)
-      Seg 106: Max=2.4453 Gy (0.05s)
-      Seg 107: Max=2.4453 Gy (0.05s)
-      Seg 108: Max=2.4453 Gy (0.05s)
-      Seg 109: Max=2.4453 Gy (0.05s)
-      Seg 110: Max=2.4453 Gy (0.05s)
-      Seg 111: Max=2.4453 Gy (0.05s)
-      Seg 112: Max=2.6173 Gy (0.05s)
-      Seg 113: Max=2.6173 Gy (0.05s)
-      Seg 114: Max=2.6173 Gy (0.05s)
-      Seg 115: Max=2.6173 Gy (0.05s)
-      Seg 116: Max=2.6173 Gy (0.05s)
-      Seg 117: Max=2.6173 Gy (0.05s)
-      Seg 118: Max=2.6173 Gy (0.05s)
-      Seg 119: Max=2.6173 Gy (0.05s)
-      Seg 120: Max=2.6173 Gy (0.05s)
-      Seg 121: Max=2.6173 Gy (0.05s)
-      Seg 122: Max=2.6110 Gy (0.05s)
-      Seg 123: Max=2.4309 Gy (0.05s)
-      Seg 124: Max=2.4309 Gy (0.05s)
-      Seg 125: Max=2.4309 Gy (0.05s)
-      Seg 126: Max=2.4309 Gy (0.05s)
-      Seg 127: Max=2.4309 Gy (0.05s)
-      Seg 128: Max=2.4309 Gy (0.05s)
-      Seg 129: Max=2.4309 Gy (0.05s)
-      Seg 130: Max=2.4309 Gy (0.05s)
-      Seg 131: Max=2.4309 Gy (0.05s)
-      Seg 132: Max=2.4309 Gy (0.05s)
-      Seg 133: Max=2.4309 Gy (0.05s)
-      Seg 134: Max=2.4309 Gy (0.05s)
-      Seg 135: Max=1.7786 Gy (0.05s)
-      Seg 136: Max=1.7786 Gy (0.05s)
-      Seg 137: Max=1.7786 Gy (0.05s)
-      Seg 138: Max=1.7786 Gy (0.05s)
-      Seg 139: Max=2.4304 Gy (0.05s)
-      Seg 140: Max=2.4304 Gy (0.05s)
-      Seg 141: Max=2.4304 Gy (0.05s)
-      Seg 142: Max=2.4304 Gy (0.05s)
-      Seg 143: Max=2.6104 Gy (0.05s)
-      Seg 144: Max=2.6104 Gy (0.05s)
-      Seg 145: Max=2.6104 Gy (0.05s)
-      Seg 146: Max=2.6104 Gy (0.05s)
-      Seg 147: Max=2.6866 Gy (0.05s)
-      Seg 148: Max=2.6866 Gy (0.05s)
-      Seg 149: Max=2.6866 Gy (0.05s)
-      Seg 150: Max=2.6866 Gy (0.05s)
-      Seg 151: Max=2.6866 Gy (0.05s)
-      Seg 152: Max=2.6866 Gy (0.05s)
-      Seg 153: Max=2.6866 Gy (0.05s)
-      Seg 154: Max=2.6866 Gy (0.05s)
-      Seg 155: Max=2.6866 Gy (0.05s)
-      Seg 156: Max=2.6022 Gy (0.05s)
-      Seg 157: Max=2.6022 Gy (0.05s)
-      Seg 158: Max=2.6022 Gy (0.05s)
-      Seg 159: Max=1.7783 Gy (0.05s)
-    Beam 10 complete: Max=90.2317 Gy
+Progress:100.00 %
+Dose calculation finished in 22.3555 seconds!
+    Calculated dij (727 bixels) in 22.4 sec
+    First segment MLC diagnostics:
+      MLC layers: 2
+        Layer 1: 56 positions
+        Layer 2: 58 positions
+      MLC devices with boundaries: 2
+        Device 1 (MLCX1): 28 leaf pairs
+        Device 2 (MLCX2): 29 leaf pairs
+      Seg 40: Open=23 bixels, Max=1.8220 Gy
+      Seg 60: Open=23 bixels, Max=1.8220 Gy
+      Seg 80: Open=23 bixels, Max=1.8257 Gy
+      Seg 100: Open=23 bixels, Max=1.7983 Gy
+      Seg 120: Open=69 bixels, Max=2.6050 Gy
+      Seg 140: Open=23 bixels, Max=1.7884 Gy
+    Processed 120 segments (skipped 0) in 1.5 sec
+    Average open bixels per segment: 33.0 / 727 (4.5%)
+    Beam 10 complete: Max=76.6592 Gy
 
   Beam 11/17 (Field 11): 165 segments, 405.7 MU
     Calculating dij matrix...
@@ -1963,7 +708,7 @@ Warning: Inconsistent dose engines given! pln asks for 'pencilBeam', but you are
 'SVDPB'!
 Warning: Using default dose calculation engine SVD Pencil Beam!
 Dose influence matrix calculation using  'SVD Pencil Beam' Dose Engine...
-Dose grid has dimensions 299x299x67
+Dose grid has dimensions 199x199x45
 Adjusting structures for overlap... Done!
 Resampling structure set... Warning: Resizing the cst to the dose grid created an empty structure 35 opti in scenario 1
 (cst{13,4}{1})!
@@ -1986,163 +731,24 @@ matRad: calculate radiological depth cube... done.
 	SSD = 700 mm ...
 	Uniform primary photon fluence -> pre-compute kernel convolution...
 Progress:100.00 %
-Dose calculation finished in 37.878 seconds!
-    Calculated dij (739 bixels) in 38.0 sec
-      Seg 1: Max=2.4278 Gy (0.07s)
-      Seg 2: Max=2.4278 Gy (0.07s)
-      Seg 3: Max=2.4278 Gy (0.07s)
-      Seg 4: Max=2.4278 Gy (0.07s)
-      Seg 5: Max=2.4278 Gy (0.07s)
-      Seg 6: Max=2.4278 Gy (0.07s)
-      Seg 7: Max=2.4278 Gy (0.07s)
-      Seg 8: Max=2.4278 Gy (0.07s)
-      Seg 9: Max=2.4278 Gy (0.07s)
-      Seg 10: Max=2.4278 Gy (0.07s)
-      Seg 11: Max=2.4278 Gy (0.07s)
-      Seg 12: Max=2.4278 Gy (0.07s)
-      Seg 13: Max=2.4278 Gy (0.07s)
-      Seg 17: Max=2.5532 Gy (0.07s)
-      Seg 18: Max=2.5532 Gy (0.07s)
-      Seg 19: Max=2.5532 Gy (0.07s)
-      Seg 20: Max=2.5532 Gy (0.07s)
-      Seg 21: Max=2.5532 Gy (0.07s)
-      Seg 22: Max=2.5532 Gy (0.07s)
-      Seg 23: Max=2.5532 Gy (0.07s)
-      Seg 24: Max=2.5532 Gy (0.07s)
-      Seg 25: Max=2.5532 Gy (0.07s)
-      Seg 26: Max=2.5532 Gy (0.07s)
-      Seg 27: Max=2.5532 Gy (0.06s)
-      Seg 28: Max=2.5532 Gy (0.06s)
-      Seg 29: Max=2.5532 Gy (0.06s)
-      Seg 30: Max=2.5532 Gy (0.06s)
-      Seg 31: Max=2.5532 Gy (0.06s)
-      Seg 32: Max=2.5532 Gy (0.06s)
-      Seg 33: Max=2.5532 Gy (0.06s)
-      Seg 34: Max=3.5258 Gy (0.06s)
-      Seg 35: Max=3.5258 Gy (0.06s)
-      Seg 36: Max=3.5258 Gy (0.06s)
-      Seg 37: Max=3.5258 Gy (0.06s)
-      Seg 38: Max=3.5258 Gy (0.06s)
-      Seg 39: Max=3.5258 Gy (0.06s)
-      Seg 40: Max=3.5258 Gy (0.06s)
-      Seg 41: Max=3.5258 Gy (0.06s)
-      Seg 42: Max=3.7889 Gy (0.06s)
-      Seg 43: Max=3.7889 Gy (0.06s)
-      Seg 44: Max=3.7889 Gy (0.06s)
-      Seg 45: Max=3.7889 Gy (0.06s)
-      Seg 46: Max=3.7889 Gy (0.06s)
-      Seg 47: Max=3.7889 Gy (0.06s)
-      Seg 48: Max=3.7889 Gy (0.06s)
-      Seg 49: Max=3.7889 Gy (0.06s)
-      Seg 50: Max=3.7889 Gy (0.06s)
-      Seg 51: Max=3.7889 Gy (0.06s)
-      Seg 52: Max=3.7889 Gy (0.06s)
-      Seg 53: Max=3.7889 Gy (0.06s)
-      Seg 54: Max=3.7889 Gy (0.06s)
-      Seg 55: Max=3.9318 Gy (0.06s)
-      Seg 56: Max=3.9318 Gy (0.06s)
-      Seg 57: Max=3.9318 Gy (0.06s)
-      Seg 58: Max=3.9318 Gy (0.06s)
-      Seg 59: Max=3.9318 Gy (0.06s)
-      Seg 60: Max=3.9318 Gy (0.06s)
-      Seg 61: Max=3.9318 Gy (0.06s)
-      Seg 62: Max=3.8209 Gy (0.06s)
-      Seg 63: Max=3.5710 Gy (0.06s)
-      Seg 64: Max=3.8752 Gy (0.06s)
-      Seg 65: Max=3.6332 Gy (0.06s)
-      Seg 66: Max=3.9171 Gy (0.06s)
-      Seg 67: Max=3.9171 Gy (0.06s)
-      Seg 68: Max=3.9171 Gy (0.06s)
-      Seg 69: Max=3.9171 Gy (0.06s)
-      Seg 70: Max=3.9171 Gy (0.06s)
-      Seg 71: Max=3.9171 Gy (0.06s)
-      Seg 72: Max=3.6833 Gy (0.06s)
-      Seg 73: Max=3.6833 Gy (0.06s)
-      Seg 74: Max=3.9674 Gy (0.06s)
-      Seg 75: Max=3.9674 Gy (0.06s)
-      Seg 76: Max=3.9674 Gy (0.06s)
-      Seg 77: Max=3.9674 Gy (0.06s)
-      Seg 78: Max=3.9674 Gy (0.06s)
-      Seg 79: Max=3.7216 Gy (0.06s)
-      Seg 80: Max=3.7216 Gy (0.06s)
-      Seg 81: Max=3.7216 Gy (0.06s)
-      Seg 82: Max=3.7216 Gy (0.06s)
-      Seg 83: Max=3.7216 Gy (0.06s)
-      Seg 84: Max=3.7216 Gy (0.06s)
-      Seg 85: Max=3.7216 Gy (0.06s)
-      Seg 86: Max=3.7216 Gy (0.06s)
-      Seg 87: Max=3.9881 Gy (0.06s)
-      Seg 88: Max=3.7191 Gy (0.06s)
-      Seg 89: Max=3.7191 Gy (0.06s)
-      Seg 90: Max=3.7191 Gy (0.06s)
-      Seg 91: Max=3.7191 Gy (0.06s)
-      Seg 92: Max=3.7191 Gy (0.06s)
-      Seg 93: Max=3.7191 Gy (0.06s)
-      Seg 94: Max=2.7480 Gy (0.06s)
-      Seg 95: Max=2.7480 Gy (0.06s)
-      Seg 96: Max=2.7480 Gy (0.06s)
-      Seg 97: Max=2.7480 Gy (0.06s)
-      Seg 98: Max=2.7480 Gy (0.06s)
-      Seg 99: Max=3.7589 Gy (0.06s)
-      Seg 100: Max=3.7589 Gy (0.06s)
-      Seg 101: Max=3.7589 Gy (0.06s)
-      Seg 102: Max=3.7589 Gy (0.06s)
-      Seg 103: Max=3.7589 Gy (0.06s)
-      Seg 104: Max=2.7695 Gy (0.06s)
-      Seg 105: Max=2.7695 Gy (0.06s)
-      Seg 106: Max=2.7695 Gy (0.06s)
-      Seg 107: Max=2.7695 Gy (0.06s)
-      Seg 108: Max=2.7695 Gy (0.06s)
-      Seg 109: Max=2.7695 Gy (0.06s)
-      Seg 110: Max=2.7695 Gy (0.06s)
-      Seg 111: Max=2.7695 Gy (0.06s)
-      Seg 112: Max=2.7695 Gy (0.06s)
-      Seg 117: Max=2.8198 Gy (0.06s)
-      Seg 118: Max=2.8198 Gy (0.06s)
-      Seg 119: Max=3.8699 Gy (0.06s)
-      Seg 120: Max=3.8699 Gy (0.06s)
-      Seg 121: Max=3.8699 Gy (0.06s)
-      Seg 122: Max=3.8699 Gy (0.06s)
-      Seg 123: Max=3.8699 Gy (0.06s)
-      Seg 124: Max=3.8699 Gy (0.06s)
-      Seg 125: Max=2.8519 Gy (0.06s)
-      Seg 126: Max=2.8519 Gy (0.06s)
-      Seg 131: Max=2.9118 Gy (0.06s)
-      Seg 132: Max=2.9118 Gy (0.06s)
-      Seg 133: Max=2.9118 Gy (0.06s)
-      Seg 134: Max=2.9118 Gy (0.06s)
-      Seg 135: Max=2.9118 Gy (0.06s)
-      Seg 136: Max=2.9118 Gy (0.06s)
-      Seg 137: Max=2.9118 Gy (0.06s)
-      Seg 138: Max=2.9118 Gy (0.06s)
-      Seg 139: Max=2.9118 Gy (0.06s)
-      Seg 140: Max=2.9118 Gy (0.06s)
-      Seg 141: Max=2.9118 Gy (0.06s)
-      Seg 142: Max=2.9118 Gy (0.06s)
-      Seg 143: Max=2.9118 Gy (0.06s)
-      Seg 144: Max=2.9118 Gy (0.06s)
-      Seg 145: Max=2.9118 Gy (0.06s)
-      Seg 146: Max=2.9118 Gy (0.06s)
-      Seg 147: Max=2.9118 Gy (0.06s)
-      Seg 148: Max=2.9118 Gy (0.06s)
-      Seg 149: Max=2.9118 Gy (0.06s)
-      Seg 150: Max=2.9118 Gy (0.06s)
-      Seg 151: Max=2.9118 Gy (0.06s)
-      Seg 152: Max=2.9118 Gy (0.06s)
-      Seg 153: Max=2.9118 Gy (0.06s)
-      Seg 154: Max=2.9118 Gy (0.06s)
-      Seg 155: Max=2.9118 Gy (0.06s)
-      Seg 156: Max=2.9118 Gy (0.06s)
-      Seg 157: Max=2.9118 Gy (0.06s)
-      Seg 158: Max=2.9118 Gy (0.06s)
-      Seg 159: Max=2.9118 Gy (0.06s)
-      Seg 160: Max=2.9118 Gy (0.06s)
-      Seg 161: Max=2.9118 Gy (0.06s)
-      Seg 162: Max=2.9118 Gy (0.06s)
-      Seg 163: Max=2.9118 Gy (0.06s)
-      Seg 164: Max=2.9118 Gy (0.06s)
-      Seg 165: Max=2.9118 Gy (0.06s)
-    Beam 11 complete: Max=146.5638 Gy
+Dose calculation finished in 21.1927 seconds!
+    Calculated dij (749 bixels) in 21.3 sec
+    First segment MLC diagnostics:
+      MLC layers: 2
+        Layer 1: 56 positions
+        Layer 2: 58 positions
+      MLC devices with boundaries: 2
+        Device 1 (MLCX1): 28 leaf pairs
+        Device 2 (MLCX2): 29 leaf pairs
+      Seg 20: Open=23 bixels, Max=2.4299 Gy
+      Seg 40: Open=46 bixels, Max=3.4521 Gy
+      Seg 60: Open=92 bixels, Max=3.9265 Gy
+      Seg 80: Open=46 bixels, Max=3.7175 Gy
+      Seg 100: Open=23 bixels, Max=2.7520 Gy
+      Seg 120: Open=23 bixels, Max=2.8128 Gy
+    Processed 100 segments (skipped 0) in 1.6 sec
+    Average open bixels per segment: 43.0 / 749 (5.7%)
+    Beam 11 complete: Max=139.1585 Gy
 
   Beam 12/17 (Field 12): 165 segments, 496.1 MU
     Calculating dij matrix...
@@ -2150,7 +756,7 @@ Warning: Inconsistent dose engines given! pln asks for 'pencilBeam', but you are
 'SVDPB'!
 Warning: Using default dose calculation engine SVD Pencil Beam!
 Dose influence matrix calculation using  'SVD Pencil Beam' Dose Engine...
-Dose grid has dimensions 299x299x67
+Dose grid has dimensions 199x199x45
 Adjusting structures for overlap... Done!
 Resampling structure set... Warning: Resizing the cst to the dose grid created an empty structure 35 opti in scenario 1
 (cst{13,4}{1})!
@@ -2170,152 +776,28 @@ Warning: projecting out of range HU values
 Warning: Kernel Cut-Off 'Inf mm' larger than machine data range of '179.500000 mm'. Using
 '179.500000 mm'!
 matRad: calculate radiological depth cube... done.
-	SSD = 811 mm ...
+	SSD = 809 mm ...
 	Uniform primary photon fluence -> pre-compute kernel convolution...
-Progress:100.00 %
-Dose calculation finished in 36.9947 seconds!
-    Calculated dij (728 bixels) in 37.1 sec
-      Seg 15: Max=2.9297 Gy (0.07s)
-      Seg 23: Max=2.9436 Gy (0.06s)
-      Seg 24: Max=2.9436 Gy (0.06s)
-      Seg 25: Max=2.9436 Gy (0.06s)
-      Seg 26: Max=2.9436 Gy (0.06s)
-      Seg 27: Max=2.9436 Gy (0.06s)
-      Seg 28: Max=2.9436 Gy (0.06s)
-      Seg 29: Max=2.9436 Gy (0.06s)
-      Seg 30: Max=2.9436 Gy (0.06s)
-      Seg 31: Max=2.9436 Gy (0.06s)
-      Seg 32: Max=2.9436 Gy (0.06s)
-      Seg 33: Max=2.9436 Gy (0.06s)
-      Seg 34: Max=2.9436 Gy (0.06s)
-      Seg 35: Max=2.9436 Gy (0.06s)
-      Seg 36: Max=2.9436 Gy (0.06s)
-      Seg 37: Max=4.0613 Gy (0.06s)
-      Seg 38: Max=4.0613 Gy (0.06s)
-      Seg 39: Max=4.0613 Gy (0.06s)
-      Seg 40: Max=4.0613 Gy (0.06s)
-      Seg 41: Max=4.0613 Gy (0.06s)
-      Seg 42: Max=4.0613 Gy (0.06s)
-      Seg 43: Max=4.0613 Gy (0.06s)
-      Seg 44: Max=4.0613 Gy (0.06s)
-      Seg 45: Max=4.0613 Gy (0.06s)
-      Seg 46: Max=4.3486 Gy (0.06s)
-      Seg 47: Max=4.4801 Gy (0.06s)
-      Seg 48: Max=4.4801 Gy (0.06s)
-      Seg 49: Max=4.4801 Gy (0.06s)
-      Seg 50: Max=4.3527 Gy (0.06s)
-      Seg 51: Max=4.3527 Gy (0.06s)
-      Seg 52: Max=4.3527 Gy (0.06s)
-      Seg 53: Max=4.3527 Gy (0.06s)
-      Seg 54: Max=4.0793 Gy (0.06s)
-      Seg 55: Max=4.0793 Gy (0.06s)
-      Seg 56: Max=4.0793 Gy (0.06s)
-      Seg 57: Max=4.3708 Gy (0.06s)
-      Seg 58: Max=4.3708 Gy (0.06s)
-      Seg 59: Max=4.0871 Gy (0.06s)
-      Seg 60: Max=4.3571 Gy (0.06s)
-      Seg 61: Max=4.3571 Gy (0.06s)
-      Seg 62: Max=4.3571 Gy (0.06s)
-      Seg 63: Max=4.3571 Gy (0.06s)
-      Seg 64: Max=4.3571 Gy (0.06s)
-      Seg 65: Max=4.3571 Gy (0.06s)
-      Seg 66: Max=4.3571 Gy (0.06s)
-      Seg 67: Max=4.3571 Gy (0.06s)
-      Seg 68: Max=4.3571 Gy (0.06s)
-      Seg 69: Max=4.0701 Gy (0.06s)
-      Seg 70: Max=2.9913 Gy (0.06s)
-      Seg 71: Max=4.0773 Gy (0.06s)
-      Seg 72: Max=2.9958 Gy (0.06s)
-      Seg 73: Max=2.9958 Gy (0.06s)
-      Seg 74: Max=2.9958 Gy (0.06s)
-      Seg 75: Max=2.9958 Gy (0.06s)
-      Seg 76: Max=2.9958 Gy (0.06s)
-      Seg 77: Max=2.9958 Gy (0.06s)
-      Seg 78: Max=2.9958 Gy (0.06s)
-      Seg 79: Max=2.9958 Gy (0.06s)
-      Seg 80: Max=2.9958 Gy (0.06s)
-      Seg 81: Max=2.9958 Gy (0.06s)
-      Seg 82: Max=2.9958 Gy (0.06s)
-      Seg 83: Max=2.9958 Gy (0.06s)
-      Seg 84: Max=4.0694 Gy (0.06s)
-      Seg 85: Max=4.0694 Gy (0.06s)
-      Seg 86: Max=4.0644 Gy (0.06s)
-      Seg 87: Max=4.0644 Gy (0.06s)
-      Seg 88: Max=4.0644 Gy (0.06s)
-      Seg 89: Max=4.0644 Gy (0.06s)
-      Seg 90: Max=2.9488 Gy (0.06s)
-      Seg 91: Max=2.9488 Gy (0.06s)
-      Seg 92: Max=2.9488 Gy (0.06s)
-      Seg 93: Max=2.9488 Gy (0.06s)
-      Seg 94: Max=2.9488 Gy (0.06s)
-      Seg 95: Max=2.9488 Gy (0.06s)
-      Seg 96: Max=2.9488 Gy (0.06s)
-      Seg 97: Max=2.9488 Gy (0.06s)
-      Seg 98: Max=2.9488 Gy (0.06s)
-      Seg 99: Max=4.0635 Gy (0.06s)
-      Seg 100: Max=4.0635 Gy (0.06s)
-      Seg 101: Max=4.0635 Gy (0.06s)
-      Seg 102: Max=4.0635 Gy (0.06s)
-      Seg 103: Max=4.0635 Gy (0.06s)
-      Seg 104: Max=4.0635 Gy (0.06s)
-      Seg 105: Max=4.0635 Gy (0.06s)
-      Seg 106: Max=2.9250 Gy (0.06s)
-      Seg 107: Max=2.9250 Gy (0.06s)
-      Seg 108: Max=4.0557 Gy (0.06s)
-      Seg 109: Max=4.4918 Gy (0.06s)
-      Seg 110: Max=4.4918 Gy (0.06s)
-      Seg 111: Max=4.4918 Gy (0.06s)
-      Seg 112: Max=5.8685 Gy (0.06s)
-      Seg 113: Max=5.8685 Gy (0.06s)
-      Seg 114: Max=5.8685 Gy (0.06s)
-      Seg 115: Max=5.8685 Gy (0.06s)
-      Seg 116: Max=5.8685 Gy (0.06s)
-      Seg 117: Max=5.8685 Gy (0.06s)
-      Seg 118: Max=5.8685 Gy (0.06s)
-      Seg 119: Max=5.8272 Gy (0.06s)
-      Seg 120: Max=5.8272 Gy (0.06s)
-      Seg 121: Max=5.8272 Gy (0.06s)
-      Seg 122: Max=5.8272 Gy (0.06s)
-      Seg 123: Max=5.8272 Gy (0.06s)
-      Seg 124: Max=5.8272 Gy (0.06s)
-      Seg 125: Max=5.7571 Gy (0.06s)
-      Seg 126: Max=5.7571 Gy (0.06s)
-      Seg 127: Max=5.7571 Gy (0.06s)
-      Seg 128: Max=5.7571 Gy (0.06s)
-      Seg 129: Max=5.7571 Gy (0.06s)
-      Seg 130: Max=5.7571 Gy (0.06s)
-      Seg 131: Max=5.7571 Gy (0.06s)
-      Seg 132: Max=5.7571 Gy (0.06s)
-      Seg 133: Max=5.7571 Gy (0.06s)
-      Seg 134: Max=5.7571 Gy (0.06s)
-      Seg 135: Max=5.5809 Gy (0.06s)
-      Seg 136: Max=5.5809 Gy (0.06s)
-      Seg 137: Max=5.5809 Gy (0.06s)
-      Seg 138: Max=5.5809 Gy (0.06s)
-      Seg 139: Max=5.5809 Gy (0.06s)
-      Seg 140: Max=5.5809 Gy (0.06s)
-      Seg 141: Max=5.5809 Gy (0.06s)
-      Seg 142: Max=5.5809 Gy (0.06s)
-      Seg 143: Max=5.5809 Gy (0.06s)
-      Seg 144: Max=5.5809 Gy (0.06s)
-      Seg 145: Max=5.5809 Gy (0.06s)
-      Seg 146: Max=5.5809 Gy (0.06s)
-      Seg 147: Max=5.5809 Gy (0.06s)
-      Seg 148: Max=5.5809 Gy (0.06s)
-      Seg 149: Max=5.5809 Gy (0.06s)
-      Seg 150: Max=5.5809 Gy (0.06s)
-      Seg 151: Max=4.3056 Gy (0.06s)
-      Seg 152: Max=4.3056 Gy (0.06s)
-      Seg 153: Max=4.3056 Gy (0.06s)
-      Seg 154: Max=4.3056 Gy (0.06s)
-      Seg 155: Max=4.3056 Gy (0.06s)
-      Seg 156: Max=4.3056 Gy (0.06s)
-      Seg 157: Max=4.3056 Gy (0.06s)
-      Seg 158: Max=4.3056 Gy (0.06s)
-      Seg 159: Max=4.3056 Gy (0.06s)
-      Seg 160: Max=4.3056 Gy (0.06s)
-      Seg 161: Max=4.3056 Gy (0.06s)
-    Beam 12 complete: Max=275.2406 Gy
+Progress: 100.00 %
+Dose calculation finished in 21.6432 seconds!
+    Calculated dij (748 bixels) in 21.7 sec
+    First segment MLC diagnostics:
+      MLC layers: 2
+        Layer 1: 56 positions
+        Layer 2: 58 positions
+      MLC devices with boundaries: 2
+        Device 1 (MLCX1): 28 leaf pairs
+        Device 2 (MLCX2): 29 leaf pairs
+      Seg 40: Open=48 bixels, Max=4.0625 Gy
+      Seg 60: Open=72 bixels, Max=4.3823 Gy
+      Seg 80: Open=24 bixels, Max=3.0076 Gy
+      Seg 100: Open=23 bixels, Max=2.9839 Gy
+      Seg 120: Open=92 bixels, Max=5.8128 Gy
+      Seg 140: Open=46 bixels, Max=5.5519 Gy
+      Seg 160: Open=23 bixels, Max=4.1364 Gy
+    Processed 127 segments (skipped 0) in 1.8 sec
+    Average open bixels per segment: 49.5 / 748 (6.6%)
+    Beam 12 complete: Max=271.2340 Gy
 
   Beam 13/17 (Field 13): 165 segments, 442.4 MU
     Calculating dij matrix...
@@ -2323,7 +805,7 @@ Warning: Inconsistent dose engines given! pln asks for 'pencilBeam', but you are
 'SVDPB'!
 Warning: Using default dose calculation engine SVD Pencil Beam!
 Dose influence matrix calculation using  'SVD Pencil Beam' Dose Engine...
-Dose grid has dimensions 299x299x67
+Dose grid has dimensions 199x199x45
 Adjusting structures for overlap... Done!
 Resampling structure set... Warning: Resizing the cst to the dose grid created an empty structure 35 opti in scenario 1
 (cst{13,4}{1})!
@@ -2343,153 +825,28 @@ Warning: projecting out of range HU values
 Warning: Kernel Cut-Off 'Inf mm' larger than machine data range of '179.500000 mm'. Using
 '179.500000 mm'!
 matRad: calculate radiological depth cube... done.
-	SSD = 806 mm ...
+	SSD = 803 mm ...
 	Uniform primary photon fluence -> pre-compute kernel convolution...
-Progress:100.00 %
-Dose calculation finished in 30.7123 seconds!
-    Calculated dij (680 bixels) in 30.8 sec
-      Seg 15: Max=2.6276 Gy (0.10s)
-      Seg 16: Max=2.6276 Gy (0.06s)
-      Seg 17: Max=2.6276 Gy (0.06s)
-      Seg 18: Max=2.6276 Gy (0.06s)
-      Seg 19: Max=2.6276 Gy (0.06s)
-      Seg 20: Max=2.6276 Gy (0.06s)
-      Seg 21: Max=2.6276 Gy (0.05s)
-      Seg 22: Max=2.6276 Gy (0.05s)
-      Seg 23: Max=2.6276 Gy (0.05s)
-      Seg 24: Max=2.6276 Gy (0.05s)
-      Seg 25: Max=2.6276 Gy (0.05s)
-      Seg 26: Max=2.6276 Gy (0.06s)
-      Seg 27: Max=2.6276 Gy (0.05s)
-      Seg 28: Max=2.6276 Gy (0.05s)
-      Seg 29: Max=2.6276 Gy (0.05s)
-      Seg 30: Max=2.6276 Gy (0.05s)
-      Seg 31: Max=2.6276 Gy (0.05s)
-      Seg 32: Max=2.6276 Gy (0.05s)
-      Seg 33: Max=2.6276 Gy (0.05s)
-      Seg 34: Max=3.6682 Gy (0.05s)
-      Seg 35: Max=3.6682 Gy (0.05s)
-      Seg 36: Max=3.6682 Gy (0.06s)
-      Seg 37: Max=3.6682 Gy (0.05s)
-      Seg 38: Max=3.6682 Gy (0.06s)
-      Seg 39: Max=3.6682 Gy (0.05s)
-      Seg 40: Max=3.6682 Gy (0.05s)
-      Seg 41: Max=3.6682 Gy (0.05s)
-      Seg 42: Max=4.0508 Gy (0.06s)
-      Seg 43: Max=4.0508 Gy (0.06s)
-      Seg 44: Max=4.0508 Gy (0.05s)
-      Seg 45: Max=4.0508 Gy (0.06s)
-      Seg 46: Max=4.0508 Gy (0.05s)
-      Seg 47: Max=4.1150 Gy (0.05s)
-      Seg 48: Max=4.1150 Gy (0.05s)
-      Seg 49: Max=4.1150 Gy (0.05s)
-      Seg 50: Max=4.1619 Gy (0.05s)
-      Seg 51: Max=4.1619 Gy (0.05s)
-      Seg 52: Max=4.1619 Gy (0.05s)
-      Seg 53: Max=4.1619 Gy (0.05s)
-      Seg 54: Max=4.1619 Gy (0.05s)
-      Seg 55: Max=4.1619 Gy (0.05s)
-      Seg 56: Max=4.1619 Gy (0.05s)
-      Seg 57: Max=4.1026 Gy (0.05s)
-      Seg 58: Max=4.1026 Gy (0.05s)
-      Seg 59: Max=4.1026 Gy (0.05s)
-      Seg 60: Max=4.1026 Gy (0.05s)
-      Seg 61: Max=4.1026 Gy (0.05s)
-      Seg 62: Max=4.1026 Gy (0.05s)
-      Seg 63: Max=4.1026 Gy (0.05s)
-      Seg 64: Max=3.9029 Gy (0.05s)
-      Seg 65: Max=3.6216 Gy (0.05s)
-      Seg 66: Max=3.6216 Gy (0.05s)
-      Seg 67: Max=3.6216 Gy (0.05s)
-      Seg 68: Max=3.8960 Gy (0.05s)
-      Seg 69: Max=3.8960 Gy (0.05s)
-      Seg 70: Max=3.8960 Gy (0.05s)
-      Seg 71: Max=3.8960 Gy (0.05s)
-      Seg 72: Max=3.8960 Gy (0.05s)
-      Seg 73: Max=3.8960 Gy (0.05s)
-      Seg 74: Max=3.8960 Gy (0.05s)
-      Seg 75: Max=4.0038 Gy (0.05s)
-      Seg 76: Max=4.0038 Gy (0.05s)
-      Seg 77: Max=4.0038 Gy (0.05s)
-      Seg 78: Max=4.0038 Gy (0.05s)
-      Seg 79: Max=4.0647 Gy (0.06s)
-      Seg 80: Max=4.0647 Gy (0.05s)
-      Seg 81: Max=3.9846 Gy (0.05s)
-      Seg 82: Max=3.9846 Gy (0.05s)
-      Seg 83: Max=3.9846 Gy (0.05s)
-      Seg 84: Max=3.9846 Gy (0.05s)
-      Seg 85: Max=3.9846 Gy (0.05s)
-      Seg 86: Max=3.9846 Gy (0.05s)
-      Seg 87: Max=3.9846 Gy (0.05s)
-      Seg 88: Max=4.0481 Gy (0.05s)
-      Seg 89: Max=4.0481 Gy (0.05s)
-      Seg 90: Max=4.0481 Gy (0.05s)
-      Seg 91: Max=4.0481 Gy (0.05s)
-      Seg 92: Max=3.9722 Gy (0.05s)
-      Seg 93: Max=3.9722 Gy (0.05s)
-      Seg 94: Max=3.9722 Gy (0.05s)
-      Seg 95: Max=3.8317 Gy (0.05s)
-      Seg 96: Max=3.8317 Gy (0.06s)
-      Seg 97: Max=3.8317 Gy (0.05s)
-      Seg 98: Max=3.8317 Gy (0.06s)
-      Seg 99: Max=3.8317 Gy (0.05s)
-      Seg 100: Max=3.8274 Gy (0.05s)
-      Seg 101: Max=3.9404 Gy (0.05s)
-      Seg 102: Max=3.9404 Gy (0.05s)
-      Seg 103: Max=3.9404 Gy (0.05s)
-      Seg 104: Max=3.9404 Gy (0.05s)
-      Seg 105: Max=3.8170 Gy (0.05s)
-      Seg 106: Max=3.9218 Gy (0.05s)
-      Seg 107: Max=3.9218 Gy (0.05s)
-      Seg 108: Max=3.9218 Gy (0.05s)
-      Seg 109: Max=3.9218 Gy (0.05s)
-      Seg 110: Max=3.9218 Gy (0.06s)
-      Seg 111: Max=3.9218 Gy (0.05s)
-      Seg 112: Max=3.9218 Gy (0.05s)
-      Seg 113: Max=3.9218 Gy (0.05s)
-      Seg 114: Max=3.9218 Gy (0.05s)
-      Seg 115: Max=3.9218 Gy (0.05s)
-      Seg 116: Max=3.7942 Gy (0.05s)
-      Seg 117: Max=3.7942 Gy (0.05s)
-      Seg 118: Max=3.7942 Gy (0.05s)
-      Seg 119: Max=3.7942 Gy (0.05s)
-      Seg 120: Max=3.7942 Gy (0.05s)
-      Seg 121: Max=3.7942 Gy (0.05s)
-      Seg 122: Max=3.7942 Gy (0.05s)
-      Seg 123: Max=3.7942 Gy (0.05s)
-      Seg 124: Max=3.7942 Gy (0.05s)
-      Seg 125: Max=3.7942 Gy (0.05s)
-      Seg 126: Max=3.7942 Gy (0.05s)
-      Seg 127: Max=3.7942 Gy (0.05s)
-      Seg 128: Max=3.7942 Gy (0.05s)
-      Seg 129: Max=3.7942 Gy (0.05s)
-      Seg 130: Max=3.5385 Gy (0.05s)
-      Seg 131: Max=3.5385 Gy (0.05s)
-      Seg 132: Max=3.5385 Gy (0.06s)
-      Seg 133: Max=3.5385 Gy (0.05s)
-      Seg 134: Max=2.5832 Gy (0.05s)
-      Seg 135: Max=2.5832 Gy (0.05s)
-      Seg 136: Max=2.5832 Gy (0.05s)
-      Seg 137: Max=2.5832 Gy (0.05s)
-      Seg 138: Max=2.5832 Gy (0.05s)
-      Seg 139: Max=2.5832 Gy (0.05s)
-      Seg 140: Max=2.5832 Gy (0.05s)
-      Seg 141: Max=2.5832 Gy (0.05s)
-      Seg 142: Max=2.5832 Gy (0.05s)
-      Seg 143: Max=2.5832 Gy (0.05s)
-      Seg 144: Max=2.5832 Gy (0.05s)
-      Seg 145: Max=2.5832 Gy (0.05s)
-      Seg 146: Max=2.5832 Gy (0.05s)
-      Seg 147: Max=2.5832 Gy (0.05s)
-      Seg 148: Max=2.5832 Gy (0.05s)
-      Seg 149: Max=2.5832 Gy (0.05s)
-      Seg 150: Max=2.5832 Gy (0.05s)
-      Seg 151: Max=2.5832 Gy (0.05s)
-      Seg 152: Max=2.5832 Gy (0.05s)
-      Seg 153: Max=2.5832 Gy (0.05s)
-      Seg 154: Max=2.5832 Gy (0.06s)
-      Seg 155: Max=2.5832 Gy (0.05s)
-    Beam 13 complete: Max=160.4637 Gy
+Progress: 100.00 %
+Dose calculation finished in 28.0697 seconds!
+    Calculated dij (719 bixels) in 28.1 sec
+    First segment MLC diagnostics:
+      MLC layers: 2
+        Layer 1: 56 positions
+        Layer 2: 58 positions
+      MLC devices with boundaries: 2
+        Device 1 (MLCX1): 28 leaf pairs
+        Device 2 (MLCX2): 29 leaf pairs
+      Seg 20: Open=24 bixels, Max=2.4310 Gy
+      Seg 40: Open=24 bixels, Max=2.4202 Gy
+      Seg 60: Open=72 bixels, Max=3.9107 Gy
+      Seg 80: Open=96 bixels, Max=3.9879 Gy
+      Seg 100: Open=48 bixels, Max=3.5050 Gy
+      Seg 120: Open=48 bixels, Max=3.5323 Gy
+      Seg 140: Open=24 bixels, Max=2.5495 Gy
+    Processed 133 segments (skipped 0) in 1.8 sec
+    Average open bixels per segment: 49.4 / 719 (6.9%)
+    Beam 13 complete: Max=149.6713 Gy
 
   Beam 14/17 (Field 14): 165 segments, 419.5 MU
     Calculating dij matrix...
@@ -2497,7 +854,7 @@ Warning: Inconsistent dose engines given! pln asks for 'pencilBeam', but you are
 'SVDPB'!
 Warning: Using default dose calculation engine SVD Pencil Beam!
 Dose influence matrix calculation using  'SVD Pencil Beam' Dose Engine...
-Dose grid has dimensions 299x299x67
+Dose grid has dimensions 199x199x45
 Adjusting structures for overlap... Done!
 Resampling structure set... Warning: Resizing the cst to the dose grid created an empty structure 35 opti in scenario 1
 (cst{13,4}{1})!
@@ -2517,147 +874,27 @@ Warning: projecting out of range HU values
 Warning: Kernel Cut-Off 'Inf mm' larger than machine data range of '179.500000 mm'. Using
 '179.500000 mm'!
 matRad: calculate radiological depth cube... done.
-	SSD = 830 mm ...
+	SSD = 825 mm ...
 	Uniform primary photon fluence -> pre-compute kernel convolution...
-Progress: 100.00 %
-Dose calculation finished in 34.5953 seconds!
-    Calculated dij (660 bixels) in 34.7 sec
-      Seg 23: Max=2.3136 Gy (0.06s)
-      Seg 24: Max=2.3136 Gy (0.06s)
-      Seg 25: Max=2.3136 Gy (0.06s)
-      Seg 26: Max=2.3136 Gy (0.06s)
-      Seg 27: Max=2.3136 Gy (0.06s)
-      Seg 28: Max=2.3136 Gy (0.06s)
-      Seg 29: Max=2.3136 Gy (0.06s)
-      Seg 30: Max=2.3136 Gy (0.06s)
-      Seg 31: Max=2.3136 Gy (0.06s)
-      Seg 32: Max=2.3136 Gy (0.06s)
-      Seg 33: Max=2.3136 Gy (0.06s)
-      Seg 34: Max=2.3136 Gy (0.06s)
-      Seg 35: Max=2.3136 Gy (0.06s)
-      Seg 36: Max=2.3136 Gy (0.06s)
-      Seg 37: Max=2.3136 Gy (0.06s)
-      Seg 38: Max=2.3136 Gy (0.06s)
-      Seg 39: Max=2.3136 Gy (0.06s)
-      Seg 40: Max=2.3136 Gy (0.06s)
-      Seg 41: Max=2.3136 Gy (0.06s)
-      Seg 42: Max=2.3136 Gy (0.06s)
-      Seg 43: Max=2.3136 Gy (0.06s)
-      Seg 44: Max=2.3136 Gy (0.06s)
-      Seg 45: Max=3.1677 Gy (0.06s)
-      Seg 46: Max=3.1677 Gy (0.06s)
-      Seg 47: Max=3.1677 Gy (0.06s)
-      Seg 48: Max=3.1677 Gy (0.06s)
-      Seg 49: Max=3.1677 Gy (0.06s)
-      Seg 50: Max=3.1677 Gy (0.06s)
-      Seg 51: Max=3.1677 Gy (0.06s)
-      Seg 52: Max=3.1677 Gy (0.06s)
-      Seg 53: Max=3.1677 Gy (0.06s)
-      Seg 54: Max=3.1677 Gy (0.06s)
-      Seg 55: Max=3.1677 Gy (0.06s)
-      Seg 56: Max=3.4150 Gy (0.06s)
-      Seg 57: Max=3.4150 Gy (0.05s)
-      Seg 58: Max=3.4150 Gy (0.05s)
-      Seg 59: Max=3.5290 Gy (0.05s)
-      Seg 60: Max=3.5290 Gy (0.05s)
-      Seg 61: Max=3.5290 Gy (0.05s)
-      Seg 62: Max=3.5290 Gy (0.05s)
-      Seg 63: Max=3.4263 Gy (0.05s)
-      Seg 64: Max=3.4263 Gy (0.05s)
-      Seg 65: Max=3.4263 Gy (0.05s)
-      Seg 66: Max=3.4263 Gy (0.05s)
-      Seg 67: Max=3.4263 Gy (0.05s)
-      Seg 68: Max=3.4263 Gy (0.05s)
-      Seg 69: Max=3.4263 Gy (0.05s)
-      Seg 70: Max=3.5436 Gy (0.05s)
-      Seg 71: Max=3.5436 Gy (0.05s)
-      Seg 72: Max=3.5436 Gy (0.05s)
-      Seg 73: Max=3.5436 Gy (0.05s)
-      Seg 74: Max=3.5436 Gy (0.05s)
-      Seg 75: Max=3.5436 Gy (0.05s)
-      Seg 76: Max=3.5436 Gy (0.05s)
-      Seg 77: Max=3.5436 Gy (0.05s)
-      Seg 78: Max=3.4511 Gy (0.05s)
-      Seg 79: Max=3.2260 Gy (0.05s)
-      Seg 80: Max=3.2260 Gy (0.05s)
-      Seg 81: Max=3.2211 Gy (0.05s)
-      Seg 82: Max=3.2211 Gy (0.05s)
-      Seg 83: Max=3.2211 Gy (0.05s)
-      Seg 84: Max=3.2211 Gy (0.05s)
-      Seg 85: Max=3.2211 Gy (0.05s)
-      Seg 86: Max=3.2211 Gy (0.05s)
-      Seg 87: Max=3.2211 Gy (0.05s)
-      Seg 88: Max=3.2211 Gy (0.05s)
-      Seg 89: Max=3.2211 Gy (0.05s)
-      Seg 90: Max=3.2211 Gy (0.05s)
-      Seg 91: Max=3.2211 Gy (0.05s)
-      Seg 92: Max=3.4646 Gy (0.05s)
-      Seg 93: Max=3.4646 Gy (0.05s)
-      Seg 94: Max=3.4646 Gy (0.05s)
-      Seg 95: Max=3.4646 Gy (0.05s)
-      Seg 96: Max=3.5776 Gy (0.05s)
-      Seg 97: Max=3.5776 Gy (0.05s)
-      Seg 98: Max=3.5776 Gy (0.05s)
-      Seg 99: Max=3.5776 Gy (0.05s)
-      Seg 100: Max=3.5776 Gy (0.05s)
-      Seg 101: Max=3.5776 Gy (0.05s)
-      Seg 102: Max=3.4811 Gy (0.05s)
-      Seg 103: Max=3.4811 Gy (0.05s)
-      Seg 104: Max=3.4811 Gy (0.05s)
-      Seg 105: Max=3.5933 Gy (0.05s)
-      Seg 106: Max=3.6613 Gy (0.05s)
-      Seg 107: Max=3.6613 Gy (0.05s)
-      Seg 108: Max=3.6613 Gy (0.05s)
-      Seg 109: Max=3.6613 Gy (0.05s)
-      Seg 110: Max=3.6613 Gy (0.05s)
-      Seg 111: Max=3.6613 Gy (0.05s)
-      Seg 112: Max=3.6613 Gy (0.05s)
-      Seg 113: Max=3.6613 Gy (0.05s)
-      Seg 114: Max=3.6613 Gy (0.05s)
-      Seg 115: Max=3.6613 Gy (0.05s)
-      Seg 116: Max=3.6613 Gy (0.05s)
-      Seg 117: Max=3.6613 Gy (0.05s)
-      Seg 118: Max=3.6613 Gy (0.05s)
-      Seg 119: Max=3.6613 Gy (0.05s)
-      Seg 120: Max=3.6613 Gy (0.05s)
-      Seg 121: Max=3.6059 Gy (0.05s)
-      Seg 122: Max=3.6059 Gy (0.05s)
-      Seg 123: Max=3.6059 Gy (0.05s)
-      Seg 124: Max=3.6059 Gy (0.05s)
-      Seg 125: Max=3.6702 Gy (0.05s)
-      Seg 126: Max=3.6702 Gy (0.05s)
-      Seg 127: Max=3.6702 Gy (0.05s)
-      Seg 128: Max=3.6702 Gy (0.05s)
-      Seg 129: Max=3.6152 Gy (0.05s)
-      Seg 130: Max=3.6152 Gy (0.05s)
-      Seg 131: Max=3.6152 Gy (0.05s)
-      Seg 132: Max=3.6152 Gy (0.05s)
-      Seg 133: Max=3.6152 Gy (0.05s)
-      Seg 134: Max=3.6152 Gy (0.05s)
-      Seg 135: Max=3.6152 Gy (0.05s)
-      Seg 136: Max=3.6152 Gy (0.05s)
-      Seg 137: Max=3.6152 Gy (0.05s)
-      Seg 138: Max=3.6152 Gy (0.05s)
-      Seg 139: Max=3.6152 Gy (0.05s)
-      Seg 140: Max=3.6152 Gy (0.05s)
-      Seg 141: Max=3.5090 Gy (0.05s)
-      Seg 142: Max=3.2620 Gy (0.05s)
-      Seg 143: Max=3.2620 Gy (0.05s)
-      Seg 144: Max=3.2620 Gy (0.05s)
-      Seg 145: Max=3.2620 Gy (0.05s)
-      Seg 146: Max=3.2620 Gy (0.05s)
-      Seg 147: Max=3.2620 Gy (0.05s)
-      Seg 148: Max=3.2620 Gy (0.05s)
-      Seg 149: Max=3.2620 Gy (0.05s)
-      Seg 150: Max=2.4146 Gy (0.05s)
-      Seg 151: Max=2.4146 Gy (0.05s)
-      Seg 152: Max=2.4146 Gy (0.05s)
-      Seg 153: Max=2.4146 Gy (0.05s)
-      Seg 154: Max=2.4146 Gy (0.05s)
-      Seg 155: Max=2.4146 Gy (0.05s)
-      Seg 156: Max=2.4146 Gy (0.05s)
-      Seg 157: Max=2.4146 Gy (0.05s)
-    Beam 14 complete: Max=158.9842 Gy
+Progress: 0100.00 %
+Dose calculation finished in 24.7675 seconds!
+    Calculated dij (686 bixels) in 24.8 sec
+    First segment MLC diagnostics:
+      MLC layers: 2
+        Layer 1: 56 positions
+        Layer 2: 58 positions
+      MLC devices with boundaries: 2
+        Device 1 (MLCX1): 28 leaf pairs
+        Device 2 (MLCX2): 29 leaf pairs
+      Seg 40: Open=24 bixels, Max=2.2971 Gy
+      Seg 60: Open=72 bixels, Max=3.4061 Gy
+      Seg 80: Open=48 bixels, Max=3.2279 Gy
+      Seg 100: Open=96 bixels, Max=3.5840 Gy
+      Seg 120: Open=96 bixels, Max=3.5992 Gy
+      Seg 140: Open=48 bixels, Max=3.2220 Gy
+    Processed 125 segments (skipped 0) in 1.6 sec
+    Average open bixels per segment: 58.9 / 686 (8.6%)
+    Beam 14 complete: Max=130.0228 Gy
 
   Beam 15/17 (Field 15): 165 segments, 441.4 MU
     Calculating dij matrix...
@@ -2665,7 +902,7 @@ Warning: Inconsistent dose engines given! pln asks for 'pencilBeam', but you are
 'SVDPB'!
 Warning: Using default dose calculation engine SVD Pencil Beam!
 Dose influence matrix calculation using  'SVD Pencil Beam' Dose Engine...
-Dose grid has dimensions 299x299x67
+Dose grid has dimensions 199x199x45
 Adjusting structures for overlap... Done!
 Resampling structure set... Warning: Resizing the cst to the dose grid created an empty structure 35 opti in scenario 1
 (cst{13,4}{1})!
@@ -2685,170 +922,27 @@ Warning: projecting out of range HU values
 Warning: Kernel Cut-Off 'Inf mm' larger than machine data range of '179.500000 mm'. Using
 '179.500000 mm'!
 matRad: calculate radiological depth cube... done.
-	SSD = 854 mm ...
+	SSD = 850 mm ...
 	Uniform primary photon fluence -> pre-compute kernel convolution...
 Progress:100.00 %
-Dose calculation finished in 33.1025 seconds!
-    Calculated dij (630 bixels) in 33.2 sec
-      Seg 2: Max=2.3826 Gy (0.06s)
-      Seg 3: Max=2.3826 Gy (0.06s)
-      Seg 4: Max=2.3826 Gy (0.06s)
-      Seg 5: Max=2.3826 Gy (0.06s)
-      Seg 6: Max=2.3826 Gy (0.06s)
-      Seg 7: Max=2.3826 Gy (0.06s)
-      Seg 8: Max=2.3826 Gy (0.06s)
-      Seg 9: Max=2.3826 Gy (0.06s)
-      Seg 10: Max=2.3826 Gy (0.06s)
-      Seg 11: Max=2.3826 Gy (0.06s)
-      Seg 12: Max=2.3826 Gy (0.06s)
-      Seg 13: Max=2.3826 Gy (0.06s)
-      Seg 14: Max=2.3826 Gy (0.06s)
-      Seg 15: Max=2.3826 Gy (0.06s)
-      Seg 16: Max=2.3826 Gy (0.06s)
-      Seg 17: Max=2.3826 Gy (0.06s)
-      Seg 18: Max=2.3826 Gy (0.06s)
-      Seg 19: Max=2.3826 Gy (0.06s)
-      Seg 20: Max=2.3826 Gy (0.06s)
-      Seg 21: Max=2.3826 Gy (0.06s)
-      Seg 22: Max=2.3826 Gy (0.06s)
-      Seg 23: Max=2.3826 Gy (0.06s)
-      Seg 24: Max=2.3826 Gy (0.06s)
-      Seg 25: Max=2.3826 Gy (0.06s)
-      Seg 26: Max=2.3826 Gy (0.06s)
-      Seg 27: Max=2.3826 Gy (0.06s)
-      Seg 28: Max=2.3826 Gy (0.06s)
-      Seg 29: Max=2.3826 Gy (0.06s)
-      Seg 30: Max=2.3826 Gy (0.06s)
-      Seg 31: Max=2.3826 Gy (0.06s)
-      Seg 32: Max=2.3826 Gy (0.06s)
-      Seg 33: Max=3.2748 Gy (0.06s)
-      Seg 34: Max=3.2748 Gy (0.06s)
-      Seg 35: Max=3.2748 Gy (0.06s)
-      Seg 36: Max=3.2748 Gy (0.06s)
-      Seg 37: Max=3.2748 Gy (0.06s)
-      Seg 38: Max=3.2748 Gy (0.06s)
-      Seg 39: Max=3.2748 Gy (0.06s)
-      Seg 40: Max=3.2748 Gy (0.06s)
-      Seg 41: Max=3.2748 Gy (0.06s)
-      Seg 42: Max=3.2748 Gy (0.06s)
-      Seg 43: Max=3.2748 Gy (0.06s)
-      Seg 44: Max=3.2748 Gy (0.06s)
-      Seg 45: Max=3.2748 Gy (0.06s)
-      Seg 46: Max=3.2748 Gy (0.06s)
-      Seg 47: Max=3.2748 Gy (0.06s)
-      Seg 48: Max=3.5002 Gy (0.06s)
-      Seg 49: Max=3.5002 Gy (0.06s)
-      Seg 50: Max=3.5002 Gy (0.06s)
-      Seg 51: Max=3.6010 Gy (0.06s)
-      Seg 52: Max=3.6010 Gy (0.06s)
-      Seg 53: Max=3.6010 Gy (0.06s)
-      Seg 54: Max=3.6577 Gy (0.06s)
-      Seg 55: Max=3.6577 Gy (0.06s)
-      Seg 56: Max=3.6577 Gy (0.06s)
-      Seg 57: Max=3.6577 Gy (0.06s)
-      Seg 58: Max=3.6577 Gy (0.06s)
-      Seg 59: Max=3.6577 Gy (0.06s)
-      Seg 60: Max=3.6577 Gy (0.06s)
-      Seg 61: Max=3.6577 Gy (0.06s)
-      Seg 62: Max=3.6577 Gy (0.06s)
-      Seg 63: Max=3.6577 Gy (0.06s)
-      Seg 64: Max=3.5778 Gy (0.06s)
-      Seg 65: Max=3.5778 Gy (0.06s)
-      Seg 66: Max=3.5778 Gy (0.06s)
-      Seg 67: Max=3.6319 Gy (0.06s)
-      Seg 68: Max=3.6319 Gy (0.06s)
-      Seg 69: Max=3.6319 Gy (0.05s)
-      Seg 70: Max=3.6711 Gy (0.06s)
-      Seg 71: Max=3.6711 Gy (0.06s)
-      Seg 72: Max=3.6711 Gy (0.06s)
-      Seg 73: Max=3.6135 Gy (0.06s)
-      Seg 74: Max=3.6135 Gy (0.06s)
-      Seg 75: Max=3.6135 Gy (0.06s)
-      Seg 76: Max=3.5252 Gy (0.06s)
-      Seg 77: Max=3.5252 Gy (0.06s)
-      Seg 78: Max=3.5252 Gy (0.06s)
-      Seg 79: Max=3.5252 Gy (0.05s)
-      Seg 80: Max=3.5791 Gy (0.06s)
-      Seg 81: Max=3.5791 Gy (0.06s)
-      Seg 82: Max=3.5791 Gy (0.06s)
-      Seg 83: Max=3.5791 Gy (0.06s)
-      Seg 84: Max=3.5791 Gy (0.06s)
-      Seg 85: Max=3.5791 Gy (0.06s)
-      Seg 86: Max=3.4946 Gy (0.06s)
-      Seg 87: Max=3.4946 Gy (0.06s)
-      Seg 88: Max=3.4946 Gy (0.06s)
-      Seg 89: Max=3.4946 Gy (0.06s)
-      Seg 90: Max=3.4946 Gy (0.06s)
-      Seg 91: Max=3.4946 Gy (0.06s)
-      Seg 92: Max=3.4946 Gy (0.06s)
-      Seg 93: Max=3.3583 Gy (0.06s)
-      Seg 94: Max=3.1383 Gy (0.06s)
-      Seg 95: Max=3.1383 Gy (0.05s)
-      Seg 96: Max=3.1383 Gy (0.06s)
-      Seg 97: Max=3.1383 Gy (0.05s)
-      Seg 98: Max=3.3361 Gy (0.06s)
-      Seg 99: Max=3.3361 Gy (0.06s)
-      Seg 100: Max=3.3361 Gy (0.06s)
-      Seg 101: Max=3.3361 Gy (0.06s)
-      Seg 102: Max=3.3361 Gy (0.06s)
-      Seg 103: Max=3.3361 Gy (0.06s)
-      Seg 104: Max=3.3361 Gy (0.06s)
-      Seg 105: Max=3.3361 Gy (0.06s)
-      Seg 106: Max=3.3361 Gy (0.06s)
-      Seg 107: Max=3.3361 Gy (0.06s)
-      Seg 108: Max=3.3361 Gy (0.06s)
-      Seg 109: Max=3.2960 Gy (0.06s)
-      Seg 110: Max=3.2960 Gy (0.06s)
-      Seg 111: Max=3.2960 Gy (0.06s)
-      Seg 112: Max=3.2960 Gy (0.06s)
-      Seg 113: Max=3.2960 Gy (0.06s)
-      Seg 114: Max=3.2960 Gy (0.06s)
-      Seg 115: Max=3.2960 Gy (0.06s)
-      Seg 116: Max=3.2960 Gy (0.06s)
-      Seg 117: Max=3.2960 Gy (0.06s)
-      Seg 118: Max=3.2960 Gy (0.06s)
-      Seg 119: Max=3.2960 Gy (0.06s)
-      Seg 120: Max=3.2960 Gy (0.06s)
-      Seg 121: Max=3.2960 Gy (0.06s)
-      Seg 122: Max=3.2960 Gy (0.06s)
-      Seg 123: Max=3.2960 Gy (0.06s)
-      Seg 124: Max=3.0334 Gy (0.06s)
-      Seg 125: Max=3.0334 Gy (0.06s)
-      Seg 126: Max=3.0334 Gy (0.06s)
-      Seg 127: Max=3.0334 Gy (0.06s)
-      Seg 128: Max=3.0334 Gy (0.06s)
-      Seg 129: Max=3.0334 Gy (0.06s)
-      Seg 130: Max=3.0334 Gy (0.06s)
-      Seg 131: Max=3.0334 Gy (0.06s)
-      Seg 132: Max=2.2159 Gy (0.06s)
-      Seg 133: Max=2.2159 Gy (0.06s)
-      Seg 134: Max=2.2159 Gy (0.06s)
-      Seg 135: Max=2.2159 Gy (0.06s)
-      Seg 142: Max=2.0933 Gy (0.06s)
-      Seg 143: Max=2.0933 Gy (0.06s)
-      Seg 144: Max=2.0933 Gy (0.06s)
-      Seg 145: Max=2.0933 Gy (0.06s)
-      Seg 146: Max=2.0933 Gy (0.06s)
-      Seg 147: Max=2.0933 Gy (0.06s)
-      Seg 148: Max=2.0933 Gy (0.06s)
-      Seg 149: Max=2.0933 Gy (0.06s)
-      Seg 150: Max=2.0933 Gy (0.06s)
-      Seg 151: Max=2.0933 Gy (0.06s)
-      Seg 152: Max=2.0933 Gy (0.06s)
-      Seg 153: Max=2.0933 Gy (0.06s)
-      Seg 154: Max=2.0933 Gy (0.06s)
-      Seg 155: Max=2.0933 Gy (0.06s)
-      Seg 156: Max=2.0933 Gy (0.06s)
-      Seg 157: Max=2.0933 Gy (0.06s)
-      Seg 158: Max=2.0933 Gy (0.06s)
-      Seg 159: Max=2.0933 Gy (0.06s)
-      Seg 160: Max=2.0933 Gy (0.06s)
-      Seg 161: Max=2.0933 Gy (0.06s)
-      Seg 162: Max=2.0933 Gy (0.06s)
-      Seg 163: Max=2.0933 Gy (0.06s)
-      Seg 164: Max=2.0933 Gy (0.06s)
-      Seg 165: Max=2.0933 Gy (0.06s)
-    Beam 15 complete: Max=184.6687 Gy
+Dose calculation finished in 13.9752 seconds!
+    Calculated dij (651 bixels) in 14.0 sec
+    First segment MLC diagnostics:
+      MLC layers: 2
+        Layer 1: 56 positions
+        Layer 2: 58 positions
+      MLC devices with boundaries: 2
+        Device 1 (MLCX1): 28 leaf pairs
+        Device 2 (MLCX2): 29 leaf pairs
+      Seg 20: Open=24 bixels, Max=2.4177 Gy
+      Seg 40: Open=24 bixels, Max=2.3862 Gy
+      Seg 60: Open=72 bixels, Max=3.4419 Gy
+      Seg 80: Open=96 bixels, Max=3.4911 Gy
+      Seg 100: Open=72 bixels, Max=3.3102 Gy
+      Seg 120: Open=48 bixels, Max=3.0335 Gy
+    Processed 132 segments (skipped 0) in 1.7 sec
+    Average open bixels per segment: 52.4 / 651 (8.0%)
+    Beam 15 complete: Max=134.9863 Gy
 
   Beam 16/17 (Field 16): 165 segments, 251.6 MU
     Calculating dij matrix...
@@ -2856,7 +950,7 @@ Warning: Inconsistent dose engines given! pln asks for 'pencilBeam', but you are
 'SVDPB'!
 Warning: Using default dose calculation engine SVD Pencil Beam!
 Dose influence matrix calculation using  'SVD Pencil Beam' Dose Engine...
-Dose grid has dimensions 299x299x67
+Dose grid has dimensions 199x199x45
 Adjusting structures for overlap... Done!
 Resampling structure set... Warning: Resizing the cst to the dose grid created an empty structure 35 opti in scenario 1
 (cst{13,4}{1})!
@@ -2876,134 +970,27 @@ Warning: projecting out of range HU values
 Warning: Kernel Cut-Off 'Inf mm' larger than machine data range of '179.500000 mm'. Using
 '179.500000 mm'!
 matRad: calculate radiological depth cube... done.
-	SSD = 896 mm ...
+	SSD = 893 mm ...
 	Uniform primary photon fluence -> pre-compute kernel convolution...
 Progress:100.00 %
-Dose calculation finished in 33.272 seconds!
-    Calculated dij (629 bixels) in 33.4 sec
-      Seg 35: Max=1.1831 Gy (0.07s)
-      Seg 36: Max=1.1831 Gy (0.06s)
-      Seg 37: Max=1.1831 Gy (0.07s)
-      Seg 38: Max=1.1831 Gy (0.06s)
-      Seg 39: Max=1.1831 Gy (0.07s)
-      Seg 40: Max=1.1831 Gy (0.07s)
-      Seg 41: Max=1.1831 Gy (0.07s)
-      Seg 42: Max=1.1831 Gy (0.07s)
-      Seg 43: Max=1.1831 Gy (0.07s)
-      Seg 44: Max=1.1831 Gy (0.06s)
-      Seg 45: Max=1.1831 Gy (0.07s)
-      Seg 46: Max=1.1831 Gy (0.07s)
-      Seg 47: Max=1.1831 Gy (0.07s)
-      Seg 48: Max=1.1831 Gy (0.07s)
-      Seg 49: Max=1.1831 Gy (0.06s)
-      Seg 50: Max=1.1831 Gy (0.07s)
-      Seg 51: Max=1.1831 Gy (0.06s)
-      Seg 52: Max=1.1831 Gy (0.07s)
-      Seg 53: Max=1.1831 Gy (0.07s)
-      Seg 54: Max=1.1831 Gy (0.07s)
-      Seg 55: Max=1.1831 Gy (0.07s)
-      Seg 56: Max=1.1831 Gy (0.07s)
-      Seg 57: Max=1.1831 Gy (0.07s)
-      Seg 58: Max=1.1831 Gy (0.07s)
-      Seg 59: Max=1.1831 Gy (0.07s)
-      Seg 60: Max=1.1831 Gy (0.07s)
-      Seg 61: Max=1.1831 Gy (0.07s)
-      Seg 62: Max=1.1831 Gy (0.07s)
-      Seg 63: Max=1.1831 Gy (0.07s)
-      Seg 64: Max=1.1831 Gy (0.07s)
-      Seg 65: Max=1.1831 Gy (0.06s)
-      Seg 66: Max=1.1831 Gy (0.06s)
-      Seg 67: Max=1.1831 Gy (0.06s)
-      Seg 68: Max=1.1831 Gy (0.06s)
-      Seg 69: Max=1.1831 Gy (0.06s)
-      Seg 70: Max=1.1831 Gy (0.06s)
-      Seg 71: Max=1.1831 Gy (0.06s)
-      Seg 72: Max=1.1831 Gy (0.06s)
-      Seg 73: Max=1.1831 Gy (0.06s)
-      Seg 74: Max=1.1831 Gy (0.06s)
-      Seg 75: Max=1.1831 Gy (0.06s)
-      Seg 76: Max=1.1831 Gy (0.06s)
-      Seg 77: Max=1.1831 Gy (0.06s)
-      Seg 78: Max=1.1831 Gy (0.06s)
-      Seg 79: Max=1.1831 Gy (0.06s)
-      Seg 80: Max=1.1831 Gy (0.06s)
-      Seg 81: Max=1.1831 Gy (0.06s)
-      Seg 82: Max=1.1831 Gy (0.06s)
-      Seg 83: Max=1.1831 Gy (0.06s)
-      Seg 84: Max=1.6320 Gy (0.06s)
-      Seg 85: Max=1.6320 Gy (0.06s)
-      Seg 86: Max=1.6320 Gy (0.06s)
-      Seg 87: Max=1.6320 Gy (0.06s)
-      Seg 88: Max=1.6320 Gy (0.06s)
-      Seg 89: Max=1.6320 Gy (0.06s)
-      Seg 90: Max=1.6320 Gy (0.06s)
-      Seg 91: Max=1.6320 Gy (0.06s)
-      Seg 92: Max=1.6320 Gy (0.06s)
-      Seg 93: Max=1.6320 Gy (0.06s)
-      Seg 94: Max=1.6320 Gy (0.06s)
-      Seg 95: Max=1.7502 Gy (0.06s)
-      Seg 96: Max=1.7502 Gy (0.06s)
-      Seg 97: Max=1.7502 Gy (0.06s)
-      Seg 98: Max=1.7502 Gy (0.06s)
-      Seg 99: Max=1.7502 Gy (0.06s)
-      Seg 100: Max=1.7502 Gy (0.06s)
-      Seg 101: Max=1.7502 Gy (0.06s)
-      Seg 102: Max=1.7502 Gy (0.06s)
-      Seg 103: Max=1.7502 Gy (0.06s)
-      Seg 104: Max=1.7502 Gy (0.06s)
-      Seg 105: Max=1.7502 Gy (0.06s)
-      Seg 106: Max=1.7502 Gy (0.06s)
-      Seg 107: Max=1.7502 Gy (0.06s)
-      Seg 108: Max=1.7502 Gy (0.06s)
-      Seg 109: Max=1.7502 Gy (0.06s)
-      Seg 110: Max=1.7502 Gy (0.06s)
-      Seg 111: Max=1.7502 Gy (0.06s)
-      Seg 112: Max=1.7502 Gy (0.06s)
-      Seg 113: Max=1.7502 Gy (0.06s)
-      Seg 114: Max=1.7502 Gy (0.06s)
-      Seg 115: Max=1.7502 Gy (0.06s)
-      Seg 116: Max=1.7502 Gy (0.06s)
-      Seg 117: Max=1.8142 Gy (0.06s)
-      Seg 118: Max=1.8142 Gy (0.06s)
-      Seg 119: Max=1.8142 Gy (0.06s)
-      Seg 120: Max=1.8142 Gy (0.06s)
-      Seg 121: Max=1.8142 Gy (0.06s)
-      Seg 122: Max=1.7619 Gy (0.06s)
-      Seg 123: Max=1.7619 Gy (0.06s)
-      Seg 124: Max=1.7619 Gy (0.06s)
-      Seg 125: Max=1.7619 Gy (0.06s)
-      Seg 126: Max=1.7619 Gy (0.06s)
-      Seg 127: Max=1.7619 Gy (0.06s)
-      Seg 128: Max=1.6439 Gy (0.06s)
-      Seg 129: Max=1.7770 Gy (0.06s)
-      Seg 130: Max=1.8390 Gy (0.06s)
-      Seg 131: Max=1.8533 Gy (0.06s)
-      Seg 132: Max=1.8533 Gy (0.06s)
-      Seg 133: Max=1.8077 Gy (0.06s)
-      Seg 134: Max=1.8077 Gy (0.06s)
-      Seg 135: Max=1.8077 Gy (0.06s)
-      Seg 136: Max=1.8077 Gy (0.06s)
-      Seg 137: Max=1.8077 Gy (0.06s)
-      Seg 138: Max=1.8077 Gy (0.06s)
-      Seg 139: Max=1.8077 Gy (0.06s)
-      Seg 140: Max=1.6937 Gy (0.06s)
-      Seg 141: Max=1.6937 Gy (0.06s)
-      Seg 142: Max=1.6937 Gy (0.06s)
-      Seg 143: Max=1.6937 Gy (0.06s)
-      Seg 144: Max=1.2395 Gy (0.06s)
-      Seg 145: Max=1.2395 Gy (0.06s)
-      Seg 146: Max=1.2395 Gy (0.06s)
-      Seg 147: Max=1.2395 Gy (0.06s)
-      Seg 148: Max=1.2395 Gy (0.06s)
-      Seg 149: Max=1.2395 Gy (0.06s)
-      Seg 150: Max=1.2395 Gy (0.06s)
-      Seg 151: Max=1.2395 Gy (0.06s)
-      Seg 152: Max=1.2395 Gy (0.06s)
-      Seg 153: Max=1.2395 Gy (0.06s)
-      Seg 163: Max=1.2579 Gy (0.06s)
-      Seg 164: Max=1.2579 Gy (0.06s)
-      Seg 165: Max=1.2579 Gy (0.06s)
-    Beam 16 complete: Max=120.3923 Gy
+Dose calculation finished in 18.6782 seconds!
+    Calculated dij (662 bixels) in 18.8 sec
+    First segment MLC diagnostics:
+      MLC layers: 2
+        Layer 1: 56 positions
+        Layer 2: 58 positions
+      MLC devices with boundaries: 2
+        Device 1 (MLCX1): 28 leaf pairs
+        Device 2 (MLCX2): 29 leaf pairs
+      Seg 40: Open=24 bixels, Max=1.1920 Gy
+      Seg 60: Open=24 bixels, Max=1.1920 Gy
+      Seg 80: Open=24 bixels, Max=1.1920 Gy
+      Seg 100: Open=72 bixels, Max=1.7445 Gy
+      Seg 120: Open=72 bixels, Max=1.7645 Gy
+      Seg 140: Open=24 bixels, Max=1.2188 Gy
+    Processed 114 segments (skipped 0) in 1.6 sec
+    Average open bixels per segment: 41.7 / 662 (6.3%)
+    Beam 16 complete: Max=113.0567 Gy
 
   Beam 17/17 (Field 17): 165 segments, 188.7 MU
     Calculating dij matrix...
@@ -3011,7 +998,7 @@ Warning: Inconsistent dose engines given! pln asks for 'pencilBeam', but you are
 'SVDPB'!
 Warning: Using default dose calculation engine SVD Pencil Beam!
 Dose influence matrix calculation using  'SVD Pencil Beam' Dose Engine...
-Dose grid has dimensions 299x299x67
+Dose grid has dimensions 199x199x45
 Adjusting structures for overlap... Done!
 Resampling structure set... Warning: Resizing the cst to the dose grid created an empty structure 35 opti in scenario 1
 (cst{13,4}{1})!
@@ -3031,172 +1018,40 @@ Warning: projecting out of range HU values
 Warning: Kernel Cut-Off 'Inf mm' larger than machine data range of '179.500000 mm'. Using
 '179.500000 mm'!
 matRad: calculate radiological depth cube... done.
-	SSD = 910 mm ...
+	SSD = 908 mm ...
 	Uniform primary photon fluence -> pre-compute kernel convolution...
-Progress: 100.00 %
-Dose calculation finished in 34.9103 seconds!
-    Calculated dij (651 bixels) in 35.0 sec
-      Seg 14: Max=0.8924 Gy (0.06s)
-      Seg 15: Max=0.8924 Gy (0.06s)
-      Seg 16: Max=0.8924 Gy (0.06s)
-      Seg 17: Max=0.8924 Gy (0.07s)
-      Seg 18: Max=0.8924 Gy (0.08s)
-      Seg 19: Max=0.8924 Gy (0.08s)
-      Seg 20: Max=0.8924 Gy (0.06s)
-      Seg 21: Max=1.2174 Gy (0.06s)
-      Seg 22: Max=1.2174 Gy (0.06s)
-      Seg 23: Max=1.2174 Gy (0.06s)
-      Seg 24: Max=1.2174 Gy (0.05s)
-      Seg 25: Max=1.2174 Gy (0.06s)
-      Seg 26: Max=1.2174 Gy (0.06s)
-      Seg 27: Max=1.2174 Gy (0.05s)
-      Seg 28: Max=1.2174 Gy (0.06s)
-      Seg 29: Max=1.2174 Gy (0.05s)
-      Seg 30: Max=1.2174 Gy (0.06s)
-      Seg 31: Max=1.2174 Gy (0.05s)
-      Seg 32: Max=1.2174 Gy (0.06s)
-      Seg 33: Max=1.2174 Gy (0.06s)
-      Seg 34: Max=1.2174 Gy (0.05s)
-      Seg 35: Max=1.2174 Gy (0.06s)
-      Seg 36: Max=1.2174 Gy (0.06s)
-      Seg 37: Max=1.2174 Gy (0.06s)
-      Seg 38: Max=1.2174 Gy (0.06s)
-      Seg 39: Max=1.2174 Gy (0.06s)
-      Seg 40: Max=1.2174 Gy (0.06s)
-      Seg 41: Max=1.2174 Gy (0.05s)
-      Seg 42: Max=1.2174 Gy (0.05s)
-      Seg 43: Max=1.2174 Gy (0.06s)
-      Seg 44: Max=1.2174 Gy (0.05s)
-      Seg 45: Max=1.2174 Gy (0.06s)
-      Seg 46: Max=1.2174 Gy (0.06s)
-      Seg 47: Max=1.3025 Gy (0.06s)
-      Seg 48: Max=1.3025 Gy (0.06s)
-      Seg 49: Max=1.3025 Gy (0.05s)
-      Seg 50: Max=1.3025 Gy (0.06s)
-      Seg 51: Max=1.3025 Gy (0.05s)
-      Seg 52: Max=1.3025 Gy (0.06s)
-      Seg 53: Max=1.3025 Gy (0.05s)
-      Seg 54: Max=1.3025 Gy (0.06s)
-      Seg 55: Max=1.3025 Gy (0.06s)
-      Seg 56: Max=1.3025 Gy (0.05s)
-      Seg 57: Max=1.3025 Gy (0.06s)
-      Seg 58: Max=1.3025 Gy (0.05s)
-      Seg 59: Max=1.3025 Gy (0.06s)
-      Seg 60: Max=1.2150 Gy (0.05s)
-      Seg 61: Max=1.2150 Gy (0.05s)
-      Seg 62: Max=1.2150 Gy (0.06s)
-      Seg 63: Max=1.2150 Gy (0.05s)
-      Seg 64: Max=1.2150 Gy (0.06s)
-      Seg 65: Max=1.2150 Gy (0.05s)
-      Seg 66: Max=1.2150 Gy (0.05s)
-      Seg 67: Max=1.2150 Gy (0.06s)
-      Seg 68: Max=1.2150 Gy (0.05s)
-      Seg 69: Max=1.2150 Gy (0.06s)
-      Seg 70: Max=1.2150 Gy (0.05s)
-      Seg 71: Max=1.2150 Gy (0.05s)
-      Seg 72: Max=1.2150 Gy (0.06s)
-      Seg 73: Max=1.3006 Gy (0.06s)
-      Seg 74: Max=1.3006 Gy (0.06s)
-      Seg 75: Max=1.3006 Gy (0.06s)
-      Seg 76: Max=1.3006 Gy (0.06s)
-      Seg 77: Max=1.3006 Gy (0.05s)
-      Seg 78: Max=1.3006 Gy (0.05s)
-      Seg 79: Max=1.3006 Gy (0.06s)
-      Seg 80: Max=1.3006 Gy (0.05s)
-      Seg 81: Max=1.3006 Gy (0.06s)
-      Seg 82: Max=1.3006 Gy (0.06s)
-      Seg 83: Max=1.3006 Gy (0.05s)
-      Seg 84: Max=1.3006 Gy (0.06s)
-      Seg 85: Max=1.3006 Gy (0.05s)
-      Seg 86: Max=1.3406 Gy (0.06s)
-      Seg 87: Max=1.3406 Gy (0.05s)
-      Seg 88: Max=1.3406 Gy (0.05s)
-      Seg 89: Max=1.3406 Gy (0.06s)
-      Seg 90: Max=1.3406 Gy (0.05s)
-      Seg 91: Max=1.3406 Gy (0.06s)
-      Seg 92: Max=1.3406 Gy (0.05s)
-      Seg 93: Max=1.3406 Gy (0.06s)
-      Seg 94: Max=1.3406 Gy (0.05s)
-      Seg 95: Max=1.3406 Gy (0.05s)
-      Seg 96: Max=1.3406 Gy (0.06s)
-      Seg 97: Max=1.3406 Gy (0.05s)
-      Seg 98: Max=1.3406 Gy (0.06s)
-      Seg 99: Max=1.3406 Gy (0.06s)
-      Seg 100: Max=1.3406 Gy (0.06s)
-      Seg 101: Max=1.3406 Gy (0.06s)
-      Seg 102: Max=1.3406 Gy (0.05s)
-      Seg 103: Max=1.3406 Gy (0.06s)
-      Seg 104: Max=1.3406 Gy (0.05s)
-      Seg 105: Max=1.3406 Gy (0.05s)
-      Seg 106: Max=1.3406 Gy (0.05s)
-      Seg 107: Max=1.3406 Gy (0.06s)
-      Seg 108: Max=1.3406 Gy (0.06s)
-      Seg 109: Max=1.3406 Gy (0.06s)
-      Seg 110: Max=1.3406 Gy (0.06s)
-      Seg 111: Max=1.3406 Gy (0.06s)
-      Seg 112: Max=1.3406 Gy (0.05s)
-      Seg 113: Max=1.3406 Gy (0.06s)
-      Seg 114: Max=1.3406 Gy (0.05s)
-      Seg 115: Max=1.3406 Gy (0.06s)
-      Seg 116: Max=1.3406 Gy (0.05s)
-      Seg 117: Max=1.3406 Gy (0.06s)
-      Seg 118: Max=1.3643 Gy (0.06s)
-      Seg 119: Max=1.3643 Gy (0.05s)
-      Seg 120: Max=1.3643 Gy (0.06s)
-      Seg 121: Max=1.3643 Gy (0.05s)
-      Seg 122: Max=1.3643 Gy (0.05s)
-      Seg 123: Max=1.3643 Gy (0.05s)
-      Seg 124: Max=1.3643 Gy (0.05s)
-      Seg 125: Max=1.3643 Gy (0.06s)
-      Seg 126: Max=1.3643 Gy (0.05s)
-      Seg 127: Max=1.3643 Gy (0.06s)
-      Seg 128: Max=1.3643 Gy (0.05s)
-      Seg 129: Max=1.3643 Gy (0.05s)
-      Seg 130: Max=1.3643 Gy (0.06s)
-      Seg 131: Max=1.3643 Gy (0.05s)
-      Seg 132: Max=1.3643 Gy (0.06s)
-      Seg 133: Max=1.3643 Gy (0.05s)
-      Seg 134: Max=1.3643 Gy (0.05s)
-      Seg 135: Max=1.3425 Gy (0.06s)
-      Seg 136: Max=1.2993 Gy (0.05s)
-      Seg 137: Max=1.2993 Gy (0.06s)
-      Seg 138: Max=1.2993 Gy (0.05s)
-      Seg 139: Max=1.2083 Gy (0.06s)
-      Seg 140: Max=1.2083 Gy (0.05s)
-      Seg 141: Max=1.2083 Gy (0.05s)
-      Seg 142: Max=1.2083 Gy (0.06s)
-      Seg 143: Max=1.2083 Gy (0.06s)
-      Seg 144: Max=1.2083 Gy (0.06s)
-      Seg 145: Max=1.2083 Gy (0.05s)
-      Seg 146: Max=1.2083 Gy (0.05s)
-      Seg 147: Max=1.2083 Gy (0.06s)
-      Seg 148: Max=1.2083 Gy (0.05s)
-      Seg 149: Max=1.2083 Gy (0.05s)
-      Seg 150: Max=1.2083 Gy (0.06s)
-      Seg 151: Max=1.2083 Gy (0.05s)
-      Seg 152: Max=1.2083 Gy (0.06s)
-      Seg 153: Max=1.2083 Gy (0.05s)
-      Seg 154: Max=1.2083 Gy (0.06s)
-      Seg 155: Max=0.8832 Gy (0.05s)
-      Seg 156: Max=0.8832 Gy (0.06s)
-      Seg 157: Max=0.8832 Gy (0.05s)
-      Seg 158: Max=0.8832 Gy (0.06s)
-      Seg 164: Max=0.8790 Gy (0.06s)
-      Seg 165: Max=0.8790 Gy (0.05s)
-    Beam 17 complete: Max=135.1206 Gy
+Progress:100.00 %
+Dose calculation finished in 21.7493 seconds!
+    Calculated dij (673 bixels) in 21.8 sec
+    First segment MLC diagnostics:
+      MLC layers: 2
+        Layer 1: 56 positions
+        Layer 2: 58 positions
+      MLC devices with boundaries: 2
+        Device 1 (MLCX1): 28 leaf pairs
+        Device 2 (MLCX2): 29 leaf pairs
+      Seg 20: Open=24 bixels, Max=0.8641 Gy
+      Seg 40: Open=48 bixels, Max=1.2191 Gy
+      Seg 60: Open=24 bixels, Max=0.8771 Gy
+      Seg 80: Open=48 bixels, Max=1.1899 Gy
+      Seg 100: Open=96 bixels, Max=1.3402 Gy
+      Seg 120: Open=120 bixels, Max=1.3651 Gy
+      Seg 140: Open=48 bixels, Max=1.2059 Gy
+    Processed 145 segments (skipped 0) in 1.9 sec
+    Average open bixels per segment: 64.6 / 673 (9.6%)
+    Beam 17 complete: Max=127.8900 Gy
 
   Summary:
-    Segments processed: 2483
-    Segments from cache: 0
-    Segments calculated: 2483
-    Total calculation time: 732.9 sec
-    Total dose max: 1017.6388 Gy
+    Beams calculated: 17, from cache: 0
+    Total segments processed: 2264
+    Total calculation time: 383.2 sec
+    Total dose max: 880.7225 Gy
 
 [7/8] Resampling doses...
   Upsampling doses to original CT resolution...
   - Upsampled total and beam doses to [598,598,134]
   Resampling to RTDOSE grid...
-  - Total dose resampled: Max=1015.5140 Gy
+  - Total dose resampled: Max=878.8278 Gy
 
 [8/8] Saving results...
   - segmentData.mat
@@ -3207,27 +1062,89 @@ Warning: DEPRECATION WARNING: Property quantityVis is deprecated from bioModel.
   - Beam_XX.mat files
 
   Comparison with reference RTDOSE:
-    Calculated max: 1015.5140 Gy
+    Calculated max: 878.8278 Gy
     Reference max:  7.1343 Gy
-    Mean abs diff:  54.8952 Gy
-    Max diff:       1013.1235 Gy
-    RMS diff:       143.8514 Gy
+    Mean abs diff:  46.0238 Gy
+    Max diff:       877.1009 Gy
+    RMS diff:       121.1652 Gy
+    Ratio (calc/ref): 123.18
   - doseComparison.mat
 
 ========================================
 Processing complete: 1194203 - Session_1
 Output: /mnt/weka/home/80030361/ETHOS_Simulations/SegmentDoses/1194203/Session_1
-Cache: /mnt/weka/home/80030361/ETHOS_Simulations/Cache/1194203/Session_1/ds2
+Cache: /mnt/weka/home/80030361/ETHOS_Simulations/Cache/1194203/Session_1/ds3
 ========================================
 
-PERFORMANCE SUMMARY:
-  - CT Downsample Factor: 2
-  - Segments from cache: 0
-  - Segments calculated: 2483
-  - Total calc time: 732.9 sec
-
 All processing complete!
+>> verify_segment_doses
+==========================================================
+  ETHOS Segment Dose Verification
+  Patient: 1194203, Session: Session_1
+==========================================================
 
-TIP: Run again to use cached results for instant completion.
-     Delete cache directory to force full recalculation.
+[1/6] Loading data...
+  Loading segmentDoses.mat...
+Warning: DEPRECATION WARNING: Property quantityOpt is deprecated from bioModel. Please set
+it as a field in pln.propOpt
+Warning: DEPRECATION WARNING: Property quantityVis is deprecated from bioModel. Please set
+it as a field in pln.propOpt
+  Loading segmentData.mat...
+  Loading doseComparison.mat...
+  Loading ctResampled.mat...
+  Data loaded successfully
+
+  Dose grid size: [95, 140, 115]
+  Dose grid resolution: [2.50, 2.50, 3.00] mm
+  Calculated max dose: 878.8278 Gy
+  Reference max dose: 7.1343 Gy
+  Number of beams: 17
+  Total segments: 2805
+
+[2/6] Creating dose overview figure...
+  Saved: dose_overview.png
+
+[3/6] Creating dose profile figure...
+  Saved: dose_profiles.png
+
+[4/6] Creating beam contribution figure...
+  Saved: beam_contributions.png
+
+[5/6] Creating beam statistics figure...
+  Saved: beam_statistics.png
+
+[6/6] Creating dose difference analysis figure...
+  Saved: dose_difference_analysis.png
+
+[Bonus] Creating CT with dose overlay figure...
+  Saved: ct_dose_overlay.png
+
+[Bonus] Creating DVH comparison figure...
+  Saved: dvh_comparison.png
+
+==========================================================
+  VERIFICATION COMPLETE
+==========================================================
+
+Patient: 1194203
+Session: Session_1
+
+DOSE SUMMARY:
+  Calculated max dose: 878.8278 Gy
+  Reference max dose:  7.1343 Gy
+  Max absolute diff:   877.1009 Gy
+  Mean absolute diff:  46.0238 Gy
+  RMS difference:      121.1652 Gy
+
+BEAM SUMMARY:
+  Total beams: 17
+  Total segments: 2805
+  Total MU: 6164.77
+
+Figures saved to: /mnt/weka/home/80030361/ETHOS_Simulations/Figures/1194203/Session_1
+
+Summary saved to: /mnt/weka/home/80030361/ETHOS_Simulations/Figures/1194203/Session_1/verification_summary.txt
+
+==========================================================
+>> close all
 >>
