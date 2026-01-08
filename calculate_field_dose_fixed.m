@@ -2,11 +2,11 @@
 % Purpose: Calculate individual segment doses from ETHOS exported IMRT data
 % Uses MATRAD for dose calculation
 %
-% FIXES APPLIED:
-%   1. Memory management - Don't store individual segment doses, only beam totals
-%   2. MLC position inheritance between control points
-%   3. Dual-layer MLC handling for ETHOS/Halcyon
-%   4. Proper weight normalization verification
+% FIXES IN THIS VERSION:
+%   - Proper MLC position inheritance across control points
+%   - Dual-layer MLC handling (combine MLCX1 and MLCX2)
+%   - Memory management: clear segment doses after accumulating to beam dose
+%   - Better debugging output to verify MLC aperture application
 %
 % KEY FEATURES:
 %   - Calculates dose for each control point/segment within each beam
@@ -14,7 +14,7 @@
 %   - Each segment contributes a weighted portion of the total beam dose
 %
 % Author: Generated for ETHOS dose analysis
-% Date: 2025 (Fixed version)
+% Date: 2025
 
 clear; clc; close all;
 
@@ -29,30 +29,30 @@ matradPath = '/mnt/weka/home/80030361/MATLAB/Addons/matRad';
 
 %% ==================== OPTIMIZATION PARAMETERS ====================
 % CT Downsampling Factor
-% 1 = original resolution (requires more memory but most accurate)
-% 2 = half resolution in each dimension (8x faster, moderate accuracy)
-ctDownsampleFactor = 1;  % Try running at full resolution with fixed memory management
+% 1 = original resolution (slowest, most accurate)
+% 2 = half resolution in each dimension (8x faster)
+ctDownsampleFactor = 2;  % ADJUST THIS TO SPEED UP CALCULATIONS
 
 % Caching Options
-enableCaching = true;           % Set to false to force recalculation
-cacheDir = fullfile(wd, 'Cache');  % Directory to store cached results
+enableCaching = true;
+cacheDir = fullfile(wd, 'Cache');
 
-% Verbose output (set to false to reduce console spam)
+% Verbose output
 verboseOutput = true;
 
-% Memory management - clear large arrays after use
-aggressiveMemoryCleanup = true;
+% Debug MLC (print details about MLC aperture checking)
+debugMLC = true;  % Set to true to see MLC position details
 
 %% ==================== INITIALIZATION ====================
 fprintf('==========================================================\n');
 fprintf('  ETHOS IMRT Segment-by-Segment Dose Calculator\n');
-fprintf('  FIXED VERSION - Memory + MLC Inheritance + Dual-Layer\n');
+fprintf('  FIXED VERSION - Proper MLC Handling\n');
 fprintf('==========================================================\n\n');
 
 fprintf('Optimization Settings:\n');
-fprintf('  - CT Downsample Factor: %d\n', ctDownsampleFactor);
+fprintf('  - CT Downsample Factor: %d (%.0fx speedup estimate)\n', ...
+    ctDownsampleFactor, ctDownsampleFactor^3);
 fprintf('  - Caching Enabled: %s\n', string(enableCaching));
-fprintf('  - Aggressive Memory Cleanup: %s\n', string(aggressiveMemoryCleanup));
 fprintf('  - Cache Directory: %s\n', cacheDir);
 fprintf('\n');
 
@@ -94,16 +94,6 @@ catch
     end
 end
 
-% Verify MATRAD functions
-essentialFunctions = {'matRad_calcDoseInfluence', 'matRad_generateStf', 'matRad_calcDoseForward'};
-for i = 1:length(essentialFunctions)
-    if exist(essentialFunctions{i}, 'file')
-        fprintf('  - Found: %s\n', essentialFunctions{i});
-    else
-        fprintf('  - WARNING: %s not found\n', essentialFunctions{i});
-    end
-end
-
 %% ==================== MAIN PROCESSING LOOP ====================
 for idxID = 1:length(ids)
     for idxSession = 1:length(sessions)
@@ -127,6 +117,11 @@ for idxID = 1:length(ids)
             mkdir(patientCacheDir);
         end
         
+        dicomCacheDir = fullfile(cacheDir, currentID, currentSession);
+        if ~exist(dicomCacheDir, 'dir')
+            mkdir(dicomCacheDir);
+        end
+        
         % Create output directory
         if ~exist(outputPath, 'dir')
             mkdir(outputPath);
@@ -135,10 +130,6 @@ for idxID = 1:length(ids)
         %% Step 1: Import DICOM data (with caching)
         fprintf('\n[1/8] Importing DICOM data...\n');
         
-        dicomCacheDir = fullfile(cacheDir, currentID, currentSession);
-        if ~exist(dicomCacheDir, 'dir')
-            mkdir(dicomCacheDir);
-        end
         dicomCacheFile = fullfile(dicomCacheDir, 'dicom_import.mat');
         
         if enableCaching && exist(dicomCacheFile, 'file')
@@ -178,7 +169,6 @@ for idxID = 1:length(ids)
         if ctDownsampleFactor > 1
             fprintf('\n  Applying CT downsampling (factor=%d)...\n', ctDownsampleFactor);
             
-            % Check for cached downsampled CT
             dsCacheFile = fullfile(patientCacheDir, 'ct_downsampled.mat');
             
             if enableCaching && exist(dsCacheFile, 'file')
@@ -186,10 +176,8 @@ for idxID = 1:length(ids)
                 load(dsCacheFile, 'ct', 'cst');
                 fprintf('    Loaded from cache: [%d,%d,%d]\n', ct.cubeDim(1), ct.cubeDim(2), ct.cubeDim(3));
             else
-                % Perform downsampling using helper function (defined at end of script)
                 [ct, cst] = downsampleCTComplete(ct_original, cst_original, ctDownsampleFactor);
                 
-                % Cache downsampled CT
                 if enableCaching
                     save(dsCacheFile, 'ct', 'cst', '-v7.3');
                     fprintf('    Cached downsampled CT\n');
@@ -251,22 +239,9 @@ for idxID = 1:length(ids)
                 fprintf('  - Reference dose: %d x %d x %d, Max: %.2f Gy\n', ...
                     size(referenceDose,1), size(referenceDose,2), size(referenceDose,3), max(referenceDose(:)));
                 
-                % Check if this is a PLAN dose (sum of all fractions)
                 if isfield(rtdoseInfo, 'DoseSummationType') && strcmp(rtdoseInfo.DoseSummationType, 'PLAN')
-                    % Get number of fractions from RTPLAN
-                    numFractionsForDose = 10;  % Default
-                    rtplanFile = dir(fullfile(dicomPath, 'RP*.dcm'));
-                    if ~isempty(rtplanFile)
-                        rtplanInfoTemp = dicominfo(fullfile(rtplanFile(1).folder, rtplanFile(1).name));
-                        if isfield(rtplanInfoTemp, 'FractionGroupSequence')
-                            fg = rtplanInfoTemp.FractionGroupSequence.Item_1;
-                            if isfield(fg, 'NumberOfFractionsPlanned')
-                                numFractionsForDose = fg.NumberOfFractionsPlanned;
-                            end
-                        end
-                    end
-                    fprintf('  WARNING: PLAN dose detected, dividing by %d fractions\n', numFractionsForDose);
-                    referenceDose = referenceDose / numFractionsForDose;
+                    fprintf('  WARNING: PLAN dose detected, dividing by 10 fractions\n');
+                    referenceDose = referenceDose / 10;
                 end
                 
                 doseSpatial.ImagePositionPatient = rtdoseInfo.ImagePositionPatient;
@@ -302,11 +277,11 @@ for idxID = 1:length(ids)
             doseGrid.dimensions = ct.cubeDim;
         end
         
-        %% Step 3: Extract segment information from RTPLAN (with FIXED MLC inheritance)
+        %% Step 3: Extract segment information from RTPLAN with PROPER MLC HANDLING
         fprintf('\n[3/8] Extracting segment information from RTPLAN (with MLC inheritance)...\n');
         
-        % Segment data is independent of CT resolution, so cache at patient level
-        segmentCacheFile = fullfile(dicomCacheDir, 'segmentData_v3_matched.mat');
+        % Use a separate cache file for the fixed segment data
+        segmentCacheFile = fullfile(dicomCacheDir, 'segmentData_fixed.mat');
         
         if enableCaching && exist(segmentCacheFile, 'file')
             fprintf('  Loading cached segment data...\n');
@@ -366,7 +341,7 @@ for idxID = 1:length(ids)
                     beamData.segments = {};
                     beamData.leafBoundaries = [];
                     beamData.numLeafPairs = 0;
-                    beamData.hasDualLayerMLC = false;
+                    beamData.isDualLayerMLC = false;
                     
                     if isfield(beam, 'BeamName')
                         beamData.beamName = beam.BeamName;
@@ -378,10 +353,9 @@ for idxID = 1:length(ids)
                         beamData.beamMeterset = beamMetersets(beamIdx);
                     end
                     
-                    % Get leaf boundaries and detect dual-layer MLC
-                    % Store ALL MLC device info for proper dual-layer handling
-                    beamData.mlcDevices = {};  % Cell array of MLC device info
-                    
+                    % Get leaf boundaries from beam limiting device sequence
+                    % Also detect dual-layer MLC
+                    mlcDeviceNames = {};
                     if isfield(beam, 'BeamLimitingDeviceSequence')
                         numDevices = length(fieldnames(beam.BeamLimitingDeviceSequence));
                         for devIdx = 1:numDevices
@@ -389,48 +363,31 @@ for idxID = 1:length(ids)
                             if isfield(device, 'RTBeamLimitingDeviceType')
                                 devType = device.RTBeamLimitingDeviceType;
                                 if contains(devType, 'MLC', 'IgnoreCase', true)
-                                    mlcDeviceInfo = struct();
-                                    mlcDeviceInfo.type = devType;
-                                    mlcDeviceInfo.leafBoundaries = [];
-                                    mlcDeviceInfo.numLeafPairs = 0;
-                                    
+                                    mlcDeviceNames{end+1} = devType;
                                     if isfield(device, 'LeafPositionBoundaries')
-                                        mlcDeviceInfo.leafBoundaries = device.LeafPositionBoundaries;
-                                        mlcDeviceInfo.numLeafPairs = length(device.LeafPositionBoundaries) - 1;
-                                    elseif isfield(device, 'NumberOfLeafJawPairs')
-                                        mlcDeviceInfo.numLeafPairs = device.NumberOfLeafJawPairs;
-                                    end
-                                    
-                                    beamData.mlcDevices{end+1} = mlcDeviceInfo;
-                                    
-                                    % Keep first device as default for backward compatibility
-                                    if isempty(beamData.leafBoundaries) && ~isempty(mlcDeviceInfo.leafBoundaries)
-                                        beamData.leafBoundaries = mlcDeviceInfo.leafBoundaries;
-                                        beamData.numLeafPairs = mlcDeviceInfo.numLeafPairs;
+                                        beamData.leafBoundaries = device.LeafPositionBoundaries;
+                                        beamData.numLeafPairs = length(beamData.leafBoundaries) - 1;
                                     end
                                 end
                             end
                         end
                     end
                     
-                    % Check for dual-layer MLC (ETHOS/Halcyon)
-                    if length(beamData.mlcDevices) > 1
-                        beamData.hasDualLayerMLC = true;
-                        mlcTypes = cellfun(@(x) x.type, beamData.mlcDevices, 'UniformOutput', false);
-                        fprintf('    Beam %d: Dual-layer MLC detected (%s)\n', beamIdx, strjoin(mlcTypes, ', '));
-                        for mlcIdx = 1:length(beamData.mlcDevices)
-                            fprintf('      Layer %d (%s): %d leaf pairs\n', mlcIdx, ...
-                                beamData.mlcDevices{mlcIdx}.type, beamData.mlcDevices{mlcIdx}.numLeafPairs);
-                        end
+                    beamData.isDualLayerMLC = length(mlcDeviceNames) >= 2;
+                    beamData.mlcDeviceNames = mlcDeviceNames;
+                    
+                    if beamData.isDualLayerMLC && debugMLC
+                        fprintf('    Beam %d: Dual-layer MLC detected: %s\n', beamIdx, strjoin(mlcDeviceNames, ', '));
                     end
                     
-                    % Process control points WITH INHERITANCE
+                    % Process control points with PROPER INHERITANCE
                     if isfield(beam, 'ControlPointSequence')
                         numCP = length(fieldnames(beam.ControlPointSequence));
                         controlPoints = cell(numCP, 1);
                         
-                        % Initialize inherited values
-                        inheritedMlcPositions = {};  % Cell array for dual-layer
+                        % Variables to track inherited values
+                        inheritedMlcLayer1 = [];
+                        inheritedMlcLayer2 = [];
                         inheritedJawX = [];
                         inheritedJawY = [];
                         inheritedGantryAngle = 0;
@@ -441,90 +398,153 @@ for idxID = 1:length(ids)
                             cpData = struct();
                             cpData.cpIdx = cpIdx;
                             cpData.cumulativeMetersetWeight = 0;
-                            cpData.gantryAngle = inheritedGantryAngle;
-                            cpData.mlcPositions = inheritedMlcPositions;  % INHERIT from previous CP
-                            cpData.jawX = inheritedJawX;  % INHERIT from previous CP
-                            cpData.jawY = inheritedJawY;  % INHERIT from previous CP
+                            cpData.gantryAngle = [];
+                            cpData.mlcLayer1 = [];  % First MLC layer
+                            cpData.mlcLayer2 = [];  % Second MLC layer (if dual-layer)
+                            cpData.mlcCombined = []; % Combined single-layer equivalent
+                            cpData.jawX = [];
+                            cpData.jawY = [];
                             
                             if isfield(cp, 'CumulativeMetersetWeight')
                                 cpData.cumulativeMetersetWeight = cp.CumulativeMetersetWeight;
                             end
                             
+                            % Gantry angle - inherit if not specified
                             if isfield(cp, 'GantryAngle')
-                                cpData.gantryAngle = cp.GantryAngle;
                                 inheritedGantryAngle = cp.GantryAngle;
                                 beamData.gantryAngle = cp.GantryAngle;
                             end
+                            cpData.gantryAngle = inheritedGantryAngle;
                             
                             if isfield(cp, 'PatientSupportAngle')
                                 beamData.couchAngle = cp.PatientSupportAngle;
                             end
                             
+                            % Extract MLC and jaw positions
                             if isfield(cp, 'BeamLimitingDevicePositionSequence')
                                 numDevices = length(fieldnames(cp.BeamLimitingDevicePositionSequence));
                                 
-                                % Collect ALL MLC layers for this CP
-                                cpMlcLayers = {};
+                                mlcLayerIdx = 0;  % Counter for MLC layers in this control point
                                 
                                 for devIdx = 1:numDevices
                                     device = cp.BeamLimitingDevicePositionSequence.(sprintf('Item_%d', devIdx));
-                                    if isfield(device, 'RTBeamLimitingDeviceType') && isfield(device, 'LeafJawPositions')
-                                        deviceType = device.RTBeamLimitingDeviceType;
-                                        positions = device.LeafJawPositions;
-                                        
-                                        if contains(deviceType, 'ASYMX', 'IgnoreCase', true) || strcmp(deviceType, 'X')
-                                            cpData.jawX = positions;
-                                            inheritedJawX = positions;
-                                        elseif contains(deviceType, 'ASYMY', 'IgnoreCase', true) || strcmp(deviceType, 'Y')
-                                            cpData.jawY = positions;
-                                            inheritedJawY = positions;
-                                        elseif contains(deviceType, 'MLC', 'IgnoreCase', true)
-                                            % Store each MLC layer separately
-                                            mlcLayer = struct();
-                                            mlcLayer.type = deviceType;
-                                            mlcLayer.positions = positions;
-                                            cpMlcLayers{end+1} = mlcLayer;
+                                    if ~isfield(device, 'RTBeamLimitingDeviceType') || ~isfield(device, 'LeafJawPositions')
+                                        continue;
+                                    end
+                                    
+                                    deviceType = device.RTBeamLimitingDeviceType;
+                                    positions = device.LeafJawPositions;
+                                    
+                                    if contains(deviceType, 'ASYMX', 'IgnoreCase', true) || strcmp(deviceType, 'X')
+                                        inheritedJawX = positions;
+                                    elseif contains(deviceType, 'ASYMY', 'IgnoreCase', true) || strcmp(deviceType, 'Y')
+                                        inheritedJawY = positions;
+                                    elseif contains(deviceType, 'MLC', 'IgnoreCase', true)
+                                        % Handle dual-layer MLC
+                                        mlcLayerIdx = mlcLayerIdx + 1;
+                                        if mlcLayerIdx == 1
+                                            inheritedMlcLayer1 = positions;
+                                        else
+                                            inheritedMlcLayer2 = positions;
                                         end
                                     end
                                 end
-                                
-                                % If we found MLC data, update inherited values
-                                if ~isempty(cpMlcLayers)
-                                    cpData.mlcPositions = cpMlcLayers;
-                                    inheritedMlcPositions = cpMlcLayers;
+                            end
+                            
+                            % Apply inherited values
+                            cpData.jawX = inheritedJawX;
+                            cpData.jawY = inheritedJawY;
+                            cpData.mlcLayer1 = inheritedMlcLayer1;
+                            cpData.mlcLayer2 = inheritedMlcLayer2;
+                            
+                            % Combine dual-layer MLC into single-layer equivalent
+                            if ~isempty(inheritedMlcLayer1)
+                                if ~isempty(inheritedMlcLayer2) && length(inheritedMlcLayer1) == length(inheritedMlcLayer2)
+                                    % Dual-layer: combine using max(left)/min(right) rule
+                                    numLeaves = length(inheritedMlcLayer1) / 2;
+                                    combined = zeros(size(inheritedMlcLayer1));
+                                    
+                                    % Left bank (A-bank): Take MAX (most restrictive for negative values)
+                                    for i = 1:numLeaves
+                                        combined(i) = max(inheritedMlcLayer1(i), inheritedMlcLayer2(i));
+                                    end
+                                    
+                                    % Right bank (B-bank): Take MIN (most restrictive for positive values)
+                                    for i = 1:numLeaves
+                                        idx = numLeaves + i;
+                                        combined(idx) = min(inheritedMlcLayer1(idx), inheritedMlcLayer2(idx));
+                                    end
+                                    
+                                    cpData.mlcCombined = combined;
+                                else
+                                    % Single layer or mismatched: use layer 1
+                                    cpData.mlcCombined = inheritedMlcLayer1;
                                 end
                             end
                             
                             controlPoints{cpIdx} = cpData;
                         end
                         
-                        % Create segments
+                        % Create segments using combined MLC positions
                         numSegments = numCP - 1;
+                        validSegmentCount = 0;
+                        
                         for segIdx = 1:numSegments
                             cpStart = controlPoints{segIdx};
                             cpEnd = controlPoints{segIdx + 1};
                             
+                            segmentWeight = cpEnd.cumulativeMetersetWeight - cpStart.cumulativeMetersetWeight;
+                            
+                            % Skip segments with zero weight
+                            if segmentWeight <= 0
+                                continue;
+                            end
+                            
+                            validSegmentCount = validSegmentCount + 1;
+                            
                             segment = struct();
                             segment.segmentIdx = segIdx;
                             segment.beamIdx = beamIdx;
-                            segment.segmentWeight = cpEnd.cumulativeMetersetWeight - cpStart.cumulativeMetersetWeight;
-                            segment.segmentMeterset = segment.segmentWeight * beamData.beamMeterset;
+                            segment.segmentWeight = segmentWeight;
+                            segment.segmentMeterset = segmentWeight * beamData.beamMeterset;
                             segment.gantryAngle = cpStart.gantryAngle;
+                            segment.mlcPositions = cpStart.mlcCombined;  % Use combined MLC
                             segment.jawX = cpStart.jawX;
                             segment.jawY = cpStart.jawY;
                             
-                            % Store ALL MLC layers - do NOT reduce here
-                            % Reduction will happen during weight calculation where we check all layers
-                            segment.mlcLayers = cpStart.mlcPositions;  % Cell array of layer structs
-                            
-                            beamData.segments{segIdx} = segment;
+                            beamData.segments{end+1} = segment;
                             totalSegments = totalSegments + 1;
+                        end
+                        
+                        % Debug output for first beam
+                        if beamIdx == 1 && debugMLC
+                            fprintf('    Beam %d first segment MLC check:\n', beamIdx);
+                            if ~isempty(beamData.segments) && ~isempty(beamData.segments{1}.mlcPositions)
+                                mlc = beamData.segments{1}.mlcPositions;
+                                numLeaves = length(mlc) / 2;
+                                fprintf('      MLC positions available: YES (%d leaf pairs)\n', numLeaves);
+                                fprintf('      Left bank range: [%.1f, %.1f] mm\n', min(mlc(1:numLeaves)), max(mlc(1:numLeaves)));
+                                fprintf('      Right bank range: [%.1f, %.1f] mm\n', min(mlc(numLeaves+1:end)), max(mlc(numLeaves+1:end)));
+                                
+                                % Show aperture width for middle leaves
+                                midLeaf = round(numLeaves/2);
+                                aperture = mlc(numLeaves + midLeaf) - mlc(midLeaf);
+                                fprintf('      Mid-leaf aperture: %.1f mm\n', aperture);
+                            else
+                                fprintf('      MLC positions available: NO\n');
+                            end
+                            if ~isempty(beamData.segments{1}.jawX)
+                                fprintf('      Jaw X: [%.1f, %.1f] mm\n', beamData.segments{1}.jawX(1), beamData.segments{1}.jawX(2));
+                            end
+                            if ~isempty(beamData.segments{1}.jawY)
+                                fprintf('      Jaw Y: [%.1f, %.1f] mm\n', beamData.segments{1}.jawY(1), beamData.segments{1}.jawY(2));
+                            end
                         end
                     end
                     
                     segmentData.beams{beamIdx} = beamData;
-                    fprintf('    Beam %d: %s, Gantry=%.1f°, %.1f MU, %d segments\n', ...
-                        beamIdx, beamData.beamName, beamData.gantryAngle, beamData.beamMeterset, length(beamData.segments));
+                    fprintf('    Beam %d: %s, %.1f MU, %d segments\n', ...
+                        beamIdx, beamData.beamName, beamData.beamMeterset, length(beamData.segments));
                 end
                 
                 segmentData.totalSegments = totalSegments;
@@ -539,23 +559,11 @@ for idxID = 1:length(ids)
                 
             catch ME
                 fprintf('ERROR extracting segment data: %s\n', ME.message);
-                fprintf('  Stack trace:\n');
                 for k = 1:length(ME.stack)
                     fprintf('    %s (line %d)\n', ME.stack(k).name, ME.stack(k).line);
                 end
                 continue;
             end
-        end
-        
-        % Verify segment weights sum correctly
-        fprintf('\n  Verifying segment weights...\n');
-        for beamIdx = 1:segmentData.numBeams
-            beamData = segmentData.beams{beamIdx};
-            totalWeight = 0;
-            for segIdx = 1:length(beamData.segments)
-                totalWeight = totalWeight + beamData.segments{segIdx}.segmentWeight;
-            end
-            fprintf('    Beam %d: Total weight = %.6f (should be ~1.0)\n', beamIdx, totalWeight);
         end
         
         %% Step 4: Configure dose calculation
@@ -579,15 +587,11 @@ for idxID = 1:length(ids)
             pln.machine = 'Generic';
         end
         
-        % Set bixel width
         pln.propStf.bixelWidth = 5;
-        
-        % IMPORTANT: Set dose grid resolution to match the (possibly downsampled) CT
         pln.propDoseCalc.doseGrid.resolution.x = ct.resolution.x;
         pln.propDoseCalc.doseGrid.resolution.y = ct.resolution.y;
         pln.propDoseCalc.doseGrid.resolution.z = ct.resolution.z;
         
-        % Set algorithm
         if strcmp(pln.radiationMode, 'photons')
             pln.propDoseCalc.engine = 'pencilBeam';
         else
@@ -600,7 +604,7 @@ for idxID = 1:length(ids)
             ct.resolution.x, ct.resolution.y, ct.resolution.z);
         fprintf('  - CT dimensions: [%d, %d, %d]\n', ct.cubeDim(1), ct.cubeDim(2), ct.cubeDim(3));
         
-        %% Step 5: Generate steering information (with caching)
+        %% Step 5: Generate steering information
         fprintf('\n[5/8] Generating steering information...\n');
         
         stfCacheFile = fullfile(patientCacheDir, 'stf.mat');
@@ -621,7 +625,6 @@ for idxID = 1:length(ids)
                 end
             catch ME
                 fprintf('Error generating steering file: %s\n', ME.message);
-                fprintf('  Error details: %s\n', ME.message);
                 for k = 1:length(ME.stack)
                     fprintf('    %s (line %d)\n', ME.stack(k).name, ME.stack(k).line);
                 end
@@ -633,117 +636,50 @@ for idxID = 1:length(ids)
             fprintf('    Beam %d: Gantry=%.1f, Rays=%d\n', i, stf(i).gantryAngle, stf(i).numOfRays);
         end
         
-        %% Step 5b: Match stf beams to segmentData beams by gantry angle
-        fprintf('\n  Matching stf beams to RTPLAN beams by gantry angle...\n');
-        
-        % Extract gantry angles from both sources
-        stfGantryAngles = zeros(length(stf), 1);
-        for i = 1:length(stf)
-            stfGantryAngles(i) = stf(i).gantryAngle;
-        end
-        
-        segmentGantryAngles = zeros(segmentData.numBeams, 1);
-        for i = 1:segmentData.numBeams
-            segmentGantryAngles(i) = segmentData.beams{i}.gantryAngle;
-        end
-        
-        % Create mapping: stfToSegment(stfIdx) = segmentDataIdx
-        % For each stf beam, find the matching segmentData beam
-        stfToSegment = zeros(length(stf), 1);
-        angleTolerance = 1.0;  % degrees tolerance for matching
-        
-        for stfIdx = 1:length(stf)
-            stfAngle = stfGantryAngles(stfIdx);
-            
-            % Find matching segment beam
-            angleDiffs = abs(segmentGantryAngles - stfAngle);
-            % Handle wrap-around (e.g., 359° vs 1°)
-            angleDiffs = min(angleDiffs, 360 - angleDiffs);
-            
-            [minDiff, matchIdx] = min(angleDiffs);
-            
-            if minDiff <= angleTolerance
-                stfToSegment(stfIdx) = matchIdx;
-                fprintf('    stf(%d) Gantry=%.1f° -> segmentData.beams{%d} Gantry=%.1f°\n', ...
-                    stfIdx, stfAngle, matchIdx, segmentGantryAngles(matchIdx));
-            else
-                fprintf('    WARNING: stf(%d) Gantry=%.1f° has no match (closest diff=%.1f°)\n', ...
-                    stfIdx, stfAngle, minDiff);
-                stfToSegment(stfIdx) = 0;  % No match
-            end
-        end
-        
-        % Verify all segment beams are matched
-        matchedSegmentBeams = unique(stfToSegment(stfToSegment > 0));
-        if length(matchedSegmentBeams) < segmentData.numBeams
-            unmatchedSegment = setdiff(1:segmentData.numBeams, matchedSegmentBeams);
-            fprintf('    WARNING: %d segment beams unmatched: %s\n', ...
-                length(unmatchedSegment), mat2str(unmatchedSegment));
-        end
-        
-        %% Step 6: Calculate segment-by-segment doses (FIXED MEMORY MANAGEMENT)
+        %% Step 6: Calculate segment-by-segment doses with PROPER MLC HANDLING
         fprintf('\n[6/8] Calculating segment-by-segment doses...\n');
-        fprintf('  NOTE: Using segmentWeight (fractional, 0-1) for weight vector\n');
-        fprintf('        NOT segmentMeterset (MU values) - this is the key fix!\n\n');
         
-        % Initialize storage - ONLY store beam totals, not individual segments
         calculatedGridSize = ct.cubeDim;
         totalDose = zeros(calculatedGridSize);
-        beamDoses = cell(segmentData.numBeams, 1);  % Index by segment beam number
+        beamDoses = cell(length(stf), 1);
         
-        % Statistics tracking
         totalCalcTime = 0;
         cachedBeams = 0;
         calculatedBeams = 0;
-        totalSegmentsProcessed = 0;
         
-        for stfIdx = 1:length(stf)
-            % Get the MATCHED segment beam for this stf beam
-            segmentBeamIdx = stfToSegment(stfIdx);
-            
-            if segmentBeamIdx == 0
-                fprintf('\n  Skipping stf beam %d (no matching segment data)\n', stfIdx);
-                continue;
-            end
-            
-            beamData = segmentData.beams{segmentBeamIdx};
+        % Statistics for MLC aperture usage
+        totalRaysChecked = 0;
+        totalRaysInAperture = 0;
+        
+        for beamIdx = 1:length(stf)
+            beamData = segmentData.beams{beamIdx};
             numSegments = length(beamData.segments);
             
-            fprintf('\n  stf Beam %d/%d (Gantry=%.1f°) -> Segment Beam %d (%s): %d segments, %.1f MU\n', ...
-                stfIdx, length(stf), stf(stfIdx).gantryAngle, segmentBeamIdx, beamData.beamName, numSegments, beamData.beamMeterset);
+            fprintf('\n  Beam %d/%d (%s): %d segments, %.1f MU\n', ...
+                beamIdx, length(stf), beamData.beamName, numSegments, beamData.beamMeterset);
             
-            % Verify gantry angle match
-            gantryDiff = abs(stf(stfIdx).gantryAngle - beamData.gantryAngle);
-            gantryDiff = min(gantryDiff, 360 - gantryDiff);
-            if gantryDiff > 1.0
-                fprintf('    WARNING: Gantry angle mismatch! stf=%.1f°, segment=%.1f°\n', ...
-                    stf(stfIdx).gantryAngle, beamData.gantryAngle);
-            end
-            
-            % Check for cached beam dose (use segmentBeamIdx for cache file naming for consistency)
-            beamDoseCacheFile = fullfile(patientCacheDir, sprintf('beam_%02d_dose_v4.mat', segmentBeamIdx));
+            % Check for cached beam dose
+            beamDoseCacheFile = fullfile(patientCacheDir, sprintf('beam_%02d_dose_fixed.mat', beamIdx));
             
             if enableCaching && exist(beamDoseCacheFile, 'file')
                 fprintf('    Loading cached beam dose...\n');
                 load(beamDoseCacheFile, 'beamDoseResult');
                 
-                beamDoses{segmentBeamIdx} = beamDoseResult;
+                beamDoses{beamIdx} = beamDoseResult;
                 totalDose = totalDose + beamDoseResult.physicalDose;
                 cachedBeams = cachedBeams + 1;
-                totalSegmentsProcessed = totalSegmentsProcessed + numSegments;
                 
                 fprintf('    Loaded from cache (Max: %.4f Gy)\n', beamDoseResult.maxDose);
                 continue;
             end
             
-            % Calculate dij for this beam (with caching)
-            % Use stfIdx for dij cache since dij depends on stf geometry (gantry angle)
-            dijCacheFile = fullfile(patientCacheDir, sprintf('stf_%02d_dij.mat', stfIdx));
+            % Calculate dij for this beam
+            dijCacheFile = fullfile(patientCacheDir, sprintf('beam_%02d_dij.mat', beamIdx));
             
             plnSingle = pln;
             plnSingle.propStf.numOfBeams = 1;
-            plnSingle.propStf.isoCenter = stf(stfIdx).isoCenter;
-            stfSingle = stf(stfIdx);
+            plnSingle.propStf.isoCenter = stf(beamIdx).isoCenter;
+            stfSingle = stf(beamIdx);
             
             if enableCaching && exist(dijCacheFile, 'file')
                 fprintf('    Loading cached dij matrix...\n');
@@ -774,63 +710,38 @@ for idxID = 1:length(ids)
             
             % Initialize beam dose accumulator
             beamDoseAccum = zeros(calculatedGridSize);
-            segmentsWithDose = 0;
-            segmentsSkipped = 0;
+            beamRaysInAperture = 0;
+            beamRaysTotal = 0;
             
-            % Track aperture statistics for debugging
-            totalOpenBixels = 0;
-            
-            % Process each segment - ACCUMULATE ONLY, don't store individual segment doses
-            tic;
-            firstSegmentDiagnostics = true;  % Show diagnostics for first valid segment
-            
+            % Process each segment
             for segIdx = 1:numSegments
                 segment = beamData.segments{segIdx};
                 
                 if segment.segmentWeight <= 0
-                    segmentsSkipped = segmentsSkipped + 1;
                     continue;
                 end
                 
                 % Create weight vector based on MLC aperture
                 w = zeros(dij.totalNumOfBixels, 1);
                 
-                mlcLayers = segment.mlcLayers;  % Cell array of MLC layer data
+                mlcPos = segment.mlcPositions;
                 jawX = segment.jawX;
                 jawY = segment.jawY;
                 
-                openBixelsThisSegment = 0;
+                segRaysInAperture = 0;
                 
-                % Diagnostic output for first segment
-                if firstSegmentDiagnostics && verboseOutput
-                    fprintf('    First segment MLC diagnostics:\n');
-                    fprintf('      Segment weight: %.6f (fractional)\n', segment.segmentWeight);
-                    fprintf('      Segment meterset: %.2f MU (NOT used for weights)\n', segment.segmentMeterset);
-                    if iscell(mlcLayers) && ~isempty(mlcLayers)
-                        fprintf('      MLC layers: %d\n', length(mlcLayers));
-                        for lIdx = 1:length(mlcLayers)
-                            if ~isempty(mlcLayers{lIdx}) && isfield(mlcLayers{lIdx}, 'positions')
-                                fprintf('        Layer %d: %d positions\n', lIdx, length(mlcLayers{lIdx}.positions));
-                            end
-                        end
-                    else
-                        fprintf('      WARNING: No MLC layer data!\n');
+                if ~isempty(mlcPos) && ~isempty(beamData.leafBoundaries)
+                    numLeafPairs = beamData.numLeafPairs;
+                    leafBoundaries = beamData.leafBoundaries;
+                    
+                    % Handle potential size mismatch
+                    if length(mlcPos) < 2 * numLeafPairs
+                        numLeafPairs = floor(length(mlcPos) / 2);
                     end
-                    if isfield(beamData, 'mlcDevices')
-                        fprintf('      MLC devices with boundaries: %d\n', length(beamData.mlcDevices));
-                        for dIdx = 1:length(beamData.mlcDevices)
-                            dev = beamData.mlcDevices{dIdx};
-                            fprintf('        Device %d (%s): %d leaf pairs\n', dIdx, dev.type, dev.numLeafPairs);
-                        end
-                    end
-                    firstSegmentDiagnostics = false;
-                end
-                
-                % Check if we have MLC data and device info
-                hasMlcData = ~isempty(mlcLayers) && iscell(mlcLayers) && ~isempty(mlcLayers);
-                hasMlcDevices = isfield(beamData, 'mlcDevices') && ~isempty(beamData.mlcDevices);
-                
-                if hasMlcData && hasMlcDevices
+                    
+                    leftBank = mlcPos(1:numLeafPairs);
+                    rightBank = mlcPos(numLeafPairs+1:2*numLeafPairs);
+                    
                     numRays = stfSingle.numOfRays;
                     bixelIdx = 0;
                     
@@ -839,70 +750,23 @@ for idxID = 1:length(ids)
                         rayPosX = ray.rayPos_bev(1);
                         rayPosY = ray.rayPos_bev(2);
                         
-                        % Check jaw limits first
+                        % Check jaw constraints
                         inJawX = isempty(jawX) || (length(jawX) >= 2 && rayPosX >= jawX(1) && rayPosX <= jawX(2));
                         inJawY = isempty(jawY) || (length(jawY) >= 2 && rayPosY >= jawY(1) && rayPosY <= jawY(2));
                         
-                        % Check ALL MLC layers - ray must pass through ALL
-                        inAllMlcLayers = inJawX && inJawY;  % Start assuming open if within jaws
-                        
-                        if inAllMlcLayers
-                            % Check each MLC layer
-                            for layerIdx = 1:length(mlcLayers)
-                                mlcLayer = mlcLayers{layerIdx};
-                                
-                                if isempty(mlcLayer) || ~isfield(mlcLayer, 'positions')
-                                    continue;  % Skip if no data for this layer
-                                end
-                                
-                                mlcPos = mlcLayer.positions;
-                                
-                                % Get the corresponding device info for leaf boundaries
-                                if layerIdx <= length(beamData.mlcDevices)
-                                    deviceInfo = beamData.mlcDevices{layerIdx};
-                                    leafBoundaries = deviceInfo.leafBoundaries;
-                                    numLeafPairs = deviceInfo.numLeafPairs;
-                                else
-                                    % Fallback: try to infer from positions
-                                    numLeafPairs = length(mlcPos) / 2;
-                                    leafBoundaries = [];
-                                end
-                                
-                                if isempty(leafBoundaries)
-                                    % Can't check this layer without boundaries
-                                    continue;
-                                end
-                                
-                                % Extract left and right banks for this layer
-                                if length(mlcPos) >= 2 * numLeafPairs
-                                    leftBank = mlcPos(1:numLeafPairs);
-                                    rightBank = mlcPos(numLeafPairs+1:2*numLeafPairs);
-                                else
-                                    % Incomplete MLC data for this layer
-                                    continue;
-                                end
-                                
-                                % Check if ray is within aperture for THIS layer
-                                inThisLayer = false;
-                                for leafIdx = 1:numLeafPairs
-                                    if leafIdx < length(leafBoundaries)
-                                        leafYMin = leafBoundaries(leafIdx);
-                                        leafYMax = leafBoundaries(leafIdx + 1);
-                                        
-                                        if rayPosY >= leafYMin && rayPosY < leafYMax
-                                            % This leaf covers the ray's Y position
-                                            if rayPosX >= leftBank(leafIdx) && rayPosX <= rightBank(leafIdx)
-                                                inThisLayer = true;
-                                            end
-                                            break;  % Found the covering leaf, no need to check others
+                        % Check MLC aperture
+                        inMLC = false;
+                        if inJawX && inJawY
+                            % Find which leaf pair this ray falls into
+                            for leafIdx = 1:numLeafPairs
+                                if leafIdx <= length(leafBoundaries)-1
+                                    if rayPosY >= leafBoundaries(leafIdx) && rayPosY < leafBoundaries(leafIdx + 1)
+                                        % Check if ray is within the aperture for this leaf pair
+                                        if rayPosX >= leftBank(leafIdx) && rayPosX <= rightBank(leafIdx)
+                                            inMLC = true;
                                         end
+                                        break;  % Found the correct leaf pair, no need to continue
                                     end
-                                end
-                                
-                                % If blocked by ANY layer, ray is blocked
-                                if ~inThisLayer
-                                    inAllMlcLayers = false;
-                                    break;
                                 end
                             end
                         end
@@ -910,139 +774,96 @@ for idxID = 1:length(ids)
                         numEnergies = length(ray.energy);
                         for energyIdx = 1:numEnergies
                             bixelIdx = bixelIdx + 1;
-                            if inAllMlcLayers
-                                % Use segmentWeight (fractional, sums to 1.0 per beam)
-                                % NOT segmentMeterset (MU values, much larger)
-                                w(bixelIdx) = segment.segmentWeight;
-                                openBixelsThisSegment = openBixelsThisSegment + 1;
+                            if inMLC
+                                w(bixelIdx) = segment.segmentWeight * beamData.beamMeterset;
+                                segRaysInAperture = segRaysInAperture + 1;
                             end
-                        end
-                    end
-                elseif hasMlcData && ~isempty(beamData.leafBoundaries)
-                    % Fallback: single layer mode using default boundaries
-                    % This handles cases where mlcDevices wasn't populated
-                    numLeafPairs = beamData.numLeafPairs;
-                    leafBoundaries = beamData.leafBoundaries;
-                    
-                    % Get positions from first layer
-                    mlcPos = [];
-                    if iscell(mlcLayers) && ~isempty(mlcLayers{1})
-                        if isfield(mlcLayers{1}, 'positions')
-                            mlcPos = mlcLayers{1}.positions;
                         end
                     end
                     
-                    if ~isempty(mlcPos) && length(mlcPos) >= 2 * numLeafPairs
-                        leftBank = mlcPos(1:numLeafPairs);
-                        rightBank = mlcPos(numLeafPairs+1:2*numLeafPairs);
-                        
-                        numRays = stfSingle.numOfRays;
-                        bixelIdx = 0;
-                        
-                        for rayIdx = 1:numRays
-                            ray = stfSingle.ray(rayIdx);
-                            rayPosX = ray.rayPos_bev(1);
-                            rayPosY = ray.rayPos_bev(2);
-                            
-                            inJawX = isempty(jawX) || (length(jawX) >= 2 && rayPosX >= jawX(1) && rayPosX <= jawX(2));
-                            inJawY = isempty(jawY) || (length(jawY) >= 2 && rayPosY >= jawY(1) && rayPosY <= jawY(2));
-                            
-                            inMLC = false;
-                            if inJawX && inJawY
-                                for leafIdx = 1:numLeafPairs
-                                    if rayPosY >= leafBoundaries(leafIdx) && rayPosY < leafBoundaries(leafIdx + 1)
-                                        if rayPosX >= leftBank(leafIdx) && rayPosX <= rightBank(leafIdx)
-                                            inMLC = true;
-                                        end
-                                        break;
-                                    end
-                                end
-                            end
-                            
-                            numEnergies = length(ray.energy);
-                            for energyIdx = 1:numEnergies
-                                bixelIdx = bixelIdx + 1;
-                                if inMLC
-                                    w(bixelIdx) = segment.segmentWeight;
-                                    openBixelsThisSegment = openBixelsThisSegment + 1;
-                                end
-                            end
-                        end
-                    else
-                        fprintf('      Seg %d: WARNING - Incomplete MLC data in fallback mode\n', segIdx);
-                    end
+                    beamRaysTotal = beamRaysTotal + dij.totalNumOfBixels;
+                    beamRaysInAperture = beamRaysInAperture + segRaysInAperture;
                 else
-                    % No MLC data - this shouldn't happen with inheritance fix
-                    fprintf('      Seg %d: WARNING - No MLC data, using uniform weights\n', segIdx);
-                    w(:) = segment.segmentWeight / dij.totalNumOfBixels;
-                    openBixelsThisSegment = dij.totalNumOfBixels;
+                    % WARNING: No MLC data - this should NOT happen with fixed code
+                    fprintf('      WARNING: Seg %d has no MLC data!\n', segment.segmentIdx);
+                    % DO NOT use fallback - this would cause overdose
+                    % Instead, skip this segment
+                    continue;
                 end
-                
-                totalOpenBixels = totalOpenBixels + openBixelsThisSegment;
                 
                 % Calculate dose using direct matrix multiplication
-                if any(w > 0)
-                    segmentDose = reshape(full(dij.physicalDose{1} * w), calculatedGridSize);
-                    beamDoseAccum = beamDoseAccum + segmentDose;
-                    segmentsWithDose = segmentsWithDose + 1;
-                    
-                    if verboseOutput && mod(segIdx, 20) == 0
-                        fprintf('      Seg %d: Open=%d bixels, Max=%.4f Gy\n', ...
-                            segIdx, openBixelsThisSegment, max(segmentDose(:)));
+                try
+                    if any(w > 0)
+                        tic;
+                        segmentDose = reshape(full(dij.physicalDose{1} * w), calculatedGridSize);
+                        calcTime = toc;
+                        totalCalcTime = totalCalcTime + calcTime;
+                        
+                        maxDose = max(segmentDose(:));
+                        beamDoseAccum = beamDoseAccum + segmentDose;
+                        
+                        if verboseOutput
+                            openFrac = segRaysInAperture / dij.totalNumOfBixels * 100;
+                            fprintf('      Seg %d: Max=%.4f Gy, Open=%.1f%% (%.2fs)\n', ...
+                                segment.segmentIdx, maxDose, openFrac, calcTime);
+                        end
+                    else
+                        if verboseOutput
+                            fprintf('      Seg %d: All rays blocked by MLC\n', segment.segmentIdx);
+                        end
                     end
-                    
-                    % Clear segment dose immediately to save memory
-                    clear segmentDose;
+                catch ME
+                    fprintf('      Seg %d ERROR: %s\n', segment.segmentIdx, ME.message);
                 end
+                
+                % MEMORY MANAGEMENT: Clear segment-level data
+                clear segmentDose w;
             end
-            segmentCalcTime = toc;
             
-            % Calculate average open bixels per segment
-            avgOpenBixels = totalOpenBixels / max(1, segmentsWithDose);
-            fprintf('    Processed %d segments (skipped %d) in %.1f sec\n', ...
-                segmentsWithDose, segmentsSkipped, segmentCalcTime);
-            fprintf('    Average open bixels per segment: %.1f / %d (%.1f%%)\n', ...
-                avgOpenBixels, dij.totalNumOfBixels, 100*avgOpenBixels/dij.totalNumOfBixels);
+            totalRaysChecked = totalRaysChecked + beamRaysTotal;
+            totalRaysInAperture = totalRaysInAperture + beamRaysInAperture;
             
-            totalCalcTime = totalCalcTime + segmentCalcTime;
-            totalSegmentsProcessed = totalSegmentsProcessed + segmentsWithDose;
-            
-            % Store beam dose (only the accumulated total)
+            % Store beam dose
             beamDoseResult = struct();
-            beamDoseResult.beamIdx = segmentBeamIdx;
-            beamDoseResult.stfIdx = stfIdx;
+            beamDoseResult.beamIdx = beamIdx;
             beamDoseResult.beamName = beamData.beamName;
             beamDoseResult.gantryAngle = beamData.gantryAngle;
             beamDoseResult.couchAngle = beamData.couchAngle;
             beamDoseResult.beamMeterset = beamData.beamMeterset;
             beamDoseResult.numSegments = numSegments;
-            beamDoseResult.segmentsWithDose = segmentsWithDose;
-            beamDoseResult.avgOpenBixels = avgOpenBixels;
             beamDoseResult.physicalDose = beamDoseAccum;
             beamDoseResult.maxDose = max(beamDoseAccum(:));
             
-            beamDoses{segmentBeamIdx} = beamDoseResult;
+            if beamRaysTotal > 0
+                beamDoseResult.apertureOpenFraction = beamRaysInAperture / beamRaysTotal;
+            else
+                beamDoseResult.apertureOpenFraction = 0;
+            end
+            
+            beamDoses{beamIdx} = beamDoseResult;
             totalDose = totalDose + beamDoseAccum;
             calculatedBeams = calculatedBeams + 1;
             
-            % Cache beam result
+            % Cache complete beam result
             if enableCaching
                 save(beamDoseCacheFile, 'beamDoseResult', '-v7.3');
             end
             
-            fprintf('    Segment Beam %d complete: Max=%.4f Gy\n', segmentBeamIdx, beamDoseResult.maxDose);
+            fprintf('    Beam %d complete: Max=%.4f Gy, Avg open: %.1f%%\n', ...
+                beamIdx, beamDoseResult.maxDose, beamDoseResult.apertureOpenFraction * 100);
             
-            % Clear dij to save memory before next beam
-            if aggressiveMemoryCleanup
-                clear dij beamDoseAccum;
-            end
+            % MEMORY MANAGEMENT: Clear dij and beam accumulator
+            clear dij beamDoseAccum;
         end
         
         fprintf('\n  Summary:\n');
-        fprintf('    Beams calculated: %d, from cache: %d\n', calculatedBeams, cachedBeams);
-        fprintf('    Total segments processed: %d\n', totalSegmentsProcessed);
+        fprintf('    Beams processed: %d (cached: %d, calculated: %d)\n', ...
+            length(stf), cachedBeams, calculatedBeams);
         fprintf('    Total calculation time: %.1f sec\n', totalCalcTime);
         fprintf('    Total dose max: %.4f Gy\n', max(totalDose(:)));
+        if totalRaysChecked > 0
+            fprintf('    Overall aperture open fraction: %.1f%%\n', totalRaysInAperture / totalRaysChecked * 100);
+        end
         
         %% Step 7: Upsample doses back to original resolution and resample to RTDOSE grid
         fprintf('\n[7/8] Resampling doses...\n');
@@ -1066,12 +887,10 @@ for idxID = 1:length(ids)
         if ~isempty(referenceDose) && ~isempty(ctSpatial.ImagePositionPatient) && ~isempty(doseSpatial.ImagePositionPatient)
             fprintf('  Resampling to RTDOSE grid...\n');
             
-            % CT coordinate vectors (original resolution)
             ct_x = double(ctSpatial.ImagePositionPatient(1)) + double((0:ctSpatial.Columns-1) * ctSpatial.PixelSpacing(2));
             ct_y = double(ctSpatial.ImagePositionPatient(2)) + double((0:ctSpatial.Rows-1) * ctSpatial.PixelSpacing(1));
             ct_z = double(ctSpatial.SlicePositions);
             
-            % RTDOSE coordinate vectors
             dose_x = double(doseSpatial.ImagePositionPatient(1)) + double((0:doseSpatial.Columns-1) * doseSpatial.PixelSpacing(2));
             dose_y = double(doseSpatial.ImagePositionPatient(2)) + double((0:doseSpatial.Rows-1) * doseSpatial.PixelSpacing(1));
             dose_z = double(doseSpatial.ImagePositionPatient(3)) + double(doseSpatial.GridFrameOffsetVector);
@@ -1079,7 +898,6 @@ for idxID = 1:length(ids)
             [CT_Y, CT_X, CT_Z] = ndgrid(ct_y, ct_x, ct_z);
             [DOSE_Y, DOSE_X, DOSE_Z] = ndgrid(dose_y, dose_x, dose_z);
             
-            % Resample total dose
             try
                 totalDoseResampled = interpn(double(CT_Y), double(CT_X), double(CT_Z), totalDose, ...
                     DOSE_Y, DOSE_X, DOSE_Z, 'linear', 0);
@@ -1089,7 +907,6 @@ for idxID = 1:length(ids)
                 totalDoseResampled = totalDose;
             end
             
-            % Resample beam doses
             beamDosesResampled = cell(size(beamDoses));
             for beamIdx = 1:length(beamDoses)
                 if ~isempty(beamDoses{beamIdx})
@@ -1105,7 +922,6 @@ for idxID = 1:length(ids)
                 end
             end
             
-            % Resample CT
             ctCube = ct_original.cubeHU{1};
             try
                 ctResampled = interpn(double(CT_Y), double(CT_X), double(CT_Z), ctCube, ...
@@ -1132,23 +948,19 @@ for idxID = 1:length(ids)
         %% Step 8: Save results and compare
         fprintf('\n[8/8] Saving results...\n');
         
-        % Save segment data
         save(fullfile(outputPath, 'segmentData.mat'), 'segmentData');
         fprintf('  - segmentData.mat\n');
         
-        % Save main results (WITHOUT individual segment doses to save space)
         save(fullfile(outputPath, 'segmentDoses.mat'), 'beamDosesResampled', ...
              'totalDoseResampled', 'referenceDose', 'doseGrid', 'ctSpatial', 'doseSpatial', ...
              'stf', 'pln', 'ctDownsampleFactor', '-v7.3');
         fprintf('  - segmentDoses.mat\n');
         
-        % Save CT resampled structure
         if ~isempty(ctResampled_struct) && isfield(ctResampled_struct, 'cubeHU')
             save(fullfile(outputPath, 'ctResampled.mat'), 'ctResampled_struct', 'doseGrid');
             fprintf('  - ctResampled.mat\n');
         end
         
-        % Save individual beam doses
         for beamIdx = 1:length(beamDosesResampled)
             if ~isempty(beamDosesResampled{beamIdx})
                 beamFilename = sprintf('Beam_%02d.mat', beamIdx);
@@ -1168,11 +980,6 @@ for idxID = 1:length(ids)
             fprintf('    Max diff:       %.4f Gy\n', max(abs(doseDiff(:))));
             fprintf('    RMS diff:       %.4f Gy\n', sqrt(mean(doseDiff(:).^2)));
             
-            % Calculate ratio for debugging
-            calcMax = max(totalDoseResampled(:));
-            refMax = max(referenceDose(:));
-            fprintf('    Ratio (calc/ref): %.2f\n', calcMax/refMax);
-            
             comparison = struct();
             comparison.calculated = totalDoseResampled;
             comparison.reference = referenceDose;
@@ -1180,7 +987,6 @@ for idxID = 1:length(ids)
             comparison.metrics.meanAbsDiff = mean(abs(doseDiff(:)));
             comparison.metrics.maxDiff = max(abs(doseDiff(:)));
             comparison.metrics.rmsDiff = sqrt(mean(doseDiff(:).^2));
-            comparison.metrics.ratio = calcMax/refMax;
             
             save(fullfile(outputPath, 'doseComparison.mat'), 'comparison');
             fprintf('  - doseComparison.mat\n');
@@ -1200,11 +1006,6 @@ fprintf('All processing complete!\n');
 %% ==================== HELPER FUNCTIONS ====================
 
 function [ct_ds, cst_ds] = downsampleCTComplete(ct, cst, factor)
-    % DOWNSAMPLECTCOMPLETE - Comprehensive CT downsampling for MATRAD compatibility
-    %
-    % This function downsamples a CT structure and adjusts all necessary fields
-    % that MATRAD uses for dose calculation, including coordinate vectors.
-    
     if factor == 1
         ct_ds = ct;
         cst_ds = cst;
@@ -1213,18 +1014,14 @@ function [ct_ds, cst_ds] = downsampleCTComplete(ct, cst, factor)
     
     ct_ds = ct;
     originalSize = ct.cubeDim;
-    
-    % Calculate new size (ensure at least 1 in each dimension)
     newSize = max(1, round(originalSize / factor));
     
     fprintf('    Downsampling CT: [%d,%d,%d] -> [%d,%d,%d]\n', ...
         originalSize(1), originalSize(2), originalSize(3), ...
         newSize(1), newSize(2), newSize(3));
     
-    % Store original resolution for reference
     origRes = [ct.resolution.x, ct.resolution.y, ct.resolution.z];
     
-    % Update resolution based on actual size change
     ct_ds.resolution.x = ct.resolution.x * (originalSize(2) / newSize(2));
     ct_ds.resolution.y = ct.resolution.y * (originalSize(1) / newSize(1));
     ct_ds.resolution.z = ct.resolution.z * (originalSize(3) / newSize(3));
@@ -1233,10 +1030,8 @@ function [ct_ds, cst_ds] = downsampleCTComplete(ct, cst, factor)
     fprintf('    Resolution: [%.2f,%.2f,%.2f] -> [%.2f,%.2f,%.2f] mm\n', ...
         origRes(1), origRes(2), origRes(3), newRes(1), newRes(2), newRes(3));
     
-    % Update dimensions
     ct_ds.cubeDim = newSize;
     
-    % Downsample the HU cube(s)
     if isfield(ct, 'cubeHU') && ~isempty(ct.cubeHU)
         for i = 1:length(ct.cubeHU)
             if ~isempty(ct.cubeHU{i})
@@ -1245,7 +1040,6 @@ function [ct_ds, cst_ds] = downsampleCTComplete(ct, cst, factor)
         end
     end
     
-    % Downsample density cube if it exists
     if isfield(ct, 'cube') && ~isempty(ct.cube)
         for i = 1:length(ct.cube)
             if ~isempty(ct.cube{i})
@@ -1254,7 +1048,6 @@ function [ct_ds, cst_ds] = downsampleCTComplete(ct, cst, factor)
         end
     end
     
-    % Update coordinate vectors
     if isfield(ct, 'x') && ~isempty(ct.x)
         xMin = min(ct.x);
         xMax = max(ct.x);
@@ -1273,12 +1066,10 @@ function [ct_ds, cst_ds] = downsampleCTComplete(ct, cst, factor)
         ct_ds.z = linspace(zMin, zMax, newSize(3));
     end
     
-    % Update numOfCtScen if it exists
     if isfield(ct, 'numOfCtScen')
         ct_ds.numOfCtScen = ct.numOfCtScen;
     end
     
-    % Adjust CST structure indices for the new grid size
     cst_ds = cst;
     scaleFactor = newSize ./ originalSize;
     
@@ -1287,13 +1078,10 @@ function [ct_ds, cst_ds] = downsampleCTComplete(ct, cst, factor)
             for scen = 1:length(cst{i, 4})
                 if ~isempty(cst{i, 4}{scen})
                     originalIndices = cst{i, 4}{scen};
-                    
                     [r, c, s] = ind2sub(originalSize, originalIndices);
-                    
                     r_new = max(1, min(newSize(1), round(r * scaleFactor(1))));
                     c_new = max(1, min(newSize(2), round(c * scaleFactor(2))));
                     s_new = max(1, min(newSize(3), round(s * scaleFactor(3))));
-                    
                     newIndices = sub2ind(newSize, r_new, c_new, s_new);
                     cst_ds{i, 4}{scen} = unique(newIndices);
                 end
