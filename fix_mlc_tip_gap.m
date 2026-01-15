@@ -15,14 +15,12 @@
 clear; clc;
 
 %% ===================== USER PARAMETERS =====================
-% Base data directory - modify this to your actual data path
-BASE_DATA_DIR = 'path/to/data';  % <-- MODIFY THIS
+% Working directory
+wd = '/mnt/weka/home/80030361/ETHOS_Simulations';
 
-% Patient IDs to process
-PATIENT_IDS = {'1194203'};  % Add more patient IDs as needed
-
-% Sessions to process
-SESSIONS = {'Session_1'};  % Add more sessions as needed
+% Patient IDs and sessions to process
+patientIDs = {'1194203'};  % Add more IDs as needed
+sessions = {'Session_1'};  % Add more sessions as needed
 
 % Minimum tip gap threshold (cm) - from commissioning
 MIN_TIP_GAP = 0.06;  % cm
@@ -33,112 +31,71 @@ EXPANSION_PER_SIDE = 0.04;  % cm (total expansion will be 0.08 cm)
 % Output filename suffix
 OUTPUT_SUFFIX = '_adjusted_mlc';
 
-
-%% ===================== MAIN PROCESSING LOOP =====================
-fprintf('=============================================================\n');
-fprintf('MLC Tip Gap Correction Script\n');
-fprintf('=============================================================\n\n');
-fprintf('Base data directory: %s\n', BASE_DATA_DIR);
-fprintf('Patient IDs: %s\n', strjoin(PATIENT_IDS, ', '));
-fprintf('Sessions: %s\n', strjoin(SESSIONS, ', '));
-fprintf('Minimum tip gap threshold: %.4f cm\n', MIN_TIP_GAP);
-fprintf('Expansion per side: %.4f cm\n\n', EXPANSION_PER_SIDE);
-
-% Loop over patient IDs
-for patIdx = 1:length(PATIENT_IDS)
-    patientID = PATIENT_IDS{patIdx};
+%% ===================== LOOP OVER PATIENTS AND SESSIONS =====================
+for p = 1:length(patientIDs)
+    patientID = patientIDs{p};
     
-    % Loop over sessions
-    for sessIdx = 1:length(SESSIONS)
-        sessionName = SESSIONS{sessIdx};
+    for s = 1:length(sessions)
+        sessionName = sessions{s};
         
-        fprintf('\n#############################################################\n');
-        fprintf('Processing Patient: %s, Session: %s\n', patientID, sessionName);
-        fprintf('#############################################################\n\n');
+        fprintf('=============================================================\n');
+        fprintf('MLC Tip Gap Correction Script\n');
+        fprintf('Patient ID: %s, Session: %s\n', patientID, sessionName);
+        fprintf('=============================================================\n\n');
         
-        % Build path to sct directory
-        sctDir = fullfile(BASE_DATA_DIR, patientID, sessionName, 'sct');
+        % Construct path to sct directory
+        rawwd = fullfile(wd, 'EthosExports', patientID, 'Pancreas', sessionName);
+        sctDir = fullfile(rawwd, 'sct');
         
         % Check if directory exists
         if ~exist(sctDir, 'dir')
             fprintf('WARNING: Directory does not exist: %s\n', sctDir);
-            fprintf('Skipping this patient/session combination.\n');
+            fprintf('Skipping patient %s, session %s\n\n', patientID, sessionName);
             continue;
         end
         
-        % Search for RTPLAN files
+        % Find RTPLAN file in sct directory
         fprintf('Scanning directory: %s\n', sctDir);
-        rtplanFiles = dir(fullfile(sctDir, 'RP*.dcm'));
+        dcmFiles = dir(fullfile(sctDir, '*.dcm'));
         
-        % Also try lowercase pattern
-        if isempty(rtplanFiles)
-            rtplanFiles = dir(fullfile(sctDir, 'rp*.dcm'));
-        end
-        
-        % Also try general DICOM search and filter by modality
-        if isempty(rtplanFiles)
-            allDcmFiles = dir(fullfile(sctDir, '*.dcm'));
-            rtplanFiles = [];
-            for i = 1:length(allDcmFiles)
-                try
-                    tempInfo = dicominfo(fullfile(sctDir, allDcmFiles(i).name));
-                    if isfield(tempInfo, 'Modality') && strcmpi(tempInfo.Modality, 'RTPLAN')
-                        rtplanFiles = [rtplanFiles; allDcmFiles(i)];
-                    end
-                catch
-                    % Skip files that can't be read
+        inputFile = '';
+        for i = 1:length(dcmFiles)
+            testFile = fullfile(sctDir, dcmFiles(i).name);
+            try
+                info = dicominfo(testFile);
+                % Check if this is an RTPLAN file (Modality = RTPLAN)
+                if isfield(info, 'Modality') && strcmp(info.Modality, 'RTPLAN')
+                    inputFile = testFile;
+                    fprintf('Found RTPLAN file: %s\n', dcmFiles(i).name);
+                    break;
                 end
+            catch
+                % Not a valid DICOM or can't read - skip
+                continue;
             end
         end
         
-        if isempty(rtplanFiles)
-            fprintf('WARNING: No RTPLAN files found in %s\n', sctDir);
-            fprintf('Skipping this patient/session combination.\n');
+        if isempty(inputFile)
+            fprintf('WARNING: No RTPLAN file found in %s\n', sctDir);
+            fprintf('Skipping patient %s, session %s\n\n', patientID, sessionName);
             continue;
         end
-        
-        fprintf('Found %d RTPLAN file(s)\n\n', length(rtplanFiles));
-        
-        % Process each RTPLAN file
-        for fileIdx = 1:length(rtplanFiles)
-            inputFile = fullfile(sctDir, rtplanFiles(fileIdx).name);
-            
-            fprintf('-------------------------------------------------------------\n');
-            fprintf('Processing RTPLAN file %d of %d: %s\n', fileIdx, length(rtplanFiles), rtplanFiles(fileIdx).name);
-            fprintf('-------------------------------------------------------------\n\n');
-            
-            % Call the processing function
-            try
-                processRTPlan(inputFile, MIN_TIP_GAP, EXPANSION_PER_SIDE, OUTPUT_SUFFIX);
-            catch ME
-                fprintf('ERROR processing file %s: %s\n', inputFile, ME.message);
-                fprintf('Continuing to next file...\n\n');
-            end
-        end
-    end
-end
 
-fprintf('\n=============================================================\n');
-fprintf('ALL PROCESSING COMPLETE\n');
+%% ===================== READ DICOM RTPLAN =====================
 fprintf('=============================================================\n');
-
-%% ===================== PROCESSING FUNCTION =====================
-function processRTPlan(inputFile, MIN_TIP_GAP, EXPANSION_PER_SIDE, OUTPUT_SUFFIX)
-% Process a single RTPLAN file for MLC tip gap corrections
+fprintf('MLC Tip Gap Correction Script\n');
+fprintf('=============================================================\n\n');
 
 fprintf('Reading RTPLAN file: %s\n', inputFile);
-
-% Check if file exists
-if ~exist(inputFile, 'file')
-    error('Input file does not exist: %s', inputFile);
-end
 
 % Read the DICOM file
 try
     rtplan = dicominfo(inputFile);
     fprintf('Successfully loaded RTPLAN: %s\n', rtplan.RTPlanLabel);
 catch ME
-    error('Failed to read DICOM file: %s', ME.message);
+    fprintf('ERROR: Failed to read DICOM file: %s\n', ME.message);
+    fprintf('Skipping patient %s, session %s\n\n', patientID, sessionName);
+    continue;
 end
 
 %% ===================== IDENTIFY MLC DEVICE TYPE =====================
@@ -358,8 +315,8 @@ fprintf('EXPORTING CORRECTED RTPLAN\n');
 fprintf('=============================================================\n\n');
 
 % Generate output filename
-[inputPath, inputName, inputExt] = fileparts(inputFile);
-outputFile = fullfile(inputPath, [inputName, OUTPUT_SUFFIX, inputExt]);
+[~, inputName, inputExt] = fileparts(inputFile);
+outputFile = fullfile(sctDir, [inputName, OUTPUT_SUFFIX, inputExt]);
 
 fprintf('Output file: %s\n', outputFile);
 
@@ -400,15 +357,22 @@ end
 fprintf('\n=============================================================\n');
 fprintf('SUMMARY\n');
 fprintf('=============================================================\n');
-fprintf('Input file:  %s\n', inputFile);
-fprintf('Output file: %s\n', outputFile);
+fprintf('Patient ID:            %s\n', patientID);
+fprintf('Session:               %s\n', sessionName);
+fprintf('Input file:            %s\n', inputFile);
+fprintf('Output file:           %s\n', outputFile);
 fprintf('Minimum gap threshold: %.4f cm\n', MIN_TIP_GAP);
 fprintf('Expansion per side:    %.4f cm\n', EXPANSION_PER_SIDE);
 fprintf('Total corrections:     %d\n', totalCorrections);
 fprintf('Verification:          %s\n', conditional(verificationPassed, 'PASSED', 'FAILED'));
 fprintf('=============================================================\n\n');
 
-end  % End of processRTPlan function
+    end  % End session loop
+end  % End patient loop
+
+fprintf('=============================================================\n');
+fprintf('ALL PATIENTS AND SESSIONS PROCESSED\n');
+fprintf('=============================================================\n');
 
 %% ===================== HELPER FUNCTIONS =====================
 function result = conditional(condition, trueVal, falseVal)
