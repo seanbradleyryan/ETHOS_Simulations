@@ -15,8 +15,14 @@
 clear; clc;
 
 %% ===================== USER PARAMETERS =====================
-% Input RTPLAN file path - modify this to your actual file path
-inputFile = 'path/to/your/rtplan.dcm';  % <-- MODIFY THIS
+% Base data directory - modify this to your actual data path
+BASE_DATA_DIR = 'path/to/data';  % <-- MODIFY THIS
+
+% Patient IDs to process
+PATIENT_IDS = {'1194203'};  % Add more patient IDs as needed
+
+% Sessions to process
+SESSIONS = {'Session_1'};  % Add more sessions as needed
 
 % Minimum tip gap threshold (cm) - from commissioning
 MIN_TIP_GAP = 0.06;  % cm
@@ -27,10 +33,98 @@ EXPANSION_PER_SIDE = 0.04;  % cm (total expansion will be 0.08 cm)
 % Output filename suffix
 OUTPUT_SUFFIX = '_adjusted_mlc';
 
-%% ===================== READ DICOM RTPLAN =====================
+
+%% ===================== MAIN PROCESSING LOOP =====================
 fprintf('=============================================================\n');
 fprintf('MLC Tip Gap Correction Script\n');
 fprintf('=============================================================\n\n');
+fprintf('Base data directory: %s\n', BASE_DATA_DIR);
+fprintf('Patient IDs: %s\n', strjoin(PATIENT_IDS, ', '));
+fprintf('Sessions: %s\n', strjoin(SESSIONS, ', '));
+fprintf('Minimum tip gap threshold: %.4f cm\n', MIN_TIP_GAP);
+fprintf('Expansion per side: %.4f cm\n\n', EXPANSION_PER_SIDE);
+
+% Loop over patient IDs
+for patIdx = 1:length(PATIENT_IDS)
+    patientID = PATIENT_IDS{patIdx};
+    
+    % Loop over sessions
+    for sessIdx = 1:length(SESSIONS)
+        sessionName = SESSIONS{sessIdx};
+        
+        fprintf('\n#############################################################\n');
+        fprintf('Processing Patient: %s, Session: %s\n', patientID, sessionName);
+        fprintf('#############################################################\n\n');
+        
+        % Build path to sct directory
+        sctDir = fullfile(BASE_DATA_DIR, patientID, sessionName, 'sct');
+        
+        % Check if directory exists
+        if ~exist(sctDir, 'dir')
+            fprintf('WARNING: Directory does not exist: %s\n', sctDir);
+            fprintf('Skipping this patient/session combination.\n');
+            continue;
+        end
+        
+        % Search for RTPLAN files
+        fprintf('Scanning directory: %s\n', sctDir);
+        rtplanFiles = dir(fullfile(sctDir, 'RP*.dcm'));
+        
+        % Also try lowercase pattern
+        if isempty(rtplanFiles)
+            rtplanFiles = dir(fullfile(sctDir, 'rp*.dcm'));
+        end
+        
+        % Also try general DICOM search and filter by modality
+        if isempty(rtplanFiles)
+            allDcmFiles = dir(fullfile(sctDir, '*.dcm'));
+            rtplanFiles = [];
+            for i = 1:length(allDcmFiles)
+                try
+                    tempInfo = dicominfo(fullfile(sctDir, allDcmFiles(i).name));
+                    if isfield(tempInfo, 'Modality') && strcmpi(tempInfo.Modality, 'RTPLAN')
+                        rtplanFiles = [rtplanFiles; allDcmFiles(i)];
+                    end
+                catch
+                    % Skip files that can't be read
+                end
+            end
+        end
+        
+        if isempty(rtplanFiles)
+            fprintf('WARNING: No RTPLAN files found in %s\n', sctDir);
+            fprintf('Skipping this patient/session combination.\n');
+            continue;
+        end
+        
+        fprintf('Found %d RTPLAN file(s)\n\n', length(rtplanFiles));
+        
+        % Process each RTPLAN file
+        for fileIdx = 1:length(rtplanFiles)
+            inputFile = fullfile(sctDir, rtplanFiles(fileIdx).name);
+            
+            fprintf('-------------------------------------------------------------\n');
+            fprintf('Processing RTPLAN file %d of %d: %s\n', fileIdx, length(rtplanFiles), rtplanFiles(fileIdx).name);
+            fprintf('-------------------------------------------------------------\n\n');
+            
+            % Call the processing function
+            try
+                processRTPlan(inputFile, MIN_TIP_GAP, EXPANSION_PER_SIDE, OUTPUT_SUFFIX);
+            catch ME
+                fprintf('ERROR processing file %s: %s\n', inputFile, ME.message);
+                fprintf('Continuing to next file...\n\n');
+            end
+        end
+    end
+end
+
+fprintf('\n=============================================================\n');
+fprintf('ALL PROCESSING COMPLETE\n');
+fprintf('=============================================================\n');
+
+%% ===================== PROCESSING FUNCTION =====================
+function processRTPlan(inputFile, MIN_TIP_GAP, EXPANSION_PER_SIDE, OUTPUT_SUFFIX)
+% Process a single RTPLAN file for MLC tip gap corrections
 
 fprintf('Reading RTPLAN file: %s\n', inputFile);
 
@@ -312,7 +406,9 @@ fprintf('Minimum gap threshold: %.4f cm\n', MIN_TIP_GAP);
 fprintf('Expansion per side:    %.4f cm\n', EXPANSION_PER_SIDE);
 fprintf('Total corrections:     %d\n', totalCorrections);
 fprintf('Verification:          %s\n', conditional(verificationPassed, 'PASSED', 'FAILED'));
-fprintf('=============================================================\n');
+fprintf('=============================================================\n\n');
+
+end  % End of processRTPlan function
 
 %% ===================== HELPER FUNCTIONS =====================
 function result = conditional(condition, trueVal, falseVal)
