@@ -15,12 +15,14 @@
 clear; clc;
 
 %% ===================== USER PARAMETERS =====================
-% Working directory
-wd = '/mnt/weka/home/80030361/ETHOS_Simulations';
+% Base data directory - modify this to your actual data path
+BASE_DATA_DIR = 'path/to/data';  % <-- MODIFY THIS
 
-% Patient IDs and sessions to process
-patientIDs = {'1194203'};  % Add more IDs as needed
-sessions = {'Session_1'};  % Add more sessions as needed
+% Patient IDs to process
+PATIENT_IDS = {'1194203'};  % Add more patient IDs as needed
+
+% Sessions to process
+SESSIONS = {'Session_1'};  % Add more sessions as needed
 
 % Minimum tip gap threshold (cm) - from commissioning
 MIN_TIP_GAP = 0.06;  % cm
@@ -28,74 +30,121 @@ MIN_TIP_GAP = 0.06;  % cm
 % Expansion amount per side when gap is too small (cm)
 EXPANSION_PER_SIDE = 0.04;  % cm (total expansion will be 0.08 cm)
 
+% MLC coordinate bounds (cm) - Varian standard
+MLC_MIN_COORD = -140;  % cm
+MLC_MAX_COORD = 140;   % cm
+
 % Output filename suffix
 OUTPUT_SUFFIX = '_adjusted_mlc';
 
-%% ===================== LOOP OVER PATIENTS AND SESSIONS =====================
-for p = 1:length(patientIDs)
-    patientID = patientIDs{p};
+
+%% ===================== MAIN PROCESSING LOOP =====================
+fprintf('=============================================================\n');
+fprintf('MLC Tip Gap Correction Script\n');
+fprintf('=============================================================\n\n');
+fprintf('Base data directory: %s\n', BASE_DATA_DIR);
+fprintf('Patient IDs: %s\n', strjoin(PATIENT_IDS, ', '));
+fprintf('Sessions: %s\n', strjoin(SESSIONS, ', '));
+fprintf('Minimum tip gap threshold: %.4f cm\n', MIN_TIP_GAP);
+fprintf('Expansion per side: %.4f cm\n\n', EXPANSION_PER_SIDE);
+
+% Loop over patient IDs
+for patIdx = 1:length(PATIENT_IDS)
+    patientID = PATIENT_IDS{patIdx};
     
-    for s = 1:length(sessions)
-        sessionName = sessions{s};
+    % Loop over sessions
+    for sessIdx = 1:length(SESSIONS)
+        sessionName = SESSIONS{sessIdx};
         
-        fprintf('=============================================================\n');
-        fprintf('MLC Tip Gap Correction Script\n');
-        fprintf('Patient ID: %s, Session: %s\n', patientID, sessionName);
-        fprintf('=============================================================\n\n');
+        fprintf('\n#############################################################\n');
+        fprintf('Processing Patient: %s, Session: %s\n', patientID, sessionName);
+        fprintf('#############################################################\n\n');
         
-        % Construct path to sct directory
-        rawwd = fullfile(wd, 'EthosExports', patientID, 'Pancreas', sessionName);
-        sctDir = fullfile(rawwd, 'sct');
+        % Build path to sct directory
+        sctDir = fullfile(BASE_DATA_DIR, patientID, sessionName, 'sct');
         
         % Check if directory exists
         if ~exist(sctDir, 'dir')
             fprintf('WARNING: Directory does not exist: %s\n', sctDir);
-            fprintf('Skipping patient %s, session %s\n\n', patientID, sessionName);
+            fprintf('Skipping this patient/session combination.\n');
             continue;
         end
         
-        % Find RTPLAN file in sct directory
+        % Search for RTPLAN files
         fprintf('Scanning directory: %s\n', sctDir);
-        dcmFiles = dir(fullfile(sctDir, '*.dcm'));
+        rtplanFiles = dir(fullfile(sctDir, 'RP*.dcm'));
         
-        inputFile = '';
-        for i = 1:length(dcmFiles)
-            testFile = fullfile(sctDir, dcmFiles(i).name);
-            try
-                info = dicominfo(testFile);
-                % Check if this is an RTPLAN file (Modality = RTPLAN)
-                if isfield(info, 'Modality') && strcmp(info.Modality, 'RTPLAN')
-                    inputFile = testFile;
-                    fprintf('Found RTPLAN file: %s\n', dcmFiles(i).name);
-                    break;
+        % Also try lowercase pattern
+        if isempty(rtplanFiles)
+            rtplanFiles = dir(fullfile(sctDir, 'rp*.dcm'));
+        end
+        
+        % Also try general DICOM search and filter by modality
+        if isempty(rtplanFiles)
+            allDcmFiles = dir(fullfile(sctDir, '*.dcm'));
+            rtplanFiles = [];
+            for i = 1:length(allDcmFiles)
+                try
+                    tempInfo = dicominfo(fullfile(sctDir, allDcmFiles(i).name));
+                    if isfield(tempInfo, 'Modality') && strcmpi(tempInfo.Modality, 'RTPLAN')
+                        rtplanFiles = [rtplanFiles; allDcmFiles(i)];
+                    end
+                catch
+                    % Skip files that can't be read
                 end
-            catch
-                % Not a valid DICOM or can't read - skip
-                continue;
             end
         end
         
-        if isempty(inputFile)
-            fprintf('WARNING: No RTPLAN file found in %s\n', sctDir);
-            fprintf('Skipping patient %s, session %s\n\n', patientID, sessionName);
+        if isempty(rtplanFiles)
+            fprintf('WARNING: No RTPLAN files found in %s\n', sctDir);
+            fprintf('Skipping this patient/session combination.\n');
             continue;
         end
+        
+        fprintf('Found %d RTPLAN file(s)\n\n', length(rtplanFiles));
+        
+        % Process each RTPLAN file
+        for fileIdx = 1:length(rtplanFiles)
+            inputFile = fullfile(sctDir, rtplanFiles(fileIdx).name);
+            
+            fprintf('-------------------------------------------------------------\n');
+            fprintf('Processing RTPLAN file %d of %d: %s\n', fileIdx, length(rtplanFiles), rtplanFiles(fileIdx).name);
+            fprintf('-------------------------------------------------------------\n\n');
+            
+            % Call the processing function
+            try
+                processRTPlan(inputFile, MIN_TIP_GAP, EXPANSION_PER_SIDE, ...
+                    MLC_MIN_COORD, MLC_MAX_COORD, OUTPUT_SUFFIX);
+            catch ME
+                fprintf('ERROR processing file %s: %s\n', inputFile, ME.message);
+                fprintf('Continuing to next file...\n\n');
+            end
+        end
+    end
+end
 
-%% ===================== READ DICOM RTPLAN =====================
+fprintf('\n=============================================================\n');
+fprintf('ALL PROCESSING COMPLETE\n');
 fprintf('=============================================================\n');
-fprintf('MLC Tip Gap Correction Script\n');
-fprintf('=============================================================\n\n');
+
+%% ===================== PROCESSING FUNCTION =====================
+function processRTPlan(inputFile, MIN_TIP_GAP, EXPANSION_PER_SIDE, ...
+    MLC_MIN_COORD, MLC_MAX_COORD, OUTPUT_SUFFIX)
+% Process a single RTPLAN file for MLC tip gap corrections
 
 fprintf('Reading RTPLAN file: %s\n', inputFile);
+
+% Check if file exists
+if ~exist(inputFile, 'file')
+    error('Input file does not exist: %s', inputFile);
+end
 
 % Read the DICOM file
 try
     rtplan = dicominfo(inputFile);
     fprintf('Successfully loaded RTPLAN: %s\n', rtplan.RTPlanLabel);
 catch ME
-    fprintf('ERROR: Failed to read DICOM file: %s\n', ME.message);
-    fprintf('Skipping patient %s, session %s\n\n', patientID, sessionName);
-    continue;
+    error('Failed to read DICOM file: %s', ME.message);
 end
 
 %% ===================== IDENTIFY MLC DEVICE TYPE =====================
@@ -138,7 +187,77 @@ for beamIdx = 1:numBeams
     
     beamCorrections = 0;
     
-    % Loop through each control point
+    %% Identify dynamic vs static leaves for this beam
+    % First, collect all MLC positions across all control points
+    mlcDeviceData = struct();  % Will store data for each MLC device found
+    
+    fprintf('  Identifying dynamic vs static leaves...\n');
+    
+    for cpIdx = 1:numControlPoints
+        cpField = cpSeqFields{cpIdx};
+        controlPoint = beam.ControlPointSequence.(cpField);
+        
+        if ~isfield(controlPoint, 'BeamLimitingDevicePositionSequence')
+            continue;
+        end
+        
+        bldSeqFields = fieldnames(controlPoint.BeamLimitingDevicePositionSequence);
+        
+        for devIdx = 1:length(bldSeqFields)
+            devField = bldSeqFields{devIdx};
+            device = controlPoint.BeamLimitingDevicePositionSequence.(devField);
+            deviceType = device.RTBeamLimitingDeviceType;
+            
+            % Only process MLC devices
+            if ~any(strcmpi(deviceType, MLC_TYPES))
+                continue;
+            end
+            
+            % Create a unique key for this device type
+            devKey = sprintf('dev_%s', deviceType);
+            
+            % Initialize storage for this device if first time seeing it
+            if ~isfield(mlcDeviceData, devKey)
+                mlcDeviceData.(devKey).deviceType = deviceType;
+                mlcDeviceData.(devKey).positions = [];  % Will store all positions
+                mlcDeviceData.(devKey).numLeafPairs = [];
+            end
+            
+            % Store this control point's positions
+            leafPositions = device.LeafJawPositions;
+            mlcDeviceData.(devKey).positions = [mlcDeviceData.(devKey).positions; leafPositions'];
+            mlcDeviceData.(devKey).numLeafPairs = length(leafPositions) / 2;
+        end
+    end
+    
+    % Determine which leaves are dynamic (change position) vs static
+    devKeys = fieldnames(mlcDeviceData);
+    for devKeyIdx = 1:length(devKeys)
+        devKey = devKeys{devKeyIdx};
+        positions = mlcDeviceData.(devKey).positions;  % Each row is a control point
+        numLeafPairs = mlcDeviceData.(devKey).numLeafPairs;
+        
+        % Check if each leaf position changes across control points
+        isDynamic = false(numLeafPairs * 2, 1);  % For both banks combined
+        
+        for leafIdx = 1:(numLeafPairs * 2)
+            % Check if this leaf position varies across control points
+            leafPositionsOverTime = positions(:, leafIdx);
+            if max(leafPositionsOverTime) - min(leafPositionsOverTime) > 1e-6  % Tolerance for floating point
+                isDynamic(leafIdx) = true;
+            end
+        end
+        
+        % Store the dynamic status for each leaf pair (both banks)
+        mlcDeviceData.(devKey).isDynamic = isDynamic;
+        
+        % Count dynamic leaf pairs
+        numDynamicPairs = sum(isDynamic(1:numLeafPairs) | isDynamic(numLeafPairs+1:end));
+        fprintf('    Device %s: %d/%d leaf pairs are dynamic\n', ...
+            mlcDeviceData.(devKey).deviceType, numDynamicPairs, numLeafPairs);
+    end
+    
+    % Loop through each control point to make corrections
     for cpIdx = 1:numControlPoints
         cpField = cpSeqFields{cpIdx};
         controlPoint = beam.ControlPointSequence.(cpField);
@@ -182,6 +301,14 @@ for beamIdx = 1:numBeams
                 continue;
             end
             
+            % Get dynamic status for this device type
+            devKey = sprintf('dev_%s', deviceType);
+            if ~isfield(mlcDeviceData, devKey)
+                warning('No dynamic data found for device %s - skipping', deviceType);
+                continue;
+            end
+            isDynamic = mlcDeviceData.(devKey).isDynamic;
+            
             % Split into two banks
             bankA = leafPositions(1:numLeafPairs);       % Left bank (usually negative)
             bankB = leafPositions(numLeafPairs+1:end);   % Right bank (usually positive)
@@ -192,29 +319,105 @@ for beamIdx = 1:numBeams
             
             totalLeafPairsChecked = totalLeafPairsChecked + numLeafPairs;
             
-            % Find leaf pairs with gap less than minimum
+            % Find leaf pairs with gap less than minimum AND are dynamic
             smallGapIdx = find(gaps < MIN_TIP_GAP);
             
             if ~isempty(smallGapIdx)
                 for leafIdx = smallGapIdx'
+                    % Check if EITHER bank A or bank B for this leaf pair is dynamic
+                    % If both are static, skip this leaf pair
+                    if ~isDynamic(leafIdx) && ~isDynamic(leafIdx + numLeafPairs)
+                        continue;  % Both banks static - skip
+                    end
+                    
                     originalGap = gaps(leafIdx);
                     originalA = bankA(leafIdx);
                     originalB = bankB(leafIdx);
                     
-                    % Expand tips: move A left (more negative) and B right (more positive)
+                    % Determine expansion strategy based on which banks are dynamic
+                    bankAIsDynamic = isDynamic(leafIdx);
+                    bankBIsDynamic = isDynamic(leafIdx + numLeafPairs);
+                    
+                    % Start with symmetric expansion
                     newA = originalA - EXPANSION_PER_SIDE;
                     newB = originalB + EXPANSION_PER_SIDE;
-                    newGap = newB - newA;
                     
-                    % Update the positions
-                    bankA(leafIdx) = newA;
-                    bankB(leafIdx) = newB;
+                    % Apply boundary constraints
+                    newA = max(newA, MLC_MIN_COORD);
+                    newB = min(newB, MLC_MAX_COORD);
+                    
+                    % Check if after clamping we still have minimum gap
+                    newGap = newB - newA;
+                    if newGap < MIN_TIP_GAP
+                        % Try asymmetric expansion to maintain minimum gap
+                        if bankAIsDynamic && bankBIsDynamic
+                            % Both dynamic - try to expand more on the side with room
+                            totalExpansionNeeded = MIN_TIP_GAP - originalGap;
+                            
+                            % Calculate available room on each side
+                            roomA = originalA - MLC_MIN_COORD;
+                            roomB = MLC_MAX_COORD - originalB;
+                            
+                            if roomA + roomB >= totalExpansionNeeded
+                                % Distribute expansion based on available room
+                                if roomA >= totalExpansionNeeded / 2 && roomB >= totalExpansionNeeded / 2
+                                    % Enough room on both sides for symmetric
+                                    newA = originalA - totalExpansionNeeded / 2;
+                                    newB = originalB + totalExpansionNeeded / 2;
+                                elseif roomA >= roomB
+                                    % More room on A side
+                                    newB = min(originalB + roomB, MLC_MAX_COORD);
+                                    newA = newB - MIN_TIP_GAP;
+                                else
+                                    % More room on B side
+                                    newA = max(originalA - roomA, MLC_MIN_COORD);
+                                    newB = newA + MIN_TIP_GAP;
+                                end
+                            else
+                                % Not enough room even with asymmetric expansion
+                                warning('Cannot achieve MIN_TIP_GAP for Beam %d, CP %d, Leaf %d due to bounds', ...
+                                    beamNumber, cpIdx, leafIdx);
+                                continue;
+                            end
+                        elseif bankAIsDynamic
+                            % Only A is dynamic - expand only A
+                            newA = originalB - MIN_TIP_GAP;
+                            newB = originalB;  % Keep B static
+                            if newA < MLC_MIN_COORD
+                                warning('Cannot achieve MIN_TIP_GAP for Beam %d, CP %d, Leaf %d (A at boundary)', ...
+                                    beamNumber, cpIdx, leafIdx);
+                                continue;
+                            end
+                        elseif bankBIsDynamic
+                            % Only B is dynamic - expand only B
+                            newA = originalA;  % Keep A static
+                            newB = originalA + MIN_TIP_GAP;
+                            if newB > MLC_MAX_COORD
+                                warning('Cannot achieve MIN_TIP_GAP for Beam %d, CP %d, Leaf %d (B at boundary)', ...
+                                    beamNumber, cpIdx, leafIdx);
+                                continue;
+                            end
+                        end
+                        
+                        newGap = newB - newA;
+                    end
+                    
+                    % Only update dynamic banks
+                    if bankAIsDynamic
+                        bankA(leafIdx) = newA;
+                    end
+                    if bankBIsDynamic
+                        bankB(leafIdx) = newB;
+                    end
                     
                     % Log the correction
                     correctionLog{end+1} = sprintf(...
-                        'Beam %d (%s), CP %d, Leaf %d: Gap %.4f -> %.4f cm (A: %.4f->%.4f, B: %.4f->%.4f)', ...
+                        'Beam %d (%s), CP %d, Leaf %d: Gap %.4f -> %.4f cm (A: %.4f->%.4f%s, B: %.4f->%.4f%s)', ...
                         beamNumber, beamName, cpIdx, leafIdx, ...
-                        originalGap, newGap, originalA, newA, originalB, newB);
+                        originalGap, newGap, originalA, bankA(leafIdx), ...
+                        conditional(bankAIsDynamic, '', '[static]'), ...
+                        originalB, bankB(leafIdx), ...
+                        conditional(bankBIsDynamic, '', '[static]'));
                     
                     beamCorrections = beamCorrections + 1;
                     totalCorrections = totalCorrections + 1;
@@ -315,8 +518,8 @@ fprintf('EXPORTING CORRECTED RTPLAN\n');
 fprintf('=============================================================\n\n');
 
 % Generate output filename
-[~, inputName, inputExt] = fileparts(inputFile);
-outputFile = fullfile(sctDir, [inputName, OUTPUT_SUFFIX, inputExt]);
+[inputPath, inputName, inputExt] = fileparts(inputFile);
+outputFile = fullfile(inputPath, [inputName, OUTPUT_SUFFIX, inputExt]);
 
 fprintf('Output file: %s\n', outputFile);
 
@@ -357,22 +560,15 @@ end
 fprintf('\n=============================================================\n');
 fprintf('SUMMARY\n');
 fprintf('=============================================================\n');
-fprintf('Patient ID:            %s\n', patientID);
-fprintf('Session:               %s\n', sessionName);
-fprintf('Input file:            %s\n', inputFile);
-fprintf('Output file:           %s\n', outputFile);
+fprintf('Input file:  %s\n', inputFile);
+fprintf('Output file: %s\n', outputFile);
 fprintf('Minimum gap threshold: %.4f cm\n', MIN_TIP_GAP);
 fprintf('Expansion per side:    %.4f cm\n', EXPANSION_PER_SIDE);
 fprintf('Total corrections:     %d\n', totalCorrections);
 fprintf('Verification:          %s\n', conditional(verificationPassed, 'PASSED', 'FAILED'));
 fprintf('=============================================================\n\n');
 
-    end  % End session loop
-end  % End patient loop
-
-fprintf('=============================================================\n');
-fprintf('ALL PATIENTS AND SESSIONS PROCESSED\n');
-fprintf('=============================================================\n');
+end  % End of processRTPlan function
 
 %% ===================== HELPER FUNCTIONS =====================
 function result = conditional(condition, trueVal, falseVal)
