@@ -43,7 +43,52 @@ function inspectStruct(s, name)
 
     % Process single struct's fields
     fields = fieldnames(s);
-
+    
+    % Check for Item_N pattern (DICOM-style numbered fields)
+    itemFields = regexp(fields, '^Item_(\d+)$', 'tokens');
+    itemIndices = find(~cellfun(@isempty, itemFields));
+    
+    if ~isempty(itemIndices) && length(itemIndices) > 1
+        % We have multiple Item_N fields - check if they're identical
+        itemFieldNames = fields(itemIndices);
+        firstItemFields = fieldnames(s.(itemFieldNames{1}));
+        
+        allSame = true;
+        for idx = 2:length(itemFieldNames)
+            if ~isequal(fieldnames(s.(itemFieldNames{idx})), firstItemFields)
+                allSame = false;
+                break;
+            end
+        end
+        
+        if allSame
+            % Process non-Item fields first
+            nonItemIndices = setdiff(1:length(fields), itemIndices);
+            for i = nonItemIndices
+                fieldName = fields{i};
+                value = s.(fieldName);
+                fullName = [name, '.', fieldName];
+                
+                if isstruct(value)
+                    inspectStruct(value, fullName);
+                else
+                    sz = size(value);
+                    szStr = strjoin(arrayfun(@numel2str, sz, 'UniformOutput', false), 'x');
+                    cl = class(value);
+                    fprintf('%-25s : %-10s %s\n', fullName, szStr, cl);
+                end
+            end
+            
+            % Show only the first Item_N and indicate how many exist
+            firstItemName = itemFieldNames{1};
+            fprintf('%-25s : [%d identical Item_N structures, showing first only]\n', ...
+                    [name, '.', firstItemName], length(itemFieldNames));
+            inspectStruct(s.(firstItemName), [name, '.', firstItemName]);
+            return;
+        end
+    end
+    
+    % Normal processing - no Item_N pattern detected or they're not identical
     for i = 1:numel(fields)
         fieldName = fields{i};
         value = s.(fieldName);
@@ -67,17 +112,3 @@ end
 function s = numel2str(n)
     s = num2str(n);
 end
-```
-
-**Key changes:**
-
-1. **Detects struct arrays**: When the function encounters a struct array (multiple elements), it checks if all elements have identical field names
-2. **Collapses redundancy**: If they're identical, it prints a summary line showing the array dimensions and only processes the first element
-3. **Recursive collapse**: This applies at every level, so your 17 items with 166 sub-items each will show as two collapsed arrays instead of 2,822 individual entries
-
-**Example output:**
-```
-input.items            : [17x1 struct array - identical structure, showing first only]
-input.items(1).data    : [166x1 struct array - identical structure, showing first only]
-input.items(1).data(1).field1 : 100x50    double
-input.items(1).data(1).field2 : 1x1       char
