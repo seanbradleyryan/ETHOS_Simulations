@@ -61,34 +61,37 @@ function inspectStruct(s, name)
             end
         end
         
-        if allSame
-            % Process non-Item fields first
-            nonItemIndices = setdiff(1:length(fields), itemIndices);
-            for i = nonItemIndices
-                fieldName = fields{i};
-                value = s.(fieldName);
-                fullName = [name, '.', fieldName];
-                
-                if isstruct(value)
-                    inspectStruct(value, fullName);
-                else
-                    sz = size(value);
-                    szStr = strjoin(arrayfun(@numel2str, sz, 'UniformOutput', false), 'x');
-                    cl = class(value);
-                    fprintf('%-25s : %-10s %s\n', fullName, szStr, cl);
-                end
-            end
+        % Process non-Item fields first
+        nonItemIndices = setdiff(1:length(fields), itemIndices);
+        for i = nonItemIndices
+            fieldName = fields{i};
+            value = s.(fieldName);
+            fullName = [name, '.', fieldName];
             
-            % Show only the first Item_N and indicate how many exist
-            firstItemName = itemFieldNames{1};
+            if isstruct(value)
+                inspectStruct(value, fullName);
+            else
+                sz = size(value);
+                szStr = strjoin(arrayfun(@numel2str, sz, 'UniformOutput', false), 'x');
+                cl = class(value);
+                fprintf('%-25s : %-10s %s\n', fullName, szStr, cl);
+            end
+        end
+        
+        % Show only the first Item_N and indicate how many exist
+        firstItemName = itemFieldNames{1};
+        if allSame
             fprintf('%-25s : [%d identical Item_N structures, showing first only]\n', ...
                     [name, '.', firstItemName], length(itemFieldNames));
-            inspectStruct(s.(firstItemName), [name, '.', firstItemName]);
-            return;
+        else
+            fprintf('%-25s : [%d Item_N structures (varying fields), showing first only]\n', ...
+                    [name, '.', firstItemName], length(itemFieldNames));
         end
+        inspectStruct(s.(firstItemName), [name, '.', firstItemName]);
+        return;
     end
     
-    % Normal processing - no Item_N pattern detected or they're not identical
+    % Normal processing - no Item_N pattern detected
     for i = 1:numel(fields)
         fieldName = fields{i};
         value = s.(fieldName);
