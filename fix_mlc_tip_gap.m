@@ -149,6 +149,8 @@ for beamIdx = 1:numBeams
     cpSeqFields = fieldnames(beam.ControlPointSequence);
     numControlPoints = length(cpSeqFields);
     
+    fprintf('  DEBUG: Beam %d has %d control points before sorting\n', beamNumber, numControlPoints);
+    
     % Sort control point fields by their ControlPointIndex to ensure proper order
     cpIndices = zeros(numControlPoints, 1);
     for i = 1:numControlPoints
@@ -159,26 +161,43 @@ for beamIdx = 1:numBeams
             cpIndices(i) = i - 1;  % Default if not present
         end
     end
-    [~, sortOrder] = sort(cpIndices);
+    
+    fprintf('  DEBUG: Control point indices before sorting: ');
+    fprintf('%d ', cpIndices);
+    fprintf('\n');
+    
+    [sortedIndices, sortOrder] = sort(cpIndices);
     cpSeqFields = cpSeqFields(sortOrder);
+    
+    fprintf('  DEBUG: Control point indices after sorting: ');
+    fprintf('%d ', sortedIndices);
+    fprintf('\n');
+    fprintf('  DEBUG: Sort order applied: ');
+    fprintf('%d ', sortOrder);
+    fprintf('\n');
     
     %% ===== STEP 1: IDENTIFY DYNAMIC VS STATIC LEAVES =====
     fprintf('  Step 1: Identifying dynamic and static leaves...\n');
+    fprintf('  DEBUG: Starting dynamic leaf detection for beam %d\n', beamNumber);
     
     % Store ALL leaf positions across ALL control points for each MLC device
     % to determine which leaves are truly dynamic
     allPositionsMap = containers.Map();
     
     % First pass: Collect all positions from all control points
+    fprintf('  DEBUG: First pass - collecting positions from %d control points\n', numControlPoints);
     for cpIdx = 1:numControlPoints
         cpField = cpSeqFields{cpIdx};
         controlPoint = beam.ControlPointSequence.(cpField);
+        cpIndex = controlPoint.ControlPointIndex;
         
         if ~isfield(controlPoint, 'BeamLimitingDevicePositionSequence')
+            fprintf('  DEBUG: CP %d - No BeamLimitingDevicePositionSequence, skipping\n', cpIndex);
             continue;
         end
         
         bldSeqFields = fieldnames(controlPoint.BeamLimitingDevicePositionSequence);
+        fprintf('  DEBUG: CP %d - Found %d beam limiting devices\n', cpIndex, length(bldSeqFields));
         
         for devIdx = 1:length(bldSeqFields)
             devField = bldSeqFields{devIdx};
@@ -186,10 +205,13 @@ for beamIdx = 1:numBeams
             deviceType = device.RTBeamLimitingDeviceType;
             
             if ~any(strcmpi(deviceType, MLC_TYPES))
+                fprintf('  DEBUG: CP %d, Device %s - Type %s is not MLC, skipping\n', cpIndex, devField, deviceType);
                 continue;
             end
             
             leafPositions = device.LeafJawPositions;
+            fprintf('  DEBUG: CP %d, Device %s (Type: %s) - Found %d leaf positions\n', ...
+                cpIndex, devField, deviceType, length(leafPositions));
             
             % Initialize storage for this device if first encounter
             if ~allPositionsMap.isKey(devField)
@@ -198,16 +220,21 @@ for beamIdx = 1:numBeams
                 allPositionsMap(devField) = struct(...
                     'positions', leafPositions(:), ...  % Start with first CP as column
                     'numLeafPairs', numLeaves / 2);
+                fprintf('  DEBUG: CP %d, Device %s - Initialized with %d leaves (%d pairs)\n', ...
+                    cpIndex, devField, numLeaves, numLeaves/2);
             else
                 % Append this control point's positions as a new column
                 temp = allPositionsMap(devField);
                 temp.positions = [temp.positions, leafPositions(:)];
                 allPositionsMap(devField) = temp;
+                fprintf('  DEBUG: CP %d, Device %s - Added positions (now have %d CPs)\n', ...
+                    cpIndex, devField, size(temp.positions, 2));
             end
         end
     end
     
     % Second pass: Determine which leaves are dynamic (vary across control points)
+    fprintf('  DEBUG: Second pass - determining dynamic leaves\n');
     dynamicLeavesMap = containers.Map();
     
     if ~isempty(allPositionsMap.keys)
@@ -216,18 +243,48 @@ for beamIdx = 1:numBeams
             allPos = devInfo.positions;  % Each row is a leaf, each column is a CP
             numLeafPairs = devInfo.numLeafPairs;
             numLeaves = size(allPos, 1);
+            numCPs = size(allPos, 2);
+            
+            fprintf('  DEBUG: Device %s - Analyzing %d leaves across %d control points\n', ...
+                devField{1}, numLeaves, numCPs);
+            
+            % Show position data for first few leaves to help debug
+            fprintf('  DEBUG: Sample positions for first 3 leaves across all CPs:\n');
+            for leafIdx = 1:min(3, numLeaves)
+                fprintf('  DEBUG:   Leaf %d positions: [', leafIdx);
+                fprintf('%.4f ', allPos(leafIdx, :));
+                fprintf(']\n');
+            end
             
             % Check if each leaf varies across control points
             isDynamic = false(numLeaves, 1);
+            numDynamic = 0;
+            
             for leafIdx = 1:numLeaves
                 % Get all positions for this leaf across all CPs
                 leafPosAcrossCPs = allPos(leafIdx, :);
                 % Check if there's any variation (max - min > tolerance)
-                variation = max(leafPosAcrossCPs) - min(leafPosAcrossCPs);
+                minPos = min(leafPosAcrossCPs);
+                maxPos = max(leafPosAcrossCPs);
+                variation = maxPos - minPos;
+                
                 if variation > 1e-4  % 0.0001 mm tolerance
                     isDynamic(leafIdx) = true;
+                    numDynamic = numDynamic + 1;
+                    if leafIdx <= 5 || leafIdx > numLeaves - 5  % Show first and last few
+                        fprintf('  DEBUG:   Leaf %d - DYNAMIC (min=%.4f, max=%.4f, var=%.4f mm)\n', ...
+                            leafIdx, minPos, maxPos, variation);
+                    end
+                else
+                    if leafIdx <= 5 || leafIdx > numLeaves - 5  % Show first and last few
+                        fprintf('  DEBUG:   Leaf %d - STATIC (min=%.4f, max=%.4f, var=%.4f mm)\n', ...
+                            leafIdx, minPos, maxPos, variation);
+                    end
                 end
             end
+            
+            fprintf('  DEBUG: Device %s - Total dynamic leaves: %d out of %d\n', ...
+                devField{1}, numDynamic, numLeaves);
             
             % Store dynamic information
             dynamicLeavesMap(devField{1}) = struct(...
@@ -250,20 +307,35 @@ for beamIdx = 1:numBeams
     %% ===== STEP 2: CORRECT DYNAMIC LEAVES WITH SMALL GAPS =====
     fprintf('  Step 2: Correcting dynamic leaves with small gaps...\n');
     
+    % Debug: Show what's in the dynamic leaves map before we start
+    fprintf('  DEBUG: Dynamic leaves map contains %d devices\n', dynamicLeavesMap.Count);
+    if dynamicLeavesMap.Count > 0
+        fprintf('  DEBUG: Dynamic map keys: ');
+        for key = dynamicLeavesMap.keys
+            fprintf('%s ', key{1});
+        end
+        fprintf('\n');
+    end
+    
     beamCorrections = 0;
     
     % Loop through each control point for corrections
     for cpIdx = 1:numControlPoints
         cpField = cpSeqFields{cpIdx};
         controlPoint = beam.ControlPointSequence.(cpField);
+        cpIndex = controlPoint.ControlPointIndex;
+        
+        fprintf('  DEBUG: Processing CP %d (loop index %d)\n', cpIndex, cpIdx);
         
         totalControlPoints = totalControlPoints + 1;
         
         if ~isfield(controlPoint, 'BeamLimitingDevicePositionSequence')
+            fprintf('  DEBUG: CP %d - No BeamLimitingDevicePositionSequence, skipping\n', cpIndex);
             continue;
         end
         
         bldSeqFields = fieldnames(controlPoint.BeamLimitingDevicePositionSequence);
+        fprintf('  DEBUG: CP %d - Found %d beam limiting devices\n', cpIndex, length(bldSeqFields));
         
         % Loop through each beam limiting device
         for devIdx = 1:length(bldSeqFields)
@@ -272,8 +344,11 @@ for beamIdx = 1:numBeams
             deviceType = device.RTBeamLimitingDeviceType;
             
             if ~any(strcmpi(deviceType, MLC_TYPES))
+                fprintf('  DEBUG: CP %d, Device %s - Not MLC (type: %s), skipping\n', cpIndex, devField, deviceType);
                 continue;
             end
+            
+            fprintf('  DEBUG: CP %d, Device %s - Processing MLC device (type: %s)\n', cpIndex, devField, deviceType);
             
             % Get leaf positions
             leafPositions = device.LeafJawPositions;
@@ -281,13 +356,13 @@ for beamIdx = 1:numBeams
             numLeafPairs = numLeaves / 2;
             
             if mod(numLeaves, 2) ~= 0
-                warning('Odd number of leaf positions at Beam %d, CP %d - skipping', ...
-                    beamNumber, cpIdx-1);
+                warning('Odd number of leaf positions at Beam %d, CP %d - skipping', beamNumber, cpIndex);
                 continue;
             end
             
             % Get dynamic leaf information
             if ~dynamicLeavesMap.isKey(devField)
+                fprintf('  DEBUG: CP %d, Device %s - WARNING: No dynamic leaf info found!\n', cpIndex, devField);
                 continue;
             end
             devInfo = dynamicLeavesMap(devField);
@@ -301,6 +376,10 @@ for beamIdx = 1:numBeams
             bankB_dynamic = devInfo.isDynamic(numLeafPairs+1:end);
             leafPair_dynamic = bankA_dynamic | bankB_dynamic;
             
+            numDynamicInCP = sum(leafPair_dynamic);
+            fprintf('  DEBUG: CP %d, Device %s - %d dynamic leaf pairs (out of %d total)\n', ...
+                cpIndex, devField, numDynamicInCP, numLeafPairs);
+            
             % Calculate gaps for each leaf pair
             gaps = bankB - bankA;
             
@@ -310,10 +389,16 @@ for beamIdx = 1:numBeams
             smallGapIdx = find(gaps < MIN_TIP_GAP & leafPair_dynamic);
             
             if ~isempty(smallGapIdx)
+                fprintf('  DEBUG: CP %d, Device %s - Found %d dynamic leaves with small gaps\n', ...
+                    cpIndex, devField, length(smallGapIdx));
+                
                 for leafIdx = smallGapIdx'
                     originalGap = gaps(leafIdx);
                     originalA = bankA(leafIdx);
                     originalB = bankB(leafIdx);
+                    
+                    fprintf('  DEBUG:   CP %d, Leaf %d - Gap %.4f mm < threshold %.4f mm (A=%.4f, B=%.4f)\n', ...
+                        cpIndex, leafIdx, originalGap, MIN_TIP_GAP, originalA, originalB);
                     
                     % Expand tips: move A left (more negative) and B right (more positive)
                     newA = originalA - EXPANSION_PER_SIDE;
@@ -322,25 +407,25 @@ for beamIdx = 1:numBeams
                     % Apply bounds checking - clamp to valid MLC range
                     if newA < MLC_MIN_POSITION
                         newA = MLC_MIN_POSITION;
-                        cpIndex = controlPoint.ControlPointIndex;
                         fprintf('    WARNING: Beam %d, CP %d, Leaf %d: Bank A clamped to %.1f mm\n', ...
                             beamNumber, cpIndex, leafIdx, MLC_MIN_POSITION);
                     end
                     if newB > MLC_MAX_POSITION
                         newB = MLC_MAX_POSITION;
-                        cpIndex = controlPoint.ControlPointIndex;
                         fprintf('    WARNING: Beam %d, CP %d, Leaf %d: Bank B clamped to %.1f mm\n', ...
                             beamNumber, cpIndex, leafIdx, MLC_MAX_POSITION);
                     end
                     
                     newGap = newB - newA;
                     
+                    fprintf('  DEBUG:   CP %d, Leaf %d - Corrected: new gap %.4f mm (A: %.4f->%.4f, B: %.4f->%.4f)\n', ...
+                        cpIndex, leafIdx, newGap, originalA, newA, originalB, newB);
+                    
                     % Update the positions
                     bankA(leafIdx) = newA;
                     bankB(leafIdx) = newB;
                     
                     % Log the correction
-                    cpIndex = controlPoint.ControlPointIndex;
                     correctionLog{end+1} = sprintf(...
                         'Beam %d (%s), CP %d, Leaf %d: Gap %.2f -> %.2f mm (A: %.2f->%.2f, B: %.2f->%.2f)', ...
                         beamNumber, beamName, cpIndex, leafIdx, ...
@@ -354,6 +439,15 @@ for beamIdx = 1:numBeams
                 newLeafPositions = [bankA; bankB];
                 rtplan.BeamSequence.(beamField).ControlPointSequence.(cpField)...
                     .BeamLimitingDevicePositionSequence.(devField).LeafJawPositions = newLeafPositions;
+                
+                fprintf('  DEBUG: CP %d, Device %s - Updated leaf positions in RTPLAN structure\n', cpIndex, devField);
+            else
+                if numDynamicInCP > 0
+                    fprintf('  DEBUG: CP %d, Device %s - No dynamic leaves with small gaps (all gaps OK)\n', ...
+                        cpIndex, devField);
+                else
+                    fprintf('  DEBUG: CP %d, Device %s - No dynamic leaves to check\n', cpIndex, devField);
+                end
             end
         end
     end
