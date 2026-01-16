@@ -3,11 +3,18 @@
 % 
 % This script:
 % 1. Reads an RTPLAN DICOM file
-% 2. Loops through all beams and control points
-% 3. Identifies MLC leaf pairs with gaps less than the minimum threshold
-% 4. Expands the tips by a specified amount on each side
-% 5. Verifies the corrections
-% 6. Exports the corrected plan as a new DICOM file
+% 2. Loops through all beams and control points (sorted by ControlPointIndex)
+% 3. Identifies MLC leaf pairs that are DYNAMIC (move during beam delivery)
+% 4. For dynamic leaves with gaps less than the minimum threshold, expands tips
+% 5. Applies bounds checking to ensure positions stay within [-140, 140] mm
+% 6. Verifies the corrections
+% 7. Exports the corrected plan as a new DICOM file
+%
+% IMPORTANT NOTES:
+% - All RTPLAN positions are in millimeters (mm)
+% - Control points are sorted by ControlPointIndex to ensure correct processing
+% - Only dynamic leaves are corrected; static leaves are left unchanged
+% - MLC positions are clamped to physical limits if expansion would exceed bounds
 %
 % Author: Claude
 % Date: January 2026
@@ -22,11 +29,12 @@ wd = '/mnt/weka/home/80030361/ETHOS_Simulations';
 patientIDs = {'1194203'};  % Add more IDs as needed
 sessions = {'Session_1'};  % Add more sessions as needed
 
-% Minimum tip gap threshold (cm) - from commissioning
-MIN_TIP_GAP = 0.06;  % cm
+% Minimum tip gap threshold (mm) - from commissioning
+% Note: RTPLAN uses millimeters for all positions
+MIN_TIP_GAP = 0.6;  % mm (0.06 cm)
 
-% Expansion amount per side when gap is too small (cm)
-EXPANSION_PER_SIDE = 0.04;  % cm (total expansion will be 0.08 cm)
+% Expansion amount per side when gap is too small (mm)
+EXPANSION_PER_SIDE = 0.4;  % mm (0.04 cm - total expansion will be 0.8 mm)
 
 % MLC position bounds (mm) - Halcyon physical limits
 MLC_MIN_POSITION = -140;  % mm
@@ -112,8 +120,8 @@ beamSeqFields = fieldnames(rtplan.BeamSequence);
 numBeams = length(beamSeqFields);
 
 fprintf('\nProcessing %d beams...\n', numBeams);
-fprintf('Minimum tip gap threshold: %.4f cm\n', MIN_TIP_GAP);
-fprintf('Expansion per side: %.4f cm\n', EXPANSION_PER_SIDE);
+fprintf('Minimum tip gap threshold: %.2f mm\n', MIN_TIP_GAP);
+fprintf('Expansion per side: %.2f mm\n', EXPANSION_PER_SIDE);
 fprintf('MLC position bounds: [%.1f, %.1f] mm\n\n', MLC_MIN_POSITION, MLC_MAX_POSITION);
 
 % Initialize counters for verification
@@ -141,13 +149,27 @@ for beamIdx = 1:numBeams
     cpSeqFields = fieldnames(beam.ControlPointSequence);
     numControlPoints = length(cpSeqFields);
     
+    % Sort control point fields by their ControlPointIndex to ensure proper order
+    cpIndices = zeros(numControlPoints, 1);
+    for i = 1:numControlPoints
+        cp = beam.ControlPointSequence.(cpSeqFields{i});
+        if isfield(cp, 'ControlPointIndex')
+            cpIndices(i) = cp.ControlPointIndex;
+        else
+            cpIndices(i) = i - 1;  % Default if not present
+        end
+    end
+    [~, sortOrder] = sort(cpIndices);
+    cpSeqFields = cpSeqFields(sortOrder);
+    
     %% ===== STEP 1: IDENTIFY DYNAMIC VS STATIC LEAVES =====
     fprintf('  Step 1: Identifying dynamic and static leaves...\n');
     
-    % Store dynamic leaf information for each MLC device
-    dynamicLeavesMap = containers.Map();
+    % Store ALL leaf positions across ALL control points for each MLC device
+    % to determine which leaves are truly dynamic
+    allPositionsMap = containers.Map();
     
-    % Loop through control points to identify which leaves are dynamic
+    % First pass: Collect all positions from all control points
     for cpIdx = 1:numControlPoints
         cpField = cpSeqFields{cpIdx};
         controlPoint = beam.ControlPointSequence.(cpField);
@@ -168,43 +190,53 @@ for beamIdx = 1:numBeams
             end
             
             leafPositions = device.LeafJawPositions;
-            numLeafPairs = length(leafPositions) / 2;
             
-            % Initialize tracking structure on first encounter
-            if ~dynamicLeavesMap.isKey(devField)
-                % Store initial positions and initialize dynamic flags
-                dynamicLeavesMap(devField) = struct(...
-                    'initialPositions', leafPositions, ...
-                    'isDynamic', false(length(leafPositions), 1), ...
-                    'numLeafPairs', numLeafPairs);
+            % Initialize storage for this device if first encounter
+            if ~allPositionsMap.isKey(devField)
+                numLeaves = length(leafPositions);
+                % Store positions from each control point as columns
+                allPositionsMap(devField) = struct(...
+                    'positions', leafPositions(:), ...  % Start with first CP as column
+                    'numLeafPairs', numLeaves / 2);
             else
-                % Compare with initial positions to identify changes
-                initialPos = dynamicLeavesMap(devField).initialPositions;
-                isDynamic = dynamicLeavesMap(devField).isDynamic;
-                
-                % Mark leaves as dynamic if position has changed
-                positionChanged = abs(leafPositions - initialPos) > 1e-6;
-                isDynamic = isDynamic | positionChanged;
-                
-                % Update the dynamic flags
-                temp = dynamicLeavesMap(devField);
-                temp.isDynamic = isDynamic;
-                dynamicLeavesMap(devField) = temp;
+                % Append this control point's positions as a new column
+                temp = allPositionsMap(devField);
+                temp.positions = [temp.positions, leafPositions(:)];
+                allPositionsMap(devField) = temp;
             end
         end
     end
     
-    % Report dynamic leaf statistics
-    if ~isempty(dynamicLeavesMap.keys)
-        for devField = dynamicLeavesMap.keys
-            devInfo = dynamicLeavesMap(devField{1});
+    % Second pass: Determine which leaves are dynamic (vary across control points)
+    dynamicLeavesMap = containers.Map();
+    
+    if ~isempty(allPositionsMap.keys)
+        for devField = allPositionsMap.keys
+            devInfo = allPositionsMap(devField{1});
+            allPos = devInfo.positions;  % Each row is a leaf, each column is a CP
             numLeafPairs = devInfo.numLeafPairs;
+            numLeaves = size(allPos, 1);
             
-            % Check for bank A and bank B separately
-            bankA_dynamic = devInfo.isDynamic(1:numLeafPairs);
-            bankB_dynamic = devInfo.isDynamic(numLeafPairs+1:end);
+            % Check if each leaf varies across control points
+            isDynamic = false(numLeaves, 1);
+            for leafIdx = 1:numLeaves
+                % Get all positions for this leaf across all CPs
+                leafPosAcrossCPs = allPos(leafIdx, :);
+                % Check if there's any variation (max - min > tolerance)
+                variation = max(leafPosAcrossCPs) - min(leafPosAcrossCPs);
+                if variation > 1e-4  % 0.0001 mm tolerance
+                    isDynamic(leafIdx) = true;
+                end
+            end
             
-            % A leaf pair is dynamic if either bank A or bank B leaf is dynamic
+            % Store dynamic information
+            dynamicLeavesMap(devField{1}) = struct(...
+                'isDynamic', isDynamic, ...
+                'numLeafPairs', numLeafPairs);
+            
+            % Report statistics
+            bankA_dynamic = isDynamic(1:numLeafPairs);
+            bankB_dynamic = isDynamic(numLeafPairs+1:end);
             leafPair_dynamic = bankA_dynamic | bankB_dynamic;
             
             numDynamicPairs = sum(leafPair_dynamic);
@@ -250,7 +282,7 @@ for beamIdx = 1:numBeams
             
             if mod(numLeaves, 2) ~= 0
                 warning('Odd number of leaf positions at Beam %d, CP %d - skipping', ...
-                    beamNumber, cpIdx);
+                    beamNumber, cpIdx-1);
                 continue;
             end
             
@@ -290,13 +322,15 @@ for beamIdx = 1:numBeams
                     % Apply bounds checking - clamp to valid MLC range
                     if newA < MLC_MIN_POSITION
                         newA = MLC_MIN_POSITION;
-                        fprintf('    WARNING: Beam %d, CP %d, Leaf %d: Bank A clamped to %.2f mm\n', ...
-                            beamNumber, cpIdx, leafIdx, MLC_MIN_POSITION);
+                        cpIndex = controlPoint.ControlPointIndex;
+                        fprintf('    WARNING: Beam %d, CP %d, Leaf %d: Bank A clamped to %.1f mm\n', ...
+                            beamNumber, cpIndex, leafIdx, MLC_MIN_POSITION);
                     end
                     if newB > MLC_MAX_POSITION
                         newB = MLC_MAX_POSITION;
-                        fprintf('    WARNING: Beam %d, CP %d, Leaf %d: Bank B clamped to %.2f mm\n', ...
-                            beamNumber, cpIdx, leafIdx, MLC_MAX_POSITION);
+                        cpIndex = controlPoint.ControlPointIndex;
+                        fprintf('    WARNING: Beam %d, CP %d, Leaf %d: Bank B clamped to %.1f mm\n', ...
+                            beamNumber, cpIndex, leafIdx, MLC_MAX_POSITION);
                     end
                     
                     newGap = newB - newA;
@@ -306,9 +340,10 @@ for beamIdx = 1:numBeams
                     bankB(leafIdx) = newB;
                     
                     % Log the correction
+                    cpIndex = controlPoint.ControlPointIndex;
                     correctionLog{end+1} = sprintf(...
-                        'Beam %d (%s), CP %d, Leaf %d: Gap %.4f -> %.4f cm (A: %.4f->%.4f, B: %.4f->%.4f)', ...
-                        beamNumber, beamName, cpIdx, leafIdx, ...
+                        'Beam %d (%s), CP %d, Leaf %d: Gap %.2f -> %.2f mm (A: %.2f->%.2f, B: %.2f->%.2f)', ...
+                        beamNumber, beamName, cpIndex, leafIdx, ...
                         originalGap, newGap, originalA, newA, originalB, newB);
                     
                     beamCorrections = beamCorrections + 1;
@@ -346,7 +381,7 @@ if totalCorrections > 0
 end
 
 % Verify all gaps are now >= minimum
-fprintf('Verifying all DYNAMIC leaf gaps are now >= %.4f cm...\n', MIN_TIP_GAP);
+fprintf('Verifying all DYNAMIC leaf gaps are now >= %.2f mm...\n', MIN_TIP_GAP);
 
 verificationPassed = true;
 remainingSmallGaps = 0;
@@ -361,10 +396,23 @@ for beamIdx = 1:numBeams
     
     cpSeqFields = fieldnames(beam.ControlPointSequence);
     
-    % Rebuild dynamic leaves map for verification
-    dynamicLeavesMap = containers.Map();
+    % Sort control points by ControlPointIndex
+    cpIndices = zeros(length(cpSeqFields), 1);
+    for i = 1:length(cpSeqFields)
+        cp = beam.ControlPointSequence.(cpSeqFields{i});
+        if isfield(cp, 'ControlPointIndex')
+            cpIndices(i) = cp.ControlPointIndex;
+        else
+            cpIndices(i) = i - 1;
+        end
+    end
+    [~, sortOrder] = sort(cpIndices);
+    cpSeqFields = cpSeqFields(sortOrder);
     
-    % First pass: identify dynamic leaves
+    % Rebuild dynamic leaves map using same improved logic as main processing
+    allPositionsMap = containers.Map();
+    
+    % First pass: Collect all positions from all control points
     for cpIdx = 1:length(cpSeqFields)
         cpField = cpSeqFields{cpIdx};
         controlPoint = beam.ControlPointSequence.(cpField);
@@ -385,26 +433,46 @@ for beamIdx = 1:numBeams
             end
             
             leafPositions = device.LeafJawPositions;
-            numLeafPairs = length(leafPositions) / 2;
             
-            if ~dynamicLeavesMap.isKey(devField)
-                dynamicLeavesMap(devField) = struct(...
-                    'initialPositions', leafPositions, ...
-                    'isDynamic', false(length(leafPositions), 1), ...
-                    'numLeafPairs', numLeafPairs);
+            if ~allPositionsMap.isKey(devField)
+                numLeaves = length(leafPositions);
+                allPositionsMap(devField) = struct(...
+                    'positions', leafPositions(:), ...
+                    'numLeafPairs', numLeaves / 2);
             else
-                initialPos = dynamicLeavesMap(devField).initialPositions;
-                isDynamic = dynamicLeavesMap(devField).isDynamic;
-                positionChanged = abs(leafPositions - initialPos) > 1e-6;
-                isDynamic = isDynamic | positionChanged;
-                temp = dynamicLeavesMap(devField);
-                temp.isDynamic = isDynamic;
-                dynamicLeavesMap(devField) = temp;
+                temp = allPositionsMap(devField);
+                temp.positions = [temp.positions, leafPositions(:)];
+                allPositionsMap(devField) = temp;
             end
         end
     end
     
-    % Second pass: verify gaps only for dynamic leaves
+    % Second pass: Determine which leaves are dynamic
+    dynamicLeavesMap = containers.Map();
+    
+    if ~isempty(allPositionsMap.keys)
+        for devField = allPositionsMap.keys
+            devInfo = allPositionsMap(devField{1});
+            allPos = devInfo.positions;
+            numLeafPairs = devInfo.numLeafPairs;
+            numLeaves = size(allPos, 1);
+            
+            isDynamic = false(numLeaves, 1);
+            for leafIdx = 1:numLeaves
+                leafPosAcrossCPs = allPos(leafIdx, :);
+                variation = max(leafPosAcrossCPs) - min(leafPosAcrossCPs);
+                if variation > 1e-4
+                    isDynamic(leafIdx) = true;
+                end
+            end
+            
+            dynamicLeavesMap(devField{1}) = struct(...
+                'isDynamic', isDynamic, ...
+                'numLeafPairs', numLeafPairs);
+        end
+    end
+    
+    % Third pass: verify gaps only for dynamic leaves
     for cpIdx = 1:length(cpSeqFields)
         cpField = cpSeqFields{cpIdx};
         controlPoint = beam.ControlPointSequence.(cpField);
@@ -448,15 +516,16 @@ for beamIdx = 1:numBeams
             if any(smallGaps)
                 verificationPassed = false;
                 remainingSmallGaps = remainingSmallGaps + sum(smallGaps);
+                cpIndex = controlPoint.ControlPointIndex;
                 fprintf('WARNING: Small gap still found at Beam %d, CP %d\n', ...
-                    beam.BeamNumber, cpIdx);
+                    beam.BeamNumber, cpIndex);
             end
         end
     end
 end
 
 if verificationPassed
-    fprintf('VERIFICATION PASSED: All dynamic MLC gaps are now >= %.4f cm\n\n', MIN_TIP_GAP);
+    fprintf('VERIFICATION PASSED: All dynamic MLC gaps are now >= %.2f mm\n\n', MIN_TIP_GAP);
 else
     fprintf('VERIFICATION FAILED: %d small gaps remaining\n\n', remainingSmallGaps);
 end
@@ -513,8 +582,8 @@ fprintf('Patient ID:            %s\n', patientID);
 fprintf('Session:               %s\n', sessionName);
 fprintf('Input file:            %s\n', inputFile);
 fprintf('Output file:           %s\n', outputFile);
-fprintf('Minimum gap threshold: %.4f cm\n', MIN_TIP_GAP);
-fprintf('Expansion per side:    %.4f cm\n', EXPANSION_PER_SIDE);
+fprintf('Minimum gap threshold: %.2f mm\n', MIN_TIP_GAP);
+fprintf('Expansion per side:    %.2f mm\n', EXPANSION_PER_SIDE);
 fprintf('MLC position bounds:   [%.1f, %.1f] mm\n', MLC_MIN_POSITION, MLC_MAX_POSITION);
 fprintf('Total corrections:     %d\n', totalCorrections);
 fprintf('Verification:          %s\n', conditional(verificationPassed, 'PASSED', 'FAILED'));
