@@ -84,15 +84,21 @@ for p_idx = 1:length(patient_ids)
 %% Load SCT Images
         fprintf('Loading SCT images...\n');
 
-        % Get all DICOM files in SCT directory
-        sct_files = dir(fullfile(sct_dir, '*.dcm'));
+        % Get all DICOM files in SCT directory that contain 'CT' in the name
+        all_files = dir(fullfile(sct_dir, '*.dcm'));
+        sct_files = [];
+        for i = 1:length(all_files)
+            if contains(all_files(i).name, 'CT', 'IgnoreCase', true)
+                sct_files = [sct_files; all_files(i)];
+            end
+        end
+        
         if isempty(sct_files)
-            warning('No DICOM files found in SCT directory: %s. Skipping...', sct_dir);
+            warning('No CT DICOM files found in SCT directory: %s. Skipping...', sct_dir);
             continue;
         end
-
-        % Read first file to get metadata
-        first_info = dicominfo(fullfile(sct_dir, sct_files(1).name));
+        
+        fprintf('Found %d CT image files.\n', length(sct_files));
 
         % Sort files by Instance Number or Image Position
         sct_data = [];
