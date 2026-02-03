@@ -28,7 +28,7 @@ sessionName = 'Session_1';
 
 % Base directories
 baseDir = '/mnt/weka/home/80030361/ETHOS_Simulations';
-fieldDoseDir = fullfile(baseDir, 'FieldDoses', patientID, sessionName);
+fieldDoseDir = fullfile(baseDir, 'RayStationFiles', patientID, sessionName);
 dicomDir = fullfile(baseDir, 'EthosExports', patientID, 'Pancreas', sessionName, 'sct');
 outputDir = fullfile(baseDir, 'kWaveReconstruction', patientID, sessionName);
 
@@ -50,69 +50,69 @@ gruneisen_default = 1.0;
 
 materialTable = struct();
 
-% Air: HU ~ -1000
-materialTable.air.HU_range = [-1024, -900];
-materialTable.air.density = 1000;
-materialTable.air.soundSpeed = 1480;
-materialTable.air.alphaCoeff = 0;
-materialTable.air.alphaPower = 1;
-materialTable.air.gruneisen = 0;  % No photoacoustic signal in air
+% % Air: HU ~ -1000
+% materialTable.air.HU_range = [-1024, -900];
+% materialTable.air.density = 1000;
+% materialTable.air.soundSpeed = 1480;
+% materialTable.air.alphaCoeff = 0;
+% materialTable.air.alphaPower = 1;
+% materialTable.air.gruneisen = 0;  % No photoacoustic signal in air
 
-% Lung: HU -700 to -600
-materialTable.lung.HU_range = [-900, -500];
-materialTable.lung.density = 400;
-materialTable.lung.soundSpeed = 600;
-materialTable.lung.alphaCoeff = 0.5;
-materialTable.lung.alphaPower = 1.5;
-materialTable.lung.gruneisen = 0.5;
+% % Lung: HU -700 to -600
+% materialTable.lung.HU_range = [-900, -500];
+% materialTable.lung.density = 400;
+% materialTable.lung.soundSpeed = 600;
+% materialTable.lung.alphaCoeff = 0.5;
+% materialTable.lung.alphaPower = 1.5;
+% materialTable.lung.gruneisen = 0.5;
 
 % Fat: HU -120 to -90
-materialTable.fat.HU_range = [-150, -50];
+materialTable.fat.HU_range = [-199, -50];
 materialTable.fat.density = 920;
 materialTable.fat.soundSpeed = 1450;
 materialTable.fat.alphaCoeff = 0.48;
 materialTable.fat.alphaPower = 1.5;
 materialTable.fat.gruneisen = 0.7;
 
-% Water: HU ~ 0
-materialTable.water.HU_range = [-50, 12];
+% Water: HU ~ 0 override air
+materialTable.water.HU_range = [-1000, -200];
 materialTable.water.density = 1000;
 materialTable.water.soundSpeed = 1480;
-materialTable.water.alphaCoeff = 0.002;
+materialTable.water.alphaCoeff = 0.0022;
 materialTable.water.alphaPower = 2;
-materialTable.water.gruneisen = 0.12;
+materialTable.water.gruneisen = 0.11;
 
 % Blood: HU +13 to +50
-materialTable.blood.HU_range = [13, 50];
-materialTable.blood.density = 1060;
-materialTable.blood.soundSpeed = 1575;
-materialTable.blood.alphaCoeff = 0.2;
-materialTable.blood.alphaPower = 1.3;
-materialTable.blood.gruneisen = 0.15;
+% materialTable.blood.HU_range = [13, 50];
+% materialTable.blood.density = 1060;
+% materialTable.blood.soundSpeed = 1575;
+% materialTable.blood.alphaCoeff = 0.2;
+% materialTable.blood.alphaPower = 1.3;
+% materialTable.blood.gruneisen = 0.15;
 
-% Muscle: HU +35 to +55 (overlaps with blood, use higher priority)
-materialTable.muscle.HU_range = [51, 80];
-materialTable.muscle.density = 1050;
-materialTable.muscle.soundSpeed = 1580;
-materialTable.muscle.alphaCoeff = 0.5;
-materialTable.muscle.alphaPower = 1;
-materialTable.muscle.gruneisen = 0.2;
+% % Muscle: HU +35 to +55 (overlaps with blood, use higher priority)
+% materialTable.muscle.HU_range = [51, 80];
+% materialTable.muscle.density = 1050;
+% materialTable.muscle.soundSpeed = 1580;
+% materialTable.muscle.alphaCoeff = 0.5;
+% materialTable.muscle.alphaPower = 1;
+% materialTable.muscle.gruneisen = 0.2;
 
 % Soft Tissue: HU +100 to +300
-materialTable.softTissue.HU_range = [81, 400];
-materialTable.softTissue.density = 1050;
+materialTable.softTissue.HU_range = [-50, 100];
+materialTable.softTissue.density = 1040;
 materialTable.softTissue.soundSpeed = 1540;
 materialTable.softTissue.alphaCoeff = 0.5;
 materialTable.softTissue.alphaPower = 1.1;
-materialTable.softTissue.gruneisen = 0.2;
+materialTable.softTissue.gruneisen = 1;
 
 % Bone: HU +700 to +3000
-materialTable.bone.HU_range = [401, 3000];
+materialTable.bone.HU_range = [100, 3000];
 materialTable.bone.density = 1900;
 materialTable.bone.soundSpeed = 3200;
-materialTable.bone.alphaCoeff = 4.0;
+materialTable.bone.alphaCoeff = 10;
 materialTable.bone.alphaPower = 1;
-materialTable.bone.gruneisen = 0;  % No signal propagation through bone
+materialTable.bone.gruneisen = 10;  % No signal propagation through bone
 
 % Metal: HU > 3000
 materialTable.metal.HU_range = [3001, 10000];
