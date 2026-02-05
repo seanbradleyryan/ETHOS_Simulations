@@ -548,6 +548,7 @@ end
 
 function save_gamma_results(gamma_ethos_vs_rs, gamma_rs_vs_recon, patient_id, session, config)
     % Save gamma analysis results
+    
     analysis_dir = get_analysis_directory(patient_id, session, config);
     save(fullfile(analysis_dir, 'gamma_ethos_vs_rs.mat'), 'gamma_ethos_vs_rs', '-v7.3');
     save(fullfile(analysis_dir, 'gamma_rs_vs_recon.mat'), 'gamma_rs_vs_recon', '-v7.3');
