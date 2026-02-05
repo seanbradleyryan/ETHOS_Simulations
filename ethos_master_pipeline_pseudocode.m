@@ -162,6 +162,8 @@ for p_idx = 1:length(CONFIG.patients)
             if CONFIG.run_step15
                 fprintf('\n[STEP 1.5] Processing field doses and resampling CT...\n');
                 
+                % Process doses - saves individual field_dose_XXX.mat files (memory constraint)
+                % Returns cell array loaded from individual files, plus sct and total dose
                 [field_doses, sct_resampled, total_rs_dose, dose_metadata] = ...
                     step15_process_doses(patient_id, session, CONFIG);
                 
@@ -170,11 +172,12 @@ for p_idx = 1:length(CONFIG.patients)
                 RESULTS.patients.(result_key).dose_grid_size = dose_metadata.dimensions;
                 RESULTS.patients.(result_key).total_rs_dose_max_Gy = max(total_rs_dose(:));
                 
-                fprintf('[STEP 1.5] Complete. Processed %d fields.\n', num_valid_fields);
+                fprintf('[STEP 1.5] Complete. Processed %d fields (saved as individual files).\n', num_valid_fields);
                 fprintf('           Dose grid: [%d x %d x %d]\n', dose_metadata.dimensions);
                 fprintf('           Max RS dose: %.4f Gy\n', max(total_rs_dose(:)));
             else
                 fprintf('\n[STEP 1.5] Loading previously processed data...\n');
+                % Load from individual files
                 [field_doses, sct_resampled, total_rs_dose, dose_metadata] = ...
                     load_processed_data(patient_id, session, CONFIG);
             end
@@ -471,26 +474,14 @@ end
 %% ========================= STUB FUNCTIONS (TO BE IMPLEMENTED) ============
 % These functions are placeholders - implement in separate script files
 
-function sct_dir = step0_sort_dicom(patient_id, session, config)
-    % Calls the sorting logic from sortCT.m
-    % Returns: path to sct directory with sorted files
-    error('Implement step0_sort_dicom or run sortCT.m');
-end
 
-function [adjusted_path, num_corrections] = step05_fix_mlc_gaps(patient_id, session, config)
-    % Calls MLC gap correction from fix_mlc_tip_gapv2.m
-    % Returns: path to adjusted RTPLAN, number of corrections made
-    error('Implement step05_fix_mlc_gaps or run fix_mlc_tip_gapv2.m');
-end
 
-function [field_doses, sct_resampled, total_rs_dose, metadata] = step15_process_doses(patient_id, session, config)
-    % Process Raystation dose files and resample CT
-    % Based on resample_sct_to_dose.m logic
-    error('Implement step15_process_doses');
-end
 
 function [field_doses, sct_resampled, total_rs_dose, metadata] = load_processed_data(patient_id, session, config)
-    % Load previously processed data
+    % Load previously processed data from individual files
+    %
+    % Loads each field_dose_XXX.mat file into cell array
+    % Loads sct_resampled.mat and total_rs_dose.mat
     error('Implement load_processed_data');
 end
 
