@@ -5,7 +5,8 @@ function [field_doses, sct_resampled, total_rs_dose, metadata] = step15_process_
 %
 %   PURPOSE:
 %   Load all Raystation field dose DICOM files, extract dose grids with geometry
-%   metadata, resample SCT to match dose grid, and save processed data. Each
+%   metadata, resample SCT to match dose grid, extract tissue classifications
+%   from RTSTRUCT, zero out couch regions, and save processed data. Each
 %   field dose is saved as a separate file due to memory constraints.
 %
 %   INPUTS:
@@ -18,18 +19,22 @@ function [field_doses, sct_resampled, total_rs_dose, metadata] = step15_process_
 %   OUTPUTS:
 %       field_doses     - Cell array of field dose structures (loaded from files)
 %       sct_resampled   - Struct with CT resampled to dose grid:
-%           .cubeHU       - 3D HU array
-%           .cubeDensity  - 3D density array (kg/m³)
-%           .origin       - [x, y, z] in mm
-%           .spacing      - [dx, dy, dz] in mm
-%           .dimensions   - [nx, ny, nz]
-%       total_rs_dose   - Sum of all field doses (3D array in Gy)
+%           .cubeHU         - 3D HU array
+%           .cubeDensity    - 3D density array (kg/mÂ³)
+%           .tissueMask     - 3D uint8 array with ROI labels (0 = unassigned)
+%           .roiNames       - Cell array of ROI names (index matches label)
+%           .couchMask      - 3D logical array (true = couch region)
+%           .origin         - [x, y, z] in mm
+%           .spacing        - [dx, dy, dz] in mm
+%           .dimensions     - [nx, ny, nz]
+%       total_rs_dose   - Sum of all field doses (3D array in Gy), couch zeroed
 %       metadata        - Struct with combined geometry info
 %
 %   FILES CREATED (in processed/ directory):
 %       - field_dose_001.mat, field_dose_002.mat, ... (one per field)
-%       - sct_resampled.mat
+%       - sct_resampled.mat (includes tissueMask and couchMask)
 %       - total_rs_dose.mat
+%       - tissue_masks.mat (individual ROI masks)
 %       - metadata.mat
 %
 %   ALGORITHM:
@@ -41,12 +46,15 @@ function [field_doses, sct_resampled, total_rs_dose, metadata] = step15_process_
 %   6. Load SCT images, sort by z-position
 %   7. Resample SCT to dose grid via 3D interpolation
 %   8. Convert HU to density
-%   9. Save all outputs and return
+%   9. Load RTSTRUCT and create tissue classification masks
+%   10. Zero out dose in couch regions
+%   11. Save all outputs and return
 %
 %   KEY TECHNICAL NOTES:
 %   - Z-resolution MUST come from GridFrameOffsetVector, NOT PixelSpacing
 %   - Use squeeze() to remove singleton dimensions in dose arrays
-%   - Standard HU to density: ρ = 1000 + HU (approximate)
+%   - Standard HU to density: Ï = 1000 + HU (approximate)
+%   - Couch regions ("Couch Exterior", "Couch Interior") are zeroed in dose
 %
 %   EXAMPLE:
 %       config.working_dir = '/mnt/weka/home/80030361/ETHOS_Simulations';
@@ -54,13 +62,13 @@ function [field_doses, sct_resampled, total_rs_dose, metadata] = step15_process_
 %       [field_doses, sct, total_dose, meta] = step15_process_doses('1194203', 'Session_1', config);
 %
 %   DEPENDENCIES:
-%       - Image Processing Toolbox (dicominfo, dicomread)
+%       - Image Processing Toolbox (dicominfo, dicomread, poly2mask)
 %
 %   AUTHOR: ETHOS Pipeline Team
 %   DATE: February 2026
-%   VERSION: 1.0
+%   VERSION: 1.1 (Added RTSTRUCT tissue classification and couch masking)
 %
-%   See also: step0_sort_dicom, step2_kwave_simulation
+%   See also: load_processed_data, step0_sort_dicom, step2_kwave_simulation
 
 %% ======================== INPUT VALIDATION ========================
 
@@ -106,7 +114,7 @@ fprintf('========================================\n');
 % Raystation directory (contains RD.*.dcm field dose files)
 rs_dir = fullfile(config.working_dir, 'RayStationFiles', patient_id, session);
 
-% SCT directory (contains CT images and RTPLAN)
+% SCT directory (contains CT images, RTPLAN, and RTSTRUCT)
 sct_dir = fullfile(config.working_dir, 'EthosExports', patient_id, ...
     config.treatment_site, session, 'sct');
 
@@ -138,7 +146,7 @@ end
 
 %% ======================== FIND FIELD DOSE FILES ========================
 
-fprintf('\n[1/6] Finding field dose files...\n');
+fprintf('\n[1/8] Finding field dose files...\n');
 
 % Find all RD.*.dcm files (Raystation naming convention)
 rd_files = dir(fullfile(rs_dir, 'RD.*.dcm'));
@@ -162,7 +170,7 @@ end
 
 %% ======================== LOAD RTPLAN FOR BEAM METADATA ========================
 
-fprintf('\n[2/6] Loading RTPLAN for beam metadata...\n');
+fprintf('\n[2/8] Loading RTPLAN for beam metadata...\n');
 
 beam_metadata = loadRtplanMetadata(sct_dir);
 
@@ -174,7 +182,7 @@ end
 
 %% ======================== ESTABLISH REFERENCE GRID ========================
 
-fprintf('\n[3/6] Establishing reference dose grid geometry...\n');
+fprintf('\n[3/8] Establishing reference dose grid geometry...\n');
 
 % Load first dose file to get reference geometry
 ref_file = fullfile(rs_dir, rd_files(1).name);
@@ -210,10 +218,11 @@ metadata.session = session;
 metadata.num_fields = num_files;
 metadata.timestamp = datetime('now');
 metadata.reference_file = rd_files(1).name;
+metadata.beam_metadata = beam_metadata;  % Beam metersets from RTPLAN
 
 %% ======================== PROCESS EACH FIELD DOSE ========================
 
-fprintf('\n[4/6] Processing field doses (saving individually)...\n');
+fprintf('\n[4/8] Processing field doses (saving individually)...\n');
 
 % Track which files were processed successfully
 field_doses = cell(num_files, 1);
@@ -259,8 +268,16 @@ for i = 1:num_files
         % Extract beam index from filename (e.g., RD.1.dcm -> beam 1)
         beam_index = extractBeamIndex(rd_files(i).name, i);
         
-        % Get beam metadata if available
-        [gantry_angle, meterset] = getBeamMetadata(beam_metadata, beam_index);
+        % Get beam metadata from RTPLAN (meterset comes from the plan, not dose file)
+        % Use positional index i since Raystation exports doses in beam order
+        [gantry_angle, meterset] = getBeamMetadata(beam_metadata, i);
+        
+        % Get number of fractions from RTPLAN metadata
+        num_fractions = 1;
+        if ~isempty(beam_metadata) && i <= length(beam_metadata) && ...
+                isfield(beam_metadata, 'num_fractions')
+            num_fractions = beam_metadata(i).num_fractions;
+        end
         
         % Create field dose structure
         field_dose = struct();
@@ -270,7 +287,8 @@ for i = 1:num_files
         field_dose.dimensions = dose_dims;
         field_dose.beam_index = beam_index;
         field_dose.gantry_angle = gantry_angle;
-        field_dose.meterset = meterset;
+        field_dose.meterset = meterset;             % From RTPLAN FractionGroupSequence
+        field_dose.num_fractions = num_fractions;    % From RTPLAN FractionGroupSequence
         field_dose.source_file = rd_files(i).name;
         field_dose.max_dose_Gy = max(dose_data(:));
         field_dose.mean_dose_Gy = mean(dose_data(dose_data > 0));
@@ -282,8 +300,8 @@ for i = 1:num_files
         field_filename = sprintf('field_dose_%03d.mat', i);
         field_filepath = fullfile(processed_dir, field_filename);
         save(field_filepath, 'field_dose', '-v7.3');
-        fprintf('    Saved: %s (max: %.4f Gy, gantry: %.1f°)\n', ...
-            field_filename, field_dose.max_dose_Gy, gantry_angle);
+        fprintf('    Saved: %s (max: %.4f Gy, gantry: %.1f°, meterset: %.2f MU)\n', ...
+            field_filename, field_dose.max_dose_Gy, gantry_angle, meterset);
         
         % Store reference in output cell array (without full dose data for memory)
         field_doses{i} = struct();
@@ -306,22 +324,15 @@ for i = 1:num_files
 end
 
 fprintf('  Successfully processed %d/%d field doses\n', processed_count, num_files);
-fprintf('  Total dose max: %.4f Gy\n', max(total_rs_dose(:)));
+fprintf('  Total dose max (before couch masking): %.4f Gy\n', max(total_rs_dose(:)));
 
 % Update metadata
 metadata.processed_count = processed_count;
-metadata.total_dose_max_Gy = max(total_rs_dose(:));
-
-%% ======================== SAVE TOTAL DOSE ========================
-
-fprintf('\n  Saving total_rs_dose.mat...\n');
-total_dose_file = fullfile(processed_dir, 'total_rs_dose.mat');
-save(total_dose_file, 'total_rs_dose', '-v7.3');
-fprintf('  Saved: total_rs_dose.mat\n');
+metadata.total_dose_max_Gy_before_masking = max(total_rs_dose(:));
 
 %% ======================== LOAD AND RESAMPLE SCT ========================
 
-fprintf('\n[5/6] Loading and resampling SCT to dose grid...\n');
+fprintf('\n[5/8] Loading and resampling SCT to dose grid...\n');
 
 % Load SCT images
 [sct_hu, sct_origin, sct_spacing, sct_dims] = loadSctImages(sct_dir);
@@ -350,13 +361,105 @@ fprintf('  Resampled SCT dimensions: [%d, %d, %d]\n', ...
 fprintf('  Converting HU to density...\n');
 sct_density = huToDensity(sct_hu_resampled);
 
-fprintf('  Density range: [%.0f, %.0f] kg/m³\n', min(sct_density(:)), max(sct_density(:)));
+fprintf('  Density range: [%.0f, %.0f] kg/mÂ³\n', min(sct_density(:)), max(sct_density(:)));
+
+%% ======================== LOAD RTSTRUCT AND CREATE TISSUE MASKS ========================
+
+fprintf('\n[6/8] Loading RTSTRUCT and creating tissue classification masks...\n');
+
+% Load RTSTRUCT and convert contours to masks on the dose grid
+[tissue_mask, roi_names, roi_masks, couch_mask] = loadRtstructAndCreateMasks(...
+    sct_dir, ref_origin, ref_spacing, ref_dims);
+
+if isempty(tissue_mask)
+    warning('step15_process_doses:NoRTSTRUCT', ...
+        'Could not create tissue masks from RTSTRUCT. Using empty masks.');
+    tissue_mask = zeros(ref_dims, 'uint8');
+    roi_names = {};
+    roi_masks = struct();
+    couch_mask = false(ref_dims);
+else
+    fprintf('  Created masks for %d ROIs\n', length(roi_names));
+    fprintf('  Couch voxels identified: %d\n', sum(couch_mask(:)));
+    
+    % List ROIs
+    for i = 1:length(roi_names)
+        if isfield(roi_masks, sprintf('ROI_%03d', i))
+            mask_field = sprintf('ROI_%03d', i);
+            num_voxels = sum(roi_masks.(mask_field)(:));
+            fprintf('    [%d] %s: %d voxels\n', i, roi_names{i}, num_voxels);
+        end
+    end
+end
+
+% Save tissue masks separately (can be large)
+fprintf('  Saving tissue_masks.mat...\n');
+tissue_masks_file = fullfile(processed_dir, 'tissue_masks.mat');
+save(tissue_masks_file, 'tissue_mask', 'roi_names', 'roi_masks', 'couch_mask', '-v7.3');
+fprintf('  Saved: tissue_masks.mat\n');
+
+%% ======================== ZERO OUT COUCH REGIONS ========================
+
+fprintf('\n[7/8] Zeroing out dose in couch regions...\n');
+
+dose_in_couch_before = sum(total_rs_dose(couch_mask));
+fprintf('  Total dose in couch before zeroing: %.4f Gy (sum)\n', dose_in_couch_before);
+
+% Zero out total dose in couch region
+total_rs_dose(couch_mask) = 0;
+
+fprintf('  Total dose max (after couch masking): %.4f Gy\n', max(total_rs_dose(:)));
+
+% Update metadata
+metadata.total_dose_max_Gy = max(total_rs_dose(:));
+metadata.couch_voxels_zeroed = sum(couch_mask(:));
+metadata.dose_in_couch_zeroed = dose_in_couch_before;
+
+% Also update individual field dose files to zero out couch
+fprintf('  Updating individual field doses to zero couch regions...\n');
+for i = 1:num_files
+    if ~isempty(field_doses{i}) && isfield(field_doses{i}, 'filepath')
+        try
+            field_filepath = field_doses{i}.filepath;
+            loaded = load(field_filepath);
+            field_dose = loaded.field_dose;
+            
+            % Zero out couch region
+            field_dose.dose_Gy(couch_mask) = 0;
+            field_dose.max_dose_Gy = max(field_dose.dose_Gy(:));
+            field_dose.couch_masked = true;
+            
+            % Re-save
+            save(field_filepath, 'field_dose', '-v7.3');
+            
+            % Update reference
+            field_doses{i}.max_dose_Gy = field_dose.max_dose_Gy;
+            field_doses{i}.couch_masked = true;
+            
+            clear field_dose;
+        catch ME
+            warning('step15_process_doses:CouchMaskError', ...
+                'Failed to update couch mask for field %d: %s', i, ME.message);
+        end
+    end
+end
+fprintf('  Updated %d field dose files\n', num_files);
+
+%% ======================== SAVE TOTAL DOSE ========================
+
+fprintf('\n  Saving total_rs_dose.mat...\n');
+total_dose_file = fullfile(processed_dir, 'total_rs_dose.mat');
+save(total_dose_file, 'total_rs_dose', '-v7.3');
+fprintf('  Saved: total_rs_dose.mat\n');
 
 %% ======================== CREATE SCT RESAMPLED STRUCTURE ========================
 
 sct_resampled = struct();
 sct_resampled.cubeHU = sct_hu_resampled;
 sct_resampled.cubeDensity = sct_density;
+sct_resampled.tissueMask = tissue_mask;
+sct_resampled.roiNames = roi_names;
+sct_resampled.couchMask = couch_mask;
 sct_resampled.origin = ref_origin;
 sct_resampled.spacing = ref_spacing;
 sct_resampled.dimensions = ref_dims;
@@ -368,7 +471,7 @@ sct_resampled.timestamp = datetime('now');
 
 %% ======================== SAVE SCT RESAMPLED ========================
 
-fprintf('\n[6/6] Saving processed data...\n');
+fprintf('\n[8/8] Saving processed data...\n');
 
 sct_resampled_file = fullfile(processed_dir, 'sct_resampled.mat');
 save(sct_resampled_file, 'sct_resampled', '-v7.3');
@@ -408,6 +511,8 @@ fprintf('  Processed %d field doses\n', processed_count);
 fprintf('  Dose grid: [%d x %d x %d]\n', ref_dims(1), ref_dims(2), ref_dims(3));
 fprintf('  Spacing: [%.3f, %.3f, %.3f] mm\n', ref_spacing(1), ref_spacing(2), ref_spacing(3));
 fprintf('  Total dose max: %.4f Gy\n', max(total_rs_dose(:)));
+fprintf('  Tissue ROIs: %d\n', length(roi_names));
+fprintf('  Couch voxels zeroed: %d\n', sum(couch_mask(:)));
 fprintf('  Output directory: %s\n', processed_dir);
 fprintf('========================================\n\n');
 
@@ -447,7 +552,12 @@ end
 function beam_metadata = loadRtplanMetadata(sct_dir)
 %LOADRTPLANMETADATA Load beam metadata from RTPLAN file
 %
-%   Extract gantry angles and metersets for each beam
+%   Extract gantry angles and beam metersets for each beam.
+%   Metersets are read from FractionGroupSequence.Item_1.ReferencedBeamSequence
+%   in the RTPLAN, NOT from the dose files.
+%
+%   The returned struct array is ordered by beam sequence position (Item_1,
+%   Item_2, ...) which matches the order Raystation exports field doses.
 
     beam_metadata = [];
     
@@ -462,20 +572,62 @@ function beam_metadata = loadRtplanMetadata(sct_dir)
     adjusted_idx = find(contains({rp_files.name}, 'adjusted_mlc'), 1);
     if ~isempty(adjusted_idx)
         rp_file = fullfile(sct_dir, rp_files(adjusted_idx).name);
+        fprintf('    Using adjusted RTPLAN: %s\n', rp_files(adjusted_idx).name);
     else
         rp_file = fullfile(sct_dir, rp_files(1).name);
+        fprintf('    Using RTPLAN: %s\n', rp_files(1).name);
     end
     
     try
         rtplan = dicominfo(rp_file);
         
         if ~isfield(rtplan, 'BeamSequence')
+            warning('loadRtplanMetadata:NoBeamSequence', ...
+                'RTPLAN has no BeamSequence');
             return;
         end
         
         beam_fields = fieldnames(rtplan.BeamSequence);
         num_beams = length(beam_fields);
         
+        % --- Build a lookup from BeamNumber -> metersets using the RTPLAN ---
+        % Metersets live in FractionGroupSequence, NOT in the dose files.
+        meterset_lookup = containers.Map('KeyType', 'double', 'ValueType', 'double');
+        num_fractions = 1;  % default
+        
+        if isfield(rtplan, 'FractionGroupSequence')
+            fg = rtplan.FractionGroupSequence.Item_1;
+            
+            % Extract number of fractions
+            if isfield(fg, 'NumberOfFractionsPlanned')
+                num_fractions = fg.NumberOfFractionsPlanned;
+                fprintf('    Number of fractions planned: %d\n', num_fractions);
+            end
+            
+            if isfield(fg, 'ReferencedBeamSequence')
+                ref_beam_fields = fieldnames(fg.ReferencedBeamSequence);
+                
+                for i = 1:length(ref_beam_fields)
+                    ref_beam = fg.ReferencedBeamSequence.(ref_beam_fields{i});
+                    
+                    if isfield(ref_beam, 'BeamMeterset') && isfield(ref_beam, 'ReferencedBeamNumber')
+                        meterset_lookup(double(ref_beam.ReferencedBeamNumber)) = ...
+                            ref_beam.BeamMeterset;
+                    end
+                end
+                
+                fprintf('    Extracted metersets for %d beams from FractionGroupSequence\n', ...
+                    meterset_lookup.Count);
+            else
+                warning('loadRtplanMetadata:NoReferencedBeamSequence', ...
+                    'FractionGroupSequence has no ReferencedBeamSequence');
+            end
+        else
+            warning('loadRtplanMetadata:NoFractionGroupSequence', ...
+                'RTPLAN has no FractionGroupSequence');
+        end
+        
+        % --- Build beam_metadata struct array in beam sequence order ---
         beam_metadata = struct();
         
         for i = 1:num_beams
@@ -507,34 +659,25 @@ function beam_metadata = loadRtplanMetadata(sct_dir)
                 end
             end
             
-            % Meterset (from FractionGroupSequence)
-            beam_metadata(i).meterset = 0;
-        end
-        
-        % Extract metersets from FractionGroupSequence
-        if isfield(rtplan, 'FractionGroupSequence')
-            fg_fields = fieldnames(rtplan.FractionGroupSequence);
-            fg = rtplan.FractionGroupSequence.(fg_fields{1});
-            
-            if isfield(fg, 'ReferencedBeamSequence')
-                ref_beam_fields = fieldnames(fg.ReferencedBeamSequence);
-                
-                for i = 1:length(ref_beam_fields)
-                    ref_beam = fg.ReferencedBeamSequence.(ref_beam_fields{i});
-                    
-                    if isfield(ref_beam, 'BeamMeterset') && isfield(ref_beam, 'ReferencedBeamNumber')
-                        beam_num = ref_beam.ReferencedBeamNumber;
-                        
-                        % Find matching beam in metadata
-                        for j = 1:length(beam_metadata)
-                            if beam_metadata(j).beam_number == beam_num
-                                beam_metadata(j).meterset = ref_beam.BeamMeterset;
-                                break;
-                            end
-                        end
-                    end
-                end
+            % Meterset from RTPLAN FractionGroupSequence lookup
+            beam_num = double(beam_metadata(i).beam_number);
+            if meterset_lookup.isKey(beam_num)
+                beam_metadata(i).meterset = meterset_lookup(beam_num);
+            else
+                beam_metadata(i).meterset = 0;
+                warning('loadRtplanMetadata:MissingMeterset', ...
+                    'No meterset found in RTPLAN for beam number %d', beam_num);
             end
+            
+            % Store number of fractions (same for all beams)
+            beam_metadata(i).num_fractions = num_fractions;
+            
+            % Positional index (order in BeamSequence, matches Raystation export order)
+            beam_metadata(i).sequence_index = i;
+            
+            fprintf('    Beam %d: %s, gantry=%.1f°, meterset=%.2f MU\n', ...
+                beam_metadata(i).beam_number, beam_metadata(i).beam_name, ...
+                beam_metadata(i).gantry_angle, beam_metadata(i).meterset);
         end
         
     catch ME
@@ -600,6 +743,12 @@ end
 
 function [gantry_angle, meterset] = getBeamMetadata(beam_metadata, beam_index)
 %GETBEAMMETADATA Get gantry angle and meterset for specific beam
+%
+%   Metersets come from the RTPLAN FractionGroupSequence (extracted by
+%   loadRtplanMetadata), NOT from the dose files.
+%
+%   Primary match: positional index (Raystation exports in beam order)
+%   Fallback: match by beam number
 
     gantry_angle = 0;
     meterset = 0;
@@ -608,7 +757,14 @@ function [gantry_angle, meterset] = getBeamMetadata(beam_metadata, beam_index)
         return;
     end
     
-    % Try to match by beam number
+    % Primary: use positional index (Raystation exports doses in beam order)
+    if beam_index <= length(beam_metadata)
+        gantry_angle = beam_metadata(beam_index).gantry_angle;
+        meterset = beam_metadata(beam_index).meterset;
+        return;
+    end
+    
+    % Fallback: try to match by beam number
     for i = 1:length(beam_metadata)
         if beam_metadata(i).beam_number == beam_index
             gantry_angle = beam_metadata(i).gantry_angle;
@@ -617,11 +773,9 @@ function [gantry_angle, meterset] = getBeamMetadata(beam_metadata, beam_index)
         end
     end
     
-    % Fallback: use index directly if within range
-    if beam_index <= length(beam_metadata)
-        gantry_angle = beam_metadata(beam_index).gantry_angle;
-        meterset = beam_metadata(beam_index).meterset;
-    end
+    warning('getBeamMetadata:NoMatch', ...
+        'No beam metadata found for beam index %d (RTPLAN has %d beams)', ...
+        beam_index, length(beam_metadata));
 end
 
 
@@ -767,10 +921,10 @@ end
 
 
 function density = huToDensity(hu)
-%HUTODENSITY Convert Hounsfield Units to density (kg/m³)
+%HUTODENSITY Convert Hounsfield Units to density (kg/mÂ³)
 %
 %   Uses simplified linear conversion:
-%   - Below -1000 HU (air): density = 1 kg/m³
+%   - Below -1000 HU (air): density = 1 kg/mÂ³
 %   - -1000 to 0 HU: linear interpolation from air (1) to water (1000)
 %   - 0 to 1000 HU: linear from water (1000) to bone (~2000)
 %   - Above 1000 HU: bone/metal region
@@ -788,7 +942,7 @@ function density = huToDensity(hu)
     density(lung_mask) = 400 + (hu(lung_mask) + 900) * (1000 - 400) / 400;
     
     % Soft tissue region (-500 to 100 HU)
-    % Approximate: density ≈ 1000 + HU
+    % Approximate: density â‰ˆ 1000 + HU
     soft_mask = (hu >= -500) & (hu < 100);
     density(soft_mask) = 1000 + hu(soft_mask);
     
@@ -798,6 +952,209 @@ function density = huToDensity(hu)
     density(bone_mask) = 1100 + (hu(bone_mask) - 100) * (1900 - 1100) / 900;
     
     % Clamp to reasonable range
-    density = max(density, 1);      % Minimum 1 kg/m³
+    density = max(density, 1);      % Minimum 1 kg/mÂ³
     density = min(density, 7800);   % Maximum (metal)
+end
+
+
+function [tissue_mask, roi_names, roi_masks, couch_mask] = loadRtstructAndCreateMasks(...
+    sct_dir, dose_origin, dose_spacing, dose_dims)
+%LOADRTSTRUCTANDCREATEMASKS Load RTSTRUCT and create tissue classification masks
+%
+%   [tissue_mask, roi_names, roi_masks, couch_mask] = loadRtstructAndCreateMasks(...)
+%
+%   Loads the RTSTRUCT file, extracts all ROI contours, and converts them
+%   to 3D binary masks on the dose grid. Also identifies couch regions.
+%
+%   INPUTS:
+%       sct_dir      - Path to directory containing RTSTRUCT
+%       dose_origin  - [x, y, z] origin of dose grid (mm)
+%       dose_spacing - [dx, dy, dz] spacing of dose grid (mm)
+%       dose_dims    - [rows, cols, slices] dimensions of dose grid
+%
+%   OUTPUTS:
+%       tissue_mask  - 3D uint8 array with ROI labels (0 = unassigned)
+%       roi_names    - Cell array of ROI names (index matches label in tissue_mask)
+%       roi_masks    - Struct with individual ROI binary masks (ROI_001, ROI_002, ...)
+%       couch_mask   - 3D logical array (true = couch region)
+
+    tissue_mask = [];
+    roi_names = {};
+    roi_masks = struct();
+    couch_mask = false(dose_dims);
+    
+    % Find RTSTRUCT file
+    rs_files = dir(fullfile(sct_dir, 'RS*.dcm'));
+    
+    if isempty(rs_files)
+        % Try alternative naming
+        rs_files = dir(fullfile(sct_dir, '*RTSTRUCT*.dcm'));
+    end
+    
+    if isempty(rs_files)
+        warning('loadRtstructAndCreateMasks:NoRTSTRUCT', ...
+            'No RTSTRUCT file found in: %s', sct_dir);
+        return;
+    end
+    
+    % Use first RTSTRUCT file found
+    rs_file = fullfile(sct_dir, rs_files(1).name);
+    fprintf('    Loading RTSTRUCT: %s\n', rs_files(1).name);
+    
+    try
+        rtstruct = dicominfo(rs_file);
+    catch ME
+        warning('loadRtstructAndCreateMasks:LoadError', ...
+            'Failed to load RTSTRUCT: %s', ME.message);
+        return;
+    end
+    
+    % Check for required sequences
+    if ~isfield(rtstruct, 'StructureSetROISequence') || ...
+       ~isfield(rtstruct, 'ROIContourSequence')
+        warning('loadRtstructAndCreateMasks:MissingSequence', ...
+            'RTSTRUCT missing StructureSetROISequence or ROIContourSequence');
+        return;
+    end
+    
+    % Extract ROI names from StructureSetROISequence
+    roi_seq_fields = fieldnames(rtstruct.StructureSetROISequence);
+    num_rois = length(roi_seq_fields);
+    
+    roi_info = struct();
+    for i = 1:num_rois
+        roi = rtstruct.StructureSetROISequence.(roi_seq_fields{i});
+        roi_info(i).number = roi.ROINumber;
+        roi_info(i).name = roi.ROIName;
+    end
+    
+    fprintf('    Found %d ROIs in StructureSetROISequence\n', num_rois);
+    
+    % Initialize tissue mask
+    tissue_mask = zeros(dose_dims, 'uint8');
+    roi_names = cell(num_rois, 1);
+    
+    % Couch region names to identify (case-insensitive matching)
+    couch_patterns = {'couch exterior', 'couch interior', 'couchexterior', ...
+                      'couchinterior', 'couch_exterior', 'couch_interior', ...
+                      'couch', 'table'};
+    
+    % Calculate z-coordinates for each slice in dose grid
+    dose_z_coords = dose_origin(3) + (0:dose_dims(3)-1) * dose_spacing(3);
+    
+    % Process each ROI in ROIContourSequence
+    contour_seq_fields = fieldnames(rtstruct.ROIContourSequence);
+    
+    for c_idx = 1:length(contour_seq_fields)
+        try
+            contour_item = rtstruct.ROIContourSequence.(contour_seq_fields{c_idx});
+            
+            % Get referenced ROI number
+            if ~isfield(contour_item, 'ReferencedROINumber')
+                continue;
+            end
+            ref_roi_num = contour_item.ReferencedROINumber;
+            
+            % Find matching ROI info
+            roi_idx = find([roi_info.number] == ref_roi_num, 1);
+            if isempty(roi_idx)
+                continue;
+            end
+            
+            roi_name = roi_info(roi_idx).name;
+            roi_names{roi_idx} = roi_name;
+            
+            fprintf('    Processing ROI %d: %s\n', roi_idx, roi_name);
+            
+            % Check if this is a couch region (case-insensitive)
+            roi_name_lower = lower(roi_name);
+            is_couch = any(contains(roi_name_lower, couch_patterns));
+            
+            % Initialize mask for this ROI
+            roi_mask = false(dose_dims);
+            
+            % Get contour sequence
+            if ~isfield(contour_item, 'ContourSequence')
+                continue;
+            end
+            
+            contour_fields = fieldnames(contour_item.ContourSequence);
+            num_contours = length(contour_fields);
+            
+            % Process each contour (typically one per slice)
+            for j = 1:num_contours
+                contour = contour_item.ContourSequence.(contour_fields{j});
+                
+                % Get contour data (x, y, z triplets)
+                if ~isfield(contour, 'ContourData') || isempty(contour.ContourData)
+                    continue;
+                end
+                
+                contour_data = contour.ContourData;
+                num_points = length(contour_data) / 3;
+                
+                if num_points < 3
+                    continue;  % Need at least 3 points for a polygon
+                end
+                
+                % Reshape to [N x 3]
+                points = reshape(contour_data, 3, num_points)';
+                
+                % Get contour z-coordinate
+                contour_z = points(1, 3);  % All points should have same z
+                
+                % Find matching slice in dose grid
+                [min_diff, slice_idx] = min(abs(dose_z_coords - contour_z));
+                
+                % Check if within tolerance (half slice thickness)
+                if min_diff > dose_spacing(3)
+                    continue;  % Contour not on this grid
+                end
+                
+                % Convert contour points to pixel coordinates
+                % X -> column, Y -> row
+                col_coords = (points(:, 1) - dose_origin(1)) / dose_spacing(1) + 1;
+                row_coords = (points(:, 2) - dose_origin(2)) / dose_spacing(2) + 1;
+                
+                % Create polygon mask for this slice
+                try
+                    slice_mask = poly2mask(col_coords, row_coords, dose_dims(1), dose_dims(2));
+                    roi_mask(:, :, slice_idx) = roi_mask(:, :, slice_idx) | slice_mask;
+                catch
+                    % poly2mask can fail for degenerate polygons
+                    continue;
+                end
+            end
+            
+            % Store individual ROI mask
+            mask_field = sprintf('ROI_%03d', roi_idx);
+            roi_masks.(mask_field) = roi_mask;
+            
+            % Add to tissue mask (later ROIs overwrite earlier ones in overlap)
+            tissue_mask(roi_mask) = uint8(roi_idx);
+            
+            % Add to couch mask if applicable
+            if is_couch
+                couch_mask = couch_mask | roi_mask;
+                fprintf('      -> Identified as COUCH region (%d voxels)\n', sum(roi_mask(:)));
+            end
+            
+        catch ME
+            warning('loadRtstructAndCreateMasks:ContourError', ...
+                'Error processing contour %d: %s', c_idx, ME.message);
+            continue;
+        end
+    end
+    
+    % Fill in empty ROI names for consistency
+    for i = 1:length(roi_names)
+        if isempty(roi_names{i})
+            roi_names{i} = sprintf('ROI_%d_NoContour', i);
+        end
+    end
+    
+    % Count valid ROIs
+    valid_count = sum(~contains(roi_names, 'NoContour'));
+    fprintf('    Tissue mask created with %d labeled ROIs\n', valid_count);
+    fprintf('    Couch mask: %d voxels\n', sum(couch_mask(:)));
 end
