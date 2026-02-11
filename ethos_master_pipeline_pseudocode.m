@@ -25,7 +25,7 @@ clear; clc; close all;
 
 % --- Patient and Session Selection ---
 CONFIG.patients = {'1194203'};
-CONFIG.sessions = {'Session_1', 'Session_2'};
+CONFIG.sessions = {'Session_1'};
 CONFIG.treatment_site = 'Pancreas';
 
 % --- Directory Paths ---
@@ -54,12 +54,12 @@ CONFIG.mlc_expansion_mm = 0.4;           % Expansion per side
 CONFIG.mlc_position_range = [-140, 140]; % Valid leaf position range (mm)
 
 % --- Pipeline Control Flags ---
-CONFIG.run_step0  = true;   % Sort DICOM files
-CONFIG.run_step05 = true;   % Fix MLC gaps
-CONFIG.run_step15 = true;   % Process doses and resample CT
-CONFIG.run_step2  = true;   % k-Wave simulation
-CONFIG.run_step3  = true;   % Gamma analysis
-CONFIG.use_parallel = true; % Use parfor for simulations
+CONFIG.run_step0  = false;   % Sort DICOM files
+CONFIG.run_step05 = false;   % Fix MLC gaps
+CONFIG.run_step15 = false;   % Process doses and resample CT
+CONFIG.run_step2  = false;   % k-Wave simulation
+CONFIG.run_step3  = false;   % Gamma analysis
+CONFIG.use_parallel = false; % Use parfor for simulations
 
 % --- Define Tissue Property Tables ---
 CONFIG.tissue_tables = define_tissue_tables();
@@ -147,7 +147,7 @@ for p_idx = 1:length(CONFIG.patients)
                 fprintf('         Please:\n');
                 fprintf('           1. Import adjusted RTPLAN into Raystation\n');
                 fprintf('           2. Recalculate dose for each field\n');
-                fprintf('           3. Export field doses as RD.*.dcm\n');
+                fprintf('           3. Export field doses as RD*.dcm\n');
                 fprintf('           4. Re-run this pipeline\n');
                 
                 RESULTS.patients.(result_key).status = 'awaiting_raystation';
@@ -473,29 +473,6 @@ end
 
 %% ========================= STUB FUNCTIONS (TO BE IMPLEMENTED) ============
 % These functions are placeholders - implement in separate script files
-
-
-
-
-function [field_doses, sct_resampled, total_rs_dose, metadata] = load_processed_data(patient_id, session, config)
-    % Load previously processed data from individual files
-    %
-    % Loads each field_dose_XXX.mat file into cell array
-    % Loads sct_resampled.mat and total_rs_dose.mat
-    error('Implement load_processed_data');
-end
-
-function medium = create_acoustic_medium(sct_resampled, config)
-    % Create k-Wave medium structure from CT data
-    % Assigns tissue properties based on config.gruneisen_method
-    error('Implement create_acoustic_medium');
-end
-
-function recon_dose = run_single_field_simulation(field_dose, sct_resampled, medium, config)
-    % Run k-Wave forward and time-reversal simulation for one field
-    % Based on ethos_kwave_simulation.m logic
-    error('Implement run_single_field_simulation');
-end
 
 function save_field_reconstruction(recon_dose, field_idx, patient_id, session, config)
     % Save individual field reconstruction

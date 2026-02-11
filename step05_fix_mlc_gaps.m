@@ -349,6 +349,27 @@ fprintf('\n  Updating DICOM metadata...\n');
 rtplan.SOPInstanceUID = dicomuid;
 rtplan.MediaStorageSOPInstanceUID = rtplan.SOPInstanceUID;
 
+% Set number of fractions to 1
+% This is stored in FractionGroupSequence.Item_X.NumberOfFractionsPlanned
+if isfield(rtplan, 'FractionGroupSequence')
+    fg_fields = fieldnames(rtplan.FractionGroupSequence);
+    for fg_idx = 1:length(fg_fields)
+        fg_field = fg_fields{fg_idx};
+        if isfield(rtplan.FractionGroupSequence.(fg_field), 'NumberOfFractionsPlanned')
+            original_fractions = rtplan.FractionGroupSequence.(fg_field).NumberOfFractionsPlanned;
+            rtplan.FractionGroupSequence.(fg_field).NumberOfFractionsPlanned = 1;
+            fprintf('    NumberOfFractionsPlanned: %d -> 1 (FractionGroup %d)\n', ...
+                original_fractions, fg_idx);
+        else
+            % Field doesn't exist, add it
+            rtplan.FractionGroupSequence.(fg_field).NumberOfFractionsPlanned = 1;
+            fprintf('    NumberOfFractionsPlanned: (not set) -> 1 (FractionGroup %d)\n', fg_idx);
+        end
+    end
+else
+    fprintf('    [WARN] No FractionGroupSequence found in RTPLAN\n');
+end
+
 % Update plan label to indicate modification
 if isfield(rtplan, 'RTPlanLabel')
     original_label = rtplan.RTPlanLabel;
@@ -365,9 +386,9 @@ end
 
 % Update plan description if present
 if isfield(rtplan, 'RTPlanDescription')
-    rtplan.RTPlanDescription = [rtplan.RTPlanDescription ' - MLC gaps adjusted'];
+    rtplan.RTPlanDescription = [rtplan.RTPlanDescription ' - MLC gaps adjusted, 1 fraction'];
 else
-    rtplan.RTPlanDescription = 'MLC gaps adjusted';
+    rtplan.RTPlanDescription = 'MLC gaps adjusted, 1 fraction';
 end
 
 %% ======================== WRITE MODIFIED DICOM ========================
