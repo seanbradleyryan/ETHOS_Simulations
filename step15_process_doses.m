@@ -1205,6 +1205,60 @@ function [tissue_mask, roi_names, roi_masks, body_mask, couch_mask] = loadRtstru
     % Count valid ROIs
     valid_count = sum(~contains(roi_names, 'NoContour'));
     fprintf('    Tissue mask created with %d labeled ROIs\n', valid_count);
-    fprintf('    Body mask: %d voxels\n', sum(body_mask(:)));
-    fprintf('    Couch mask: %d voxels\n', sum(couch_mask(:)));
+    fprintf('    Body mask (before gap fill): %d voxels\n', sum(body_mask(:)));
+    fprintf('    Couch mask (before gap fill): %d voxels\n', sum(couch_mask(:)));
+    
+    % ===== FIX GAPS IN BODY AND COUCH MASKS =====
+    % RTSTRUCT contours may not align with dose grid slices, causing gaps.
+    % Fill gaps by interpolating along z-direction.
+    fprintf('    Filling z-direction gaps in masks...\n');
+    body_mask = fillMaskZGaps(body_mask);
+    couch_mask = fillMaskZGaps(couch_mask);
+    fprintf('    Body mask (after gap fill): %d voxels\n', sum(body_mask(:)));
+    fprintf('    Couch mask (after gap fill): %d voxels\n', sum(couch_mask(:)));
+end
+
+
+function mask_filled = fillMaskZGaps(mask)
+%FILLMASKZGAPS Fill gaps in a 3D binary mask along the z-direction
+%
+%   For each (x,y) column, finds gaps (zeros between ones) and fills them.
+%   This fixes the common issue where RTSTRUCT contour z-coordinates don't
+%   align with dose grid slice positions, causing alternating filled/empty slices.
+%
+%   Uses vectorized operations for efficiency on large volumes.
+%
+%   INPUT:
+%       mask - 3D logical array
+%
+%   OUTPUT:
+%       mask_filled - 3D logical array with z-gaps filled
+
+    [nRows, nCols, nSlices] = size(mask);
+    
+    % Reshape to 2D: each column is a z-profile for one (row,col) position
+    % Shape: [nSlices x (nRows*nCols)]
+    mask_2d = reshape(mask, [], nSlices)';  % [nSlices x nPixels]
+    
+    % For each pixel column, find first and last true indices
+    % We'll use cumsum tricks for vectorization
+    
+    % Method: For each column, create a mask that is true from first_true to last_true
+    % 1. Forward cumsum: marks everything from first true onward
+    % 2. Backward cumsum: marks everything up to last true
+    % 3. AND them together
+    
+    % Forward pass: cumsum > 0 means we've seen at least one true
+    forward_cumsum = cumsum(mask_2d, 1);
+    from_first = forward_cumsum > 0;
+    
+    % Backward pass: flip, cumsum, flip back
+    backward_cumsum = flipud(cumsum(flipud(mask_2d), 1));
+    to_last = backward_cumsum > 0;
+    
+    % Fill: true where we're between first and last (inclusive)
+    mask_2d_filled = from_first & to_last;
+    
+    % Reshape back to 3D
+    mask_filled = reshape(mask_2d_filled', nRows, nCols, nSlices);
 end
