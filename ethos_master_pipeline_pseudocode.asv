@@ -141,7 +141,7 @@ for p_idx = 1:length(CONFIG.patients)
             rs_dir = get_raystation_directory(patient_id, session, CONFIG);
             [rs_files_exist, num_dose_files] = check_raystation_files(rs_dir);
             
-            if ~rs_files_exist
+            if rs_files_exist < 1
                 fprintf('[STEP 1] WAITING: No Raystation files found.\n');
                 fprintf('         Expected location: %s\n', rs_dir);
                 fprintf('         Please:\n');
@@ -428,15 +428,15 @@ end
 
 function [exists, num_files] = check_raystation_files(rs_dir)
     % Check if Raystation dose files exist
-    exists = false; 
-    num_files = 0; 
-    if  exist(rs_dir, 'dir') > 0
-        exists = true;
-    
+    if ~exist(rs_dir, 'dir')
+        exists = false;
+        num_files = 0;
+        return;
+    end
     
     rd_files = dir(fullfile(rs_dir, 'RD.*.dcm'));
-    num_files = length(rd_files)
-    end
+    num_files = length(rd_files);
+    exists = (num_files > 0);
 end
 
 function generate_pipeline_summary(results)
