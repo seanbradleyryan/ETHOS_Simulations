@@ -33,10 +33,11 @@ function [field_doses, sct_resampled, total_rs_dose, metadata] = step15_process_
 %           .tissueMask     - 3D uint8 array with ROI labels (0 = unassigned)
 %           .roiNames       - Cell array of ROI names (index matches label)
 %           .bodyMask       - 3D logical array (true = inside body region)
+%           .couchMask      - 3D logical array (true = couch region)
 %           .origin         - [x, y, z] in mm
 %           .spacing        - [dx, dy, dz] in mm
 %           .dimensions     - [nx, ny, nz]
-%       total_rs_dose   - Sum of all field doses (3D array in Gy), outside body zeroed
+%       total_rs_dose   - Sum of all field doses (3D array in Gy), zeroed outside body and in couch
 %       metadata        - Struct with combined geometry info
 %
 %   FILES CREATED (in processed/ directory):
@@ -63,7 +64,7 @@ function [field_doses, sct_resampled, total_rs_dose, metadata] = step15_process_
 %   - Z-resolution MUST come from GridFrameOffsetVector, NOT PixelSpacing
 %   - Use squeeze() to remove singleton dimensions in dose arrays
 %   - Standard HU to density: ρ = 1000 + HU (approximate)
-%   - Dose outside body region is zeroed (body identified from RTSTRUCT)
+%   - Dose zeroed where: outside body OR inside couch
 %   - Raystation files: Beam[n]_Seg[m]_Field [o].dcm pattern
 %   - RTPLAN files: RTPLAN*.dcm pattern
 %   - RTSTRUCT files: RTSTRUCT*.dcm pattern
@@ -384,7 +385,7 @@ fprintf('  Density range: [%.0f, %.0f] kg/m³\n', min(sct_density(:)), max(sct_d
 fprintf('\n[6/8] Loading RTSTRUCT and creating tissue classification masks...\n');
 
 % Load RTSTRUCT and convert contours to masks on the dose grid
-[tissue_mask, roi_names, roi_masks, body_mask] = loadRtstructAndCreateMasks(...
+[tissue_mask, roi_names, roi_masks, body_mask, couch_mask] = loadRtstructAndCreateMasks(...
     sct_dir, ref_origin, ref_spacing, ref_dims);
 
 if isempty(tissue_mask)
@@ -394,9 +395,11 @@ if isempty(tissue_mask)
     roi_names = {};
     roi_masks = struct();
     body_mask = false(ref_dims);
+    couch_mask = false(ref_dims);
 else
     fprintf('  Created masks for %d ROIs\n', length(roi_names));
     fprintf('  Body voxels identified: %d\n', sum(body_mask(:)));
+    fprintf('  Couch voxels identified: %d\n', sum(couch_mask(:)));
     
     % List ROIs
     for i = 1:length(roi_names)
@@ -411,34 +414,47 @@ end
 % Save tissue masks separately (can be large)
 fprintf('  Saving tissue_masks.mat...\n');
 tissue_masks_file = fullfile(processed_dir, 'tissue_masks.mat');
-save(tissue_masks_file, 'tissue_mask', 'roi_names', 'roi_masks', 'body_mask', '-v7.3');
+save(tissue_masks_file, 'tissue_mask', 'roi_names', 'roi_masks', 'body_mask', 'couch_mask', '-v7.3');
 fprintf('  Saved: tissue_masks.mat\n');
 
-%% ======================== ZERO OUT DOSE OUTSIDE BODY ========================
+%% ======================== ZERO OUT DOSE OUTSIDE BODY AND IN COUCH ========================
 
-fprintf('\n[7/8] Zeroing out dose outside body region...\n');
+fprintf('\n[7/8] Zeroing out dose outside body and in couch regions...\n');
 
-% Create mask for voxels outside body
-outside_body_mask = ~body_mask;
+% Create mask for valid dose region: inside body AND not in couch
+valid_dose_mask = body_mask & ~couch_mask;
+invalid_dose_mask = ~valid_dose_mask;
 
-dose_outside_body_before = sum(total_rs_dose(outside_body_mask));
-num_voxels_outside = sum(outside_body_mask(:));
-fprintf('  Voxels outside body: %d\n', num_voxels_outside);
-fprintf('  Total dose outside body before zeroing: %.4f Gy (sum)\n', dose_outside_body_before);
+% Statistics before zeroing
+dose_outside_body = sum(total_rs_dose(~body_mask));
+dose_in_couch = sum(total_rs_dose(couch_mask));
+dose_to_zero = sum(total_rs_dose(invalid_dose_mask));
 
-% Zero out total dose outside body region
-total_rs_dose(outside_body_mask) = 0;
+num_voxels_outside_body = sum(~body_mask(:));
+num_voxels_in_couch = sum(couch_mask(:));
+num_voxels_zeroed = sum(invalid_dose_mask(:));
 
-fprintf('  Total dose max (after body masking): %.4f Gy\n', max(total_rs_dose(:)));
+fprintf('  Voxels outside body: %d\n', num_voxels_outside_body);
+fprintf('  Voxels in couch: %d\n', num_voxels_in_couch);
+fprintf('  Total voxels to zero (outside body OR in couch): %d\n', num_voxels_zeroed);
+fprintf('  Dose outside body before zeroing: %.4f Gy (sum)\n', dose_outside_body);
+fprintf('  Dose in couch before zeroing: %.4f Gy (sum)\n', dose_in_couch);
+
+% Zero out dose in invalid regions
+total_rs_dose(invalid_dose_mask) = 0;
+
+fprintf('  Total dose max (after masking): %.4f Gy\n', max(total_rs_dose(:)));
 
 % Update metadata
 metadata.total_dose_max_Gy = max(total_rs_dose(:));
 metadata.body_voxels = sum(body_mask(:));
-metadata.voxels_outside_body_zeroed = num_voxels_outside;
-metadata.dose_outside_body_zeroed = dose_outside_body_before;
+metadata.couch_voxels = sum(couch_mask(:));
+metadata.voxels_zeroed = num_voxels_zeroed;
+metadata.dose_outside_body_zeroed = dose_outside_body;
+metadata.dose_in_couch_zeroed = dose_in_couch;
 
-% Also update individual field dose files to zero outside body
-fprintf('  Updating individual field doses to zero outside body region...\n');
+% Also update individual field dose files to zero invalid regions
+fprintf('  Updating individual field doses to zero invalid regions...\n');
 for i = 1:num_files
     if ~isempty(field_doses{i}) && isfield(field_doses{i}, 'filepath')
         try
@@ -446,10 +462,11 @@ for i = 1:num_files
             loaded = load(field_filepath);
             field_dose = loaded.field_dose;
             
-            % Zero out dose outside body
-            field_dose.dose_Gy(outside_body_mask) = 0;
+            % Zero out dose outside body and in couch
+            field_dose.dose_Gy(invalid_dose_mask) = 0;
             field_dose.max_dose_Gy = max(field_dose.dose_Gy(:));
             field_dose.body_masked = true;
+            field_dose.couch_masked = true;
             
             % Re-save
             save(field_filepath, 'field_dose', '-v7.3');
@@ -457,11 +474,12 @@ for i = 1:num_files
             % Update reference
             field_doses{i}.max_dose_Gy = field_dose.max_dose_Gy;
             field_doses{i}.body_masked = true;
+            field_doses{i}.couch_masked = true;
             
             clear field_dose;
         catch ME
-            warning('step15_process_doses:BodyMaskError', ...
-                'Failed to update body mask for field %d: %s', i, ME.message);
+            warning('step15_process_doses:MaskError', ...
+                'Failed to update masks for field %d: %s', i, ME.message);
         end
     end
 end
@@ -482,6 +500,7 @@ sct_resampled.cubeDensity = sct_density;
 sct_resampled.tissueMask = tissue_mask;
 sct_resampled.roiNames = roi_names;
 sct_resampled.bodyMask = body_mask;
+sct_resampled.couchMask = couch_mask;
 sct_resampled.origin = ref_origin;
 sct_resampled.spacing = ref_spacing;
 sct_resampled.dimensions = ref_dims;
@@ -535,7 +554,8 @@ fprintf('  Spacing: [%.3f, %.3f, %.3f] mm\n', ref_spacing(1), ref_spacing(2), re
 fprintf('  Total dose max: %.4f Gy\n', max(total_rs_dose(:)));
 fprintf('  Tissue ROIs: %d\n', length(roi_names));
 fprintf('  Body voxels: %d\n', sum(body_mask(:)));
-fprintf('  Voxels outside body zeroed: %d\n', sum(outside_body_mask(:)));
+fprintf('  Couch voxels: %d\n', sum(couch_mask(:)));
+fprintf('  Voxels zeroed (outside body OR in couch): %d\n', num_voxels_zeroed);
 fprintf('  Output directory: %s\n', processed_dir);
 fprintf('========================================\n\n');
 
@@ -969,14 +989,14 @@ function density = huToDensity(hu)
 end
 
 
-function [tissue_mask, roi_names, roi_masks, body_mask] = loadRtstructAndCreateMasks(...
+function [tissue_mask, roi_names, roi_masks, body_mask, couch_mask] = loadRtstructAndCreateMasks(...
     sct_dir, dose_origin, dose_spacing, dose_dims)
 %LOADRTSTRUCTANDCREATEMASKS Load RTSTRUCT and create tissue classification masks
 %
-%   [tissue_mask, roi_names, roi_masks, body_mask] = loadRtstructAndCreateMasks(...)
+%   [tissue_mask, roi_names, roi_masks, body_mask, couch_mask] = loadRtstructAndCreateMasks(...)
 %
 %   Loads the RTSTRUCT file, extracts all ROI contours, and converts them
-%   to 3D binary masks on the dose grid. Also identifies the body region.
+%   to 3D binary masks on the dose grid. Identifies body and couch regions.
 %
 %   INPUTS:
 %       sct_dir      - Path to directory containing RTSTRUCT
@@ -989,11 +1009,13 @@ function [tissue_mask, roi_names, roi_masks, body_mask] = loadRtstructAndCreateM
 %       roi_names    - Cell array of ROI names (index matches label in tissue_mask)
 %       roi_masks    - Struct with individual ROI binary masks (ROI_001, ROI_002, ...)
 %       body_mask    - 3D logical array (true = inside body region)
+%       couch_mask   - 3D logical array (true = couch region)
 
     tissue_mask = [];
     roi_names = {};
     roi_masks = struct();
     body_mask = false(dose_dims);
+    couch_mask = false(dose_dims);
     
     % Find RTSTRUCT file (RTSTRUCT*.dcm naming convention)
     rs_files = dir(fullfile(sct_dir, 'RTSTRUCT*.dcm'));
@@ -1050,6 +1072,11 @@ function [tissue_mask, roi_names, roi_masks, body_mask] = loadRtstructAndCreateM
     body_patterns = {'body', 'external', 'patient', 'skin', 'outer contour', ...
                      'body contour', 'external contour'};
     
+    % Couch region names to identify (case-insensitive matching)
+    couch_patterns = {'couch exterior', 'couch interior', 'couchexterior', ...
+                      'couchinterior', 'couch_exterior', 'couch_interior', ...
+                      'couch', 'table'};
+    
     % Calculate z-coordinates for each slice in dose grid
     dose_z_coords = dose_origin(3) + (0:dose_dims(3)-1) * dose_spacing(3);
     
@@ -1081,6 +1108,10 @@ function [tissue_mask, roi_names, roi_masks, body_mask] = loadRtstructAndCreateM
             roi_name_lower = lower(roi_name);
             is_body = any(strcmpi(roi_name_lower, body_patterns)) || ...
                       any(contains(roi_name_lower, body_patterns));
+            
+            % Check if this is a couch region (case-insensitive)
+            is_couch = any(strcmpi(roi_name_lower, couch_patterns)) || ...
+                       any(contains(roi_name_lower, couch_patterns));
             
             % Initialize mask for this ROI
             roi_mask = false(dose_dims);
@@ -1151,6 +1182,12 @@ function [tissue_mask, roi_names, roi_masks, body_mask] = loadRtstructAndCreateM
                 fprintf('      -> Identified as BODY region (%d voxels)\n', sum(roi_mask(:)));
             end
             
+            % Add to couch mask if applicable
+            if is_couch
+                couch_mask = couch_mask | roi_mask;
+                fprintf('      -> Identified as COUCH region (%d voxels)\n', sum(roi_mask(:)));
+            end
+            
         catch ME
             warning('loadRtstructAndCreateMasks:ContourError', ...
                 'Error processing contour %d: %s', c_idx, ME.message);
@@ -1169,4 +1206,5 @@ function [tissue_mask, roi_names, roi_masks, body_mask] = loadRtstructAndCreateM
     valid_count = sum(~contains(roi_names, 'NoContour'));
     fprintf('    Tissue mask created with %d labeled ROIs\n', valid_count);
     fprintf('    Body mask: %d voxels\n', sum(body_mask(:)));
+    fprintf('    Couch mask: %d voxels\n', sum(couch_mask(:)));
 end
