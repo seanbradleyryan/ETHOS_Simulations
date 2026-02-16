@@ -15,10 +15,12 @@
 %       Figure 2: Three orthogonal views of tissue/body mask at max dose location
 %       Figure 3: Dose colormap with body contour
 %       Figure 4: Body mask diagnostics (slice coverage, gaps detection)
+%       Figure 5: Side-by-side original field dose vs total RS dose
+%       Figure 6: Gamma analysis (3%/3mm) - gamma map, pass/fail, histogram
 %
 %   AUTHOR: ETHOS Pipeline Team
 %   DATE: February 2026
-%   VERSION: 1.1 (Added streaking diagnostics)
+%   VERSION: 1.2 (Added original dose comparison and gamma analysis)
 
 %% ======================== CONFIGURATION ========================
 
@@ -29,6 +31,14 @@ dose_file = '/mnt/weka/home/80030361/ETHOS_Simulations/RayStationFiles/1194203/S
 
 % Alternative: load a specific field dose
 % dose_file = '/mnt/weka/home/80030361/ETHOS_Simulations/RayStationFiles/1194203/Session_1/processed/field_dose_001.mat';
+
+% Original field dose from ETHOS (DICOM) for gamma comparison
+original_dose_dcm = '/mnt/weka/home/80030361/ETHOS_Simulations/RayStationFiles/1194203/Session_1/processed/original_field_dose.dcm';
+
+% Gamma analysis parameters
+gamma_percent = 3;   % Dose difference criterion (%)
+gamma_dta_mm  = 3;   % Distance-to-agreement criterion (mm)
+gamma_dose_threshold = 10;  % % of max dose below which to exclude from pass rate
 
 %% ======================== LOAD DATA ========================
 
@@ -57,6 +67,44 @@ else
     error('Could not find dose data in file');
 end
 fprintf('  Loaded: %s\n', dose_file);
+
+% Load original field dose from DICOM
+if isfile(original_dose_dcm)
+    fprintf('  Loading original field dose DICOM...\n');
+    orig_info = dicominfo(original_dose_dcm);
+    orig_dose_raw = double(squeeze(dicomread(original_dose_dcm)));
+    
+    % Apply dose grid scaling
+    if isfield(orig_info, 'DoseGridScaling')
+        orig_dose_data = orig_dose_raw * orig_info.DoseGridScaling;
+    else
+        orig_dose_data = orig_dose_raw;
+        warning('No DoseGridScaling found in original DICOM, using raw values');
+    end
+    
+    % Extract geometry
+    orig_origin = orig_info.ImagePositionPatient(:);  % [x, y, z] in mm
+    orig_pixel_spacing = orig_info.PixelSpacing;      % [row, col] spacing
+    if isfield(orig_info, 'GridFrameOffsetVector') && length(orig_info.GridFrameOffsetVector) >= 2
+        orig_dz = abs(orig_info.GridFrameOffsetVector(2) - orig_info.GridFrameOffsetVector(1));
+    elseif isfield(orig_info, 'SliceThickness')
+        orig_dz = orig_info.SliceThickness;
+    else
+        orig_dz = spacing(3);  % Fallback to dose grid spacing
+        warning('Cannot determine Z spacing for original dose, using %.3f mm', orig_dz);
+    end
+    orig_spacing = [orig_pixel_spacing(1); orig_pixel_spacing(2); orig_dz];
+    
+    fprintf('    Dimensions: [%d, %d, %d]\n', size(orig_dose_data, 1), size(orig_dose_data, 2), size(orig_dose_data, 3));
+    fprintf('    Spacing (mm): [%.3f, %.3f, %.3f]\n', orig_spacing(1), orig_spacing(2), orig_spacing(3));
+    fprintf('    Origin (mm): [%.3f, %.3f, %.3f]\n', orig_origin(1), orig_origin(2), orig_origin(3));
+    fprintf('    Max dose: %.4f Gy\n', max(orig_dose_data(:)));
+    
+    has_original_dose = true;
+else
+    warning('Original field dose DICOM not found: %s', original_dose_dcm);
+    has_original_dose = false;
+end
 
 %% ======================== FIND MAX DOSE LOCATION ========================
 
@@ -444,6 +492,214 @@ end
 
 fprintf('\nVisualization complete.\n');
 
+%% ======================== FIGURE 5: ORIGINAL vs TOTAL DOSE COMPARISON ========================
+
+if has_original_dose
+    fprintf('\n--- Original Field Dose vs Total RS Dose Comparison ---\n');
+    
+    % Check if grids match; if not, resample original dose to the RS dose grid
+    rs_dims = size(dose_data);
+    rs_origin = sct_resampled.origin;
+    rs_spacing = sct_resampled.spacing;
+    
+    if isequal(size(orig_dose_data), rs_dims)
+        orig_dose_on_grid = orig_dose_data;
+        fprintf('  Grid dimensions match - no resampling needed.\n');
+    else
+        fprintf('  Grid mismatch - resampling original dose to RS dose grid...\n');
+        orig_dose_on_grid = resampleOrigDoseToGrid(orig_dose_data, orig_origin, orig_spacing, ...
+            rs_origin, rs_spacing, rs_dims);
+        fprintf('  Resampling complete. New dimensions: [%d, %d, %d]\n', size(orig_dose_on_grid));
+    end
+    
+    % Find max dose location on original dose for slice selection
+    [orig_max_dose, orig_max_idx] = max(orig_dose_on_grid(:));
+    [orig_max_row, orig_max_col, orig_max_slice] = ind2sub(size(orig_dose_on_grid), orig_max_idx);
+    
+    % Use the slice of max dose from whichever has higher max
+    if orig_max_dose >= max_dose
+        comp_slice = orig_max_slice;
+        comp_row = orig_max_row;
+        comp_col = orig_max_col;
+    else
+        comp_slice = max_slice;
+        comp_row = max_row;
+        comp_col = max_col;
+    end
+    
+    % Common color scale
+    common_max = max(orig_max_dose, max_dose);
+    
+    % Extract transverse slices for comparison
+    orig_trans = squeeze(orig_dose_on_grid(:, :, comp_slice));
+    rs_trans = squeeze(dose_data(:, :, comp_slice));
+    
+    figure('Name', 'Original Field Dose vs Total RS Dose', ...
+        'Position', [50, 50, 1200, 550], 'Color', 'w');
+    
+    dose_cmap_comp = hot(256);
+    
+    % Subplot 1: Original field dose
+    subplot(1, 2, 1);
+    imagesc(orig_trans);
+    hold on;
+    if ~isempty(mask_data)
+        contour(squeeze(mask_data(:, :, comp_slice)), [0.5 0.5], 'g-', 'LineWidth', 1);
+    end
+    plot(comp_col, comp_row, 'w+', 'MarkerSize', 15, 'LineWidth', 2);
+    hold off;
+    colormap(gca, dose_cmap_comp);
+    cbar = colorbar;
+    ylabel(cbar, 'Dose (Gy)');
+    caxis([0, common_max]);
+    axis equal tight;
+    title(sprintf('Original Field Dose (Max: %.4f Gy)', orig_max_dose), 'FontSize', 12);
+    xlabel('Column (X)');
+    ylabel('Row (Y)');
+    
+    % Subplot 2: Total RS dose
+    subplot(1, 2, 2);
+    imagesc(rs_trans);
+    hold on;
+    if ~isempty(mask_data)
+        contour(squeeze(mask_data(:, :, comp_slice)), [0.5 0.5], 'g-', 'LineWidth', 1);
+    end
+    plot(comp_col, comp_row, 'w+', 'MarkerSize', 15, 'LineWidth', 2);
+    hold off;
+    colormap(gca, dose_cmap_comp);
+    cbar = colorbar;
+    ylabel(cbar, 'Dose (Gy)');
+    caxis([0, common_max]);
+    axis equal tight;
+    title(sprintf('Total RS Dose (Max: %.4f Gy)', max_dose), 'FontSize', 12);
+    xlabel('Column (X)');
+    ylabel('Row (Y)');
+    
+    sgtitle(sprintf('Dose Comparison - Transverse Slice %d (green = body contour)', comp_slice), ...
+        'FontSize', 14, 'FontWeight', 'bold');
+    
+    %% ======================== FIGURE 6: GAMMA ANALYSIS ========================
+    
+    fprintf('\n--- Gamma Analysis: %d%%/%dmm ---\n', gamma_percent, gamma_dta_mm);
+    fprintf('  Reference: Original Field Dose\n');
+    fprintf('  Evaluated: Total RS Dose\n');
+    
+    % Build CalcGamma input structures
+    % Reference = original field dose
+    reference.start = rs_origin(:)';   % [x, y, z] in mm
+    reference.width = rs_spacing(:)';  % [dx, dy, dz] in mm
+    reference.data  = orig_dose_on_grid;
+    
+    % Target = total RS dose
+    target.start = rs_origin(:)';
+    target.width = rs_spacing(:)';
+    target.data  = dose_data;
+    
+    % Run 3D gamma (restrict=1 for speed, global gamma)
+    fprintf('  Computing 3D gamma (this may take a while)...\n');
+    tic;
+    gamma_map = CalcGamma(reference, target, gamma_percent, gamma_dta_mm, ...
+        'local', 0, 'restrict', 1);
+    gamma_time = toc;
+    fprintf('  Gamma computation completed in %.1f seconds.\n', gamma_time);
+    
+    % Calculate pass rate (exclude low-dose region)
+    dose_threshold_Gy = (gamma_dose_threshold / 100) * max(orig_dose_on_grid(:));
+    valid_mask = orig_dose_on_grid >= dose_threshold_Gy;
+    gamma_valid = gamma_map(valid_mask);
+    pass_rate = 100 * sum(gamma_valid <= 1) / numel(gamma_valid);
+    
+    fprintf('\n  === GAMMA RESULTS ===\n');
+    fprintf('  Criteria: %d%%/%dmm (global)\n', gamma_percent, gamma_dta_mm);
+    fprintf('  Dose threshold: %.4f Gy (%d%% of max)\n', dose_threshold_Gy, gamma_dose_threshold);
+    fprintf('  Voxels evaluated: %d / %d\n', sum(valid_mask(:)), numel(valid_mask));
+    fprintf('  Pass rate (gamma <= 1): %.2f%%\n', pass_rate);
+    fprintf('  Mean gamma: %.4f\n', mean(gamma_valid));
+    fprintf('  Max gamma: %.4f\n', max(gamma_valid));
+    fprintf('  Median gamma: %.4f\n', median(gamma_valid));
+    
+    % Extract gamma at comparison slice
+    gamma_trans = squeeze(gamma_map(:, :, comp_slice));
+    
+    figure('Name', 'Gamma Analysis: Original vs Total RS Dose', ...
+        'Position', [100, 50, 1600, 550], 'Color', 'w');
+    
+    % Subplot 1: Gamma map (transverse)
+    subplot(1, 3, 1);
+    imagesc(gamma_trans);
+    hold on;
+    if ~isempty(mask_data)
+        contour(squeeze(mask_data(:, :, comp_slice)), [0.5 0.5], 'k-', 'LineWidth', 1);
+    end
+    hold off;
+    colormap(gca, jet(256));
+    cbar = colorbar;
+    ylabel(cbar, 'Gamma Index');
+    caxis([0, 2]);
+    axis equal tight;
+    title(sprintf('Gamma Map (Slice %d)', comp_slice), 'FontSize', 12);
+    xlabel('Column (X)');
+    ylabel('Row (Y)');
+    
+    % Subplot 2: Pass/fail map (transverse)
+    subplot(1, 3, 2);
+    slice_mask = squeeze(valid_mask(:, :, comp_slice));
+    pass_fail_img = nan(size(gamma_trans));
+    pass_fail_img(slice_mask & gamma_trans <= 1) = 1;   % Pass = green
+    pass_fail_img(slice_mask & gamma_trans > 1)  = 0;   % Fail = red
+    
+    imagesc(pass_fail_img);
+    hold on;
+    if ~isempty(mask_data)
+        contour(squeeze(mask_data(:, :, comp_slice)), [0.5 0.5], 'k-', 'LineWidth', 1);
+    end
+    hold off;
+    
+    % Custom pass/fail colormap: red -> green
+    pf_cmap = [1 0 0; 0 0.8 0];
+    colormap(gca, pf_cmap);
+    caxis([0, 1]);
+    cbar = colorbar;
+    set(cbar, 'Ticks', [0.25, 0.75], 'TickLabels', {'FAIL', 'PASS'});
+    axis equal tight;
+    
+    % Slice pass rate
+    gamma_slice_valid = gamma_trans(slice_mask);
+    slice_pass_rate = 100 * sum(gamma_slice_valid <= 1) / numel(gamma_slice_valid);
+    title(sprintf('Pass/Fail (Slice: %.1f%%)', slice_pass_rate), 'FontSize', 12);
+    xlabel('Column (X)');
+    ylabel('Row (Y)');
+    
+    % Subplot 3: Gamma histogram
+    subplot(1, 3, 3);
+    histogram(gamma_valid, 100, 'FaceColor', [0.3 0.5 0.8], 'EdgeAlpha', 0.3);
+    hold on;
+    xline(1, 'r--', 'LineWidth', 2);
+    hold off;
+    xlabel('Gamma Index');
+    ylabel('Voxel Count');
+    title('Gamma Histogram (Thresholded Volume)', 'FontSize', 12);
+    
+    % Add annotation with stats
+    annotation_text = sprintf('Pass rate: %.2f%%\nMean: %.3f\nMedian: %.3f\nMax: %.3f', ...
+        pass_rate, mean(gamma_valid), median(gamma_valid), max(gamma_valid));
+    text(0.95, 0.95, annotation_text, 'Units', 'normalized', ...
+        'VerticalAlignment', 'top', 'HorizontalAlignment', 'right', ...
+        'FontSize', 10, 'FontName', 'FixedWidth', 'BackgroundColor', 'w', ...
+        'EdgeColor', 'k');
+    grid on;
+    xlim([0, max(2, prctile(gamma_valid, 99))]);
+    
+    sgtitle(sprintf('Gamma Analysis: %d%%/%dmm - Overall Pass Rate: %.2f%%', ...
+        gamma_percent, gamma_dta_mm, pass_rate), ...
+        'FontSize', 14, 'FontWeight', 'bold');
+    
+else
+    fprintf('\nSkipping dose comparison and gamma analysis (no original dose loaded).\n');
+end
+
+fprintf('\nAll visualization and analysis complete.\n');
+
 %% ======================== HELPER FUNCTIONS ========================
 
 function rgb_img = createMaskOverlay(hu_slice, mask_slice)
@@ -469,4 +725,31 @@ function rgb_img = createMaskOverlay(hu_slice, mask_slice)
         channel(mask_slice) = (1 - alpha) * channel(mask_slice) + alpha * mask_color(c);
         rgb_img(:, :, c) = channel;
     end
+end
+
+function resampled = resampleOrigDoseToGrid(orig_data, orig_origin, orig_spacing, ...
+    target_origin, target_spacing, target_dims)
+%RESAMPLEORIGDOSETOGRID Resample original dose to target grid via 3D interpolation
+%
+%   Uses trilinear interpolation to resample the original dose distribution
+%   onto the target (RS dose) grid. Out-of-bounds voxels are set to zero.
+
+    orig_dims = size(orig_data);
+    
+    % Build coordinate vectors for original data grid
+    orig_x = orig_origin(1) + (0:orig_dims(2)-1) * orig_spacing(1);
+    orig_y = orig_origin(2) + (0:orig_dims(1)-1) * orig_spacing(2);
+    orig_z = orig_origin(3) + (0:orig_dims(3)-1) * orig_spacing(3);
+    
+    % Build coordinate vectors for target grid
+    tar_x = target_origin(1) + (0:target_dims(2)-1) * target_spacing(1);
+    tar_y = target_origin(2) + (0:target_dims(1)-1) * target_spacing(2);
+    tar_z = target_origin(3) + (0:target_dims(3)-1) * target_spacing(3);
+    
+    % Create meshgrids for target
+    [TarX, TarY, TarZ] = meshgrid(tar_x, tar_y, tar_z);
+    
+    % Interpolate
+    resampled = interp3(orig_x, orig_y, orig_z, double(orig_data), ...
+        TarX, TarY, TarZ, 'linear', 0);
 end
