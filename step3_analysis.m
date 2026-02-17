@@ -5,46 +5,56 @@ function results = step3_analysis(patient_id, session, config)
 %
 %   PURPOSE:
 %   Quantify agreement between dose distributions using gamma analysis
-%   (3%/3mm criteria) and Structural Similarity Index (SSIM). Performs two
+%   (3%/3mm default) and Structural Similarity Index (SSIM). Performs two
 %   comparisons:
 %     1. ETHOS truth dose vs Raystation recalculation
 %     2. Raystation dose vs Photoacoustic reconstruction
+%   Optionally generates visualization figures for quality review.
 %
 %   INPUTS:
 %       patient_id  - String, patient identifier (e.g., '1194203')
 %       session     - String, session name (e.g., 'Session_1')
 %       config      - Struct with configuration parameters:
-%           .working_dir           - Base directory path
+%           .working_dir           - Base directory path (REQUIRED)
 %           .treatment_site        - Subfolder name (default: 'Pancreas')
+%           .gruneisen_method      - Simulation method subfolder (default: 'threshold_2')
 %           .gamma_dose_pct        - Dose difference % (default: 3.0)
-%           .gamma_dist_mm         - DTA mm (default: 3.0)
-%           .gamma_dose_cutoff_pct - Low-dose cutoff % of max (default: 10.0)
-%           .analysis_plot_results - Enable plotting (default: false)
+%           .gamma_dist_mm         - Distance-to-agreement mm (default: 3.0)
+%           .gamma_dose_cutoff_pct - Low-dose cutoff, % of max (default: 10.0)
+%           .analysis_compute_ssim - Enable SSIM computation (default: true)
+%           .analysis_plot_results - Enable figure generation (default: false)
 %           .analysis_plot_slices  - Slice indices or 'auto' (default: 'auto')
-%           .gruneisen_method      - For simulation directory path
 %
 %   OUTPUTS:
 %       results - Struct containing:
 %           .ethos_vs_rs.gamma     - Gamma analysis struct
-%           .ethos_vs_rs.ssim      - SSIM analysis struct
+%           .ethos_vs_rs.ssim      - SSIM analysis struct (if enabled)
 %           .rs_vs_recon.gamma     - Gamma analysis struct
-%           .rs_vs_recon.ssim      - SSIM analysis struct
+%           .rs_vs_recon.ssim      - SSIM analysis struct (if enabled)
 %           .metadata              - Analysis metadata
 %
 %   FILES CREATED (in AnalysisResults/[PatientID]/[Session]/):
 %       - gamma_ethos_vs_rs.mat
 %       - gamma_rs_vs_recon.mat
-%       - analysis_results.mat (combined)
+%       - analysis_results.mat (combined results)
 %       - figures/ (if analysis_plot_results = true)
 %           - gamma_ethos_vs_rs.png
 %           - gamma_rs_vs_recon.png
 %           - dose_comparison_ethos_rs.png
 %           - dose_comparison_rs_recon.png
 %
+%   PIPELINE INTEGRATION:
+%       This function is called from ethos_master_pipeline.m at Step 3.
+%       It uses the same CONFIG struct and directory conventions as all
+%       other pipeline steps. Helper functions defined here
+%       (load_ethos_truth_dose, resample_dose_to_grid,
+%       compute_gamma_analysis, save_gamma_results) match the stub
+%       signatures in the master pipeline pseudocode.
+%
 %   DEPENDENCIES:
 %       - CalcGamma.m (Mark Geurts gamma calculation)
-%       - load_processed_data.m
-%       - Image Processing Toolbox (for ssim)
+%       - load_processed_data.m (pipeline Step 1.5 loader)
+%       - Image Processing Toolbox (optional, for built-in ssim)
 %
 %   EXAMPLE:
 %       config.working_dir = '/mnt/weka/home/80030361/ETHOS_Simulations';
@@ -58,7 +68,7 @@ function results = step3_analysis(patient_id, session, config)
 %   DATE: February 2026
 %   VERSION: 1.0
 %
-%   See also: CalcGamma, load_processed_data, compute_gamma_analysis, compute_dose_ssim
+%   See also: CalcGamma, load_processed_data, ethos_master_pipeline
 
 %% ======================== INPUT VALIDATION ========================
 
@@ -86,21 +96,24 @@ end
 
 %% ======================== SET DEFAULTS ========================
 
-if ~isfield(config, 'treatment_site'),        config.treatment_site = 'Pancreas'; end
-if ~isfield(config, 'gamma_dose_pct'),         config.gamma_dose_pct = 3.0; end
-if ~isfield(config, 'gamma_dist_mm'),          config.gamma_dist_mm = 3.0; end
-if ~isfield(config, 'gamma_dose_cutoff_pct'),  config.gamma_dose_cutoff_pct = 10.0; end
-if ~isfield(config, 'analysis_plot_results'),   config.analysis_plot_results = false; end
-if ~isfield(config, 'analysis_plot_slices'),    config.analysis_plot_slices = 'auto'; end
+if ~isfield(config, 'treatment_site'),         config.treatment_site = 'Pancreas'; end
 if ~isfield(config, 'gruneisen_method'),        config.gruneisen_method = 'threshold_2'; end
+if ~isfield(config, 'gamma_dose_pct'),          config.gamma_dose_pct = 3.0; end
+if ~isfield(config, 'gamma_dist_mm'),           config.gamma_dist_mm = 3.0; end
+if ~isfield(config, 'gamma_dose_cutoff_pct'),   config.gamma_dose_cutoff_pct = 10.0; end
+if ~isfield(config, 'analysis_compute_ssim'),    config.analysis_compute_ssim = true; end
+if ~isfield(config, 'analysis_plot_results'),    config.analysis_plot_results = false; end
+if ~isfield(config, 'analysis_plot_slices'),     config.analysis_plot_slices = 'auto'; end
 
 %% ======================== PRINT HEADER ========================
 
 fprintf('\n=========================================================\n');
-fprintf('  [STEP 3] Gamma Analysis and SSIM\n');
+fprintf('  [STEP 3] Gamma Analysis, SSIM & Visualization\n');
 fprintf('  Patient: %s | Session: %s\n', patient_id, session);
 fprintf('  Gamma criteria: %.1f%% / %.1f mm (cutoff: %.1f%% of max)\n', ...
     config.gamma_dose_pct, config.gamma_dist_mm, config.gamma_dose_cutoff_pct);
+fprintf('  SSIM: %s | Plotting: %s\n', ...
+    bool2str(config.analysis_compute_ssim), bool2str(config.analysis_plot_results));
 fprintf('=========================================================\n\n');
 
 analysis_timer = tic;
@@ -117,96 +130,99 @@ end
 
 fprintf('  Loading dose distributions...\n');
 
-% --- Load ETHOS truth dose ---
+% --- Load ETHOS truth dose (uses pipeline-matching signature) ---
 fprintf('    Loading ETHOS truth dose...\n');
-[ethos_dose, ethos_info] = load_ethos_truth_dose(patient_id, session, config);
-fprintf('      Size: [%d x %d x %d], Max: %.4f Gy\n', ...
-    size(ethos_dose, 1), size(ethos_dose, 2), size(ethos_dose, 3), max(ethos_dose(:)));
+ethos_truth_dose = load_ethos_truth_dose(patient_id, session, config);
+fprintf('      Size: [%s], Max: %.4f Gy\n', ...
+    num2str(size(ethos_truth_dose), '%d x '), max(ethos_truth_dose(:)));
 
 % --- Load Raystation processed data ---
-fprintf('    Loading Raystation total dose...\n');
-[~, ~, total_rs_dose, metadata] = load_processed_data(patient_id, session, config);
-spacing = metadata.spacing;  % [dx, dy, dz] in mm
-fprintf('      Size: [%d x %d x %d], Max: %.4f Gy\n', ...
-    size(total_rs_dose, 1), size(total_rs_dose, 2), size(total_rs_dose, 3), max(total_rs_dose(:)));
-fprintf('      Spacing: [%.2f, %.2f, %.2f] mm\n', spacing(1), spacing(2), spacing(3));
+fprintf('    Loading Raystation total dose and metadata...\n');
+[~, ~, total_rs_dose, dose_metadata] = load_processed_data(patient_id, session, config);
+fprintf('      Size: [%s], Max: %.4f Gy\n', ...
+    num2str(size(total_rs_dose), '%d x '), max(total_rs_dose(:)));
+fprintf('      Spacing: [%.2f, %.2f, %.2f] mm\n', ...
+    dose_metadata.spacing(1), dose_metadata.spacing(2), dose_metadata.spacing(3));
 
 % --- Load reconstructed dose ---
 fprintf('    Loading reconstructed dose...\n');
 [total_recon, ~] = load_total_reconstruction(patient_id, session, config);
-fprintf('      Size: [%d x %d x %d], Max: %.4f Gy\n', ...
-    size(total_recon, 1), size(total_recon, 2), size(total_recon, 3), max(total_recon(:)));
+fprintf('      Size: [%s], Max: %.4f Gy\n', ...
+    num2str(size(total_recon), '%d x '), max(total_recon(:)));
 
 %% ======================== DIMENSION MATCHING ========================
+% Matches pipeline logic (lines 280-283): resample if sizes differ from RS grid
 
 fprintf('\n  Checking dimension alignment...\n');
 
 rs_size = size(total_rs_dose);
-ethos_size = size(ethos_dose);
-recon_size = size(total_recon);
 
-% Check ETHOS vs RS dimensions
-if ~isequal(ethos_size, rs_size)
+% --- Resample ETHOS if needed (matches pipeline line 280-283) ---
+if ~isequal(size(ethos_truth_dose), rs_size)
     fprintf('    [WARNING] ETHOS dose size %s differs from RS dose size %s\n', ...
-        mat2str(ethos_size), mat2str(rs_size));
-    fprintf('    Resampling ETHOS dose to RS grid...\n');
-    ethos_dose = resample_dose_to_grid(ethos_dose, ethos_info, rs_size, metadata);
-    fprintf('      Resampled ETHOS dose size: %s, Max: %.4f Gy\n', ...
-        mat2str(size(ethos_dose)), max(ethos_dose(:)));
+        mat2str(size(ethos_truth_dose)), mat2str(rs_size));
+    fprintf('    Resampling ETHOS dose to match grid...\n');
+    ethos_truth_dose = resample_dose_to_grid(ethos_truth_dose, rs_size, dose_metadata);
+    fprintf('      Resampled size: %s, Max: %.4f Gy\n', ...
+        mat2str(size(ethos_truth_dose)), max(ethos_truth_dose(:)));
 end
 
-% Check Recon vs RS dimensions
-if ~isequal(recon_size, rs_size)
+% --- Resample reconstructed dose if needed ---
+if ~isequal(size(total_recon), rs_size)
     fprintf('    [WARNING] Recon dose size %s differs from RS dose size %s\n', ...
-        mat2str(recon_size), mat2str(rs_size));
-    fprintf('    Resampling recon dose to RS grid...\n');
-    % Recon should already be on the same grid from step 2, but handle if not
-    total_recon = resample_3d_array(total_recon, rs_size);
-    fprintf('      Resampled recon dose size: %s, Max: %.4f Gy\n', ...
+        mat2str(size(total_recon)), mat2str(rs_size));
+    fprintf('    Resampling recon dose to match grid...\n');
+    total_recon = resample_dose_to_grid(total_recon, rs_size, dose_metadata);
+    fprintf('      Resampled size: %s, Max: %.4f Gy\n', ...
         mat2str(size(total_recon)), max(total_recon(:)));
 end
 
-fprintf('    All distributions aligned to grid: [%d x %d x %d]\n', rs_size(1), rs_size(2), rs_size(3));
+fprintf('    All distributions aligned: [%d x %d x %d]\n', rs_size(1), rs_size(2), rs_size(3));
 
-%% ======================== ANALYSIS 1: ETHOS vs RAYSTATION ========================
+%% ======================== GAMMA 1: ETHOS vs RAYSTATION ========================
 
-fprintf('\n  Computing ETHOS vs Raystation analysis...\n');
+fprintf('\n  Computing gamma: ETHOS vs Raystation...\n');
+gamma_ethos_vs_rs = compute_gamma_analysis(...
+    ethos_truth_dose, total_rs_dose, dose_metadata.spacing, config);
+fprintf('    Pass rate: %.1f%% (%d/%d voxels)\n', ...
+    gamma_ethos_vs_rs.pass_rate, gamma_ethos_vs_rs.num_passed, gamma_ethos_vs_rs.num_evaluated);
+fprintf('    Mean gamma: %.3f, Max gamma: %.3f\n', ...
+    gamma_ethos_vs_rs.mean_gamma, gamma_ethos_vs_rs.max_gamma);
 
-fprintf('    Running gamma analysis...\n');
-results.ethos_vs_rs.gamma = compute_gamma_analysis(ethos_dose, total_rs_dose, spacing, config);
-fprintf('      Pass rate: %.1f%% (%d/%d voxels)\n', ...
-    results.ethos_vs_rs.gamma.pass_rate, ...
-    results.ethos_vs_rs.gamma.num_passed, ...
-    results.ethos_vs_rs.gamma.num_evaluated);
-fprintf('      Mean gamma: %.3f, Max gamma: %.3f\n', ...
-    results.ethos_vs_rs.gamma.mean_gamma, ...
-    results.ethos_vs_rs.gamma.max_gamma);
+results.ethos_vs_rs.gamma = gamma_ethos_vs_rs;
 
-fprintf('    Running SSIM analysis...\n');
-results.ethos_vs_rs.ssim = compute_dose_ssim(ethos_dose, total_rs_dose, config);
-fprintf('      3D SSIM: %.4f\n', results.ethos_vs_rs.ssim.ssim_3d);
-fprintf('      Mean slice SSIM: %.4f\n', results.ethos_vs_rs.ssim.ssim_mean_slice);
+%% ======================== GAMMA 2: RS vs RECONSTRUCTED ========================
 
-%% ======================== ANALYSIS 2: RS vs RECONSTRUCTED ========================
+fprintf('\n  Computing gamma: Raystation vs Reconstructed...\n');
+gamma_rs_vs_recon = compute_gamma_analysis(...
+    total_rs_dose, total_recon, dose_metadata.spacing, config);
+fprintf('    Pass rate: %.1f%% (%d/%d voxels)\n', ...
+    gamma_rs_vs_recon.pass_rate, gamma_rs_vs_recon.num_passed, gamma_rs_vs_recon.num_evaluated);
+fprintf('    Mean gamma: %.3f, Max gamma: %.3f\n', ...
+    gamma_rs_vs_recon.mean_gamma, gamma_rs_vs_recon.max_gamma);
 
-fprintf('\n  Computing Raystation vs Reconstructed analysis...\n');
+results.rs_vs_recon.gamma = gamma_rs_vs_recon;
 
-fprintf('    Running gamma analysis...\n');
-results.rs_vs_recon.gamma = compute_gamma_analysis(total_rs_dose, total_recon, spacing, config);
-fprintf('      Pass rate: %.1f%% (%d/%d voxels)\n', ...
-    results.rs_vs_recon.gamma.pass_rate, ...
-    results.rs_vs_recon.gamma.num_passed, ...
-    results.rs_vs_recon.gamma.num_evaluated);
-fprintf('      Mean gamma: %.3f, Max gamma: %.3f\n', ...
-    results.rs_vs_recon.gamma.mean_gamma, ...
-    results.rs_vs_recon.gamma.max_gamma);
+%% ======================== SSIM (OPTIONAL) ========================
 
-fprintf('    Running SSIM analysis...\n');
-results.rs_vs_recon.ssim = compute_dose_ssim(total_rs_dose, total_recon, config);
-fprintf('      3D SSIM: %.4f\n', results.rs_vs_recon.ssim.ssim_3d);
-fprintf('      Mean slice SSIM: %.4f\n', results.rs_vs_recon.ssim.ssim_mean_slice);
+if config.analysis_compute_ssim
+    fprintf('\n  Computing SSIM...\n');
+    
+    fprintf('    ETHOS vs Raystation...\n');
+    results.ethos_vs_rs.ssim = compute_dose_ssim(ethos_truth_dose, total_rs_dose, config);
+    fprintf('      3D SSIM: %.4f  |  Mean-slice SSIM: %.4f\n', ...
+        results.ethos_vs_rs.ssim.ssim_3d, results.ethos_vs_rs.ssim.ssim_mean_slice);
+    
+    fprintf('    Raystation vs Reconstructed...\n');
+    results.rs_vs_recon.ssim = compute_dose_ssim(total_rs_dose, total_recon, config);
+    fprintf('      3D SSIM: %.4f  |  Mean-slice SSIM: %.4f\n', ...
+        results.rs_vs_recon.ssim.ssim_3d, results.rs_vs_recon.ssim.ssim_mean_slice);
+else
+    results.ethos_vs_rs.ssim = [];
+    results.rs_vs_recon.ssim = [];
+end
 
-%% ======================== OPTIONAL PLOTTING ========================
+%% ======================== PLOTTING (OPTIONAL) ========================
 
 if config.analysis_plot_results
     fprintf('\n  Generating visualization figures...\n');
@@ -214,44 +230,38 @@ if config.analysis_plot_results
     fig_dir = fullfile(analysis_dir, 'figures');
     if ~exist(fig_dir, 'dir'), mkdir(fig_dir); end
     
-    plot_analysis_results(ethos_dose, total_rs_dose, ...
+    plot_analysis_results(ethos_truth_dose, total_rs_dose, ...
         results.ethos_vs_rs.gamma, results.ethos_vs_rs.ssim, ...
-        spacing, 'ETHOS_vs_RS', fig_dir, config);
+        dose_metadata.spacing, 'ETHOS_vs_RS', fig_dir, config);
     
     plot_analysis_results(total_rs_dose, total_recon, ...
         results.rs_vs_recon.gamma, results.rs_vs_recon.ssim, ...
-        spacing, 'RS_vs_Recon', fig_dir, config);
+        dose_metadata.spacing, 'RS_vs_Recon', fig_dir, config);
     
     fprintf('    Figures saved to: %s\n', fig_dir);
 end
 
-%% ======================== STORE METADATA ========================
+%% ======================== SAVE RESULTS ========================
 
+fprintf('\n  Saving results...\n');
+
+% Populate metadata
 results.metadata.patient_id = patient_id;
 results.metadata.session = session;
 results.metadata.timestamp = datetime('now');
 results.metadata.config = config;
-results.metadata.spacing_mm = spacing;
+results.metadata.spacing_mm = dose_metadata.spacing;
 results.metadata.grid_size = rs_size;
-results.metadata.ethos_dose_max_Gy = max(ethos_dose(:));
+results.metadata.ethos_dose_max_Gy = max(ethos_truth_dose(:));
 results.metadata.rs_dose_max_Gy = max(total_rs_dose(:));
 results.metadata.recon_dose_max_Gy = max(total_recon(:));
 
-%% ======================== SAVE RESULTS ========================
+% Save individual gamma files (matches save_gamma_results stub signature)
+save_gamma_results(gamma_ethos_vs_rs, gamma_rs_vs_recon, patient_id, session, config);
 
-fprintf('\n  Saving analysis results...\n');
-
-% Save individual gamma results (for backward compatibility with pipeline spec)
-gamma_ethos_vs_rs = results.ethos_vs_rs.gamma;
-save(fullfile(analysis_dir, 'gamma_ethos_vs_rs.mat'), 'gamma_ethos_vs_rs', '-v7.3');
-fprintf('    Saved: gamma_ethos_vs_rs.mat\n');
-
-gamma_rs_vs_recon = results.rs_vs_recon.gamma;
-save(fullfile(analysis_dir, 'gamma_rs_vs_recon.mat'), 'gamma_rs_vs_recon', '-v7.3');
-fprintf('    Saved: gamma_rs_vs_recon.mat\n');
-
-% Save combined results
-save(fullfile(analysis_dir, 'analysis_results.mat'), 'results', '-v7.3');
+% Save combined results file
+analysis_results = results; %#ok<NASGU>
+save(fullfile(analysis_dir, 'analysis_results.mat'), 'analysis_results', '-v7.3');
 fprintf('    Saved: analysis_results.mat\n');
 
 %% ======================== SUMMARY ========================
@@ -259,70 +269,94 @@ fprintf('    Saved: analysis_results.mat\n');
 elapsed = toc(analysis_timer);
 fprintf('\n=========================================================\n');
 fprintf('  [STEP 3] Analysis Complete (%.1f sec)\n', elapsed);
-fprintf('  ETHOS vs RS:    Gamma pass = %.1f%%  |  SSIM = %.4f\n', ...
-    results.ethos_vs_rs.gamma.pass_rate, results.ethos_vs_rs.ssim.ssim_3d);
-fprintf('  RS vs Recon:    Gamma pass = %.1f%%  |  SSIM = %.4f\n', ...
-    results.rs_vs_recon.gamma.pass_rate, results.rs_vs_recon.ssim.ssim_3d);
-fprintf('  Output directory: %s\n', analysis_dir);
+fprintf('  ETHOS vs RS:    Gamma pass = %.1f%%', gamma_ethos_vs_rs.pass_rate);
+if config.analysis_compute_ssim
+    fprintf('  |  SSIM = %.4f', results.ethos_vs_rs.ssim.ssim_3d);
+end
+fprintf('\n');
+fprintf('  RS vs Recon:    Gamma pass = %.1f%%', gamma_rs_vs_recon.pass_rate);
+if config.analysis_compute_ssim
+    fprintf('  |  SSIM = %.4f', results.rs_vs_recon.ssim.ssim_3d);
+end
+fprintf('\n');
+fprintf('  Output: %s\n', analysis_dir);
 fprintf('=========================================================\n\n');
 
 end
 
 
-%% ======================= HELPER FUNCTIONS ================================
+%% =========================================================================
+%  HELPER FUNCTIONS - Directory / Path Utilities
+%  (Match signatures from ethos_master_pipeline helper functions)
+%  =========================================================================
 
 function analysis_dir = get_analysis_directory(patient_id, session, config)
     % Return path to analysis output directory
     analysis_dir = fullfile(config.working_dir, 'AnalysisResults', patient_id, session);
+    if ~exist(analysis_dir, 'dir')
+        mkdir(analysis_dir);
+    end
+end
+
+function sct_dir = get_sct_directory(patient_id, session, config)
+    % Return path to SCT directory
+    sct_dir = fullfile(config.working_dir, 'EthosExports', patient_id, ...
+        config.treatment_site, session, 'sct');
+end
+
+function sim_dir = get_simulation_directory(patient_id, session, config)
+    % Return path to simulation output directory
+    sim_dir = fullfile(config.working_dir, 'SimulationResults', patient_id, ...
+        session, config.gruneisen_method);
+end
+
+function s = bool2str(val)
+    if val, s = 'enabled'; else, s = 'disabled'; end
 end
 
 
-function [ethos_dose, info] = load_ethos_truth_dose(patient_id, session, config)
-    % Load ETHOS RTDOSE (truth) from sct directory and return dose + DICOM info
-    
-    sct_dir = fullfile(config.working_dir, 'EthosExports', patient_id, ...
-        config.treatment_site, session, 'sct');
-    
+%% =========================================================================
+%  DATA LOADING FUNCTIONS
+%  (Signatures match master pipeline stubs exactly)
+%  =========================================================================
+
+function ethos_dose = load_ethos_truth_dose(patient_id, session, config)
+%% LOAD_ETHOS_TRUTH_DOSE - Load ETHOS RTDOSE (truth) from sct directory
+%
+%   ethos_dose = load_ethos_truth_dose(patient_id, session, config)
+%
+%   Matches master pipeline stub signature (line 498): single output.
+%   Reads the first RD*.dcm in the sct directory and applies DoseGridScaling.
+
+    sct_dir = get_sct_directory(patient_id, session, config);
     rd_files = dir(fullfile(sct_dir, 'RD*.dcm'));
+    
     if isempty(rd_files)
         error('step3_analysis:FileNotFound', ...
             'No RTDOSE file (RD*.dcm) found in: %s', sct_dir);
     end
     
-    % Use first RTDOSE file
     rd_path = fullfile(sct_dir, rd_files(1).name);
-    info = dicominfo(rd_path);
+    dose_info = dicominfo(rd_path);
     ethos_dose = double(squeeze(dicomread(rd_path)));
     
-    % Apply DoseGridScaling to convert to Gy
-    if isfield(info, 'DoseGridScaling')
-        ethos_dose = ethos_dose * info.DoseGridScaling;
+    % Apply DoseGridScaling to convert raw values to Gy
+    if isfield(dose_info, 'DoseGridScaling')
+        ethos_dose = ethos_dose * dose_info.DoseGridScaling;
     end
     
-    % Extract geometry info for potential resampling
-    if isfield(info, 'ImagePositionPatient')
-        info.origin = info.ImagePositionPatient(:)';
-    end
-    if isfield(info, 'PixelSpacing')
-        dx = info.PixelSpacing(1);
-        dy = info.PixelSpacing(2);
-        % Z spacing from GridFrameOffsetVector
-        if isfield(info, 'GridFrameOffsetVector') && length(info.GridFrameOffsetVector) > 1
-            dz = abs(info.GridFrameOffsetVector(2) - info.GridFrameOffsetVector(1));
-        else
-            dz = dx;  % fallback
-        end
-        info.spacing = [dx, dy, dz];
-    end
+    fprintf('      Loaded: %s\n', rd_files(1).name);
 end
 
 
 function [total_recon, recon_metadata] = load_total_reconstruction(patient_id, session, config)
-    % Load total reconstructed dose from simulation results
-    
-    sim_dir = fullfile(config.working_dir, 'SimulationResults', patient_id, ...
-        session, config.gruneisen_method);
-    
+%% LOAD_TOTAL_RECONSTRUCTION - Load total reconstructed dose from Step 2
+%
+%   [total_recon, metadata] = load_total_reconstruction(patient_id, session, config)
+%
+%   Matches master pipeline stub signature (line 490).
+
+    sim_dir = get_simulation_directory(patient_id, session, config);
     recon_file = fullfile(sim_dir, 'total_recon_dose.mat');
     
     if ~isfile(recon_file)
@@ -341,98 +375,102 @@ function [total_recon, recon_metadata] = load_total_reconstruction(patient_id, s
 end
 
 
-function resampled = resample_dose_to_grid(dose, dose_info, target_size, target_metadata)
-    % Resample a dose distribution to match a target grid using trilinear interpolation
-    %
-    % Uses DICOM geometry info from dose_info and target_metadata to build
-    % coordinate grids and interpolate.
-    
+%% =========================================================================
+%  RESAMPLING
+%  (Signature matches master pipeline stub at line 515:
+%   resample_dose_to_grid(dose, target_size, metadata)  — 3 args)
+%  =========================================================================
+
+function resampled_dose = resample_dose_to_grid(dose, target_size, metadata) %#ok<INUSD>
+%% RESAMPLE_DOSE_TO_GRID - Resample a 3D dose array to a target grid size
+%
+%   resampled_dose = resample_dose_to_grid(dose, target_size, metadata)
+%
+%   Uses trilinear interpolation. Matches the master pipeline stub signature.
+%
+%   INPUTS:
+%       dose        - 3D source dose array
+%       target_size - [nx, ny, nz] target dimensions (e.g. from size(total_rs_dose))
+%       metadata    - Struct with .spacing and .dimensions of the target grid
+%                     (available for future coordinate-aware resampling)
+%
+%   OUTPUT:
+%       resampled_dose - 3D array of size target_size
+
     src_size = size(dose);
     
-    % Build source coordinate vectors (mm)
-    if isfield(dose_info, 'origin') && isfield(dose_info, 'spacing')
-        src_origin = dose_info.origin;
-        src_spacing = dose_info.spacing;
-    else
-        % Fallback: assume same origin, scale spacing
-        src_origin = target_metadata.origin;
-        src_spacing = target_metadata.spacing .* (target_size ./ src_size);
+    % If already correct size, no-op
+    if isequal(src_size, target_size)
+        resampled_dose = dose;
+        return;
     end
     
-    src_x = src_origin(1) + (0:src_size(1)-1) * src_spacing(1);
-    src_y = src_origin(2) + (0:src_size(2)-1) * src_spacing(2);
-    src_z = src_origin(3) + (0:src_size(3)-1) * src_spacing(3);
-    
-    % Build target coordinate vectors (mm)
-    tgt_origin = target_metadata.origin;
-    tgt_spacing = target_metadata.spacing;
-    
-    tgt_x = tgt_origin(1) + (0:target_size(1)-1) * tgt_spacing(1);
-    tgt_y = tgt_origin(2) + (0:target_size(2)-1) * tgt_spacing(2);
-    tgt_z = tgt_origin(3) + (0:target_size(3)-1) * tgt_spacing(3);
-    
-    % Create meshgrids
-    [SrcX, SrcY, SrcZ] = ndgrid(src_x, src_y, src_z);
-    [TgtX, TgtY, TgtZ] = ndgrid(tgt_x, tgt_y, tgt_z);
-    
-    % Interpolate
-    F = griddedInterpolant(SrcX, SrcY, SrcZ, double(dose), 'linear', 'none');
-    resampled = F(TgtX, TgtY, TgtZ);
-    
-    % Replace NaN (outside source domain) with 0
-    resampled(isnan(resampled)) = 0;
-end
-
-
-function resampled = resample_3d_array(vol, target_size)
-    % Simple resampling of 3D array to target size using imresize3
-    % Used when coordinate metadata is unavailable
-    
+    % Use imresize3 if available (Image Processing Toolbox R2017a+)
     if exist('imresize3', 'file')
-        resampled = imresize3(double(vol), target_size, 'linear');
+        resampled_dose = imresize3(double(dose), target_size, 'linear');
     else
-        % Manual trilinear interpolation fallback
-        src_size = size(vol);
+        % Manual trilinear interpolation via interp3
+        % interp3 expects (Y, X, Z) ordering for meshgrid convention
         [Xi, Yi, Zi] = ndgrid(...
             linspace(1, src_size(1), target_size(1)), ...
             linspace(1, src_size(2), target_size(2)), ...
             linspace(1, src_size(3), target_size(3)));
-        resampled = interp3(double(vol), Yi, Xi, Zi, 'linear', 0);
+        resampled_dose = interp3(double(dose), Yi, Xi, Zi, 'linear', 0);
     end
+    
+    % Clamp negative values from interpolation
+    resampled_dose(resampled_dose < 0) = 0;
 end
 
 
-%% ======================= CORE ANALYSIS FUNCTIONS =========================
+%% =========================================================================
+%  GAMMA ANALYSIS
+%  (Signature matches master pipeline stub at line 520:
+%   compute_gamma_analysis(reference, evaluated, spacing, config)  — 4 args)
+%  =========================================================================
 
 function gamma = compute_gamma_analysis(reference, evaluated, spacing, config)
-%% COMPUTE_GAMMA_ANALYSIS - Gamma analysis between two 3D dose distributions
+%% COMPUTE_GAMMA_ANALYSIS - Gamma index between two 3D dose distributions
 %
-%   Uses CalcGamma.m (Mark Geurts) with the reference/target struct format.
+%   gamma = compute_gamma_analysis(reference, evaluated, spacing, config)
+%
+%   Wraps CalcGamma.m (Mark Geurts) using the required struct format.
 %   Applies a low-dose cutoff mask to exclude clinically irrelevant voxels.
 %
 %   INPUTS:
-%       reference - 3D dose array (Gy), the ground truth
-%       evaluated - 3D dose array (Gy), same size as reference
+%       reference - 3D reference dose array (Gy)
+%       evaluated - 3D evaluated dose array (Gy), same size as reference
 %       spacing   - [dx, dy, dz] voxel spacing in mm
-%       config    - Config struct with gamma parameters
+%       config    - Config struct with:
+%           .gamma_dose_pct        - Dose difference %
+%           .gamma_dist_mm         - DTA in mm
+%           .gamma_dose_cutoff_pct - Ignore voxels below this % of max
 %
 %   OUTPUT:
-%       gamma - Struct with pass_rate, mean_gamma, max_gamma, gamma_map, etc.
+%       gamma - Struct with fields:
+%           .pass_rate        - % of voxels with gamma <= 1
+%           .mean_gamma       - Mean gamma in evaluated region
+%           .max_gamma        - Maximum gamma value
+%           .gamma_map        - 3D gamma map (NaN where masked)
+%           .num_evaluated    - Number of evaluated voxels
+%           .num_passed       - Number passing (gamma <= 1)
+%           .computation_time_sec - CalcGamma wall time
+%           .parameters       - Struct echoing input criteria
 
-    % Validate inputs
+    % Validate sizes match
     if ~isequal(size(reference), size(evaluated))
         error('compute_gamma_analysis:SizeMismatch', ...
             'Reference size %s does not match evaluated size %s', ...
             mat2str(size(reference)), mat2str(size(evaluated)));
     end
     
-    dose_pct = config.gamma_dose_pct;
-    dist_mm = config.gamma_dist_mm;
+    dose_pct   = config.gamma_dose_pct;
+    dist_mm    = config.gamma_dist_mm;
     cutoff_pct = config.gamma_dose_cutoff_pct;
     
-    % Build low-dose cutoff mask: ignore voxels below cutoff_pct of reference max
-    max_ref_dose = max(reference(:));
-    dose_threshold = max_ref_dose * cutoff_pct / 100;
+    % Low-dose cutoff mask: ignore voxels below cutoff_pct of reference max
+    max_ref_dose    = max(reference(:));
+    dose_threshold  = max_ref_dose * cutoff_pct / 100;
     mask = (reference >= dose_threshold) | (evaluated >= dose_threshold);
     
     fprintf('      Dose threshold: %.4f Gy (%.1f%% of %.4f Gy)\n', ...
@@ -440,20 +478,20 @@ function gamma = compute_gamma_analysis(reference, evaluated, spacing, config)
     fprintf('      Voxels above threshold: %d / %d (%.1f%%)\n', ...
         sum(mask(:)), numel(mask), 100 * sum(mask(:)) / numel(mask));
     
-    % Build CalcGamma input structures
-    % CalcGamma expects: struct with .start, .width, .data
-    grid_size = size(reference);
-    
-    ref_struct.start = [0, 0, 0];  % Relative coordinates are fine
-    ref_struct.width = spacing;    % [dx, dy, dz] in mm
+    % --- Build CalcGamma input structures ---
+    % CalcGamma expects: struct with .start (1xN), .width (1xN), .data (ND)
+    ref_struct.start = [0, 0, 0];   % Both on same grid, use relative coords
+    ref_struct.width = spacing;      % [dx, dy, dz] in mm
     ref_struct.data  = reference;
     
     tar_struct.start = [0, 0, 0];
     tar_struct.width = spacing;
     tar_struct.data  = evaluated;
     
-    % Run CalcGamma (global gamma, restricted search for speed)
-    fprintf('      Running CalcGamma (%.0f%%/%.0fmm, restricted search)...\n', dose_pct, dist_mm);
+    % --- Call CalcGamma ---
+    % Global gamma, restricted 3D search (axes only), res=20, limit=2
+    fprintf('      Running CalcGamma (%.0f%%/%.0fmm, restricted 3D search)...\n', ...
+        dose_pct, dist_mm);
     gamma_timer = tic;
     
     gamma_map_raw = CalcGamma(ref_struct, tar_struct, dose_pct, dist_mm, ...
@@ -462,42 +500,53 @@ function gamma = compute_gamma_analysis(reference, evaluated, spacing, config)
     gamma_elapsed = toc(gamma_timer);
     fprintf('      CalcGamma completed in %.1f sec\n', gamma_elapsed);
     
-    % Apply mask
+    % --- Apply low-dose mask ---
     gamma_map_masked = gamma_map_raw;
     gamma_map_masked(~mask) = NaN;
     
-    % Compute statistics on masked region only
+    % --- Compute statistics on masked region ---
     valid_gammas = gamma_map_masked(mask);
     
-    gamma.gamma_map     = gamma_map_masked;
-    gamma.pass_rate     = 100 * sum(valid_gammas <= 1) / length(valid_gammas);
+    gamma.pass_rate     = 100 * sum(valid_gammas <= 1) / numel(valid_gammas);
     gamma.mean_gamma    = mean(valid_gammas);
     gamma.max_gamma     = max(valid_gammas);
-    gamma.num_evaluated = length(valid_gammas);
+    gamma.gamma_map     = gamma_map_masked;
+    gamma.num_evaluated = numel(valid_gammas);
     gamma.num_passed    = sum(valid_gammas <= 1);
     gamma.computation_time_sec = gamma_elapsed;
     
-    gamma.parameters.dose_pct   = dose_pct;
-    gamma.parameters.dist_mm    = dist_mm;
-    gamma.parameters.cutoff_pct = cutoff_pct;
-    gamma.parameters.dose_threshold_Gy = dose_threshold;
-    gamma.parameters.max_ref_dose_Gy = max_ref_dose;
+    gamma.parameters.dose_pct              = dose_pct;
+    gamma.parameters.dist_mm               = dist_mm;
+    gamma.parameters.cutoff_pct            = cutoff_pct;
+    gamma.parameters.dose_threshold_Gy     = dose_threshold;
+    gamma.parameters.max_ref_dose_Gy       = max_ref_dose;
 end
 
 
-function ssim_results = compute_dose_ssim(reference, evaluated, config)
-%% COMPUTE_DOSE_SSIM - SSIM between two 3D dose distributions
+%% =========================================================================
+%  SSIM COMPUTATION
+%  =========================================================================
+
+function ssim_results = compute_dose_ssim(reference, evaluated, config) %#ok<INUSD>
+%% COMPUTE_DOSE_SSIM - Structural Similarity Index for 3D dose distributions
 %
-%   Computes both an overall 3D SSIM and per-slice (axial) SSIM values.
-%   Normalizes both distributions to a common dynamic range before comparison.
+%   ssim_results = compute_dose_ssim(reference, evaluated, config)
+%
+%   Computes per-slice (axial) SSIM and a dose-weighted 3D aggregate.
+%   Both arrays are normalized to a shared dynamic range before comparison.
 %
 %   INPUTS:
 %       reference - 3D dose array (Gy)
 %       evaluated - 3D dose array (Gy), same size as reference
-%       config    - Config struct (currently unused, reserved for future options)
+%       config    - Config struct (reserved for future options)
 %
 %   OUTPUT:
-%       ssim_results - Struct with ssim_3d, ssim_per_slice, ssim_mean_slice, etc.
+%       ssim_results - Struct with:
+%           .ssim_3d           - Dose-weighted aggregate SSIM
+%           .ssim_per_slice    - Vector of per-axial-slice SSIM
+%           .ssim_mean_slice   - Simple mean of per-slice SSIM
+%           .dynamic_range     - [min, max] used for normalization
+%           .num_slices        - Number of axial slices
 
     if ~isequal(size(reference), size(evaluated))
         error('compute_dose_ssim:SizeMismatch', ...
@@ -505,249 +554,251 @@ function ssim_results = compute_dose_ssim(reference, evaluated, config)
             mat2str(size(reference)), mat2str(size(evaluated)));
     end
     
-    % Determine shared dynamic range for normalization
+    % Shared dynamic range for normalization
     combined_max = max(max(reference(:)), max(evaluated(:)));
     combined_min = min(min(reference(:)), min(evaluated(:)));
     dynamic_range = [combined_min, combined_max];
     
-    % Normalize to [0, 1] for SSIM computation
+    % Normalize to [0, 1]
     if combined_max > combined_min
-        ref_norm = (reference - combined_min) / (combined_max - combined_min);
+        ref_norm  = (reference - combined_min) / (combined_max - combined_min);
         eval_norm = (evaluated - combined_min) / (combined_max - combined_min);
     else
-        ref_norm = zeros(size(reference));
+        ref_norm  = zeros(size(reference));
         eval_norm = zeros(size(evaluated));
     end
     
-    % --- Per-slice SSIM (axial slices = 3rd dimension) ---
+    % Per-slice SSIM (3rd dimension = axial slices)
     num_slices = size(reference, 3);
     ssim_per_slice = zeros(num_slices, 1);
+    has_builtin_ssim = (exist('ssim', 'file') == 2);
     
     for k = 1:num_slices
-        ref_slice = ref_norm(:, :, k);
+        ref_slice  = ref_norm(:, :, k);
         eval_slice = eval_norm(:, :, k);
         
-        % Skip empty slices
+        % Both empty -> perfect match
         if max(ref_slice(:)) < 1e-10 && max(eval_slice(:)) < 1e-10
-            ssim_per_slice(k) = 1.0;  % Both empty = perfect match
+            ssim_per_slice(k) = 1.0;
             continue;
         end
         
-        % Use MATLAB's built-in ssim if available, else manual computation
-        if exist('ssim', 'file')
+        if has_builtin_ssim
             ssim_per_slice(k) = ssim(eval_slice, ref_slice, 'DynamicRange', 1.0);
         else
             ssim_per_slice(k) = compute_ssim_manual(ref_slice, eval_slice);
         end
     end
     
-    ssim_results.ssim_per_slice = ssim_per_slice;
-    ssim_results.ssim_mean_slice = mean(ssim_per_slice);
-    
-    % --- Overall 3D SSIM ---
-    % Computed as mean of per-slice SSIM weighted by slice dose content
+    % Dose-weighted 3D SSIM (weight each slice by its max dose)
     slice_weights = zeros(num_slices, 1);
     for k = 1:num_slices
-        slice_weights(k) = max(max(reference(:,:,k)));
+        slice_weights(k) = max(max(reference(:, :, k)));
     end
-    
     if sum(slice_weights) > 0
-        slice_weights = slice_weights / sum(slice_weights);
-        ssim_results.ssim_3d = sum(ssim_per_slice .* slice_weights);
+        slice_weights_norm = slice_weights / sum(slice_weights);
+        ssim_3d = sum(ssim_per_slice .* slice_weights_norm);
     else
-        ssim_results.ssim_3d = mean(ssim_per_slice);
+        ssim_3d = mean(ssim_per_slice);
     end
     
-    ssim_results.dynamic_range = dynamic_range;
-    ssim_results.num_slices = num_slices;
+    % Pack output
+    ssim_results.ssim_3d         = ssim_3d;
+    ssim_results.ssim_per_slice  = ssim_per_slice;
+    ssim_results.ssim_mean_slice = mean(ssim_per_slice);
+    ssim_results.dynamic_range   = dynamic_range;
+    ssim_results.num_slices      = num_slices;
 end
 
 
 function val = compute_ssim_manual(ref, eval_img)
-    % Manual SSIM computation for a 2D image pair (fallback if Image Processing
-    % Toolbox ssim function is not available)
-    %
-    % Uses standard SSIM formula with default constants:
-    %   C1 = (K1*L)^2, C2 = (K2*L)^2 where K1=0.01, K2=0.03, L=1.0
-    
-    K1 = 0.01; K2 = 0.03; L = 1.0;
+%% COMPUTE_SSIM_MANUAL - Fallback SSIM for a 2D image pair
+%   Standard SSIM with 11x11 Gaussian window, K1=0.01, K2=0.03, L=1.0
+
+    K1 = 0.01;  K2 = 0.03;  L = 1.0;
     C1 = (K1 * L)^2;
     C2 = (K2 * L)^2;
     
-    % Gaussian window (11x11, sigma=1.5)
-    win_size = 11;
-    sigma = 1.5;
+    % Gaussian window
+    win_size = 11; sigma = 1.5;
     [x, y] = meshgrid(-(win_size-1)/2:(win_size-1)/2);
     g = exp(-(x.^2 + y.^2) / (2 * sigma^2));
     g = g / sum(g(:));
     
-    % Local means
-    mu_ref = conv2(ref, g, 'valid');
+    mu_ref  = conv2(ref, g, 'valid');
     mu_eval = conv2(eval_img, g, 'valid');
     
-    mu_ref_sq = mu_ref .^ 2;
-    mu_eval_sq = mu_eval .^ 2;
-    mu_ref_eval = mu_ref .* mu_eval;
+    sigma_ref_sq   = conv2(ref.^2, g, 'valid')         - mu_ref.^2;
+    sigma_eval_sq  = conv2(eval_img.^2, g, 'valid')     - mu_eval.^2;
+    sigma_ref_eval = conv2(ref .* eval_img, g, 'valid')  - mu_ref .* mu_eval;
     
-    % Local variances and covariance
-    sigma_ref_sq = conv2(ref.^2, g, 'valid') - mu_ref_sq;
-    sigma_eval_sq = conv2(eval_img.^2, g, 'valid') - mu_eval_sq;
-    sigma_ref_eval = conv2(ref .* eval_img, g, 'valid') - mu_ref_eval;
+    numerator   = (2 * mu_ref .* mu_eval + C1) .* (2 * sigma_ref_eval + C2);
+    denominator = (mu_ref.^2 + mu_eval.^2 + C1) .* (sigma_ref_sq + sigma_eval_sq + C2);
     
-    % SSIM map
-    numerator = (2 * mu_ref_eval + C1) .* (2 * sigma_ref_eval + C2);
-    denominator = (mu_ref_sq + mu_eval_sq + C1) .* (sigma_ref_sq + sigma_eval_sq + C2);
     ssim_map = numerator ./ denominator;
-    
     val = mean(ssim_map(:));
 end
 
 
-%% ======================= VISUALIZATION FUNCTION ==========================
+%% =========================================================================
+%  SAVE RESULTS
+%  (Signature matches master pipeline stub at line 526:
+%   save_gamma_results(gamma1, gamma2, patient_id, session, config)  — 5 args)
+%  =========================================================================
 
-function plot_analysis_results(reference, evaluated, gamma, ssim_results, spacing, comparison_name, output_dir, config)
-%% PLOT_ANALYSIS_RESULTS - Generate comparison and gamma visualization figures
+function save_gamma_results(gamma_ethos_vs_rs, gamma_rs_vs_recon, patient_id, session, config)
+%% SAVE_GAMMA_RESULTS - Save gamma analysis results to disk
+%
+%   save_gamma_results(gamma_ethos_vs_rs, gamma_rs_vs_recon, patient_id, session, config)
+%
+%   Matches the master pipeline stub signature.
+
+    analysis_dir = get_analysis_directory(patient_id, session, config);
+    
+    save(fullfile(analysis_dir, 'gamma_ethos_vs_rs.mat'), 'gamma_ethos_vs_rs', '-v7.3');
+    fprintf('    Saved: gamma_ethos_vs_rs.mat\n');
+    
+    save(fullfile(analysis_dir, 'gamma_rs_vs_recon.mat'), 'gamma_rs_vs_recon', '-v7.3');
+    fprintf('    Saved: gamma_rs_vs_recon.mat\n');
+end
+
+
+%% =========================================================================
+%  VISUALIZATION
+%  =========================================================================
+
+function plot_analysis_results(reference, evaluated, gamma_result, ssim_result, spacing, comparison_name, output_dir, config) %#ok<INUSD>
+%% PLOT_ANALYSIS_RESULTS - Generate dose comparison and gamma figures
 %
 %   Creates two figures per comparison:
-%     1. Dose comparison: side-by-side axial slices + dose difference
-%     2. Gamma map: axial slices with gamma overlay + histogram
+%     1. Dose comparison: reference, evaluated, and difference side-by-side
+%     2. Gamma map: gamma overlay, pass/fail map, and histogram
 %
 %   INPUTS:
 %       reference       - 3D reference dose (Gy)
 %       evaluated       - 3D evaluated dose (Gy)
-%       gamma           - Gamma result struct from compute_gamma_analysis
-%       ssim_results    - SSIM result struct from compute_dose_ssim
-%       spacing         - [dx, dy, dz] in mm
-%       comparison_name - String for figure titles/filenames (e.g., 'ETHOS_vs_RS')
-%       output_dir      - Directory to save figures
+%       gamma_result    - Struct from compute_gamma_analysis
+%       ssim_result     - Struct from compute_dose_ssim (may be [])
+%       spacing         - [dx, dy, dz] in mm (unused, reserved)
+%       comparison_name - String for titles/filenames (e.g. 'ETHOS_vs_RS')
+%       output_dir      - Directory for saving figures
 %       config          - Config struct
 
-    % Determine which slices to plot
     plot_slices = select_plot_slices(reference, config);
     num_plot = length(plot_slices);
-    
-    % Pretty name for titles
     title_name = strrep(comparison_name, '_', ' ');
     
-    % Common dose colormap range
     dose_max = max(max(reference(:)), max(evaluated(:)));
     dose_clim = [0, dose_max];
     
     % ===== FIGURE 1: Dose Comparison =====
-    fig1 = figure('Position', [100, 100, 400*num_plot, 1000], 'Visible', 'off');
+    fig1 = figure('Position', [100 100 400*num_plot 1000], 'Visible', 'off');
     
     for s = 1:num_plot
         k = plot_slices(s);
-        
-        ref_slice = reference(:, :, k);
+        ref_slice  = reference(:, :, k);
         eval_slice = evaluated(:, :, k);
-        diff_slice = evaluated(:, :, k) - reference(:, :, k);
+        diff_slice = eval_slice - ref_slice;
         
-        % Reference dose
+        % Row 1: Reference
         subplot(3, num_plot, s);
         imagesc(ref_slice, dose_clim);
-        colormap(gca, 'jet');
-        colorbar;
-        title(sprintf('Reference (slice %d)', k));
+        colormap(gca, 'jet'); colorbar;
+        title(sprintf('Reference (z=%d)', k));
         axis image; axis off;
         
-        % Evaluated dose
+        % Row 2: Evaluated
         subplot(3, num_plot, num_plot + s);
         imagesc(eval_slice, dose_clim);
-        colormap(gca, 'jet');
-        colorbar;
-        title(sprintf('Evaluated (slice %d)', k));
+        colormap(gca, 'jet'); colorbar;
+        title(sprintf('Evaluated (z=%d)', k));
         axis image; axis off;
         
-        % Dose difference
+        % Row 3: Difference
         subplot(3, num_plot, 2*num_plot + s);
         diff_lim = max(abs(diff_slice(:)));
         if diff_lim < 1e-10, diff_lim = 1; end
         imagesc(diff_slice, [-diff_lim, diff_lim]);
-        colormap(gca, rdbu_colormap());
-        colorbar;
-        title(sprintf('Difference (slice %d)', k));
+        colormap(gca, rdbu_colormap()); colorbar;
+        title(sprintf('Difference (z=%d)', k));
         axis image; axis off;
     end
     
     sgtitle(sprintf('Dose Comparison: %s', title_name), 'FontSize', 14, 'FontWeight', 'bold');
     
-    % Save
-    dose_fig_path = fullfile(output_dir, sprintf('dose_comparison_%s.png', lower(comparison_name)));
-    exportgraphics(fig1, dose_fig_path, 'Resolution', 150);
+    fig_path = fullfile(output_dir, sprintf('dose_comparison_%s.png', lower(comparison_name)));
+    exportgraphics(fig1, fig_path, 'Resolution', 150);
     close(fig1);
-    fprintf('      Saved: %s\n', dose_fig_path);
+    fprintf('      Saved: %s\n', fig_path);
     
     % ===== FIGURE 2: Gamma Analysis =====
-    fig2 = figure('Position', [100, 100, 400*num_plot + 400, 800], 'Visible', 'off');
+    fig2 = figure('Position', [100 100 400*num_plot+400 800], 'Visible', 'off');
     
-    gamma_map = gamma.gamma_map;
+    gamma_map = gamma_result.gamma_map;
     gamma_clim = [0, 2];
     
     for s = 1:num_plot
         k = plot_slices(s);
-        
         gamma_slice = gamma_map(:, :, k);
-        ref_slice = reference(:, :, k);
         
-        % Gamma map
+        % Row 1: Gamma map
         subplot(2, num_plot + 1, s);
         imagesc(gamma_slice, gamma_clim);
-        colormap(gca, gamma_colormap());
-        colorbar;
-        title(sprintf('Gamma (slice %d)', k));
+        colormap(gca, gamma_colormap()); colorbar;
+        title(sprintf('Gamma (z=%d)', k));
         axis image; axis off;
         
-        % Pass/fail map
+        % Row 2: Pass/fail overlay
         subplot(2, num_plot + 1, num_plot + 1 + s);
         pass_fail = nan(size(gamma_slice));
         valid = ~isnan(gamma_slice);
-        pass_fail(valid & gamma_slice <= 1) = 1;  % Pass
-        pass_fail(valid & gamma_slice > 1) = 0;    % Fail
+        pass_fail(valid & gamma_slice <= 1) = 1;  % Pass = green
+        pass_fail(valid & gamma_slice > 1)  = 0;  % Fail = red
         imagesc(pass_fail, [0, 1]);
-        colormap(gca, [1 0 0; 0 0.7 0]);  % Red=fail, Green=pass
+        colormap(gca, [1 0 0; 0 0.7 0]);
         colorbar('Ticks', [0.25, 0.75], 'TickLabels', {'Fail', 'Pass'});
-        title(sprintf('Pass/Fail (slice %d)', k));
+        title(sprintf('Pass/Fail (z=%d)', k));
         axis image; axis off;
     end
     
-    % Gamma histogram in last column
+    % Histogram in last column
     subplot(2, num_plot + 1, [num_plot + 1, 2*(num_plot + 1)]);
     valid_gammas = gamma_map(~isnan(gamma_map));
     histogram(valid_gammas, 0:0.05:3, 'FaceColor', [0.3 0.5 0.8], ...
         'EdgeColor', 'none', 'FaceAlpha', 0.8);
-    hold on;
-    xline(1, 'r--', 'LineWidth', 2);
-    hold off;
-    xlabel('Gamma Index');
-    ylabel('Voxel Count');
-    title(sprintf('Gamma Histogram\nPass: %.1f%% | Mean: %.2f', ...
-        gamma.pass_rate, gamma.mean_gamma));
-    xlim([0, 3]);
-    grid on;
+    hold on; xline(1, 'r--', 'LineWidth', 2); hold off;
+    xlabel('Gamma Index'); ylabel('Voxel Count');
+    title(sprintf('Pass: %.1f%% | Mean: %.2f', ...
+        gamma_result.pass_rate, gamma_result.mean_gamma));
+    xlim([0, 3]); grid on;
     
-    % Add SSIM info to title
-    sgtitle(sprintf('Gamma Analysis: %s (%.0f%%/%.0fmm) | SSIM: %.4f', ...
-        title_name, gamma.parameters.dose_pct, gamma.parameters.dist_mm, ...
-        ssim_results.ssim_3d), 'FontSize', 14, 'FontWeight', 'bold');
+    % Supertitle with SSIM if available
+    if ~isempty(ssim_result) && isstruct(ssim_result)
+        sgtitle(sprintf('Gamma: %s (%.0f%%/%.0fmm) | SSIM=%.4f', ...
+            title_name, gamma_result.parameters.dose_pct, ...
+            gamma_result.parameters.dist_mm, ssim_result.ssim_3d), ...
+            'FontSize', 14, 'FontWeight', 'bold');
+    else
+        sgtitle(sprintf('Gamma: %s (%.0f%%/%.0fmm)', ...
+            title_name, gamma_result.parameters.dose_pct, ...
+            gamma_result.parameters.dist_mm), ...
+            'FontSize', 14, 'FontWeight', 'bold');
+    end
     
-    % Save
-    gamma_fig_path = fullfile(output_dir, sprintf('gamma_%s.png', lower(comparison_name)));
-    exportgraphics(fig2, gamma_fig_path, 'Resolution', 150);
+    fig_path = fullfile(output_dir, sprintf('gamma_%s.png', lower(comparison_name)));
+    exportgraphics(fig2, fig_path, 'Resolution', 150);
     close(fig2);
-    fprintf('      Saved: %s\n', gamma_fig_path);
+    fprintf('      Saved: %s\n', fig_path);
 end
 
 
 function slices = select_plot_slices(dose, config)
-    % Select representative axial slices for plotting
-    %
+    % Select representative axial slices for plotting.
     % If config.analysis_plot_slices is numeric, use directly.
-    % If 'auto', pick 3 slices: 25th, 50th, 75th percentile of dose-containing slices.
+    % If 'auto', pick 3 slices at 25th/50th/75th percentile of dose-bearing range.
     
     if isfield(config, 'analysis_plot_slices') && isnumeric(config.analysis_plot_slices)
         slices = config.analysis_plot_slices;
-        % Clamp to valid range
         slices = slices(slices >= 1 & slices <= size(dose, 3));
         if isempty(slices)
             slices = round(size(dose, 3) / 2);
@@ -755,65 +806,44 @@ function slices = select_plot_slices(dose, config)
         return;
     end
     
-    % Auto mode: find slices with significant dose
+    % Auto mode
     num_slices = size(dose, 3);
     slice_max = zeros(num_slices, 1);
     for k = 1:num_slices
         slice_max(k) = max(max(dose(:, :, k)));
     end
     
-    dose_threshold = 0.1 * max(slice_max);  % 10% of peak
-    active_slices = find(slice_max >= dose_threshold);
+    active_slices = find(slice_max >= 0.1 * max(slice_max));
     
     if isempty(active_slices)
         slices = round(num_slices / 2);
     elseif length(active_slices) <= 3
         slices = active_slices(:)';
     else
-        % Pick 25th, 50th, 75th percentile of active range
         n = length(active_slices);
-        idx_25 = active_slices(max(1, round(0.25 * n)));
-        idx_50 = active_slices(max(1, round(0.50 * n)));
-        idx_75 = active_slices(max(1, round(0.75 * n)));
-        slices = unique([idx_25, idx_50, idx_75]);
+        slices = unique([...
+            active_slices(max(1, round(0.25 * n))), ...
+            active_slices(max(1, round(0.50 * n))), ...
+            active_slices(max(1, round(0.75 * n)))]);
     end
 end
 
 
 function cmap = rdbu_colormap()
-    % Red-white-blue diverging colormap for dose difference display
-    n = 256;
-    half = n / 2;
-    
-    % Blue to white
-    r1 = linspace(0.1, 1, half)';
-    g1 = linspace(0.2, 1, half)';
-    b1 = linspace(0.7, 1, half)';
-    
-    % White to red
-    r2 = linspace(1, 0.8, half)';
-    g2 = linspace(1, 0.1, half)';
-    b2 = linspace(1, 0.1, half)';
-    
-    cmap = [r1, g1, b1; r2, g2, b2];
+    % Red-white-blue diverging colormap for dose difference
+    n = 256; half = n / 2;
+    r = [linspace(0.1, 1, half)'; linspace(1, 0.8, half)'];
+    g = [linspace(0.2, 1, half)'; linspace(1, 0.1, half)'];
+    b = [linspace(0.7, 1, half)'; linspace(1, 0.1, half)'];
+    cmap = [r, g, b];
 end
 
 
 function cmap = gamma_colormap()
-    % Custom colormap for gamma display: green (pass) -> yellow -> red (fail)
-    n = 256;
-    
-    % Green to yellow (gamma 0 to 1)
-    half = round(n / 2);
-    r1 = linspace(0, 1, half)';
-    g1 = ones(half, 1) * 0.8;
-    b1 = linspace(0.2, 0, half)';
-    
-    % Yellow to red (gamma 1 to 2)
-    remainder = n - half;
-    r2 = ones(remainder, 1);
-    g2 = linspace(0.8, 0, remainder)';
-    b2 = zeros(remainder, 1);
-    
-    cmap = [r1, g1, b1; r2, g2, b2];
+    % Green -> yellow -> red colormap for gamma display
+    n = 256; half = round(n / 2); remainder = n - half;
+    r = [linspace(0, 1, half)';    ones(remainder, 1)];
+    g = [ones(half, 1) * 0.8;     linspace(0.8, 0, remainder)'];
+    b = [linspace(0.2, 0, half)';  zeros(remainder, 1)];
+    cmap = [r, g, b];
 end

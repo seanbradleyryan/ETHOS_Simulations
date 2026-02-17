@@ -48,6 +48,11 @@ CONFIG.gamma_dose_pct = 3.0;             % Dose difference threshold (%)
 CONFIG.gamma_dist_mm = 3.0;              % Distance-to-agreement (mm)
 CONFIG.gamma_dose_cutoff_pct = 10.0;     % Ignore voxels below this % of max
 
+% --- SSIM & Visualization Parameters ---
+CONFIG.analysis_compute_ssim = true;     % Compute SSIM alongside gamma
+CONFIG.analysis_plot_results = false;    % Generate PNG figures
+CONFIG.analysis_plot_slices  = 'auto';   % Slice indices or 'auto' (25/50/75th %ile)
+
 % --- MLC Gap Correction Parameters ---
 CONFIG.mlc_min_gap_mm = 0.5;             % Minimum allowed gap
 CONFIG.mlc_expansion_mm = 0.4;           % Expansion per side
@@ -211,7 +216,7 @@ for p_idx = 1:length(CONFIG.patients)
                     parfor f_idx = 1:num_fields
                         field_idx = valid_field_indices(f_idx);
                         
-                        fprintf('           Field %d (gantry: %.1f°)...\n', ...
+                        fprintf('           Field %d (gantry: %.1fÂ°)...\n', ...
                             field_idx, field_doses{field_idx}.gantry_angle);
                         
                         recon_doses{f_idx} = run_single_field_simulation(...
@@ -237,7 +242,7 @@ for p_idx = 1:length(CONFIG.patients)
                     for f_idx = 1:num_fields
                         field_idx = valid_field_indices(f_idx);
                         
-                        fprintf('           Field %d/%d (gantry: %.1f°)...\n', ...
+                        fprintf('           Field %d/%d (gantry: %.1fÂ°)...\n', ...
                             f_idx, num_fields, field_doses{field_idx}.gantry_angle);
                         
                         recon_dose = run_single_field_simulation(...
@@ -268,41 +273,41 @@ for p_idx = 1:length(CONFIG.patients)
             end
             
             % ============================================================
-            % STEP 3: Gamma Analysis
+            % STEP 3: Gamma Analysis, SSIM & Visualization
             % ============================================================
             if CONFIG.run_step3
-                fprintf('\n[STEP 3] Running gamma analysis...\n');
+                fprintf('\n[STEP 3] Running analysis (gamma + SSIM)...\n');
                 
-                % Load ETHOS truth dose
-                ethos_truth_dose = load_ethos_truth_dose(patient_id, session, CONFIG);
+                % Call step3_analysis — loads all data, computes gamma and
+                % SSIM, optionally generates figures, saves results to disk.
+                % Signature matches: step3_analysis(patient_id, session, config)
+                step3_results = step3_analysis(patient_id, session, CONFIG);
                 
-                % Resample if needed to match dimensions
-                if ~isequal(size(ethos_truth_dose), size(total_rs_dose))
-                    fprintf('         Resampling ETHOS dose to match grid...\n');
-                    ethos_truth_dose = resample_dose_to_grid(...
-                        ethos_truth_dose, size(total_rs_dose), dose_metadata);
+                % Store gamma pass rates in pipeline RESULTS
+                RESULTS.patients.(result_key).gamma_ethos_vs_rs_pass_pct = ...
+                    step3_results.ethos_vs_rs.gamma.pass_rate;
+                RESULTS.patients.(result_key).gamma_rs_vs_recon_pass_pct = ...
+                    step3_results.rs_vs_recon.gamma.pass_rate;
+                
+                % Store SSIM if computed
+                if CONFIG.analysis_compute_ssim && ~isempty(step3_results.ethos_vs_rs.ssim)
+                    RESULTS.patients.(result_key).ssim_ethos_vs_rs = ...
+                        step3_results.ethos_vs_rs.ssim.ssim_3d;
+                    RESULTS.patients.(result_key).ssim_rs_vs_recon = ...
+                        step3_results.rs_vs_recon.ssim.ssim_3d;
                 end
                 
-                % Gamma 1: ETHOS Truth vs Raystation
-                fprintf('         Computing gamma: ETHOS vs Raystation...\n');
-                gamma_ethos_vs_rs = compute_gamma_analysis(...
-                    ethos_truth_dose, total_rs_dose, dose_metadata.spacing, CONFIG);
-                
-                % Gamma 2: Raystation vs Reconstructed
-                fprintf('         Computing gamma: Raystation vs Reconstructed...\n');
-                gamma_rs_vs_recon = compute_gamma_analysis(...
-                    total_rs_dose, total_recon, dose_metadata.spacing, CONFIG);
-                
-                % Save gamma results
-                save_gamma_results(gamma_ethos_vs_rs, gamma_rs_vs_recon, ...
-                    patient_id, session, CONFIG);
-                
-                RESULTS.patients.(result_key).gamma_ethos_vs_rs_pass_pct = gamma_ethos_vs_rs.pass_rate;
-                RESULTS.patients.(result_key).gamma_rs_vs_recon_pass_pct = gamma_rs_vs_recon.pass_rate;
-                
                 fprintf('[STEP 3] Complete.\n');
-                fprintf('         ETHOS vs RS gamma pass rate: %.1f%%\n', gamma_ethos_vs_rs.pass_rate);
-                fprintf('         RS vs Recon gamma pass rate: %.1f%%\n', gamma_rs_vs_recon.pass_rate);
+                fprintf('         ETHOS vs RS gamma pass rate: %.1f%%\n', ...
+                    step3_results.ethos_vs_rs.gamma.pass_rate);
+                fprintf('         RS vs Recon gamma pass rate: %.1f%%\n', ...
+                    step3_results.rs_vs_recon.gamma.pass_rate);
+                if CONFIG.analysis_compute_ssim && ~isempty(step3_results.ethos_vs_rs.ssim)
+                    fprintf('         ETHOS vs RS SSIM: %.4f\n', ...
+                        step3_results.ethos_vs_rs.ssim.ssim_3d);
+                    fprintf('         RS vs Recon SSIM: %.4f\n', ...
+                        step3_results.rs_vs_recon.ssim.ssim_3d);
+                end
             end
             
             % Mark patient/session as complete
@@ -464,6 +469,12 @@ function generate_pipeline_summary(results)
             if isfield(p, 'gamma_rs_vs_recon_pass_pct')
                 fprintf('  Gamma (RS vs Recon): %.1f%%\n', p.gamma_rs_vs_recon_pass_pct);
             end
+            if isfield(p, 'ssim_ethos_vs_rs')
+                fprintf('  SSIM  (ETHOS vs RS): %.4f\n', p.ssim_ethos_vs_rs);
+            end
+            if isfield(p, 'ssim_rs_vs_recon')
+                fprintf('  SSIM  (RS vs Recon): %.4f\n', p.ssim_rs_vs_recon);
+            end
         elseif strcmp(p.status, 'error')
             fprintf('  Error: %s\n', p.error.message);
         end
@@ -472,7 +483,9 @@ end
 
 
 %% ========================= STUB FUNCTIONS (TO BE IMPLEMENTED) ============
-% These functions are placeholders - implement in separate script files
+% Step 2 functions: save/load reconstruction results
+% Step 3 functions: now implemented in step3_analysis.m (called externally)
+%   The local versions below are kept for reference and standalone use.
 
 function save_field_reconstruction(recon_dose, field_idx, patient_id, session, config)
     % Save individual field reconstruction
@@ -512,20 +525,73 @@ function ethos_dose = load_ethos_truth_dose(patient_id, session, config)
     end
 end
 
-function resampled_dose = resample_dose_to_grid(dose, target_size, metadata)
-    % Resample dose array to target grid size
-    error('Implement resample_dose_to_grid');
+function resampled_dose = resample_dose_to_grid(dose, target_size, metadata) %#ok<INUSD>
+    % Resample dose array to target grid size using trilinear interpolation.
+    % metadata is available for future coordinate-aware resampling.
+    src_size = size(dose);
+    if isequal(src_size, target_size)
+        resampled_dose = dose;
+        return;
+    end
+    if exist('imresize3', 'file')
+        resampled_dose = imresize3(double(dose), target_size, 'linear');
+    else
+        [Xi, Yi, Zi] = ndgrid(...
+            linspace(1, src_size(1), target_size(1)), ...
+            linspace(1, src_size(2), target_size(2)), ...
+            linspace(1, src_size(3), target_size(3)));
+        resampled_dose = interp3(double(dose), Yi, Xi, Zi, 'linear', 0);
+    end
+    resampled_dose(resampled_dose < 0) = 0;
 end
 
 function gamma = compute_gamma_analysis(reference, evaluated, spacing, config)
-    % Compute gamma analysis between two dose distributions
-    % Uses CalcGamma.m or equivalent
-    error('Implement compute_gamma_analysis');
+    % Compute gamma analysis between two dose distributions using CalcGamma.m
+    %
+    % Returns struct with: pass_rate, mean_gamma, max_gamma, gamma_map,
+    %   num_evaluated, num_passed, computation_time_sec, parameters
+    
+    dose_pct   = config.gamma_dose_pct;
+    dist_mm    = config.gamma_dist_mm;
+    cutoff_pct = config.gamma_dose_cutoff_pct;
+    
+    % Low-dose cutoff mask
+    max_ref = max(reference(:));
+    threshold = max_ref * cutoff_pct / 100;
+    mask = (reference >= threshold) | (evaluated >= threshold);
+    
+    % Build CalcGamma structs
+    ref_s.start = [0, 0, 0];
+    ref_s.width = spacing;
+    ref_s.data  = reference;
+    tar_s.start = [0, 0, 0];
+    tar_s.width = spacing;
+    tar_s.data  = evaluated;
+    
+    t = tic;
+    gamma_raw = CalcGamma(ref_s, tar_s, dose_pct, dist_mm, ...
+        'local', 0, 'restrict', 1, 'res', 20, 'limit', 2);
+    elapsed = toc(t);
+    
+    gamma_raw(~mask) = NaN;
+    valid = gamma_raw(mask);
+    
+    gamma.pass_rate     = 100 * sum(valid <= 1) / numel(valid);
+    gamma.mean_gamma    = mean(valid);
+    gamma.max_gamma     = max(valid);
+    gamma.gamma_map     = gamma_raw;
+    gamma.num_evaluated = numel(valid);
+    gamma.num_passed    = sum(valid <= 1);
+    gamma.computation_time_sec = elapsed;
+    gamma.parameters.dose_pct   = dose_pct;
+    gamma.parameters.dist_mm    = dist_mm;
+    gamma.parameters.cutoff_pct = cutoff_pct;
+    gamma.parameters.dose_threshold_Gy = threshold;
+    gamma.parameters.max_ref_dose_Gy   = max_ref;
 end
 
 function save_gamma_results(gamma_ethos_vs_rs, gamma_rs_vs_recon, patient_id, session, config)
     % Save gamma analysis results
-    
     analysis_dir = get_analysis_directory(patient_id, session, config);
     save(fullfile(analysis_dir, 'gamma_ethos_vs_rs.mat'), 'gamma_ethos_vs_rs', '-v7.3');
     save(fullfile(analysis_dir, 'gamma_rs_vs_recon.mat'), 'gamma_rs_vs_recon', '-v7.3');
