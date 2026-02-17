@@ -326,14 +326,14 @@ function ethos_dose = load_ethos_truth_dose(patient_id, session, config)
 %   ethos_dose = load_ethos_truth_dose(patient_id, session, config)
 %
 %   Matches master pipeline stub signature (line 498): single output.
-%   Reads the first RD*.dcm in the sct directory and applies DoseGridScaling.
+%   Reads the first RTDOSE*.dcm in the sct directory and applies DoseGridScaling.
 
     sct_dir = get_sct_directory(patient_id, session, config);
-    rd_files = dir(fullfile(sct_dir, 'RD*.dcm'));
+    rd_files = dir(fullfile(sct_dir, 'RTDOSE*.dcm'));
     
     if isempty(rd_files)
         error('step3_analysis:FileNotFound', ...
-            'No RTDOSE file (RD*.dcm) found in: %s', sct_dir);
+            'No RTDOSE file (RTDOSE*.dcm) found in: %s', sct_dir);
     end
     
     rd_path = fullfile(sct_dir, rd_files(1).name);

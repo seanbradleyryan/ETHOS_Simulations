@@ -482,10 +482,10 @@ function generate_pipeline_summary(results)
 end
 
 
-%% ========================= STUB FUNCTIONS (TO BE IMPLEMENTED) ============
-% Step 2 functions: save/load reconstruction results
-% Step 3 functions: now implemented in step3_analysis.m (called externally)
-%   The local versions below are kept for reference and standalone use.
+%% ========================= STEP 2 HELPER FUNCTIONS =======================
+% These functions support Step 2 (k-Wave simulation) and are called
+% directly from the pipeline script. Step 3 functions are implemented
+% in step3_analysis.m and called via step3_analysis(patient_id, session, CONFIG).
 
 function save_field_reconstruction(recon_dose, field_idx, patient_id, session, config)
     % Save individual field reconstruction
@@ -506,93 +506,4 @@ function [total_recon, metadata] = load_total_reconstruction(patient_id, session
     data = load(fullfile(sim_dir, 'total_recon_dose.mat'));
     total_recon = data.total_recon;
     metadata = data.metadata;
-end
-
-function ethos_dose = load_ethos_truth_dose(patient_id, session, config)
-    % Load ETHOS RTDOSE (truth) from sct directory
-    sct_dir = get_sct_directory(patient_id, session, config);
-    rd_files = dir(fullfile(sct_dir, 'RD*.dcm'));
-    
-    if isempty(rd_files)
-        error('No RTDOSE file found in %s', sct_dir);
-    end
-    
-    dose_info = dicominfo(fullfile(sct_dir, rd_files(1).name));
-    ethos_dose = double(squeeze(dicomread(fullfile(sct_dir, rd_files(1).name))));
-    
-    if isfield(dose_info, 'DoseGridScaling')
-        ethos_dose = ethos_dose * dose_info.DoseGridScaling;
-    end
-end
-
-function resampled_dose = resample_dose_to_grid(dose, target_size, metadata) %#ok<INUSD>
-    % Resample dose array to target grid size using trilinear interpolation.
-    % metadata is available for future coordinate-aware resampling.
-    src_size = size(dose);
-    if isequal(src_size, target_size)
-        resampled_dose = dose;
-        return;
-    end
-    if exist('imresize3', 'file')
-        resampled_dose = imresize3(double(dose), target_size, 'linear');
-    else
-        [Xi, Yi, Zi] = ndgrid(...
-            linspace(1, src_size(1), target_size(1)), ...
-            linspace(1, src_size(2), target_size(2)), ...
-            linspace(1, src_size(3), target_size(3)));
-        resampled_dose = interp3(double(dose), Yi, Xi, Zi, 'linear', 0);
-    end
-    resampled_dose(resampled_dose < 0) = 0;
-end
-
-function gamma = compute_gamma_analysis(reference, evaluated, spacing, config)
-    % Compute gamma analysis between two dose distributions using CalcGamma.m
-    %
-    % Returns struct with: pass_rate, mean_gamma, max_gamma, gamma_map,
-    %   num_evaluated, num_passed, computation_time_sec, parameters
-    
-    dose_pct   = config.gamma_dose_pct;
-    dist_mm    = config.gamma_dist_mm;
-    cutoff_pct = config.gamma_dose_cutoff_pct;
-    
-    % Low-dose cutoff mask
-    max_ref = max(reference(:));
-    threshold = max_ref * cutoff_pct / 100;
-    mask = (reference >= threshold) | (evaluated >= threshold);
-    
-    % Build CalcGamma structs
-    ref_s.start = [0, 0, 0];
-    ref_s.width = spacing;
-    ref_s.data  = reference;
-    tar_s.start = [0, 0, 0];
-    tar_s.width = spacing;
-    tar_s.data  = evaluated;
-    
-    t = tic;
-    gamma_raw = CalcGamma(ref_s, tar_s, dose_pct, dist_mm, ...
-        'local', 0, 'restrict', 1, 'res', 20, 'limit', 2);
-    elapsed = toc(t);
-    
-    gamma_raw(~mask) = NaN;
-    valid = gamma_raw(mask);
-    
-    gamma.pass_rate     = 100 * sum(valid <= 1) / numel(valid);
-    gamma.mean_gamma    = mean(valid);
-    gamma.max_gamma     = max(valid);
-    gamma.gamma_map     = gamma_raw;
-    gamma.num_evaluated = numel(valid);
-    gamma.num_passed    = sum(valid <= 1);
-    gamma.computation_time_sec = elapsed;
-    gamma.parameters.dose_pct   = dose_pct;
-    gamma.parameters.dist_mm    = dist_mm;
-    gamma.parameters.cutoff_pct = cutoff_pct;
-    gamma.parameters.dose_threshold_Gy = threshold;
-    gamma.parameters.max_ref_dose_Gy   = max_ref;
-end
-
-function save_gamma_results(gamma_ethos_vs_rs, gamma_rs_vs_recon, patient_id, session, config)
-    % Save gamma analysis results
-    analysis_dir = get_analysis_directory(patient_id, session, config);
-    save(fullfile(analysis_dir, 'gamma_ethos_vs_rs.mat'), 'gamma_ethos_vs_rs', '-v7.3');
-    save(fullfile(analysis_dir, 'gamma_rs_vs_recon.mat'), 'gamma_rs_vs_recon', '-v7.3');
 end
