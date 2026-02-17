@@ -13,8 +13,10 @@ function [field_doses, sct_resampled, total_rs_dose, metadata] = step15_process_
 %       patient_id  - String, patient identifier (e.g., '1194203')
 %       session     - String, session name (e.g., 'Session_1')
 %       config      - Struct with configuration parameters:
-%           .working_dir    - Base directory path
-%           .treatment_site - Subfolder name (default: 'Pancreas')
+%           .working_dir        - Base directory path
+%           .treatment_site     - Subfolder name (default: 'Pancreas')
+%           .apply_dose_masking - Boolean, zero dose outside body/in couch
+%                                 (default: true, set false for debugging)
 %
 %   OUTPUTS:
 %       field_doses     - Cell array of field dose structures (loaded from files)
@@ -64,7 +66,8 @@ function [field_doses, sct_resampled, total_rs_dose, metadata] = step15_process_
 %   - Z-resolution MUST come from GridFrameOffsetVector, NOT PixelSpacing
 %   - Use squeeze() to remove singleton dimensions in dose arrays
 %   - Standard HU to density: ρ = 1000 + HU (approximate)
-%   - Dose zeroed where: outside body OR inside couch
+%   - Dose zeroed where: outside body OR inside couch (unless disabled)
+%   - Set config.apply_dose_masking = false to skip dose zeroing (debugging)
 %   - Raystation files: Beam[n]_Seg[m]_Field [o].dcm pattern
 %   - RTPLAN files: RTPLAN*.dcm pattern
 %   - RTSTRUCT files: RTSTRUCT*.dcm pattern
@@ -73,6 +76,7 @@ function [field_doses, sct_resampled, total_rs_dose, metadata] = step15_process_
 %   EXAMPLE:
 %       config.working_dir = '/mnt/weka/home/80030361/ETHOS_Simulations';
 %       config.treatment_site = 'Pancreas';
+%       config.apply_dose_masking = true;  % Set false to disable dose zeroing (debugging)
 %       [field_doses, sct, total_dose, meta] = step15_process_doses('1194203', 'Session_1', config);
 %
 %   DEPENDENCIES:
@@ -116,6 +120,15 @@ end
 if ~isfield(config, 'treatment_site') || isempty(config.treatment_site)
     config.treatment_site = 'Pancreas';
     fprintf('  [INFO] Using default treatment_site: %s\n', config.treatment_site);
+end
+
+% Set default for dose masking (for debugging, can disable zeroing outside body/couch)
+if ~isfield(config, 'apply_dose_masking')
+    config.apply_dose_masking = true;  % Default: apply masking
+    config-apply_dose_masking = false; 
+end
+if ~config.apply_dose_masking
+    fprintf('  [INFO] Dose masking DISABLED (debugging mode)\n');
 end
 
 %% ======================== CONSTRUCT PATHS ========================
@@ -419,71 +432,92 @@ fprintf('  Saved: tissue_masks.mat\n');
 
 %% ======================== ZERO OUT DOSE OUTSIDE BODY AND IN COUCH ========================
 
-fprintf('\n[7/8] Zeroing out dose outside body and in couch regions...\n');
-
-% Create mask for valid dose region: inside body AND not in couch
-valid_dose_mask = body_mask & ~couch_mask;
-invalid_dose_mask = ~valid_dose_mask;
-
-% Statistics before zeroing
-dose_outside_body = sum(total_rs_dose(~body_mask));
-dose_in_couch = sum(total_rs_dose(couch_mask));
-dose_to_zero = sum(total_rs_dose(invalid_dose_mask));
-
-num_voxels_outside_body = sum(~body_mask(:));
-num_voxels_in_couch = sum(couch_mask(:));
-num_voxels_zeroed = sum(invalid_dose_mask(:));
-
-fprintf('  Voxels outside body: %d\n', num_voxels_outside_body);
-fprintf('  Voxels in couch: %d\n', num_voxels_in_couch);
-fprintf('  Total voxels to zero (outside body OR in couch): %d\n', num_voxels_zeroed);
-fprintf('  Dose outside body before zeroing: %.4f Gy (sum)\n', dose_outside_body);
-fprintf('  Dose in couch before zeroing: %.4f Gy (sum)\n', dose_in_couch);
-
-% Zero out dose in invalid regions
-total_rs_dose(invalid_dose_mask) = 0;
-
-fprintf('  Total dose max (after masking): %.4f Gy\n', max(total_rs_dose(:)));
-
-% Update metadata
-metadata.total_dose_max_Gy = max(total_rs_dose(:));
-metadata.body_voxels = sum(body_mask(:));
-metadata.couch_voxels = sum(couch_mask(:));
-metadata.voxels_zeroed = num_voxels_zeroed;
-metadata.dose_outside_body_zeroed = dose_outside_body;
-metadata.dose_in_couch_zeroed = dose_in_couch;
-
-% Also update individual field dose files to zero invalid regions
-fprintf('  Updating individual field doses to zero invalid regions...\n');
-for i = 1:num_files
-    if ~isempty(field_doses{i}) && isfield(field_doses{i}, 'filepath')
-        try
-            field_filepath = field_doses{i}.filepath;
-            loaded = load(field_filepath);
-            field_dose = loaded.field_dose;
-            
-            % Zero out dose outside body and in couch
-            field_dose.dose_Gy(invalid_dose_mask) = 0;
-            field_dose.max_dose_Gy = max(field_dose.dose_Gy(:));
-            field_dose.body_masked = true;
-            field_dose.couch_masked = true;
-            
-            % Re-save
-            save(field_filepath, 'field_dose', '-v7.3');
-            
-            % Update reference
-            field_doses{i}.max_dose_Gy = field_dose.max_dose_Gy;
-            field_doses{i}.body_masked = true;
-            field_doses{i}.couch_masked = true;
-            
-            clear field_dose;
-        catch ME
-            warning('step15_process_doses:MaskError', ...
-                'Failed to update masks for field %d: %s', i, ME.message);
+if config.apply_dose_masking
+    fprintf('\n[7/8] Zeroing out dose outside body and in couch regions...\n');
+    
+    % Create mask for valid dose region: inside body AND not in couch
+    valid_dose_mask = body_mask & ~couch_mask;
+    invalid_dose_mask = ~valid_dose_mask;
+    
+    % Statistics before zeroing
+    dose_outside_body = sum(total_rs_dose(~body_mask));
+    dose_in_couch = sum(total_rs_dose(couch_mask));
+    dose_to_zero = sum(total_rs_dose(invalid_dose_mask));
+    
+    num_voxels_outside_body = sum(~body_mask(:));
+    num_voxels_in_couch = sum(couch_mask(:));
+    num_voxels_zeroed = sum(invalid_dose_mask(:));
+    
+    fprintf('  Voxels outside body: %d\n', num_voxels_outside_body);
+    fprintf('  Voxels in couch: %d\n', num_voxels_in_couch);
+    fprintf('  Total voxels to zero (outside body OR in couch): %d\n', num_voxels_zeroed);
+    fprintf('  Dose outside body before zeroing: %.4f Gy (sum)\n', dose_outside_body);
+    fprintf('  Dose in couch before zeroing: %.4f Gy (sum)\n', dose_in_couch);
+    
+    % Zero out dose in invalid regions
+    total_rs_dose(invalid_dose_mask) = 0;
+    
+    fprintf('  Total dose max (after masking): %.4f Gy\n', max(total_rs_dose(:)));
+    
+    % Update metadata
+    metadata.total_dose_max_Gy = max(total_rs_dose(:));
+    metadata.body_voxels = sum(body_mask(:));
+    metadata.couch_voxels = sum(couch_mask(:));
+    metadata.voxels_zeroed = num_voxels_zeroed;
+    metadata.dose_outside_body_zeroed = dose_outside_body;
+    metadata.dose_in_couch_zeroed = dose_in_couch;
+    metadata.dose_masking_applied = true;
+    
+    % Also update individual field dose files to zero invalid regions
+    fprintf('  Updating individual field doses to zero invalid regions...\n');
+    for i = 1:num_files
+        if ~isempty(field_doses{i}) && isfield(field_doses{i}, 'filepath')
+            try
+                field_filepath = field_doses{i}.filepath;
+                loaded = load(field_filepath);
+                field_dose = loaded.field_dose;
+                
+                % Zero out dose outside body and in couch
+                field_dose.dose_Gy(invalid_dose_mask) = 0;
+                field_dose.max_dose_Gy = max(field_dose.dose_Gy(:));
+                field_dose.body_masked = true;
+                field_dose.couch_masked = true;
+                
+                % Re-save
+                save(field_filepath, 'field_dose', '-v7.3');
+                
+                % Update reference
+                field_doses{i}.max_dose_Gy = field_dose.max_dose_Gy;
+                field_doses{i}.body_masked = true;
+                field_doses{i}.couch_masked = true;
+                
+                clear field_dose;
+            catch ME
+                warning('step15_process_doses:MaskError', ...
+                    'Failed to update masks for field %d: %s', i, ME.message);
+            end
         end
     end
+    fprintf('  Updated %d field dose files\n', num_files);
+    
+else
+    % Dose masking disabled (debugging mode)
+    fprintf('\n[7/8] Dose masking SKIPPED (config.apply_dose_masking = false)\n');
+    
+    % Still compute statistics for reference
+    num_voxels_zeroed = 0;
+    metadata.total_dose_max_Gy = max(total_rs_dose(:));
+    metadata.body_voxels = sum(body_mask(:));
+    metadata.couch_voxels = sum(couch_mask(:));
+    metadata.voxels_zeroed = 0;
+    metadata.dose_outside_body_zeroed = 0;
+    metadata.dose_in_couch_zeroed = 0;
+    metadata.dose_masking_applied = false;
+    
+    fprintf('  Total dose max (unmasked): %.4f Gy\n', max(total_rs_dose(:)));
+    fprintf('  Body voxels: %d\n', sum(body_mask(:)));
+    fprintf('  Couch voxels: %d\n', sum(couch_mask(:)));
 end
-fprintf('  Updated %d field dose files\n', num_files);
 
 %% ======================== SAVE TOTAL DOSE ========================
 
@@ -555,7 +589,11 @@ fprintf('  Total dose max: %.4f Gy\n', max(total_rs_dose(:)));
 fprintf('  Tissue ROIs: %d\n', length(roi_names));
 fprintf('  Body voxels: %d\n', sum(body_mask(:)));
 fprintf('  Couch voxels: %d\n', sum(couch_mask(:)));
-fprintf('  Voxels zeroed (outside body OR in couch): %d\n', num_voxels_zeroed);
+if config.apply_dose_masking
+    fprintf('  Dose masking: ENABLED (voxels zeroed: %d)\n', num_voxels_zeroed);
+else
+    fprintf('  Dose masking: DISABLED (debugging mode)\n');
+end
 fprintf('  Output directory: %s\n', processed_dir);
 fprintf('========================================\n\n');
 
