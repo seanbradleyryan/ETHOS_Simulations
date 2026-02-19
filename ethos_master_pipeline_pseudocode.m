@@ -43,6 +43,14 @@ CONFIG.cfl_number = 0.3;                 % CFL stability criterion
 CONFIG.use_gpu = true;                   % GPU acceleration
 CONFIG.num_time_reversal_iter = 1;       % Time reversal iterations
 
+% --- Sensor Placement Parameters ---
+CONFIG.sensor_size_cm       = [10, 10];  % Physical sensor [X, Z] in cm
+CONFIG.sensor_standoff_mm   = 5;         % Gap between body surface and sensor (mm)
+CONFIG.element_size_mm      = [];        % Element patch size for averaging (mm)
+                                         % Empty = no averaging; set to sweep parametrically
+CONFIG.jaw_margin_mm        = 10;        % Extra margin around jaw projection (mm)
+CONFIG.sensor_placement     = 'anterior'; % Placement side
+
 % --- Gamma Analysis Parameters ---
 CONFIG.gamma_dose_pct = 3.0;             % Dose difference threshold (%)
 CONFIG.gamma_dist_mm = 3.0;              % Distance-to-agreement (mm)
@@ -187,6 +195,17 @@ for p_idx = 1:length(CONFIG.patients)
                     load_processed_data(patient_id, session, CONFIG);
             end
             
+            % Extract beam metadata (isocenter + jaw positions) for sensor placement.
+            % beam_metadata is stored in dose_metadata by step15_process_doses.
+            if isfield(dose_metadata, 'beam_metadata') && ~isempty(dose_metadata.beam_metadata)
+                beam_metadata = dose_metadata.beam_metadata;
+                fprintf('         Beam metadata: %d beams (with isocenter/jaw data for sensor placement)\n', ...
+                    length(beam_metadata));
+            else
+                beam_metadata = [];
+                fprintf('         [WARNING] No beam metadata in dose_metadata — sensor placement will use legacy mode\n');
+            end
+            
             % ============================================================
             % STEP 2: k-Wave Photoacoustic Simulation
             % ============================================================
@@ -216,11 +235,12 @@ for p_idx = 1:length(CONFIG.patients)
                     parfor f_idx = 1:num_fields
                         field_idx = valid_field_indices(f_idx);
                         
-                        fprintf('           Field %d (gantry: %.1fÂ°)...\n', ...
+                        fprintf('           Field %d (gantry: %.1f°)...\n', ...
                             field_idx, field_doses{field_idx}.gantry_angle);
                         
-                        recon_doses{f_idx} = run_single_field_simulation(...
-                            field_doses{field_idx}, sct_resampled, medium, CONFIG);
+                        [recon_doses{f_idx}, ~] = run_single_field_simulation(...
+                            field_doses{field_idx}, sct_resampled, medium, ...
+                            beam_metadata, CONFIG);
                         
                         % Save individual field result
                         save_field_reconstruction(recon_doses{f_idx}, field_idx, ...
@@ -238,19 +258,22 @@ for p_idx = 1:length(CONFIG.patients)
                     fprintf('         Using serial processing...\n');
                     
                     total_recon = zeros(grid_dims);
+                    sim_results_all = cell(num_fields, 1);
                     
                     for f_idx = 1:num_fields
                         field_idx = valid_field_indices(f_idx);
                         
-                        fprintf('           Field %d/%d (gantry: %.1fÂ°)...\n', ...
+                        fprintf('           Field %d/%d (gantry: %.1f°)...\n', ...
                             f_idx, num_fields, field_doses{field_idx}.gantry_angle);
                         
-                        recon_dose = run_single_field_simulation(...
-                            field_doses{field_idx}, sct_resampled, medium, CONFIG);
+                        [recon_dose, sim_results] = run_single_field_simulation(...
+                            field_doses{field_idx}, sct_resampled, medium, ...
+                            beam_metadata, CONFIG);
                         
                         total_recon = total_recon + recon_dose;
+                        sim_results_all{f_idx} = sim_results;
                         
-                        % Save individual field result
+                        % Save individual field result (with sensor geometry)
                         save_field_reconstruction(recon_dose, field_idx, ...
                             patient_id, session, CONFIG);
                     end
@@ -278,7 +301,7 @@ for p_idx = 1:length(CONFIG.patients)
             if CONFIG.run_step3
                 fprintf('\n[STEP 3] Running analysis (gamma + SSIM)...\n');
                 
-                % Call step3_analysis — loads all data, computes gamma and
+                % Call step3_analysis â€” loads all data, computes gamma and
                 % SSIM, optionally generates figures, saves results to disk.
                 % Signature matches: step3_analysis(patient_id, session, config)
                 step3_results = step3_analysis(patient_id, session, CONFIG);

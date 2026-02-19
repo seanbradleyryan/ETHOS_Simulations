@@ -31,7 +31,7 @@ function [field_doses, sct_resampled, total_rs_dose, metadata] = step15_process_
 %           .meterset      - Monitor units (from RTPLAN, matched by field_num)
 %       sct_resampled   - Struct with CT resampled to dose grid:
 %           .cubeHU         - 3D HU array
-%           .cubeDensity    - 3D density array (kg/m³)
+%           .cubeDensity    - 3D density array (kg/mÂ³)
 %           .tissueMask     - 3D uint8 array with ROI labels (0 = unassigned)
 %           .roiNames       - Cell array of ROI names (index matches label)
 %           .bodyMask       - 3D logical array (true = inside body region)
@@ -65,7 +65,7 @@ function [field_doses, sct_resampled, total_rs_dose, metadata] = step15_process_
 %   KEY TECHNICAL NOTES:
 %   - Z-resolution MUST come from GridFrameOffsetVector, NOT PixelSpacing
 %   - Use squeeze() to remove singleton dimensions in dose arrays
-%   - Standard HU to density: ρ = 1000 + HU (approximate)
+%   - Standard HU to density: Ï = 1000 + HU (approximate)
 %   - Dose zeroed where: outside body OR inside couch (unless disabled)
 %   - Set config.apply_dose_masking = false to skip dose zeroing (debugging)
 %   - Raystation files: Beam[n]_Seg[m]_Field [o].dcm pattern
@@ -125,7 +125,6 @@ end
 % Set default for dose masking (for debugging, can disable zeroing outside body/couch)
 if ~isfield(config, 'apply_dose_masking')
     config.apply_dose_masking = true;  % Default: apply masking
-    config-apply_dose_masking = false; 
 end
 if ~config.apply_dose_masking
     fprintf('  [INFO] Dose masking DISABLED (debugging mode)\n');
@@ -253,6 +252,7 @@ metadata.session = session;
 metadata.num_fields = num_files;
 metadata.timestamp = datetime('now');
 metadata.reference_file = rd_files(1).name;
+metadata.beam_metadata = beam_metadata;  % Includes isocenter + jaw data for sensor placement
 
 %% ======================== PROCESS EACH FIELD DOSE ========================
 
@@ -321,6 +321,12 @@ for i = 1:num_files
         field_dose.max_dose_Gy = max(dose_data(:));
         field_dose.mean_dose_Gy = mean(dose_data(dose_data > 0));
         
+        % Propagate isocenter and jaw data from beam_metadata
+        [iso, jx, jy] = getBeamGeometry(beam_metadata, field_num);
+        field_dose.isocenter = iso;
+        field_dose.jaw_x = jx;
+        field_dose.jaw_y = jy;
+        
         % Add to total dose
         total_rs_dose = total_rs_dose + dose_data;
         
@@ -328,7 +334,7 @@ for i = 1:num_files
         field_filename = sprintf('field_dose_%03d.mat', i);
         field_filepath = fullfile(processed_dir, field_filename);
         save(field_filepath, 'field_dose', '-v7.3');
-        fprintf('    Saved: %s (field %d, max: %.4f Gy, gantry: %.1f°, MU: %.1f)\n', ...
+        fprintf('    Saved: %s (field %d, max: %.4f Gy, gantry: %.1fÂ°, MU: %.1f)\n', ...
             field_filename, field_num, field_dose.max_dose_Gy, gantry_angle, meterset);
         
         % Store reference in output cell array (without full dose data for memory)
@@ -341,6 +347,9 @@ for i = 1:num_files
         field_doses{i}.meterset = meterset;
         field_doses{i}.max_dose_Gy = field_dose.max_dose_Gy;
         field_doses{i}.source_file = rd_files(i).name;
+        field_doses{i}.isocenter = iso;
+        field_doses{i}.jaw_x = jx;
+        field_doses{i}.jaw_y = jy;
         
         processed_count = processed_count + 1;
         
@@ -391,7 +400,7 @@ fprintf('  Resampled SCT dimensions: [%d, %d, %d]\n', ...
 fprintf('  Converting HU to density...\n');
 sct_density = huToDensity(sct_hu_resampled);
 
-fprintf('  Density range: [%.0f, %.0f] kg/m³\n', min(sct_density(:)), max(sct_density(:)));
+fprintf('  Density range: [%.0f, %.0f] kg/mÂ³\n', min(sct_density(:)), max(sct_density(:)));
 
 %% ======================== LOAD RTSTRUCT AND CREATE TISSUE MASKS ========================
 
@@ -633,7 +642,18 @@ end
 function beam_metadata = loadRtplanMetadata(sct_dir)
 %LOADRTPLANMETADATA Load beam metadata from RTPLAN file
 %
-%   Extract gantry angles and metersets for each beam
+%   Extract gantry angles, metersets, isocenter positions, and jaw positions
+%   for each beam. Isocenter and jaw data are required by determine_sensor_mask
+%   for computing beam field exclusion zones on the patient surface.
+%
+%   FIELDS EXTRACTED:
+%       .beam_number   - Beam number from BeamSequence
+%       .beam_name     - Beam name string
+%       .gantry_angle  - Gantry angle from first ControlPoint (degrees)
+%       .meterset      - Monitor units from FractionGroupSequence
+%       .isocenter     - [x, y, z] mm from ControlPointSequence.Item_1.IsocenterPosition
+%       .jaw_x         - [x1, x2] mm at isocenter (ASYMX / X jaw positions)
+%       .jaw_y         - [y1, y2] mm at isocenter (ASYMY / Y jaw positions)
 
     beam_metadata = [];
     
@@ -686,20 +706,81 @@ function beam_metadata = loadRtplanMetadata(sct_dir)
                 beam_metadata(i).beam_name = sprintf('Beam_%d', i);
             end
             
-            % Gantry angle from first control point
+            % Initialize defaults for all fields
             beam_metadata(i).gantry_angle = 0;
+            beam_metadata(i).meterset = 0;
+            beam_metadata(i).isocenter = [];
+            beam_metadata(i).jaw_x = [];
+            beam_metadata(i).jaw_y = [];
+            
+            % Extract from first ControlPoint
             if isfield(beam, 'ControlPointSequence')
                 cp_fields = fieldnames(beam.ControlPointSequence);
                 if ~isempty(cp_fields)
                     cp1 = beam.ControlPointSequence.(cp_fields{1});
+                    
+                    % Gantry angle
                     if isfield(cp1, 'GantryAngle')
                         beam_metadata(i).gantry_angle = cp1.GantryAngle;
+                    end
+                    
+                    % Isocenter position [x, y, z] in mm (DICOM patient coords)
+                    if isfield(cp1, 'IsocenterPosition')
+                        beam_metadata(i).isocenter = cp1.IsocenterPosition(:)';
+                    end
+                    
+                    % Jaw positions from BeamLimitingDevicePositionSequence
+                    if isfield(cp1, 'BeamLimitingDevicePositionSequence')
+                        bld_seq = cp1.BeamLimitingDevicePositionSequence;
+                        bld_fields = fieldnames(bld_seq);
+                        
+                        for j = 1:length(bld_fields)
+                            bld_item = bld_seq.(bld_fields{j});
+                            
+                            if ~isfield(bld_item, 'RTBeamLimitingDeviceType') || ...
+                               ~isfield(bld_item, 'LeafJawPositions')
+                                continue;
+                            end
+                            
+                            dev_type = upper(bld_item.RTBeamLimitingDeviceType);
+                            positions = bld_item.LeafJawPositions;
+                            
+                            % ASYMX or X jaws -> jaw_x
+                            if strcmp(dev_type, 'ASYMX') || strcmp(dev_type, 'X')
+                                if length(positions) >= 2
+                                    beam_metadata(i).jaw_x = positions(1:2)';
+                                end
+                            end
+                            
+                            % ASYMY or Y jaws -> jaw_y
+                            if strcmp(dev_type, 'ASYMY') || strcmp(dev_type, 'Y')
+                                if length(positions) >= 2
+                                    beam_metadata(i).jaw_y = positions(1:2)';
+                                end
+                            end
+                        end
                     end
                 end
             end
             
-            % Meterset (from FractionGroupSequence)
-            beam_metadata(i).meterset = 0;
+            % Log extracted geometry
+            if ~isempty(beam_metadata(i).isocenter)
+                fprintf('    Beam %d: gantry=%.1f deg, iso=[%.1f, %.1f, %.1f] mm', ...
+                    beam_metadata(i).beam_number, beam_metadata(i).gantry_angle, ...
+                    beam_metadata(i).isocenter(1), beam_metadata(i).isocenter(2), ...
+                    beam_metadata(i).isocenter(3));
+            else
+                fprintf('    Beam %d: gantry=%.1f deg, iso=N/A', ...
+                    beam_metadata(i).beam_number, beam_metadata(i).gantry_angle);
+            end
+            
+            if ~isempty(beam_metadata(i).jaw_x)
+                fprintf(', jaw_x=[%.1f, %.1f]', beam_metadata(i).jaw_x(1), beam_metadata(i).jaw_x(2));
+            end
+            if ~isempty(beam_metadata(i).jaw_y)
+                fprintf(', jaw_y=[%.1f, %.1f]', beam_metadata(i).jaw_y(1), beam_metadata(i).jaw_y(2));
+            end
+            fprintf('\n');
         end
         
         % Extract metersets from FractionGroupSequence
@@ -849,8 +930,49 @@ function [gantry_angle, meterset] = getBeamMetadata(beam_metadata, field_num)
 end
 
 
-function resampled_dose = resampleDoseToGrid(dose_data, dose_origin, dose_spacing, ...
-    ref_origin, ref_spacing, ref_dims)
+function [isocenter, jaw_x, jaw_y] = getBeamGeometry(beam_metadata, field_num)
+%GETBEAMGEOMETRY Get isocenter and jaw positions for a beam by field number
+%
+%   Matches field_num to beam_number in beam_metadata struct array.
+%   Returns empty arrays if fields are not found.
+
+    isocenter = [];
+    jaw_x = [];
+    jaw_y = [];
+    
+    if isempty(beam_metadata) || ~isstruct(beam_metadata)
+        return;
+    end
+    
+    % Match field_num to beam_number in RTPLAN
+    for j = 1:length(beam_metadata)
+        if beam_metadata(j).beam_number == field_num
+            if isfield(beam_metadata(j), 'isocenter')
+                isocenter = beam_metadata(j).isocenter;
+            end
+            if isfield(beam_metadata(j), 'jaw_x')
+                jaw_x = beam_metadata(j).jaw_x;
+            end
+            if isfield(beam_metadata(j), 'jaw_y')
+                jaw_y = beam_metadata(j).jaw_y;
+            end
+            return;
+        end
+    end
+    
+    % Fallback: use field_num as index if within range
+    if field_num <= length(beam_metadata)
+        if isfield(beam_metadata(field_num), 'isocenter')
+            isocenter = beam_metadata(field_num).isocenter;
+        end
+        if isfield(beam_metadata(field_num), 'jaw_x')
+            jaw_x = beam_metadata(field_num).jaw_x;
+        end
+        if isfield(beam_metadata(field_num), 'jaw_y')
+            jaw_y = beam_metadata(field_num).jaw_y;
+        end
+    end
+end
 %RESAMPLEDOSETOGRID Resample dose array to reference grid
 
     dose_dims = size(dose_data);
@@ -991,10 +1113,10 @@ end
 
 
 function density = huToDensity(hu)
-%HUTODENSITY Convert Hounsfield Units to density (kg/m³)
+%HUTODENSITY Convert Hounsfield Units to density (kg/mÂ³)
 %
 %   Uses simplified linear conversion:
-%   - Below -1000 HU (air): density = 1 kg/m³
+%   - Below -1000 HU (air): density = 1 kg/mÂ³
 %   - -1000 to 0 HU: linear interpolation from air (1) to water (1000)
 %   - 0 to 1000 HU: linear from water (1000) to bone (~2000)
 %   - Above 1000 HU: bone/metal region
@@ -1012,7 +1134,7 @@ function density = huToDensity(hu)
     density(lung_mask) = 400 + (hu(lung_mask) + 900) * (1000 - 400) / 400;
     
     % Soft tissue region (-500 to 100 HU)
-    % Approximate: density ≈ 1000 + HU
+    % Approximate: density â‰ˆ 1000 + HU
     soft_mask = (hu >= -500) & (hu < 100);
     density(soft_mask) = 1000 + hu(soft_mask);
     
@@ -1022,7 +1144,7 @@ function density = huToDensity(hu)
     density(bone_mask) = 1100 + (hu(bone_mask) - 100) * (1900 - 1100) / 900;
     
     % Clamp to reasonable range
-    density = max(density, 1);      % Minimum 1 kg/m³
+    density = max(density, 1);      % Minimum 1 kg/mÂ³
     density = min(density, 7800);   % Maximum (metal)
 end
 
