@@ -973,6 +973,10 @@ function [isocenter, jaw_x, jaw_y] = getBeamGeometry(beam_metadata, field_num)
         end
     end
 end
+
+
+function resampled_dose = resampleDoseToGrid(dose_data, dose_origin, dose_spacing, ...
+    ref_origin, ref_spacing, ref_dims)
 %RESAMPLEDOSETOGRID Resample dose array to reference grid
 
     dose_dims = size(dose_data);
