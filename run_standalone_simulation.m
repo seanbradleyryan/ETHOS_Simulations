@@ -89,7 +89,18 @@ CONFIG.meterset               = 100;    % MU (monitor units) for total dose
 CONFIG.pml_size               = 10;     % PML thickness (voxels)
 CONFIG.cfl_number             = 0.3;    % CFL stability number
 CONFIG.use_gpu                = true;   % Use GPU acceleration
-CONFIG.num_time_reversal_iter = 1;      % Time-reversal iterations
+
+% --- Iterative Time-Reversal Reconstruction ---
+%   Uses the Dirichlet-BC time-reversal method from ethos_kwave_simulation.m
+%   with iterative residual correction:
+%     Iter 1: TR(measured_data) -> p0_est
+%     Iter n: forward(p0_est) -> simulated_data
+%             residual = measured_data - simulated_data
+%             measured_data += residual (corrected data)
+%             TR(corrected_data) -> p0_est (updated)
+%             positivity constraint applied each iteration
+CONFIG.num_iterations = 5;             % Number of iterative TR iterations
+CONFIG.convergence_tol = 1e-4;         % Early stop if relative change < tol
 
 % --- Output ---
 CONFIG.save_results = true;             % Save reconstruction to .mat
@@ -105,11 +116,12 @@ fprintf('  Dose file:       %s\n', CONFIG.dose_file);
 fprintf('  SCT file:        %s\n', CONFIG.sct_file);
 fprintf('  Sensor mode:     %s\n', CONFIG.sensor_mode);
 fprintf('  Tissue model:    %s\n', CONFIG.gruneisen_method);
+fprintf('  TR iterations:   %d (tol: %.1e)\n', CONFIG.num_iterations, CONFIG.convergence_tol);
 fprintf('  GPU:             %s\n', mat2str(CONFIG.use_gpu));
 fprintf('=========================================================\n\n');
 
 % ---- Load dose ----
-fprintf('[1/6] Loading dose data...\n');
+fprintf('[1/7] Loading dose data...\n');
 if ~isfile(CONFIG.dose_file)
     error('Dose file not found: %s', CONFIG.dose_file);
 end
@@ -144,7 +156,7 @@ fprintf('       Grid size: [%d x %d x %d]\n', Nx, Ny, Nz);
 fprintf('       Dose range: [%.6f, %.4f] Gy\n', min(doseGrid(:)), max(doseGrid(:)));
 
 % ---- Load SCT ----
-fprintf('[2/6] Loading SCT data...\n');
+fprintf('[2/7] Loading SCT data...\n');
 if ~isfile(CONFIG.sct_file)
     error('SCT file not found: %s', CONFIG.sct_file);
 end
@@ -182,7 +194,7 @@ fprintf('       HU range: [%.0f, %.0f]\n', min(sct.cubeHU(:)), max(sct.cubeHU(:)
 
 %% ========================= CREATE ACOUSTIC MEDIUM ========================
 
-fprintf('[3/6] Creating acoustic medium (method: %s)...\n', CONFIG.gruneisen_method);
+fprintf('[3/7] Creating acoustic medium (method: %s)...\n', CONFIG.gruneisen_method);
 
 medium = create_medium(sct, CONFIG);
 
@@ -207,7 +219,7 @@ end
 
 %% ========================= INITIAL PRESSURE p0 ==========================
 
-fprintf('[4/6] Computing initial pressure...\n');
+fprintf('[4/7] Computing initial pressure...\n');
 
 % Pulse calculation
 meterset = CONFIG.meterset;
@@ -232,7 +244,7 @@ end
 
 %% ========================= SENSOR PLACEMENT ==============================
 
-fprintf('[5/6] Placing sensor (mode: %s)...\n', CONFIG.sensor_mode);
+fprintf('[5/7] Placing sensor (mode: %s)...\n', CONFIG.sensor_mode);
 
 sensor = struct();
 
@@ -290,9 +302,9 @@ if numSensorPts == 0
     return;
 end
 
-%% ========================= k-WAVE SIMULATION ============================
+%% ========================= k-WAVE FORWARD SIMULATION =====================
 
-fprintf('[6/6] Running k-Wave simulation...\n');
+fprintf('[6/7] Running k-Wave forward simulation...\n');
 
 % ---- Create k-Wave grid ----
 kgrid = kWaveGrid(Nx, dx, Ny, dy, Nz, dz);
@@ -341,8 +353,6 @@ inputArgs = {'Smooth', false, ...
              'PlotSim', false};
 
 % ==== FORWARD SIMULATION ====
-fprintf('       Running forward simulation...\n');
-
 source_fwd    = struct();
 source_fwd.p0 = p0;
 
@@ -357,24 +367,64 @@ catch ME
     return;
 end
 
-% ==== TIME REVERSAL RECONSTRUCTION ====
-num_tr_iter = CONFIG.num_time_reversal_iter;
-fprintf('       Running time reversal (%d iteration(s))...\n', num_tr_iter);
+% Store the original measured sensor data (never modified)
+sensorData_measured = sensorData;
 
+%% ========================= ITERATIVE TIME-REVERSAL RECONSTRUCTION ========
+%
+%  Iterative reconstruction using the Dirichlet-BC time-reversal method
+%  from ethos_kwave_simulation.m with residual correction.
+%
+%  Algorithm (Treeby & Cox, "k-Wave" iterative TR):
+%    Iteration 1:
+%      1. Time-reverse measured sensor data (fliplr) as Dirichlet source
+%      2. Record p_final over entire grid -> p0_est
+%      3. Apply positivity constraint: p0_est = max(p0_est, 0)
+%
+%    Iterations 2..N:
+%      4. Forward-simulate current estimate p0_est -> sensorData_simulated
+%      5. Compute residual: residual = sensorData_measured - sensorData_simulated
+%      6. Correct sensor data: sensorData_corrected = sensorData_measured + residual
+%         (equivalently: sensorData_corrected = 2*sensorData_measured - sensorData_simulated)
+%      7. Time-reverse corrected data -> p0_est (updated)
+%      8. Apply positivity constraint
+%      9. Check convergence (relative change in p0_est)
+%
+%  This progressively reduces artifacts from the limited-view sensor
+%  geometry and acoustic heterogeneity.
+%  =========================================================================
+
+num_iterations = CONFIG.num_iterations;
+convergence_tol = CONFIG.convergence_tol;
+
+fprintf('[7/7] Iterative time-reversal reconstruction (%d iterations)...\n', num_iterations);
+
+% Convergence tracking
+iter_metrics = struct();
+iter_metrics.max_pressure  = zeros(num_iterations, 1);
+iter_metrics.rel_change    = zeros(num_iterations, 1);
+iter_metrics.residual_norm = zeros(num_iterations, 1);
+iter_metrics.iter_time     = zeros(num_iterations, 1);
+
+% Working copy of sensor data (will be updated each iteration)
+sensorData_working = sensorData_measured;
+
+% Previous estimate for convergence check
+reconPressure_prev = zeros(gridSize);
 reconPressure = zeros(gridSize);
 
 try
-    tr_tic = tic;
+    tr_total_tic = tic;
 
-    for tr_iter = 1:num_tr_iter
-        if num_tr_iter > 1
-            fprintf('         TR iteration %d/%d...\n', tr_iter, num_tr_iter);
-        end
+    for iter = 1:num_iterations
+        iter_tic = tic;
+        fprintf('\n       --- Iteration %d/%d ---\n', iter, num_iterations);
 
-        % Time-reversed source on sensor locations
+        % ---- Step A: Time-reverse current sensor data ----
+        % (Matches ethos_kwave_simulation.m: Dirichlet BC, p_final recording)
         source_tr        = struct();
         source_tr.p_mask = sensor.mask;
-        source_tr.p      = fliplr(sensorData);
+        source_tr.p      = fliplr(sensorData_working);  % Time-reversed
         source_tr.p_mode = 'dirichlet';
 
         % Record final pressure over entire grid
@@ -382,35 +432,107 @@ try
         sensor_tr.mask   = ones(Nx, Ny, Nz);
         sensor_tr.record = {'p_final'};
 
+        fprintf('       Running time reversal...\n');
         p0_recon = kspaceFirstOrder3D(kgrid, kmedium, source_tr, sensor_tr, inputArgs{:});
 
         % Extract 3D pressure field
         if isstruct(p0_recon) && isfield(p0_recon, 'p_final')
             reconPressure = reshape(p0_recon.p_final, [Nx, Ny, Nz]);
         else
-            reconPressure = p0_recon;
+            reconPressure = reshape(p0_recon, [Nx, Ny, Nz]);
         end
 
-        % Positivity constraint
+        % Apply positivity constraint (dose & pressure are non-negative)
         reconPressure = max(reconPressure, 0);
 
-        % Iterative TR: compute residual for next iteration
-        if tr_iter < num_tr_iter
+        % ---- Track convergence metrics ----
+        iter_metrics.max_pressure(iter) = max(reconPressure(:));
+
+        if iter > 1
+            % Relative change from previous iteration
+            delta = reconPressure - reconPressure_prev;
+            norm_prev = norm(reconPressure_prev(:));
+            if norm_prev > 0
+                iter_metrics.rel_change(iter) = norm(delta(:)) / norm_prev;
+            else
+                iter_metrics.rel_change(iter) = Inf;
+            end
+        else
+            iter_metrics.rel_change(iter) = Inf;
+        end
+
+        iter_metrics.iter_time(iter) = toc(iter_tic);
+
+        fprintf('       Max pressure: %.4e Pa\n', iter_metrics.max_pressure(iter));
+        if iter > 1
+            fprintf('       Relative change: %.6e\n', iter_metrics.rel_change(iter));
+        end
+        fprintf('       Iteration time: %.1f s\n', iter_metrics.iter_time(iter));
+
+        % ---- Step B: Check convergence (skip on last iteration) ----
+        if iter > 1 && iter_metrics.rel_change(iter) < convergence_tol
+            fprintf('       *** Converged at iteration %d (rel_change %.2e < tol %.2e) ***\n', ...
+                iter, iter_metrics.rel_change(iter), convergence_tol);
+            % Trim metrics arrays
+            iter_metrics.max_pressure  = iter_metrics.max_pressure(1:iter);
+            iter_metrics.rel_change    = iter_metrics.rel_change(1:iter);
+            iter_metrics.residual_norm = iter_metrics.residual_norm(1:iter);
+            iter_metrics.iter_time     = iter_metrics.iter_time(1:iter);
+            break;
+        end
+
+        % Save current estimate for next convergence check
+        reconPressure_prev = reconPressure;
+
+        % ---- Step C: Compute residual and correct sensor data ----
+        % (Skip on last iteration -- no need for another forward sim)
+        if iter < num_iterations
+            fprintf('       Forward-simulating current estimate for residual...\n');
+
             source_resid    = struct();
             source_resid.p0 = reconPressure;
-            sensorDataRecon = kspaceFirstOrder3D(kgrid, kmedium, ...
+            sensorData_simulated = kspaceFirstOrder3D(kgrid, kmedium, ...
                 source_resid, sensor, inputArgs{:});
-            sensorData = sensorData + (sensorData - sensorDataRecon);
+
+            % Residual: difference between measured and simulated
+            residual = sensorData_measured - sensorData_simulated;
+            iter_metrics.residual_norm(iter) = norm(residual(:));
+
+            fprintf('       Residual norm: %.4e (sensor data norm: %.4e)\n', ...
+                iter_metrics.residual_norm(iter), norm(sensorData_measured(:)));
+
+            % Correct sensor data for next iteration:
+            %   sensorData_corrected = sensorData_measured + residual
+            %   = sensorData_measured + (sensorData_measured - sensorData_simulated)
+            %   = 2*sensorData_measured - sensorData_simulated
+            sensorData_working = sensorData_measured + residual;
         end
     end
 
-    tr_time = toc(tr_tic);
-    fprintf('       Time reversal complete (%.1f s).\n', tr_time);
-    fprintf('       Reconstructed pressure: [%.2e, %.2e] Pa\n', ...
+    tr_time = toc(tr_total_tic);
+    num_completed = length(iter_metrics.max_pressure);
+
+    fprintf('\n       =========================================\n');
+    fprintf('       Iterative TR complete: %d/%d iterations (%.1f s total)\n', ...
+        num_completed, num_iterations, tr_time);
+    fprintf('       Final pressure range: [%.2e, %.2e] Pa\n', ...
         min(reconPressure(:)), max(reconPressure(:)));
+    fprintf('       =========================================\n');
+
+    % Print convergence summary table
+    fprintf('\n       Convergence Summary:\n');
+    fprintf('       %5s  %12s  %12s  %12s  %8s\n', ...
+        'Iter', 'Max(p)', 'Rel Change', '||Residual||', 'Time(s)');
+    fprintf('       %s\n', repmat('-', 1, 55));
+    for k = 1:num_completed
+        fprintf('       %5d  %12.4e  %12.4e  %12.4e  %8.1f\n', ...
+            k, iter_metrics.max_pressure(k), iter_metrics.rel_change(k), ...
+            iter_metrics.residual_norm(k), iter_metrics.iter_time(k));
+    end
 
 catch ME
-    fprintf('[ERROR] Time reversal failed: %s\n', ME.message);
+    fprintf('[ERROR] Iterative reconstruction failed at iteration %d: %s\n', ...
+        iter, ME.message);
     return;
 end
 
@@ -437,8 +559,8 @@ if any(dose_region(:))
 end
 
 total_time = fwd_time + tr_time;
-fprintf('  Total simulation time: %.1f s (fwd: %.1f, TR: %.1f)\n', ...
-    total_time, fwd_time, tr_time);
+fprintf('  Total simulation time: %.1f s (fwd: %.1f, TR %d iters: %.1f)\n', ...
+    total_time, fwd_time, num_completed, tr_time);
 fprintf('===========================\n');
 
 %% ========================= SAVE RESULTS =================================
@@ -455,6 +577,8 @@ if CONFIG.save_results
     results.grid_size      = gridSize;
     results.fwd_time_sec   = fwd_time;
     results.tr_time_sec    = tr_time;
+    results.iter_metrics   = iter_metrics;
+    results.num_iterations_completed = num_completed;
 
     save(CONFIG.output_file, '-struct', 'results', '-v7.3');
     fprintf('\nResults saved to: %s\n', CONFIG.output_file);
@@ -464,6 +588,33 @@ end
 
 if CONFIG.plot_results
     plot_dose_comparison(doseGrid, recon_dose, sensor.mask, spacing_mm);
+
+    % ---- Convergence plot ----
+    if num_completed > 1
+        figure('Name', 'Iterative TR Convergence', 'Position', [200, 200, 900, 400]);
+        sgtitle('Iterative Time-Reversal Convergence');
+
+        subplot(1, 2, 1);
+        plot(1:num_completed, iter_metrics.max_pressure, 'bo-', 'LineWidth', 1.5, 'MarkerSize', 8);
+        xlabel('Iteration');
+        ylabel('Max Reconstructed Pressure (Pa)');
+        title('Peak Pressure vs Iteration');
+        grid on;
+
+        subplot(1, 2, 2);
+        semilogy(2:num_completed, iter_metrics.rel_change(2:end), 'rs-', 'LineWidth', 1.5, 'MarkerSize', 8);
+        hold on;
+        if CONFIG.convergence_tol > 0
+            yline(CONFIG.convergence_tol, 'k--', 'Tolerance', 'LineWidth', 1);
+        end
+        xlabel('Iteration');
+        ylabel('Relative Change (L2 norm)');
+        title('Convergence: Relative Change');
+        grid on;
+        hold off;
+
+        drawnow;
+    end
 end
 
 fprintf('\nStandalone simulation complete.\n');
