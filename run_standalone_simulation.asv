@@ -35,7 +35,7 @@ clear; clc; close all;
 CONFIG.dose_file = 'total_rs_dose.mat';      % dose file to load
 CONFIG.sct_file  = 'sct_resampled.mat';      % CT / tissue data file
 
-CONFIG.sensor_mode = 'sphere';  % 'full_anterior_plane' | 'dose_based' | 'sphere'
+CONFIG.sensor_mode = 'full_anterior_plane';  % 'full_anterior_plane' | 'dose_based'
 CONFIG.gantry_angle = 180;  % degrees (only used when sensor_mode = 'dose_based')
 
 % --- Tissue Heterogeneity ---
