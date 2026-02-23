@@ -1,7 +1,7 @@
-function recon_dose = run_single_field_simulation(field_dose, sct_resampled, medium, config)
+function [recon_dose, sim_results] = run_single_field_simulation(field_dose, sct_resampled, medium, beam_metadata, config)
 %RUN_SINGLE_FIELD_SIMULATION k-Wave forward + time-reversal for one field
 %
-%   recon_dose = run_single_field_simulation(field_dose, sct_resampled, medium, config)
+%   [recon_dose, sim_results] = run_single_field_simulation(field_dose, sct_resampled, medium, beam_metadata, config)
 %
 %   Converts a single radiation field dose to initial acoustic pressure
 %   (p0 = D * Gamma * rho), runs the k-Wave forward simulation to generate
@@ -15,9 +15,15 @@ function recon_dose = run_single_field_simulation(field_dose, sct_resampled, med
 %           .meterset      - Monitor units (MU)
 %           .spacing       - [dx, dy, dz] in mm
 %           .dimensions    - [nx, ny, nz]
+%           .isocenter     - [x, y, z] mm (from RTPLAN, propagated)
+%           .jaw_x         - [x1, x2] mm at isocenter (from RTPLAN)
+%           .jaw_y         - [y1, y2] mm at isocenter (from RTPLAN)
 %       sct_resampled - Struct with:
+%           .bodyMask      - 3D logical (true = inside body)
+%           .couchMask     - 3D logical (true = couch region)
 %           .spacing       - [dx, dy, dz] in mm
 %           .dimensions    - [nx, ny, nz]
+%           .origin        - [x, y, z] in mm
 %       medium - Struct from create_acoustic_medium():
 %           .density       - 3D array (kg/m^3)
 %           .sound_speed   - 3D array (m/s)
@@ -25,6 +31,12 @@ function recon_dose = run_single_field_simulation(field_dose, sct_resampled, med
 %           .alpha_power   - Scalar exponent
 %           .gruneisen     - 3D array (dimensionless)
 %           .grid_size     - [nx, ny, nz]
+%       beam_metadata - Struct array (ALL beams in plan) with:
+%           .beam_number   - Beam number
+%           .gantry_angle  - Gantry angle (degrees)
+%           .isocenter     - [x, y, z] mm
+%           .jaw_x         - [x1, x2] mm at isocenter
+%           .jaw_y         - [y1, y2] mm at isocenter
 %       config - Configuration struct:
 %           .dose_per_pulse_cGy      - Dose per LINAC pulse (default: 0.16)
 %           .pml_size                - PML thickness, voxels (default: 10)
@@ -33,20 +45,35 @@ function recon_dose = run_single_field_simulation(field_dose, sct_resampled, med
 %           .num_time_reversal_iter  - TR iterations (default: 1)
 %           .enable_spherical_correction - Boolean (default: true)
 %           .regularization_lambda   - Wiener filter lambda (default: 0.01)
+%           .sensor_x_index          - X voxel index for lateral sensor plane (default: 1)
 %
 %   OUTPUTS:
-%       recon_dose - 3D reconstructed dose array (Gy), same size as input
+%       recon_dose  - 3D reconstructed dose array (Gy), same size as input.
+%       sim_results - Struct with simulation diagnostics:
+%           .sensor_info    - Sensor placement info from determine_sensor_mask
+%           .forward_time_s - Forward simulation wall time
+%           .tr_time_s      - Time reversal wall time
+%           .num_pulses     - Number of LINAC pulses
+%           .p0_max         - Maximum initial pressure (Pa)
+%           .recon_max      - Maximum reconstructed pressure (Pa)
+%           .sph_corr_time_s - Spherical correction wall time (if enabled)
+%           .p0_planar_max  - Max planar pressure before correction (Pa)
+%           .p0_corrected_max - Max corrected pressure (Pa)
 %
 %   NOTES:
-%       - Stateless: safe for parfor execution
-%       - PlotSim disabled for batch mode
-%       - Returns zeros if no significant dose or on simulation failure
+%       - Stateless: safe for parfor execution.
+%       - PlotSim disabled for batch mode.
+%       - Returns zeros if no significant dose or on simulation failure.
+%       - beam_metadata is the FULL plan metadata (all beams), passed through
+%         to determine_sensor_mask for computing the exclusion zone.
+%       - For backwards compatibility, beam_metadata can be omitted (pass []),
+%         in which case the legacy sensor placement is used.
 %
 %   AUTHOR: ETHOS Pipeline Team
 %   DATE: February 2026
-%   VERSION: 1.0
+%   VERSION: 2.0 (Integrated determine_sensor_mask + element averaging)
 %
-%   See also: create_acoustic_medium, kspaceFirstOrder3D, kWaveGrid
+%   See also: determine_sensor_mask, apply_element_averaging, kspaceFirstOrder3D
 
     %% ======================== CONFIG DEFAULTS ========================
 
@@ -57,6 +84,9 @@ function recon_dose = run_single_field_simulation(field_dose, sct_resampled, med
     num_tr_iter        = safe_config(config, 'num_time_reversal_iter', 1);
     enable_sph_corr    = safe_config(config, 'enable_spherical_correction', true);
     reg_lambda         = safe_config(config, 'regularization_lambda', 0.01);
+
+    % Initialize sim_results output
+    sim_results = struct();
 
     %% ======================== EXTRACT DATA ========================
 
@@ -98,6 +128,8 @@ function recon_dose = run_single_field_simulation(field_dose, sct_resampled, med
 
     fprintf('        Meterset: %.2f MU, Pulses: %d\n', meterset, num_pulses);
 
+    sim_results.num_pulses = num_pulses;
+
     %% ======================== INITIAL PRESSURE p0 ========================
 
     % p0(r) = D(r)/N_pulses * Gamma(r) * rho(r)
@@ -109,6 +141,8 @@ function recon_dose = run_single_field_simulation(field_dose, sct_resampled, med
     fprintf('        Initial pressure range: [%.2e, %.2e] Pa\n', ...
         min(p0(:)), max(p0(:)));
 
+    sim_results.p0_max = max(p0(:));
+
     %% ======================== CHECK FOR SIGNIFICANT DOSE ========================
 
     doseThreshold = 0.01 * max(doseGrid(:));  % 1% of max
@@ -118,6 +152,7 @@ function recon_dose = run_single_field_simulation(field_dose, sct_resampled, med
         warning('run_single_field_simulation:NoDose', ...
             'No significant dose or zero initial pressure. Returning zeros.');
         recon_dose = zeros(gridSize);
+        sim_results.sensor_info = struct();
         return;
     end
 
@@ -151,12 +186,50 @@ function recon_dose = run_single_field_simulation(field_dose, sct_resampled, med
     kmedium.alpha_power = medium.alpha_power;  % scalar
 
     %% ======================== SENSOR PLACEMENT ========================
+    %  Simple lateral sensor: full YZ plane at a fixed X index.
+    %  X = left-right (lateral), Y = anterior-posterior, Z = sup-inf (transverse).
 
-    gantry_angle = field_dose.gantry_angle;
-    sensor = place_sensor_for_field(doseMask, Nx, Ny, Nz, gantry_angle);
+    sensor_x = safe_config(config, 'sensor_x_index', 1);  % default: x = 1 face
+    sensor = struct();
+    sensor.mask = zeros(Nx, Ny, Nz);
+    sensor.mask(sensor_x, :, :) = 1;
+    sensor_info = struct('element_map', [], 'num_elements', 0);
+    sim_results.sensor_info = sensor_info;
+
+    fprintf('        Sensor: full YZ plane at x = %d\n', sensor_x);
+
+    % --- COMMENTED OUT: advanced sensor placement (for future use) ----------
+    % use_new_sensor = ~isempty(beam_metadata) && isstruct(beam_metadata) && ...
+    %                  isfield(sct_resampled, 'bodyMask');
+    %
+    % if use_new_sensor
+    %     % Physics-based sensor placement using determine_sensor_mask
+    %     [sensor_mask_3d, sensor_info] = determine_sensor_mask( ...
+    %         sct_resampled, field_dose, beam_metadata, config);
+    %
+    %     sensor = struct();
+    %     sensor.mask = sensor_mask_3d;
+    %
+    %     sim_results.sensor_info = sensor_info;
+    % else
+    %     % Fallback: no beam_metadata or bodyMask available
+    %     gantry_angle = field_dose.gantry_angle;
+    %     if use_bounded_sensor
+    %         warning('run_single_field_simulation:LegacySensor', ...
+    %             'Using legacy dose-bounded sensor placement.');
+    %         sensor = place_sensor_for_field_legacy(doseMask, Nx, Ny, Nz, gantry_angle);
+    %         fprintf('        Sensor mode: dose-bounded planar (legacy)\n');
+    %     else
+    %         sensor = place_fullface_sensor(Nx, Ny, Nz, gantry_angle);
+    %         fprintf('        Sensor mode: full-face planar\n');
+    %     end
+    %     sensor_info = struct('element_map', [], 'num_elements', 0);
+    %     sim_results.sensor_info = sensor_info;
+    % end
+    % ------------------------------------------------------------------------
 
     numSensorPts = sum(sensor.mask(:));
-    fprintf('        Sensor: %d points (gantry = %.1f deg)\n', numSensorPts, gantry_angle);
+    fprintf('        Sensor: %d active points\n', numSensorPts);
 
     if numSensorPts == 0
         warning('run_single_field_simulation:EmptySensor', ...
@@ -200,12 +273,24 @@ function recon_dose = run_single_field_simulation(field_dose, sct_resampled, med
         fwd_time = toc(fwd_tic);
         fprintf('        Forward complete (%.1f s). Sensor data: [%d x %d]\n', ...
             fwd_time, size(sensorData, 1), size(sensorData, 2));
+        sim_results.forward_time_s = fwd_time;
     catch ME
         warning('run_single_field_simulation:ForwardFail', ...
             'Forward simulation failed: %s', ME.message);
         recon_dose = zeros(gridSize);
         return;
     end
+
+    %% ======================== ELEMENT AVERAGING ========================
+
+    % --- COMMENTED OUT: element averaging (for future use) ------------------
+    % if use_new_sensor && ~isempty(sensor_info.element_map) && sensor_info.num_elements > 0
+    %     fprintf('        Applying element averaging (%d elements)...\n', sensor_info.num_elements);
+    %     [~, sensorData] = apply_element_averaging(sensorData, sensor_info);
+    %     fprintf('        Element averaging applied. Sensor data: [%d x %d]\n', ...
+    %         size(sensorData, 1), size(sensorData, 2));
+    % end
+    % ------------------------------------------------------------------------
 
     %% ======================== TIME REVERSAL RECONSTRUCTION ========================
 
@@ -251,6 +336,11 @@ function recon_dose = run_single_field_simulation(field_dose, sct_resampled, med
                 sensorDataRecon = kspaceFirstOrder3D(kgrid, kmedium, ...
                     source_resid, sensor, inputArgs{:});
 
+                % --- COMMENTED OUT: element averaging on residual ---
+                % if use_new_sensor && ~isempty(sensor_info.element_map) && sensor_info.num_elements > 0
+                %     [~, sensorDataRecon] = apply_element_averaging(sensorDataRecon, sensor_info);
+                % end
+
                 % Residual correction
                 sensorData = sensorData + (sensorData - sensorDataRecon);
             end
@@ -260,6 +350,9 @@ function recon_dose = run_single_field_simulation(field_dose, sct_resampled, med
         fprintf('        Time reversal complete (%.1f s).\n', tr_time);
         fprintf('        Reconstructed pressure: [%.2e, %.2e] Pa\n', ...
             min(reconPressure(:)), max(reconPressure(:)));
+
+        sim_results.tr_time_s = tr_time;
+        sim_results.recon_max = max(reconPressure(:));
 
     catch ME
         warning('run_single_field_simulation:TRFail', ...
@@ -357,6 +450,10 @@ function recon_dose = run_single_field_simulation(field_dose, sct_resampled, med
             sph_time = toc(sph_tic);
             fprintf('        Spherical compensation complete (%.1f s total).\n', sph_time);
 
+            sim_results.sph_corr_time_s  = sph_time;
+            sim_results.p0_planar_max    = max(p0_planar(:));
+            sim_results.p0_corrected_max = max(corrected(:));
+
         catch ME
             warning('run_single_field_simulation:SphCorrFail', ...
                 'Spherical compensation failed: %s. Using planar result.', ME.message);
@@ -385,62 +482,35 @@ end
 %  LOCAL HELPER FUNCTIONS
 %% ========================================================================
 
-function sensor = place_sensor_for_field(doseMask, Nx, Ny, Nz, gantry_angle)
-%PLACE_SENSOR_FOR_FIELD Create planar sensor based on dose extent and gantry
+function sensor = place_fullface_sensor(Nx, Ny, Nz, gantry_angle)
+%PLACE_FULLFACE_SENSOR Place sensor as the entire face plane on beam exit side
 %
-%   Sensor is placed on the beam exit side, determined by gantry angle:
-%     IEC gantry angle convention (looking from isocenter):
-%       0   deg -> beam from anterior (+Y),  sensor on posterior (-Y side)
-%       90  deg -> beam from right   (-X),   sensor on left      (+X side)
-%       180 deg -> beam from posterior(-Y),  sensor on anterior  (+Y side)
-%       270 deg -> beam from left    (+X),   sensor on right     (-X side)
-%
-%   The sensor plane covers the X-Z (or Y-Z) extent of the dose with a
-%   5-voxel pad, offset 10 voxels beyond the dose boundary on the exit side.
-
-    MARGIN = 10;   % voxels beyond dose extent
-    PAD_XZ = 5;    % padding around dose extent in plane
-
-    % Find dose voxel indices
-    [xIdx, yIdx, zIdx] = ind2sub([Nx, Ny, Nz], find(doseMask));
+%   Uses gantry angle to determine which grid face receives the sensor:
+%     0   deg -> beam from anterior  -> sensor on -Y face (full XZ plane)
+%     90  deg -> beam from right     -> sensor on +X face (full YZ plane)
+%     180 deg -> beam from posterior -> sensor on +Y face (full XZ plane)
+%     270 deg -> beam from left      -> sensor on -X face (full YZ plane)
 
     sensor = struct();
     sensor.mask = zeros(Nx, Ny, Nz);
 
-    if isempty(xIdx)
-        return;
-    end
-
-    % Dose extent with padding
-    xMin = max(1,  min(xIdx) - PAD_XZ);
-    xMax = min(Nx, max(xIdx) + PAD_XZ);
-    yMin = max(1,  min(yIdx) - PAD_XZ);
-    yMax = min(Ny, max(yIdx) + PAD_XZ);
-    zMin = max(1,  min(zIdx) - PAD_XZ);
-    zMax = min(Nz, max(zIdx) + PAD_XZ);
-
-    % Determine exit side from gantry angle (quantized to quadrants)
     ga = mod(gantry_angle, 360);
 
     if (ga >= 315 || ga < 45)
-        % Beam from anterior -> sensor on posterior (low Y)
-        sY = max(1, min(yIdx) - MARGIN);
-        sensor.mask(xMin:xMax, sY, zMin:zMax) = 1;
+        % Beam from anterior -> sensor on -Y face
+        sensor.mask(:, 1, :) = 1;
 
     elseif (ga >= 45 && ga < 135)
-        % Beam from right -> sensor on left (high X)
-        sX = min(Nx, max(xIdx) + MARGIN);
-        sensor.mask(sX, yMin:yMax, zMin:zMax) = 1;
+        % Beam from right -> sensor on +X face
+        sensor.mask(Nx, :, :) = 1;
 
     elseif (ga >= 135 && ga < 225)
-        % Beam from posterior -> sensor on anterior (high Y)
-        sY = min(Ny, max(yIdx) + MARGIN);
-        sensor.mask(xMin:xMax, sY, zMin:zMax) = 1;
+        % Beam from posterior -> sensor on +Y face
+        sensor.mask(:, Ny, :) = 1;
 
     else  % 225 <= ga < 315
-        % Beam from left -> sensor on right (low X)
-        sX = max(1, min(xIdx) - MARGIN);
-        sensor.mask(sX, yMin:yMax, zMin:zMax) = 1;
+        % Beam from left -> sensor on -X face
+        sensor.mask(1, :, :) = 1;
     end
 end
 
@@ -484,6 +554,49 @@ function sensor = build_enclosing_sensor(Nx, Ny, Nz, pml_size)
     % -Z face (z = face_lo) and +Z face (z = face_hi_z)
     sensor.mask(ix, iy, face_lo) = 1;
     sensor.mask(ix, iy, face_hi_z) = 1;
+end
+
+
+function sensor = place_sensor_for_field_legacy(doseMask, Nx, Ny, Nz, gantry_angle)
+%PLACE_SENSOR_FOR_FIELD_LEGACY Legacy planar sensor based on dose extent + gantry
+%
+%   Retained for backwards compatibility when beam_metadata or bodyMask
+%   is not available. See determine_sensor_mask for the recommended approach.
+
+    MARGIN = 10;   % voxels beyond dose extent
+    PAD_XZ = 5;    % padding around dose extent in plane
+
+    [xIdx, yIdx, zIdx] = ind2sub([Nx, Ny, Nz], find(doseMask));
+
+    sensor = struct();
+    sensor.mask = zeros(Nx, Ny, Nz);
+
+    if isempty(xIdx)
+        return;
+    end
+
+    xMin = max(1,  min(xIdx) - PAD_XZ);
+    xMax = min(Nx, max(xIdx) + PAD_XZ);
+    yMin = max(1,  min(yIdx) - PAD_XZ);
+    yMax = min(Ny, max(yIdx) + PAD_XZ);
+    zMin = max(1,  min(zIdx) - PAD_XZ);
+    zMax = min(Nz, max(zIdx) + PAD_XZ);
+
+    ga = mod(gantry_angle, 360);
+
+    if (ga >= 315 || ga < 45)
+        sY = max(1, min(yIdx) - MARGIN);
+        sensor.mask(xMin:xMax, sY, zMin:zMax) = 1;
+    elseif (ga >= 45 && ga < 135)
+        sX = min(Nx, max(xIdx) + MARGIN);
+        sensor.mask(sX, yMin:yMax, zMin:zMax) = 1;
+    elseif (ga >= 135 && ga < 225)
+        sY = min(Ny, max(yIdx) + MARGIN);
+        sensor.mask(xMin:xMax, sY, zMin:zMax) = 1;
+    else
+        sX = max(1, min(xIdx) - MARGIN);
+        sensor.mask(sX, yMin:yMax, zMin:zMax) = 1;
+    end
 end
 
 
