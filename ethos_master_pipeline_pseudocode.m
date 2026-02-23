@@ -299,6 +299,7 @@ for p_idx = 1:length(CONFIG.patients)
             % STEP 3: Gamma Analysis, SSIM & Visualization
             % ============================================================
             if CONFIG.run_step3
+                total_recon = double(gather(total_recon));
                 fprintf('\n[STEP 3] Running analysis (gamma + SSIM)...\n');
                 
                 % Call step3_analysis â€” loads all data, computes gamma and

@@ -147,6 +147,7 @@ fprintf('      Spacing: [%.2f, %.2f, %.2f] mm\n', ...
 % --- Load reconstructed dose ---
 fprintf('    Loading reconstructed dose...\n');
 [total_recon, ~] = load_total_reconstruction(patient_id, session, config);
+total_recon = double(gather(total_recon)); 
 fprintf('      Size: [%s], Max: %.4f Gy\n', ...
     num2str(size(total_recon), '%d x '), max(total_recon(:)));
 
@@ -456,7 +457,8 @@ function gamma = compute_gamma_analysis(reference, evaluated, spacing, config)
 %           .num_passed       - Number passing (gamma <= 1)
 %           .computation_time_sec - CalcGamma wall time
 %           .parameters       - Struct echoing input criteria
-
+    
+    % Fix GPU data
     % Validate sizes match
     if ~isequal(size(reference), size(evaluated))
         error('compute_gamma_analysis:SizeMismatch', ...
