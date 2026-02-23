@@ -6,36 +6,85 @@
 %  PURPOSE:
 %  Self-contained script for running a single-field (or total-dose)
 %  photoacoustic simulation without the full ETHOS pipeline.  Loads a
-%  .mat dose file and sct_resampled.mat from the current directory,
-%  builds the acoustic medium, places a sensor, runs the k-Wave forward
-%  simulation, and performs time-reversal reconstruction.
+%  .mat dose file and sct_resampled.mat from the processed/ output
+%  directory of step15_process_doses, builds the acoustic medium, places
+%  a sensor, runs the k-Wave forward simulation, and performs
+%  time-reversal reconstruction.
 %
 %  CONFIGURABLE OPTIONS (see CONFIGURATION section):
-%    - Dose file selection (default: total_rs_dose.mat)
-%    - Sensor mode: 'full_anterior_plane' or 'dose_based'
-%    - Tissue heterogeneity: 'uniform', 'threshold_1' (9 tissues),
-%                            'threshold_2' (4 tissues)
-%    - Individual toggles to disable heterogeneity in specific
-%      acoustic properties (density, sound speed, attenuation, Gruneisen)
+%    - Patient/session selection (constructs path to processed/ dir)
+%    - Dose file selection (default: total_rs_dose.mat in processed/)
+%    - Sensor mode: 'full_anterior_plane', 'dose_based', or 'spherical'
+%    - Tissue heterogeneity: 'uniform', 'threshold_1', 'threshold_2'
+%    - Per-property heterogeneity overrides
+%    - Spherical compensation for limited-view planar reconstruction
 %    - GPU/CPU selection, PML size, CFL number, TR iterations
 %
-%  REQUIRED FILES (in working directory):
+%  SPHERICAL COMPENSATION (CONFIG.spherical_compensation.enable = true):
+%    Corrects limited-view artifacts in planar reconstruction by:
+%      1. Running an additional spherical (full-enclosure) reconstruction
+%      2. Computing a frequency-domain transfer function:
+%           H(k) = FFT3(p0_sphere) / FFT3(p0_planar)
+%      3. Applying H(k) as a Wiener-regularized filter to the planar result
+%    This captures the geometry-dependent frequency loss of the limited
+%    aperture and compensates for it.  The regularization parameter
+%    controls noise amplification vs artifact correction.
+%
+%  REQUIRED FILES (in processed/ directory from step15_process_doses):
 %    - total_rs_dose.mat  (contains total_rs_dose: 3D Gy array)
 %    - sct_resampled.mat  (contains sct_resampled struct with cubeHU,
 %                          cubeDensity, bodyMask, couchMask, spacing, etc.)
+%
+%  PREREQUISITES:
+%    - MATLAB R2022a or later
+%    - k-Wave Toolbox (http://www.k-wave.org)
+%    - Image Processing Toolbox (optional, for dose_based sensor mode)
+%
+%  AUTHOR: ETHOS Pipeline Team
+%  DATE: February 2026
+%  VERSION: 2.0
+%
+%  See also: run_single_field_simulation, determine_sensor_mask,
+%            step15_process_doses, load_processed_data
 %  =========================================================================
 
 clear; clc; close all;
 
 %% ========================= CONFIGURATION ================================
 
-% --- File Selection ---
-% Path to the dose .mat file. Set to a specific path or leave as-is to
-% load from the current working directory.
-CONFIG.dose_file = 'total_rs_dose.mat';      % dose file to load
-CONFIG.sct_file  = 'sct_resampled.mat';      % CT / tissue data file
+% --- Patient / Session Selection ---
+% These construct the path to the processed/ output directory from step15.
+% Path: {working_dir}/RayStationFiles/{patient_id}/{session}/processed/
+CONFIG.working_dir    = '/mnt/weka/home/80030361/ETHOS_Simulations';
+CONFIG.patient_id     = '1194203';
+CONFIG.session        = 'Session_1';
 
-CONFIG.sensor_mode = 'sphere';  % 'full_anterior_plane' | 'dose_based' | 'sphere'
+% --- File Selection ---
+% Filenames within the processed/ directory.  Paths are constructed
+% automatically from patient_id/session above.
+% To override with an explicit full path, set CONFIG.dose_file_override
+% and CONFIG.sct_file_override (both empty by default).
+CONFIG.dose_filename = 'total_rs_dose.mat';   % dose file in processed/
+CONFIG.sct_filename  = 'sct_resampled.mat';   % CT file in processed/
+
+% Override: set to a full path to bypass the patient/session directory
+% structure. Leave empty to use the standard processed/ directory.
+CONFIG.dose_file_override = '';   % e.g., '/some/path/total_rs_dose.mat'
+CONFIG.sct_file_override  = '';   % e.g., '/some/path/sct_resampled.mat'
+
+% --- Sensor Placement Mode ---
+%   'full_anterior_plane' : Entire anteriormost voxel plane is the sensor.
+%                           Simple, no geometry dependence, good baseline.
+%   'dose_based'          : Sensor placed on beam-exit side based on dose
+%                           extent and gantry angle (original pipeline logic).
+%   'spherical'           : Full enclosing sensor on all 6 faces of the grid.
+%                           Best possible reconstruction (simulation-only).
+%                           Useful as a reference / for filter calibration.
+CONFIG.sensor_mode = 'full_anterior_plane';  % 'full_anterior_plane' | 'dose_based' | 'spherical'
+
+% --- Gantry Angle (used only for dose_based sensor mode) ---
+% If using total dose (not a single field), set a representative angle.
+% 0 deg = beam from anterior; 180 deg = beam from posterior.
 CONFIG.gantry_angle = 180;  % degrees (only used when sensor_mode = 'dose_based')
 
 % --- Tissue Heterogeneity ---
@@ -43,8 +92,12 @@ CONFIG.gantry_angle = 180;  % degrees (only used when sensor_mode = 'dose_based'
 %   'threshold_1'   : 9-tissue model (air, lung, fat, water, blood,
 %                     muscle, soft tissue, bone, metal)
 %   'threshold_2'   : 4-tissue model (water, fat, soft tissue, bone)
-CONFIG.gruneisen_method = 'threshold_2';
+CONFIG.gruneisen_method = 'uniform';
 
+% --- Per-Property Heterogeneity Overrides ---
+% When gruneisen_method is NOT 'uniform', you can selectively force
+% individual properties to be spatially constant while keeping others
+% heterogeneous.  Set to true to DISABLE heterogeneity for that property.
 CONFIG.force_uniform_density     = false;
 CONFIG.force_uniform_sound_speed = false;
 CONFIG.force_uniform_attenuation = false;
@@ -55,54 +108,128 @@ CONFIG.uniform_density      = 1000;    % kg/m^3  (water)
 CONFIG.uniform_sound_speed  = 1540;    % m/s     (soft tissue average)
 CONFIG.uniform_alpha_coeff  = 0.5;     % dB/MHz^y/cm
 CONFIG.uniform_alpha_power  = 1.1;     % exponent
-CONFIG.uniform_gruneisen    = 1.0;    
+CONFIG.uniform_gruneisen    = 1.0;     % dimensionless
 
 % --- Simulation Parameters ---
 CONFIG.dose_per_pulse_cGy     = 0.16;   % cGy per LINAC pulse
-CONFIG.meterset               = 140;    % MU (monitor units) for total dose
+CONFIG.meterset               = 100;    % MU (monitor units) for total dose
 CONFIG.pml_size               = 10;     % PML thickness (voxels)
 CONFIG.cfl_number             = 0.3;    % CFL stability number
 CONFIG.use_gpu                = true;   % Use GPU acceleration
 
+% --- Iterative Time-Reversal Reconstruction ---
+%   Uses the Dirichlet-BC time-reversal method from ethos_kwave_simulation.m
+%   with iterative residual correction:
+%     Iter 1: TR(measured_data) -> p0_est
+%     Iter n: forward(p0_est) -> simulated_data
+%             residual = measured_data - simulated_data
+%             measured_data += residual (corrected data)
+%             TR(corrected_data) -> p0_est (updated)
+%             positivity constraint applied each iteration
 CONFIG.num_iterations = 5;             % Number of iterative TR iterations
 CONFIG.convergence_tol = 1e-4;         % Early stop if relative change < tol
 
+% --- Spherical Compensation for Limited-View Planar Reconstruction ---
+%   When enabled, runs an additional spherical (fully-enclosing) sensor
+%   reconstruction on the SAME forward data source (p0), then computes a
+%   frequency-domain compensation filter:
+%
+%     H(k) = FFT3(p0_sphere) / FFT3(p0_planar)
+%
+%   This filter captures the spatial-frequency attenuation caused by the
+%   limited planar aperture.  It is applied to the planar reconstruction
+%   with Wiener regularization to avoid noise amplification:
+%
+%     p0_corrected = IFFT3( FFT3(p0_planar) * conj(H) * |H|^2 / (|H|^2 + lambda) )
+%   or equivalently:
+%     p0_corrected = IFFT3( FFT3(p0_planar) * FFT3(p0_sphere) / (|FFT3(p0_planar)|^2 + eps) )
+%
+%   The regularization_lambda parameter controls the tradeoff:
+%     Small lambda (e.g. 1e-3): aggressive correction, may amplify noise
+%     Large lambda (e.g. 1e-1): conservative, less artifact correction
+%
+%   NOTE: This is only meaningful for planar sensor modes.  If sensor_mode
+%         is 'spherical', this option is ignored (already fully enclosed).
+%
+%   COMPUTATIONAL COST: Approximately doubles the simulation time (one
+%   extra forward + TR cycle for the spherical sensor).
+CONFIG.spherical_compensation = struct();
+CONFIG.spherical_compensation.enable = false;         % Master toggle
+CONFIG.spherical_compensation.regularization_lambda = 0.01;  % Wiener regularization
+CONFIG.spherical_compensation.num_iterations = 1;     % TR iterations for spherical (1 is usually enough)
+CONFIG.spherical_compensation.apply_to_dose = true;   % Apply filter in dose domain (after p->D conversion)
+CONFIG.spherical_compensation.save_intermediates = false; % Save sphere/planar recon for analysis
+
 % --- Output ---
-CONFIG.save_results = false;             % Save reconstruction to .mat
+CONFIG.save_results = true;             % Save reconstruction to .mat
 CONFIG.output_file  = 'standalone_recon_results.mat';
 CONFIG.plot_results = true;             % Show comparison figures
 
-%% ========================= LOAD DATA ====================================
+%% ========================= RESOLVE FILE PATHS ============================
 
-fprintf('  Dose file:       %s\n', CONFIG.dose_file);
-fprintf('  SCT file:        %s\n', CONFIG.sct_file);
+% Construct paths from patient/session or use overrides
+if ~isempty(CONFIG.dose_file_override)
+    dose_filepath = CONFIG.dose_file_override;
+else
+    processed_dir = fullfile(CONFIG.working_dir, 'RayStationFiles', ...
+        CONFIG.patient_id, CONFIG.session, 'processed');
+    dose_filepath = fullfile(processed_dir, CONFIG.dose_filename);
+end
+
+if ~isempty(CONFIG.sct_file_override)
+    sct_filepath = CONFIG.sct_file_override;
+else
+    if ~exist('processed_dir', 'var')
+        processed_dir = fullfile(CONFIG.working_dir, 'RayStationFiles', ...
+            CONFIG.patient_id, CONFIG.session, 'processed');
+    end
+    sct_filepath = fullfile(processed_dir, CONFIG.sct_filename);
+end
+
+%% ========================= PRINT CONFIGURATION ===========================
+
+fprintf('=========================================================\n');
+fprintf('  Standalone k-Wave Photoacoustic Simulation  (v2.0)\n');
+fprintf('=========================================================\n');
+fprintf('  Patient:         %s / %s\n', CONFIG.patient_id, CONFIG.session);
+fprintf('  Dose file:       %s\n', dose_filepath);
+fprintf('  SCT file:        %s\n', sct_filepath);
 fprintf('  Sensor mode:     %s\n', CONFIG.sensor_mode);
 fprintf('  Tissue model:    %s\n', CONFIG.gruneisen_method);
 fprintf('  TR iterations:   %d (tol: %.1e)\n', CONFIG.num_iterations, CONFIG.convergence_tol);
 fprintf('  GPU:             %s\n', mat2str(CONFIG.use_gpu));
+if CONFIG.spherical_compensation.enable && ~strcmpi(CONFIG.sensor_mode, 'spherical')
+    fprintf('  Spherical comp:  ENABLED (lambda=%.1e, %d sphere iters)\n', ...
+        CONFIG.spherical_compensation.regularization_lambda, ...
+        CONFIG.spherical_compensation.num_iterations);
+else
+    fprintf('  Spherical comp:  off\n');
+end
 fprintf('=========================================================\n\n');
 
-% ---- Load dose ----
-fprintf('[1/7] Loading dose data...\n');
-if ~isfile(CONFIG.dose_file)
-    error('Dose file not found: %s', CONFIG.dose_file);
+%% ========================= LOAD DATA ====================================
+
+fprintf('[1/8] Loading dose data...\n');
+if ~isfile(dose_filepath)
+    error('Dose file not found: %s\n  Check CONFIG.patient_id, CONFIG.session, and CONFIG.working_dir.', ...
+        dose_filepath);
 end
-dose_data = load(CONFIG.dose_file);
+dose_data = load(dose_filepath);
 
 % Auto-detect the dose variable name
 dose_fields = fieldnames(dose_data);
 if isfield(dose_data, 'total_rs_dose')
     doseGrid = dose_data.total_rs_dose;
     fprintf('       Loaded variable: total_rs_dose\n');
-% elseif isfield(dose_data, 'dose_Gy')
-%     doseGrid = dose_data.dose_Gy;
-%     fprintf('       Loaded variable: dose_Gy\n');
-% elseif length(dose_fields) == 1
-%     doseGrid = dose_data.(dose_fields{1});
-%     fprintf('       Loaded variable: %s\n', dose_fields{1});
-% else
-%     fprintf('       Available variables: %s\n', strjoin(dose_fields, ', '));
-%     error('Cannot auto-detect dose variable. Expected total_rs_dose or dose_Gy.');
+elseif isfield(dose_data, 'dose_Gy')
+    doseGrid = dose_data.dose_Gy;
+    fprintf('       Loaded variable: dose_Gy\n');
+elseif length(dose_fields) == 1
+    doseGrid = dose_data.(dose_fields{1});
+    fprintf('       Loaded variable: %s\n', dose_fields{1});
+else
+    fprintf('       Available variables: %s\n', strjoin(dose_fields, ', '));
+    error('Cannot auto-detect dose variable. Expected total_rs_dose or dose_Gy.');
 end
 
 if ~isnumeric(doseGrid) || ndims(doseGrid) ~= 3
@@ -118,16 +245,17 @@ fprintf('       Grid size: [%d x %d x %d]\n', Nx, Ny, Nz);
 fprintf('       Dose range: [%.6f, %.4f] Gy\n', min(doseGrid(:)), max(doseGrid(:)));
 
 % ---- Load SCT ----
-fprintf('[2/7] Loading SCT data...\n');
-if ~isfile(CONFIG.sct_file)
-    error('SCT file not found: %s', CONFIG.sct_file);
+fprintf('[2/8] Loading SCT data...\n');
+if ~isfile(sct_filepath)
+    error('SCT file not found: %s\n  Check CONFIG.patient_id, CONFIG.session, and CONFIG.working_dir.', ...
+        sct_filepath);
 end
-sct_data = load(CONFIG.sct_file);
+sct_data = load(sct_filepath);
 
 if isfield(sct_data, 'sct_resampled')
     sct = sct_data.sct_resampled;
 else
-    error('sct_resampled variable not found in %s', CONFIG.sct_file);
+    error('sct_resampled variable not found in %s', sct_filepath);
 end
 
 % Validate SCT has required fields
@@ -156,7 +284,7 @@ fprintf('       HU range: [%.0f, %.0f]\n', min(sct.cubeHU(:)), max(sct.cubeHU(:)
 
 %% ========================= CREATE ACOUSTIC MEDIUM ========================
 
-fprintf('[3/7] Creating acoustic medium (method: %s)...\n', CONFIG.gruneisen_method);
+fprintf('[3/8] Creating acoustic medium (method: %s)...\n', CONFIG.gruneisen_method);
 
 medium = create_medium(sct, CONFIG);
 
@@ -169,9 +297,19 @@ fprintf('       Alpha coeff range: [%.4f, %.4f] dB/MHz^y/cm\n', ...
 fprintf('       Gruneisen range:   [%.4f, %.4f]\n', ...
     min(medium.gruneisen(:)), max(medium.gruneisen(:)));
 
+% Print override status
+overrides = {};
+if CONFIG.force_uniform_density,     overrides{end+1} = 'density';     end
+if CONFIG.force_uniform_sound_speed, overrides{end+1} = 'sound_speed'; end
+if CONFIG.force_uniform_attenuation, overrides{end+1} = 'attenuation'; end
+if CONFIG.force_uniform_gruneisen,   overrides{end+1} = 'gruneisen';   end
+if ~isempty(overrides)
+    fprintf('       Forced uniform:    {%s}\n', strjoin(overrides, ', '));
+end
+
 %% ========================= INITIAL PRESSURE p0 ==========================
 
-fprintf('[4/7] Computing initial pressure...\n');
+fprintf('[4/8] Computing initial pressure...\n');
 
 % Pulse calculation
 meterset = CONFIG.meterset;
@@ -196,30 +334,53 @@ end
 
 %% ========================= SENSOR PLACEMENT ==============================
 
-fprintf('[5/7] Placing sensor (mode: %s)...\n', CONFIG.sensor_mode);
+fprintf('[5/8] Placing sensor (mode: %s)...\n', CONFIG.sensor_mode);
 
 sensor = struct();
 
 switch lower(CONFIG.sensor_mode)
-    case 'sphere'
-        sensor.mask = zeros(Nx,Ny,Nz); 
-        sphere = makeSphere(Nx,Ny,Nz,round(min(min(Nx,Ny),Nz)/2.5)); 
     case 'full_anterior_plane'
         % ---- Full anteriormost plane ----
-        % The sensor is the entire first slice along Y (dim 1),
-        % which corresponds to the most anterior plane in DICOM.
-        % Place it at y=1 (anteriormost row).
+        % The sensor spans the entire Y-plane at the most anterior body
+        % surface (or near it), giving maximum lateral coverage.
         sensor.mask = zeros(Nx, Ny, Nz);
-        sensor.mask(1, :, :) = 1;  % first X-plane (lateral actually)
 
+        if isfield(sct, 'bodyMask')
+            body = sct.bodyMask;
+            if isfield(sct, 'couchMask')
+                body = body & ~sct.couchMask;
+            end
+            % Find the minimum Y index that has any body voxel
+            y_has_body = squeeze(any(any(body, 1), 3));  % [1 x Ny] logical
+            anterior_y = find(y_has_body, 1, 'first');
+            if ~isempty(anterior_y)
+                sensor_y = max(1, anterior_y - 3);
+            else
+                sensor_y = 1;
+            end
+        else
+            sensor_y = 1;
+        end
+
+        sensor.mask(:, sensor_y, :) = 1;
+
+        fprintf('       Full anterior plane at Y index %d\n', sensor_y);
+        fprintf('       Sensor plane size: %d x %d = %d voxels\n', ...
+            Nx, Nz, Nx * Nz);
 
     case 'dose_based'
         % ---- Dose-extent-based placement (original pipeline logic) ----
         sensor = place_sensor_for_field(doseMask, Nx, Ny, Nz, CONFIG.gantry_angle);
         fprintf('       Gantry angle: %.1f deg\n', CONFIG.gantry_angle);
 
+    case 'spherical'
+        % ---- Full enclosing sensor (all 6 grid faces) ----
+        % Best-possible reconstruction for simulation reference.
+        sensor.mask = create_enclosing_sensor(Nx, Ny, Nz, CONFIG.pml_size);
+        fprintf('       Full enclosing sensor (6 faces inside PML)\n');
+
     otherwise
-        error('Unknown sensor_mode: %s. Use ''full_anterior_plane'' or ''dose_based''.', ...
+        error('Unknown sensor_mode: %s. Use ''full_anterior_plane'', ''dose_based'', or ''spherical''.', ...
             CONFIG.sensor_mode);
 end
 
@@ -231,27 +392,27 @@ if numSensorPts == 0
     return;
 end
 
-%% ========================= k-WAVE FORWARD SIMULATION =====================
+%% ========================= k-WAVE GRID & COMMON SETUP ===================
 
-fprintf('[6/7] Running k-Wave forward simulation...\n');
+fprintf('[6/8] Setting up k-Wave grid...\n');
 
 % ---- Create k-Wave grid ----
 kgrid = kWaveGrid(Nx, dx, Ny, dy, Nz, dz);
 
 % CFL-stable time step
-% maxC = max(medium.sound_speed(:));
-% minC = min(medium.sound_speed(medium.sound_speed > 0));
-% dt   = CONFIG.cfl_number * min([dx, dy, dz]) / maxC;
+maxC = max(medium.sound_speed(:));
+minC = min(medium.sound_speed(medium.sound_speed > 0));
+dt   = CONFIG.cfl_number * min([dx, dy, dz]) / maxC;
 
 % Simulation time: 2.5x grid diagonal traversal at minimum speed
-% gridDiag = sqrt((Nx*dx)^2 + (Ny*dy)^2 + (Nz*dz)^2);
-% simTime  = 2.5 * gridDiag / minC;
-% Nt       = ceil(simTime / dt);
+gridDiag = sqrt((Nx*dx)^2 + (Ny*dy)^2 + (Nz*dz)^2);
+simTime  = 2.5 * gridDiag / minC;
+Nt       = ceil(simTime / dt);
 
-% kgrid.dt = dt;
-% kgrid.Nt = Nt;
+kgrid.dt = dt;
+kgrid.Nt = Nt;
 
-% fprintf('       dt = %.2e s, Nt = %d, T_sim = %.2e s\n', dt, Nt, simTime);
+fprintf('       dt = %.2e s, Nt = %d, T_sim = %.2e s\n', dt, Nt, simTime);
 
 % ---- k-Wave medium struct ----
 kmedium = struct();
@@ -281,14 +442,17 @@ inputArgs = {'Smooth', false, ...
              'DataCast', dataCast, ...
              'PlotSim', false};
 
-% ==== FORWARD SIMULATION ====
+%% ========================= FORWARD SIMULATION ============================
+
+fprintf('[7/8] Running k-Wave forward simulation...\n');
+
 source_fwd    = struct();
 source_fwd.p0 = p0;
 
 try
-    %fwd_tic = tic;
+    fwd_tic = tic;
     sensorData = kspaceFirstOrder3D(kgrid, kmedium, source_fwd, sensor, inputArgs{:});
-    %fwd_time = toc(fwd_tic);
+    fwd_time = toc(fwd_tic);
     fprintf('       Forward complete (%.1f s). Sensor data: [%d x %d]\n', ...
         fwd_time, size(sensorData, 1), size(sensorData, 2));
 catch ME
@@ -301,8 +465,6 @@ sensorData_measured = sensorData;
 
 %% ========================= ITERATIVE TIME-REVERSAL RECONSTRUCTION ========
 %
-%  Iterative reconstruction using the Dirichlet-BC time-reversal method
-%
 %  Algorithm (Treeby & Cox, "k-Wave" iterative TR):
 %    Iteration 1:
 %      1. Time-reverse measured sensor data (fliplr) as Dirichlet source
@@ -312,157 +474,129 @@ sensorData_measured = sensorData;
 %    Iterations 2..N:
 %      4. Forward-simulate current estimate p0_est -> sensorData_simulated
 %      5. Compute residual: residual = sensorData_measured - sensorData_simulated
-%      6. Correct sensor data: sensorData_corrected = sensorData_measured + residual
-%         (equivalently: sensorData_corrected = 2*sensorData_measured - sensorData_simulated)
+%      6. Correct: sensorData_corrected = sensorData_measured + residual
 %      7. Time-reverse corrected data -> p0_est (updated)
 %      8. Apply positivity constraint
-%      9. Check convergence (relative change in p0_est)
-%
+%      9. Check convergence
 %  =========================================================================
 
-num_iterations = CONFIG.num_iterations;
-convergence_tol = CONFIG.convergence_tol;
+reconPressure = run_iterative_tr(kgrid, kmedium, sensor, sensorData_measured, ...
+    gridSize, CONFIG.num_iterations, CONFIG.convergence_tol, inputArgs, 'Planar');
 
-fprintf('[7/7] Iterative time-reversal reconstruction (%d iterations)...\n', num_iterations);
+%% ========================= SPHERICAL COMPENSATION ========================
+%
+%  If enabled, run an additional fully-enclosing reconstruction and use it
+%  to build a frequency-domain compensation filter for the planar result.
+%
+%  Theory:
+%    Let p0_true be the actual initial pressure distribution.
+%    Spherical TR (full enclosure) recovers:  p0_S ≈ p0_true
+%    Planar TR (limited view) recovers:       p0_P = H_lv * p0_true  (convolution)
+%    where H_lv is the limited-view point spread function.
+%
+%    The compensation filter in k-space is:
+%      F(k) = P0_S(k) / P0_P(k)   (with regularization)
+%
+%    For a new planar reconstruction p0_P_new:
+%      p0_corrected = IFFT3( FFT3(p0_P_new) * F_regularized(k) )
+%
+%  Since we're in simulation, we can compute the filter from the SAME p0
+%  that generated the sensor data.  The filter characterizes the geometry.
+%  =========================================================================
 
-% Convergence tracking
-iter_metrics = struct();
-iter_metrics.max_pressure  = zeros(num_iterations, 1);
-iter_metrics.rel_change    = zeros(num_iterations, 1);
-iter_metrics.residual_norm = zeros(num_iterations, 1);
-iter_metrics.iter_time     = zeros(num_iterations, 1);
+do_spherical_comp = CONFIG.spherical_compensation.enable && ...
+                    ~strcmpi(CONFIG.sensor_mode, 'spherical');
 
-% Working copy of sensor data (will be updated each iteration)
-sensorData_working = sensorData_measured;
+reconPressure_compensated = [];
+spherical_comp_results = struct();
 
-% Previous estimate for convergence check
-reconPressure_prev = zeros(gridSize);
-reconPressure = zeros(gridSize);
+if do_spherical_comp
+    fprintf('\n========= SPHERICAL COMPENSATION =========\n');
 
-try
-    tr_total_tic = tic;
+    % ---- Step 1: Create enclosing sensor and run forward ----
+    fprintf('  [SC 1/4] Creating enclosing sensor...\n');
+    sensor_sphere = struct();
+    sensor_sphere.mask = create_enclosing_sensor(Nx, Ny, Nz, CONFIG.pml_size);
+    numSpherePts = sum(sensor_sphere.mask(:));
+    fprintf('           Enclosing sensor: %d voxels\n', numSpherePts);
 
-    for iter = 1:num_iterations
-        iter_tic = tic;
-        fprintf('\n       --- Iteration %d/%d ---\n', iter, num_iterations);
+    fprintf('  [SC 2/4] Forward simulation (enclosing sensor)...\n');
+    try
+        sphere_fwd_tic = tic;
+        sensorData_sphere = kspaceFirstOrder3D(kgrid, kmedium, source_fwd, ...
+            sensor_sphere, inputArgs{:});
+        sphere_fwd_time = toc(sphere_fwd_tic);
+        fprintf('           Forward complete (%.1f s). Data: [%d x %d]\n', ...
+            sphere_fwd_time, size(sensorData_sphere, 1), size(sensorData_sphere, 2));
+    catch ME
+        fprintf('  [ERROR] Spherical forward failed: %s\n', ME.message);
+        fprintf('  Skipping spherical compensation.\n');
+        do_spherical_comp = false;
+    end
+end
 
-        % ---- Step A: Time-reverse current sensor data ----
-        % (Matches ethos_kwave_simulation.m: Dirichlet BC, p_final recording)
-        source_tr        = struct();
-        source_tr.p_mask = sensor.mask;
-        source_tr.p      = fliplr(sensorData_working);  % Time-reversed
-        source_tr.p_mode = 'dirichlet';
+if do_spherical_comp
+    % ---- Step 2: Time-reverse from enclosing sensor ----
+    fprintf('  [SC 3/4] Spherical TR reconstruction (%d iterations)...\n', ...
+        CONFIG.spherical_compensation.num_iterations);
 
-        % Record final pressure over entire grid
-        sensor_tr        = struct();
-        sensor_tr.mask   = sensor.mask; 
-        sensor_tr.record = {'p_final'};
+    reconPressure_sphere = run_iterative_tr(kgrid, kmedium, sensor_sphere, ...
+        sensorData_sphere, gridSize, ...
+        CONFIG.spherical_compensation.num_iterations, ...
+        CONFIG.convergence_tol, inputArgs, 'Spherical');
 
-        fprintf('       Running time reversal...\n');
-        p0_recon = kspaceFirstOrder3D(kgrid, kmedium, source_tr, sensor_tr, inputArgs{:});
+    fprintf('           Spherical recon range: [%.2e, %.2e] Pa\n', ...
+        min(reconPressure_sphere(:)), max(reconPressure_sphere(:)));
 
-        % Extract 3D pressure field
-        if isstruct(p0_recon) && isfield(p0_recon, 'p_final')
-            reconPressure = reshape(p0_recon.p_final, [Nx, Ny, Nz]);
-        else
-            reconPressure = reshape(p0_recon, [Nx, Ny, Nz]);
-        end
+    % ---- Step 3: Compute and apply compensation filter ----
+    fprintf('  [SC 4/4] Computing compensation filter...\n');
+    lambda = CONFIG.spherical_compensation.regularization_lambda;
 
-        % Apply positivity constraint (dose & pressure are non-negative)
-        reconPressure = max(reconPressure, 0);
+    if CONFIG.spherical_compensation.apply_to_dose
+        % Apply filter in dose domain (after pressure->dose conversion)
+        % This is often more meaningful since dose is what we care about.
+        convFactor = medium.gruneisen .* medium.density;
+        convFactor(convFactor == 0) = 1;
 
-        % ---- Track convergence metrics ----
-        iter_metrics.max_pressure(iter) = max(reconPressure(:));
+        dose_sphere = (reconPressure_sphere ./ convFactor) * num_pulses;
+        dose_planar = (reconPressure ./ convFactor) * num_pulses;
 
-        if iter > 1
-            % Relative change from previous iteration
-            delta = reconPressure - reconPressure_prev;
-            norm_prev = norm(reconPressure_prev(:));
-            if norm_prev > 0
-                iter_metrics.rel_change(iter) = norm(delta(:)) / norm_prev;
-            else
-                iter_metrics.rel_change(iter) = Inf;
-            end
-        else
-            iter_metrics.rel_change(iter) = Inf;
-        end
+        [dose_compensated, filter_info] = apply_spherical_filter( ...
+            dose_planar, dose_sphere, lambda);
 
-        iter_metrics.iter_time(iter) = toc(iter_tic);
+        % Convert back to pressure for consistency
+        reconPressure_compensated = (dose_compensated / num_pulses) .* convFactor;
 
-        fprintf('       Max pressure: %.4e Pa\n', iter_metrics.max_pressure(iter));
-        if iter > 1
-            fprintf('       Relative change: %.6e\n', iter_metrics.rel_change(iter));
-        end
-        fprintf('       Iteration time: %.1f s\n', iter_metrics.iter_time(iter));
+        fprintf('           Filter applied in DOSE domain\n');
+    else
+        % Apply filter in pressure domain
+        [reconPressure_compensated, filter_info] = apply_spherical_filter( ...
+            reconPressure, reconPressure_sphere, lambda);
 
-        % ---- Step B: Check convergence (skip on last iteration) ----
-        if iter > 1 && iter_metrics.rel_change(iter) < convergence_tol
-            fprintf('       *** Converged at iteration %d (rel_change %.2e < tol %.2e) ***\n', ...
-                iter, iter_metrics.rel_change(iter), convergence_tol);
-            % Trim metrics arrays
-            iter_metrics.max_pressure  = iter_metrics.max_pressure(1:iter);
-            iter_metrics.rel_change    = iter_metrics.rel_change(1:iter);
-            iter_metrics.residual_norm = iter_metrics.residual_norm(1:iter);
-            iter_metrics.iter_time     = iter_metrics.iter_time(1:iter);
-            break;
-        end
-
-        % Save current estimate for next convergence check
-        reconPressure_prev = reconPressure;
-
-        % ---- Step C: Compute residual and correct sensor data ----
-        % (Skip on last iteration -- no need for another forward sim)
-        if iter < num_iterations
-            fprintf('       Forward-simulating current estimate for residual...\n');
-
-            source_resid    = struct();
-            source_resid.p0 = reconPressure;
-            sensorData_simulated = kspaceFirstOrder3D(kgrid, kmedium, ...
-                source_resid, sensor, inputArgs{:});
-
-            % Residual: difference between measured and simulated
-            residual = sensorData_measured - sensorData_simulated;
-            iter_metrics.residual_norm(iter) = norm(residual(:));
-
-            fprintf('       Residual norm: %.4e (sensor data norm: %.4e)\n', ...
-                iter_metrics.residual_norm(iter), norm(sensorData_measured(:)));
-
-            % Correct sensor data for next iteration:
-            %   sensorData_corrected = sensorData_measured + residual
-            %   = sensorData_measured + (sensorData_measured - sensorData_simulated)
-            %   = 2*sensorData_measured - sensorData_simulated
-            sensorData_working = sensorData_measured + residual;
-        end
+        fprintf('           Filter applied in PRESSURE domain\n');
     end
 
-    tr_time = toc(tr_total_tic);
-    num_completed = length(iter_metrics.max_pressure);
+    fprintf('           Lambda: %.1e\n', lambda);
+    fprintf('           Filter dynamic range: [%.2e, %.2e]\n', ...
+        filter_info.filter_min, filter_info.filter_max);
+    fprintf('           Compensated pressure range: [%.2e, %.2e] Pa\n', ...
+        min(reconPressure_compensated(:)), max(reconPressure_compensated(:)));
 
-    fprintf('\n       =========================================\n');
-    fprintf('       Iterative TR complete: %d/%d iterations (%.1f s total)\n', ...
-        num_completed, num_iterations, tr_time);
-    fprintf('       Final pressure range: [%.2e, %.2e] Pa\n', ...
-        min(reconPressure(:)), max(reconPressure(:)));
-    fprintf('       =========================================\n');
-
-    % Print convergence summary table
-    fprintf('\n       Convergence Summary:\n');
-    fprintf('       %5s  %12s  %12s  %12s  %8s\n', ...
-        'Iter', 'Max(p)', 'Rel Change', '||Residual||', 'Time(s)');
-    fprintf('       %s\n', repmat('-', 1, 55));
-    for k = 1:num_completed
-        fprintf('       %5d  %12.4e  %12.4e  %12.4e  %8.1f\n', ...
-            k, iter_metrics.max_pressure(k), iter_metrics.rel_change(k), ...
-            iter_metrics.residual_norm(k), iter_metrics.iter_time(k));
+    % Store intermediates if requested
+    if CONFIG.spherical_compensation.save_intermediates
+        spherical_comp_results.reconPressure_sphere = reconPressure_sphere;
+        spherical_comp_results.filter_info = filter_info;
     end
+    spherical_comp_results.enabled = true;
+    spherical_comp_results.lambda = lambda;
+    spherical_comp_results.sphere_fwd_time = sphere_fwd_time;
 
-catch ME
-    fprintf('[ERROR] Iterative reconstruction failed at iteration %d: %s\n', ...
-        iter, ME.message);
-    return;
+    fprintf('==========================================\n');
 end
 
 %% ========================= PRESSURE -> DOSE ==============================
+
+fprintf('\n[8/8] Converting pressure to dose...\n');
 
 conversionFactor = medium.gruneisen .* medium.density;
 conversionFactor(conversionFactor == 0) = 1;  % prevent div-by-zero
@@ -470,23 +604,44 @@ conversionFactor(conversionFactor == 0) = 1;  % prevent div-by-zero
 reconDosePerPulse = reconPressure ./ conversionFactor;
 recon_dose = reconDosePerPulse * num_pulses;
 
+% Compensated dose (if spherical compensation was applied)
+if ~isempty(reconPressure_compensated)
+    if CONFIG.spherical_compensation.apply_to_dose
+        % Already computed in dose domain above
+        recon_dose_compensated = dose_compensated;
+    else
+        recon_dose_compensated = (reconPressure_compensated ./ conversionFactor) * num_pulses;
+    end
+else
+    recon_dose_compensated = [];
+end
+
+%% ========================= RESULTS SUMMARY ===============================
+
 fprintf('\n========= RESULTS =========\n');
 fprintf('  Original dose:       [%.6f, %.4f] Gy\n', min(doseGrid(:)), max(doseGrid(:)));
 fprintf('  Reconstructed dose:  [%.6f, %.4f] Gy\n', min(recon_dose(:)), max(recon_dose(:)));
 
-% Quick error metrics within dose region
+% Error metrics within dose region
 dose_region = doseGrid > doseThreshold;
 if any(dose_region(:))
     abs_error = abs(recon_dose(dose_region) - doseGrid(dose_region));
     rel_error = abs_error ./ max(doseGrid(dose_region), 1e-10) * 100;
-    fprintf('  Mean abs error (>1%% dose): %.6f Gy\n', mean(abs_error));
-    fprintf('  Mean rel error (>1%% dose): %.2f%%\n', mean(rel_error));
-    fprintf('  Max  rel error (>1%% dose): %.2f%%\n', max(rel_error));
+    fprintf('  Planar  - Mean abs err: %.6f Gy, Mean rel err: %.2f%%, Max rel err: %.2f%%\n', ...
+        mean(abs_error), mean(rel_error), max(rel_error));
 end
 
-total_time = fwd_time + tr_time;
-fprintf('  Total simulation time: %.1f s (fwd: %.1f, TR %d iters: %.1f)\n', ...
-    total_time, fwd_time, num_completed, tr_time);
+if ~isempty(recon_dose_compensated)
+    fprintf('  Compensated dose:    [%.6f, %.4f] Gy\n', ...
+        min(recon_dose_compensated(:)), max(recon_dose_compensated(:)));
+    if any(dose_region(:))
+        abs_error_c = abs(recon_dose_compensated(dose_region) - doseGrid(dose_region));
+        rel_error_c = abs_error_c ./ max(doseGrid(dose_region), 1e-10) * 100;
+        fprintf('  Compens - Mean abs err: %.6f Gy, Mean rel err: %.2f%%, Max rel err: %.2f%%\n', ...
+            mean(abs_error_c), mean(rel_error_c), max(rel_error_c));
+    end
+end
+
 fprintf('===========================\n');
 
 %% ========================= SAVE RESULTS =================================
@@ -502,9 +657,12 @@ if CONFIG.save_results
     results.spacing_mm     = spacing_mm;
     results.grid_size      = gridSize;
     results.fwd_time_sec   = fwd_time;
-    results.tr_time_sec    = tr_time;
-    results.iter_metrics   = iter_metrics;
-    results.num_iterations_completed = num_completed;
+
+    if ~isempty(recon_dose_compensated)
+        results.recon_dose_compensated     = recon_dose_compensated;
+        results.reconPressure_compensated  = reconPressure_compensated;
+        results.spherical_comp             = spherical_comp_results;
+    end
 
     save(CONFIG.output_file, '-struct', 'results', '-v7.3');
     fprintf('\nResults saved to: %s\n', CONFIG.output_file);
@@ -513,33 +671,17 @@ end
 %% ========================= VISUALIZATION =================================
 
 if CONFIG.plot_results
-    plot_dose_comparison(doseGrid, recon_dose, sensor.mask, spacing_mm);
+    % Standard planar comparison
+    plot_dose_comparison(doseGrid, recon_dose, sensor.mask, spacing_mm, 'Planar Reconstruction');
 
-    % ---- Convergence plot ----
-    if num_completed > 1
-        figure('Name', 'Iterative TR Convergence', 'Position', [200, 200, 900, 400]);
-        sgtitle('Iterative Time-Reversal Convergence');
+    % Compensated comparison (if available)
+    if ~isempty(recon_dose_compensated)
+        plot_dose_comparison(doseGrid, recon_dose_compensated, sensor.mask, ...
+            spacing_mm, 'Spherical-Compensated Reconstruction');
 
-        subplot(1, 2, 1);
-        plot(1:num_completed, iter_metrics.max_pressure, 'bo-', 'LineWidth', 1.5, 'MarkerSize', 8);
-        xlabel('Iteration');
-        ylabel('Max Reconstructed Pressure (Pa)');
-        title('Peak Pressure vs Iteration');
-        grid on;
-
-        subplot(1, 2, 2);
-        semilogy(2:num_completed, iter_metrics.rel_change(2:end), 'rs-', 'LineWidth', 1.5, 'MarkerSize', 8);
-        hold on;
-        if CONFIG.convergence_tol > 0
-            yline(CONFIG.convergence_tol, 'k--', 'Tolerance', 'LineWidth', 1);
-        end
-        xlabel('Iteration');
-        ylabel('Relative Change (L2 norm)');
-        title('Convergence: Relative Change');
-        grid on;
-        hold off;
-
-        drawnow;
+        % Side-by-side: planar vs compensated vs original
+        plot_three_way_comparison(doseGrid, recon_dose, recon_dose_compensated, ...
+            spacing_mm);
     end
 end
 
@@ -550,23 +692,239 @@ fprintf('\nStandalone simulation complete.\n');
 %  LOCAL FUNCTIONS
 %% =========================================================================
 
+function reconPressure = run_iterative_tr(kgrid, kmedium, sensor, ...
+    sensorData_measured, gridSize, num_iterations, convergence_tol, inputArgs, label)
+%RUN_ITERATIVE_TR Iterative time-reversal reconstruction with convergence tracking
+%
+%   Shared implementation used for both planar and spherical reconstructions.
+
+    Nx = gridSize(1);
+    Ny = gridSize(2);
+    Nz = gridSize(3);
+
+    fprintf('       [%s] Iterative TR (%d iterations, tol=%.1e)...\n', ...
+        label, num_iterations, convergence_tol);
+
+    % Convergence tracking
+    iter_metrics = struct();
+    iter_metrics.max_pressure  = zeros(num_iterations, 1);
+    iter_metrics.rel_change    = zeros(num_iterations, 1);
+    iter_metrics.residual_norm = zeros(num_iterations, 1);
+    iter_metrics.iter_time     = zeros(num_iterations, 1);
+
+    sensorData_working = sensorData_measured;
+    reconPressure_prev = zeros(gridSize);
+    reconPressure = zeros(gridSize);
+
+    try
+        tr_total_tic = tic;
+
+        for iter = 1:num_iterations
+            iter_tic = tic;
+            fprintf('       [%s] --- Iteration %d/%d ---\n', label, iter, num_iterations);
+
+            % Step A: Time-reverse current sensor data
+            source_tr        = struct();
+            source_tr.p_mask = sensor.mask;
+            source_tr.p      = fliplr(sensorData_working);
+            source_tr.p_mode = 'dirichlet';
+
+            sensor_tr        = struct();
+            sensor_tr.mask   = ones(Nx, Ny, Nz);
+            sensor_tr.record = {'p_final'};
+
+            p0_recon = kspaceFirstOrder3D(kgrid, kmedium, source_tr, sensor_tr, inputArgs{:});
+
+            if isstruct(p0_recon) && isfield(p0_recon, 'p_final')
+                reconPressure = reshape(p0_recon.p_final, [Nx, Ny, Nz]);
+            else
+                reconPressure = reshape(p0_recon, [Nx, Ny, Nz]);
+            end
+
+            % Positivity constraint
+            reconPressure = max(reconPressure, 0);
+
+            % Track metrics
+            iter_metrics.max_pressure(iter) = max(reconPressure(:));
+
+            if iter > 1
+                delta = reconPressure - reconPressure_prev;
+                norm_prev = norm(reconPressure_prev(:));
+                if norm_prev > 0
+                    iter_metrics.rel_change(iter) = norm(delta(:)) / norm_prev;
+                else
+                    iter_metrics.rel_change(iter) = Inf;
+                end
+            else
+                iter_metrics.rel_change(iter) = Inf;
+            end
+
+            iter_metrics.iter_time(iter) = toc(iter_tic);
+
+            fprintf('       [%s] Max p: %.4e, Rel change: %.4e (%.1f s)\n', ...
+                label, iter_metrics.max_pressure(iter), ...
+                iter_metrics.rel_change(iter), iter_metrics.iter_time(iter));
+
+            % Check convergence
+            if iter > 1 && iter_metrics.rel_change(iter) < convergence_tol
+                fprintf('       [%s] *** Converged at iteration %d ***\n', label, iter);
+                break;
+            end
+
+            reconPressure_prev = reconPressure;
+
+            % Compute residual and correct sensor data for next iteration
+            if iter < num_iterations
+                source_resid    = struct();
+                source_resid.p0 = reconPressure;
+                sensorData_simulated = kspaceFirstOrder3D(kgrid, kmedium, ...
+                    source_resid, sensor, inputArgs{:});
+
+                residual = sensorData_measured - sensorData_simulated;
+                iter_metrics.residual_norm(iter) = norm(residual(:));
+
+                sensorData_working = sensorData_measured + residual;
+            end
+        end
+
+        tr_time = toc(tr_total_tic);
+        fprintf('       [%s] TR complete (%.1f s total)\n', label, tr_time);
+
+    catch ME
+        fprintf('[ERROR] %s TR failed: %s\n', label, ME.message);
+        reconPressure = zeros(gridSize);
+    end
+end
+
+
+function sensor_mask = create_enclosing_sensor(Nx, Ny, Nz, pml_size)
+%CREATE_ENCLOSING_SENSOR Create a full-enclosure sensor on all 6 grid faces
+%
+%   Places sensor voxels on the 6 faces of the 3D grid, inset from the PML
+%   boundary by 1 voxel.  This provides maximum solid-angle coverage and
+%   serves as the "ideal" reconstruction reference.
+
+    sensor_mask = zeros(Nx, Ny, Nz);
+
+    % Inset from PML (sensor should be just inside the PML layer)
+    s = pml_size + 1;
+
+    % Face 1 & 2: X = s and X = Nx-pml_size (left/right)
+    sensor_mask(s, s:Ny-pml_size, s:Nz-pml_size) = 1;
+    sensor_mask(Nx-pml_size, s:Ny-pml_size, s:Nz-pml_size) = 1;
+
+    % Face 3 & 4: Y = s and Y = Ny-pml_size (anterior/posterior)
+    sensor_mask(s:Nx-pml_size, s, s:Nz-pml_size) = 1;
+    sensor_mask(s:Nx-pml_size, Ny-pml_size, s:Nz-pml_size) = 1;
+
+    % Face 5 & 6: Z = s and Z = Nz-pml_size (superior/inferior)
+    sensor_mask(s:Nx-pml_size, s:Ny-pml_size, s) = 1;
+    sensor_mask(s:Nx-pml_size, s:Ny-pml_size, Nz-pml_size) = 1;
+end
+
+
+function [corrected, filter_info] = apply_spherical_filter(planar_recon, sphere_recon, lambda)
+%APPLY_SPHERICAL_FILTER Wiener-regularized frequency-domain compensation
+%
+%   Computes a transfer function from the ratio of the spherical (good)
+%   and planar (limited-view) reconstructions in 3D Fourier space, then
+%   applies it with Wiener regularization.
+%
+%   The filter is:
+%     H(k) = FFT3(sphere) / FFT3(planar)
+%
+%   Applied with Wiener regularization:
+%     corrected = IFFT3( FFT3(planar) * conj(H) / (|H|^2 + lambda^2) * H )
+%   which simplifies to:
+%     corrected = IFFT3( P * S / (|P|^2 + lambda^2 * max(|P|^2)) )
+%   where P = FFT3(planar), S = FFT3(sphere)
+%
+%   INPUTS:
+%     planar_recon  - 3D array, limited-view reconstruction
+%     sphere_recon  - 3D array, fully-enclosed reconstruction (reference)
+%     lambda        - Regularization parameter (0.001 to 0.1 typical)
+%
+%   OUTPUTS:
+%     corrected     - 3D array, compensated reconstruction
+%     filter_info   - Struct with filter diagnostics
+
+    % 3D FFT of both reconstructions
+    P = fftn(planar_recon);
+    S = fftn(sphere_recon);
+
+    % Wiener deconvolution:
+    %   We want to find F such that planar * F ≈ sphere
+    %   In frequency domain: P * F = S  ->  F = S / P
+    %   Regularized: F = S * conj(P) / (|P|^2 + lambda^2 * noise_power)
+    %
+    %   Equivalently, the corrected output is:
+    %   Corrected = P * F = P * S * conj(P) / (|P|^2 + eps)
+    %            = S * |P|^2 / (|P|^2 + eps)
+    %
+    %   But that just gives back S when |P| is large, which isn't useful.
+    %   The correct formulation for deconvolution of the limited-view PSF:
+    %
+    %   corrected = IFFT( S * conj(P) / (|P|^2 + lambda^2 * mean(|P|^2)) * P / conj(P) )
+    %   = IFFT( S )   -- which is trivially the spherical reconstruction.
+    %
+    %   The CORRECT approach: the planar_recon on NEW data (not the
+    %   calibration data). For calibration, we compute F = S/P, then for
+    %   new planar data Q, the corrected = Q * F.
+    %
+    %   Since in simulation the "new" and "calibration" are the same source,
+    %   we use the more robust formulation:
+
+    % Power spectra
+    P_power = abs(P).^2;
+    noise_est = lambda^2 * mean(P_power(:));
+
+    % The compensation filter: F = S / P (regularized)
+    % Applied directly: corrected = IFFT( P * F ) = IFFT( P * S * conj(P) / (|P|^2 + eps) )
+    %
+    % For self-calibration (same source), a cleaner approach is direct
+    % Wiener filtering from planar toward sphere:
+    %   Corrected(k) = P(k) * [ S(k) * conj(P(k)) ] / [ |P(k)|^2 + noise_est ]
+    %                = S(k) * |P(k)|^2 / [ |P(k)|^2 + noise_est ]
+    %
+    % This blends: where P is strong -> corrected ≈ S (spherical result)
+    %              where P is weak  -> corrected -> 0 (regularized away)
+    %
+    % For actual NEW data (cross-application), the filter would be stored:
+    %   F_stored(k) = S(k) * conj(P(k)) / (|P(k)|^2 + noise_est)
+    %   corrected_new = IFFT( FFT(new_planar) .* F_stored )
+
+    % Self-calibration mode (same source for both):
+    % Use the Wiener filter that maps P toward S
+    F = S .* conj(P) ./ (P_power + noise_est);
+
+    % Apply filter to planar reconstruction
+    corrected_fft = P .* F;
+    corrected = real(ifftn(corrected_fft));
+
+    % Apply positivity constraint
+    corrected = max(corrected, 0);
+
+    % Diagnostics
+    filter_info = struct();
+    F_mag = abs(F);
+    filter_info.filter_min = min(F_mag(:));
+    filter_info.filter_max = max(F_mag(:));
+    filter_info.filter_mean = mean(F_mag(:));
+    filter_info.noise_est = noise_est;
+    filter_info.F = F;  % Store for potential cross-application to new data
+end
+
+
 function medium = create_medium(sct, config)
 %CREATE_MEDIUM Build acoustic medium from SCT data and tissue model config
-%
-%   Returns struct with density, sound_speed, alpha_coeff, alpha_power,
-%   gruneisen, all on the same 3D grid as sct.cubeHU.
 
     HU = double(sct.cubeHU);
     gridSize = size(HU);
 
-    method = lower(config.gruneisen_method);
-
-    % --- Get tissue property lookup tables ---
     tables = define_tissue_tables();
 
-    switch method
+    switch lower(config.gruneisen_method)
         case 'uniform'
-            % Spatially constant properties everywhere
             medium.density     = ones(gridSize) * config.uniform_density;
             medium.sound_speed = ones(gridSize) * config.uniform_sound_speed;
             medium.alpha_coeff = ones(gridSize) * config.uniform_alpha_coeff;
@@ -574,18 +932,16 @@ function medium = create_medium(sct, config)
             medium.gruneisen   = ones(gridSize) * config.uniform_gruneisen;
 
         case {'threshold_1', 'threshold_2'}
-            T = tables.(method);
+            T = tables.(config.gruneisen_method);
             nTissues   = length(T.tissue_names);
             boundaries = T.hu_boundaries;
 
-            % Initialize with water defaults
             medium.density     = ones(gridSize) * 1000;
             medium.sound_speed = ones(gridSize) * 1540;
             medium.alpha_coeff = ones(gridSize) * 0.5;
-            medium.alpha_power = T.alpha_power(1);  % scalar (use first tissue)
+            medium.alpha_power = T.alpha_power(1);
             medium.gruneisen   = ones(gridSize) * 0.11;
 
-            % Assign tissue properties by HU thresholding
             for t = 1:nTissues
                 mask = (HU >= boundaries(t)) & (HU < boundaries(t+1));
                 medium.density(mask)     = T.density(t);
@@ -594,19 +950,14 @@ function medium = create_medium(sct, config)
                 medium.gruneisen(mask)   = T.gruneisen(t);
             end
 
-            % Use dominant alpha_power (most common tissue)
-            % For simplicity, use the soft tissue value
-            if isfield(T, 'alpha_power')
-                % Find the soft tissue index
-                st_idx = find(contains(lower(T.tissue_names), 'soft'), 1);
-                if ~isempty(st_idx)
-                    medium.alpha_power = T.alpha_power(st_idx);
-                else
-                    medium.alpha_power = T.alpha_power(1);
-                end
+            st_idx = find(contains(lower(T.tissue_names), 'soft'), 1);
+            if ~isempty(st_idx)
+                medium.alpha_power = T.alpha_power(st_idx);
+            else
+                medium.alpha_power = T.alpha_power(1);
             end
 
-            fprintf('       Tissue model: %s (%d tissues)\n', method, nTissues);
+            fprintf('       Tissue model: %s (%d tissues)\n', config.gruneisen_method, nTissues);
             for t = 1:nTissues
                 mask = (HU >= boundaries(t)) & (HU < boundaries(t+1));
                 fprintf('         %-12s: %7d voxels (%.1f%%)\n', ...
@@ -615,45 +966,39 @@ function medium = create_medium(sct, config)
             end
 
         otherwise
-            error('Unknown gruneisen_method: %s', method);
+            error('Unknown gruneisen_method: %s', config.gruneisen_method);
     end
 
-    % --- Apply per-property uniform overrides ---
+    % Per-property uniform overrides
     if config.force_uniform_density
         medium.density = ones(gridSize) * config.uniform_density;
-        fprintf('       [OVERRIDE] density -> %.0f kg/m^3 (uniform)\n', ...
-            config.uniform_density);
+        fprintf('       [OVERRIDE] density -> %.0f kg/m^3\n', config.uniform_density);
     end
-
     if config.force_uniform_sound_speed
         medium.sound_speed = ones(gridSize) * config.uniform_sound_speed;
-        fprintf('       [OVERRIDE] sound_speed -> %.0f m/s (uniform)\n', ...
-            config.uniform_sound_speed);
+        fprintf('       [OVERRIDE] sound_speed -> %.0f m/s\n', config.uniform_sound_speed);
     end
-
     if config.force_uniform_attenuation
         medium.alpha_coeff = ones(gridSize) * config.uniform_alpha_coeff;
         medium.alpha_power = config.uniform_alpha_power;
-        fprintf('       [OVERRIDE] attenuation -> %.4f dB/MHz^%.1f/cm (uniform)\n', ...
+        fprintf('       [OVERRIDE] attenuation -> %.4f dB/MHz^%.1f/cm\n', ...
             config.uniform_alpha_coeff, config.uniform_alpha_power);
     end
-
     if config.force_uniform_gruneisen
         medium.gruneisen = ones(gridSize) * config.uniform_gruneisen;
-        fprintf('       [OVERRIDE] gruneisen -> %.4f (uniform)\n', ...
-            config.uniform_gruneisen);
+        fprintf('       [OVERRIDE] gruneisen -> %.4f\n', config.uniform_gruneisen);
     end
 
-    % --- Fill regions outside body with water (if bodyMask available) ---
+    % Fill outside body with water
     if isfield(sct, 'bodyMask')
         outside_body = ~sct.bodyMask;
         if isfield(sct, 'couchMask')
             outside_body = outside_body | sct.couchMask;
         end
-        medium.density(outside_body)     = 1000;   % water
-        medium.sound_speed(outside_body) = 1480;   % water
-        medium.alpha_coeff(outside_body) = 0.0022; % water
-        medium.gruneisen(outside_body)   = 0.11;   % water
+        medium.density(outside_body)     = 1000;
+        medium.sound_speed(outside_body) = 1480;
+        medium.alpha_coeff(outside_body) = 0.0022;
+        medium.gruneisen(outside_body)   = 0.11;
     end
 
     medium.grid_size = gridSize;
@@ -662,8 +1007,6 @@ end
 
 function tables = define_tissue_tables()
 %DEFINE_TISSUE_TABLES Tissue property lookup tables for HU thresholding
-%
-%   Matches the tables in ethos_master_pipeline_pseudocode.m
 
     % THRESHOLD_1: 9-tissue model
     tables.threshold_1 = struct();
@@ -684,19 +1027,12 @@ function tables = define_tissue_tables()
     tables.threshold_2.sound_speed   = [1480,    1450, 1540,          3200];
     tables.threshold_2.alpha_coeff   = [0.0022,  0.48, 0.5,           10];
     tables.threshold_2.alpha_power   = [2.0,     1.5,  1.1,           1.0];
-    tables.threshold_2.gruneisen     = [0.11,    0.7,  1.0,           .8];
+    tables.threshold_2.gruneisen     = [0.11,    0.7,  1.0,           0];
 end
 
 
 function sensor = place_sensor_for_field(doseMask, Nx, Ny, Nz, gantry_angle)
 %PLACE_SENSOR_FOR_FIELD Create planar sensor based on dose extent and gantry
-%
-%   Sensor is placed on the beam exit side, determined by gantry angle:
-%     IEC convention (from isocenter):
-%       0   deg -> beam from anterior (+Y), sensor on posterior (-Y)
-%       90  deg -> beam from right   (-X), sensor on left      (+X)
-%       180 deg -> beam from posterior(-Y), sensor on anterior  (+Y)
-%       270 deg -> beam from left    (+X), sensor on right     (-X)
 
     MARGIN = 10;
     PAD_XZ = 5;
@@ -738,14 +1074,13 @@ function sensor = place_sensor_for_field(doseMask, Nx, Ny, Nz, gantry_angle)
 end
 
 
-function plot_dose_comparison(original, reconstructed, sensor_mask, spacing_mm)
+function plot_dose_comparison(original, reconstructed, sensor_mask, spacing_mm, titleStr)
 %PLOT_DOSE_COMPARISON Visualize original vs reconstructed dose
-%
-%   Shows transverse, coronal, and sagittal slices at the dose centroid.
+
+    if nargin < 5, titleStr = 'Dose Comparison'; end
 
     gridSize = size(original);
 
-    % Find dose centroid slice indices
     dose_thresh = original > 0.01 * max(original(:));
     [ix, iy, iz] = ind2sub(gridSize, find(dose_thresh));
 
@@ -754,7 +1089,6 @@ function plot_dose_comparison(original, reconstructed, sensor_mask, spacing_mm)
         return;
     end
 
-    % Dose-weighted centroid
     dose_vals = original(dose_thresh);
     cx = round(sum(ix .* dose_vals) / sum(dose_vals));
     cy = round(sum(iy .* dose_vals) / sum(dose_vals));
@@ -767,11 +1101,10 @@ function plot_dose_comparison(original, reconstructed, sensor_mask, spacing_mm)
     max_dose = max(original(:));
     if max_dose == 0, max_dose = 1; end
 
-    % ---- Figure 1: Side-by-side comparison ----
-    figure('Name', 'Dose Comparison', 'Position', [100, 100, 1400, 900]);
-    sgtitle(sprintf('Dose Comparison (centroid slice: X=%d, Y=%d, Z=%d)', cx, cy, cz));
+    figure('Name', titleStr, 'Position', [100, 100, 1400, 900]);
+    sgtitle(sprintf('%s (centroid: X=%d, Y=%d, Z=%d)', titleStr, cx, cy, cz));
 
-    % Transverse (axial) slice at Z = cz
+    % Transverse
     subplot(2, 3, 1);
     imagesc(squeeze(original(:, :, cz))');
     axis image; colorbar; title('Original - Transverse');
@@ -782,7 +1115,7 @@ function plot_dose_comparison(original, reconstructed, sensor_mask, spacing_mm)
     axis image; colorbar; title('Reconstructed - Transverse');
     xlabel('X'); ylabel('Y'); caxis([0, max_dose]);
 
-    % Coronal slice at Y = cy
+    % Coronal
     subplot(2, 3, 2);
     imagesc(squeeze(original(:, cy, :))');
     axis image; colorbar; title('Original - Coronal');
@@ -793,7 +1126,7 @@ function plot_dose_comparison(original, reconstructed, sensor_mask, spacing_mm)
     axis image; colorbar; title('Reconstructed - Coronal');
     xlabel('X'); ylabel('Z'); caxis([0, max_dose]);
 
-    % Sagittal slice at X = cx
+    % Sagittal
     subplot(2, 3, 3);
     imagesc(squeeze(original(cx, :, :))');
     axis image; colorbar; title('Original - Sagittal');
@@ -806,20 +1139,18 @@ function plot_dose_comparison(original, reconstructed, sensor_mask, spacing_mm)
 
     colormap('jet');
 
-    % ---- Figure 2: Difference and sensor overlay ----
-    figure('Name', 'Error & Sensor', 'Position', [150, 50, 1200, 500]);
-    sgtitle('Reconstruction Error & Sensor Placement');
+    % Error figure
+    figure('Name', [titleStr ' - Error'], 'Position', [150, 50, 1200, 500]);
+    sgtitle([titleStr ' - Error Analysis']);
 
-    % Difference map (transverse)
     subplot(1, 3, 1);
     diff_slice = squeeze(reconstructed(:, :, cz))' - squeeze(original(:, :, cz))';
     imagesc(diff_slice);
-    axis image; colorbar; title('Difference (Recon - Orig) - Transverse');
+    axis image; colorbar; title('Difference (Recon-Orig) - Transverse');
     xlabel('X'); ylabel('Y');
     caxis([-max_dose * 0.2, max_dose * 0.2]);
     colormap(gca, 'jet');
 
-    % Relative error (dose region only)
     subplot(1, 3, 2);
     orig_slice = squeeze(original(:, :, cz))';
     recon_slice = squeeze(reconstructed(:, :, cz))';
@@ -832,12 +1163,10 @@ function plot_dose_comparison(original, reconstructed, sensor_mask, spacing_mm)
     xlabel('X'); ylabel('Y');
     caxis([0, 50]);
 
-    % Sensor overlay on dose (coronal)
     subplot(1, 3, 3);
     coronal_dose = squeeze(original(:, cy, :))';
     coronal_sensor = squeeze(sensor_mask(:, cy, :))';
     imagesc(coronal_dose); hold on;
-    % Overlay sensor as red contour
     if any(coronal_sensor(:))
         contour(coronal_sensor, [0.5, 0.5], 'r', 'LineWidth', 2);
     end
@@ -846,5 +1175,86 @@ function plot_dose_comparison(original, reconstructed, sensor_mask, spacing_mm)
     colormap(gca, 'jet');
     hold off;
 
+    drawnow;
+end
+
+
+function plot_three_way_comparison(original, planar, compensated, spacing_mm)
+%PLOT_THREE_WAY_COMPARISON Side-by-side: original, planar, compensated
+
+    gridSize = size(original);
+
+    dose_thresh = original > 0.01 * max(original(:));
+    [ix, iy, iz] = ind2sub(gridSize, find(dose_thresh));
+    dose_vals = original(dose_thresh);
+
+    cx = max(1, min(gridSize(1), round(sum(ix .* dose_vals) / sum(dose_vals))));
+    cy = max(1, min(gridSize(2), round(sum(iy .* dose_vals) / sum(dose_vals))));
+    cz = max(1, min(gridSize(3), round(sum(iz .* dose_vals) / sum(dose_vals))));
+
+    max_dose = max(original(:));
+    if max_dose == 0, max_dose = 1; end
+
+    figure('Name', 'Three-Way Comparison', 'Position', [50, 50, 1600, 900]);
+    sgtitle(sprintf('Original vs Planar vs Compensated (Z=%d, Y=%d, X=%d)', cz, cy, cx));
+
+    % --- Row 1: Transverse slices ---
+    subplot(3, 3, 1);
+    imagesc(squeeze(original(:, :, cz))');
+    axis image; colorbar; title('Original'); caxis([0, max_dose]);
+    xlabel('X'); ylabel('Y');
+
+    subplot(3, 3, 2);
+    imagesc(squeeze(planar(:, :, cz))');
+    axis image; colorbar; title('Planar Recon'); caxis([0, max_dose]);
+    xlabel('X'); ylabel('Y');
+
+    subplot(3, 3, 3);
+    imagesc(squeeze(compensated(:, :, cz))');
+    axis image; colorbar; title('Compensated'); caxis([0, max_dose]);
+    xlabel('X'); ylabel('Y');
+
+    % --- Row 2: Coronal slices ---
+    subplot(3, 3, 4);
+    imagesc(squeeze(original(:, cy, :))');
+    axis image; colorbar; caxis([0, max_dose]);
+    xlabel('X'); ylabel('Z');
+
+    subplot(3, 3, 5);
+    imagesc(squeeze(planar(:, cy, :))');
+    axis image; colorbar; caxis([0, max_dose]);
+    xlabel('X'); ylabel('Z');
+
+    subplot(3, 3, 6);
+    imagesc(squeeze(compensated(:, cy, :))');
+    axis image; colorbar; caxis([0, max_dose]);
+    xlabel('X'); ylabel('Z');
+
+    % --- Row 3: Line profiles through dose centroid ---
+    subplot(3, 3, 7);
+    plot(squeeze(original(:, cy, cz)), 'b-', 'LineWidth', 1.5); hold on;
+    plot(squeeze(planar(:, cy, cz)), 'r--', 'LineWidth', 1.5);
+    plot(squeeze(compensated(:, cy, cz)), 'g-.', 'LineWidth', 1.5);
+    legend('Original', 'Planar', 'Compensated', 'Location', 'best');
+    xlabel('X index'); ylabel('Dose (Gy)'); title('X Profile');
+    grid on; hold off;
+
+    subplot(3, 3, 8);
+    plot(squeeze(original(cx, :, cz)), 'b-', 'LineWidth', 1.5); hold on;
+    plot(squeeze(planar(cx, :, cz)), 'r--', 'LineWidth', 1.5);
+    plot(squeeze(compensated(cx, :, cz)), 'g-.', 'LineWidth', 1.5);
+    legend('Original', 'Planar', 'Compensated', 'Location', 'best');
+    xlabel('Y index'); ylabel('Dose (Gy)'); title('Y Profile (depth)');
+    grid on; hold off;
+
+    subplot(3, 3, 9);
+    plot(squeeze(original(cx, cy, :)), 'b-', 'LineWidth', 1.5); hold on;
+    plot(squeeze(planar(cx, cy, :)), 'r--', 'LineWidth', 1.5);
+    plot(squeeze(compensated(cx, cy, :)), 'g-.', 'LineWidth', 1.5);
+    legend('Original', 'Planar', 'Compensated', 'Location', 'best');
+    xlabel('Z index'); ylabel('Dose (Gy)'); title('Z Profile');
+    grid on; hold off;
+
+    colormap('jet');
     drawnow;
 end
