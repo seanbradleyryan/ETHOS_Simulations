@@ -50,6 +50,9 @@ CONFIG.element_size_mm      = [];        % Element patch size for averaging (mm)
                                          % Empty = no averaging; set to sweep parametrically
 CONFIG.jaw_margin_mm        = 10;        % Extra margin around jaw projection (mm)
 CONFIG.sensor_placement     = 'anterior'; % Placement side
+CONFIG.sensor_mode          = 'full_lateral_plane';  % Sensor geometry for dose visualization
+                                                      %   'full_lateral_plane': sensor.mask(1,:,:) = 1
+                                                      %   (entire first lateral face of the grid)
 
 % --- Gamma Analysis Parameters ---
 CONFIG.gamma_dose_pct = 3.0;             % Dose difference threshold (%)
