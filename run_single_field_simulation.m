@@ -1,4 +1,4 @@
-function [recon_dose, sim_results] = run_single_field_simulation(field_dose, sct_resampled, medium, beam_metadata, config)
+function [recon_dose, sim_results] = run_single_field_simulation(field_dose, sct_resampled, medium, beam_metadata, config, psf_filter)
 %RUN_SINGLE_FIELD_SIMULATION k-Wave forward + time-reversal for one field
 %
 %   [recon_dose, sim_results] = run_single_field_simulation(field_dose, sct_resampled, medium, beam_metadata, config)
@@ -43,9 +43,11 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, sct
 %           .cfl_number              - CFL stability number (default: 0.3)
 %           .use_gpu                 - Boolean (default: true)
 %           .num_time_reversal_iter  - TR iterations (default: 1)
-%           .enable_spherical_correction - Boolean (default: true)
-%           .regularization_lambda   - Wiener filter lambda (default: 0.01)
 %           .sensor_x_index          - X voxel index for lateral sensor plane (default: 1)
+%       psf_filter - (OPTIONAL, 6th arg) Pre-computed PSF correction from get_psf():
+%           .F              - 3D complex Wiener filter in Fourier domain
+%           If provided and non-empty, applied to the planar reconstruction
+%           to compensate for limited-view artifacts.  Pass [] to skip.
 %
 %   OUTPUTS:
 %       recon_dose  - 3D reconstructed dose array (Gy), same size as input.
@@ -56,9 +58,7 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, sct
 %           .num_pulses     - Number of LINAC pulses
 %           .p0_max         - Maximum initial pressure (Pa)
 %           .recon_max      - Maximum reconstructed pressure (Pa)
-%           .sph_corr_time_s - Spherical correction wall time (if enabled)
-%           .p0_planar_max  - Max planar pressure before correction (Pa)
-%           .p0_corrected_max - Max corrected pressure (Pa)
+%           .psf_applied    - Boolean, whether PSF correction was applied
 %
 %   NOTES:
 %       - Stateless: safe for parfor execution.
@@ -73,7 +73,7 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, sct
 %   DATE: February 2026
 %   VERSION: 2.0 (Integrated determine_sensor_mask + element averaging)
 %
-%   See also: determine_sensor_mask, apply_element_averaging, kspaceFirstOrder3D
+%   See also: get_psf, determine_sensor_mask, kspaceFirstOrder3D
 
     %% ======================== CONFIG DEFAULTS ========================
 
@@ -82,8 +82,8 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, sct
     cfl                = safe_config(config, 'cfl_number', 0.3);
     use_gpu            = safe_config(config, 'use_gpu', true);
     num_tr_iter        = safe_config(config, 'num_time_reversal_iter', 1);
-    enable_sph_corr    = safe_config(config, 'enable_spherical_correction', true);
-    reg_lambda         = safe_config(config, 'regularization_lambda', 0.01);
+
+    if nargin < 6, psf_filter = []; end
 
     % Initialize sim_results output
     sim_results = struct();
@@ -361,106 +361,23 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, sct
         return;
     end
 
-    %% ============== SPHERICAL COMPENSATION CORRECTION ==============
-    %  Limited-angle planar sensors introduce aperture artifacts.
-    %  A Wiener-regularized correction is computed by comparing the planar
-    %  reconstruction (p0_planar) with a reference full-angle reconstruction
-    %  (p0_sphere) obtained from an enclosing 6-face sensor mask.
-    %
-    %  In Fourier space the compensation filter is:
-    %     F(k) = S(k) * conj(P(k)) / ( |P(k)|^2 + lambda^2 * mean(|P|^2) )
-    %  and the corrected image is:
-    %     corrected = max( real( IFFT3( P(k) .* F(k) ) ), 0 )
+    %% ======================== PSF CORRECTION (OPTIONAL) ========================
+    %  If a pre-computed PSF correction filter (from get_psf) is provided,
+    %  apply it to the planar reconstruction to compensate for limited-view
+    %  artifacts.  The filter is computed once before the field loop and
+    %  reused for every field.
 
-    p0_planar = reconPressure;  % save planar result before overwriting
-
-    if enable_sph_corr
-        fprintf('        Running spherical compensation correction...\n');
-
-        try
-            sph_tic = tic;
-
-            % --- 1. Build enclosing sensor mask (all 6 faces, 1 voxel inside PML) ---
-            enclosing_sensor = build_enclosing_sensor(Nx, Ny, Nz, pml_size);
-            numEncPts = sum(enclosing_sensor.mask(:));
-            fprintf('          Enclosing sensor: %d points on 6 faces\n', numEncPts);
-
-            % --- 2. Forward simulation with enclosing sensor ---
-            fprintf('          Forward simulation (enclosing sensor)...\n');
-            source_enc    = struct();
-            source_enc.p0 = p0;   % same initial pressure as original forward
-
-            enc_fwd_tic = tic;
-            sensorData_enc = kspaceFirstOrder3D(kgrid, kmedium, source_enc, ...
-                enclosing_sensor, inputArgs{:});
-            enc_fwd_time = toc(enc_fwd_tic);
-            fprintf('          Enclosing forward complete (%.1f s). Data: [%d x %d]\n', ...
-                enc_fwd_time, size(sensorData_enc, 1), size(sensorData_enc, 2));
-
-            % --- 3. Time-reversal from enclosing sensor -> p0_sphere ---
-            fprintf('          Time reversal (enclosing sensor, 1 iter)...\n');
-            source_enc_tr        = struct();
-            source_enc_tr.p_mask = enclosing_sensor.mask;
-            source_enc_tr.p      = fliplr(sensorData_enc);
-            source_enc_tr.p_mode = 'dirichlet';
-
-            sensor_enc_tr        = struct();
-            sensor_enc_tr.mask   = ones(Nx, Ny, Nz);
-            sensor_enc_tr.record = {'p_final'};
-
-            enc_tr_tic = tic;
-            p0_enc_raw = kspaceFirstOrder3D(kgrid, kmedium, source_enc_tr, ...
-                sensor_enc_tr, inputArgs{:});
-            enc_tr_time = toc(enc_tr_tic);
-
-            if isstruct(p0_enc_raw) && isfield(p0_enc_raw, 'p_final')
-                p0_sphere = reshape(p0_enc_raw.p_final, [Nx, Ny, Nz]);
-            else
-                p0_sphere = p0_enc_raw;
-            end
-            p0_sphere = max(p0_sphere, 0);
-
-            fprintf('          Enclosing TR complete (%.1f s).\n', enc_tr_time);
-            fprintf('          p0_sphere range: [%.2e, %.2e] Pa\n', ...
-                min(p0_sphere(:)), max(p0_sphere(:)));
-
-            % --- 4. Wiener-regularized compensation in Fourier space ---
-            fprintf('          Computing Wiener compensation filter (lambda = %.4f)...\n', ...
-                reg_lambda);
-
-            P = fftn(p0_planar);
-            S = fftn(p0_sphere);
-
-            P_abs_sq  = abs(P).^2;
-            noise_reg = reg_lambda^2 * mean(P_abs_sq(:));
-
-            F = S .* conj(P) ./ (P_abs_sq + noise_reg);
-
-            corrected = real(ifftn(P .* F));
-            corrected = max(corrected, 0);  % positivity constraint
-
-            % --- Report improvement ---
-            fprintf('          Planar  pressure range: [%.2e, %.2e] Pa\n', ...
-                min(p0_planar(:)), max(p0_planar(:)));
-            fprintf('          Corrected pressure range: [%.2e, %.2e] Pa\n', ...
-                min(corrected(:)), max(corrected(:)));
-
-            reconPressure = corrected;
-
-            sph_time = toc(sph_tic);
-            fprintf('        Spherical compensation complete (%.1f s total).\n', sph_time);
-
-            sim_results.sph_corr_time_s  = sph_time;
-            sim_results.p0_planar_max    = max(p0_planar(:));
-            sim_results.p0_corrected_max = max(corrected(:));
-
-        catch ME
-            warning('run_single_field_simulation:SphCorrFail', ...
-                'Spherical compensation failed: %s. Using planar result.', ME.message);
-            reconPressure = p0_planar;
-        end
+    if ~isempty(psf_filter) && isstruct(psf_filter) && isfield(psf_filter, 'F') ...
+            && ~isempty(psf_filter.F)
+        fprintf('        Applying pre-computed PSF correction...\n');
+        P_field = fftn(reconPressure);
+        corrected = real(ifftn(P_field .* psf_filter.F));
+        reconPressure = max(corrected, 0);
+        fprintf('        Corrected pressure range: [%.2e, %.2e] Pa\n', ...
+            min(reconPressure(:)), max(reconPressure(:)));
+        sim_results.psf_applied = true;
     else
-        fprintf('        Spherical compensation: disabled.\n');
+        sim_results.psf_applied = false;
     end
 
     %% ======================== PRESSURE -> DOSE CONVERSION ========================
@@ -512,48 +429,6 @@ function sensor = place_fullface_sensor(Nx, Ny, Nz, gantry_angle)
         % Beam from left -> sensor on -X face
         sensor.mask(1, :, :) = 1;
     end
-end
-
-
-function sensor = build_enclosing_sensor(Nx, Ny, Nz, pml_size)
-%BUILD_ENCLOSING_SENSOR Create sensor mask on all 6 faces of the 3D grid
-%
-%   Builds a binary mask with active sensor points on each face of the
-%   computational grid, inset from the PML boundary by 1 voxel. This
-%   provides near-complete angular coverage for reference reconstruction.
-%
-%   INPUTS:
-%       Nx, Ny, Nz - Grid dimensions
-%       pml_size   - PML layer thickness in voxels
-%
-%   OUTPUTS:
-%       sensor - Struct with .mask field (Nx x Ny x Nz binary array)
-
-    sensor = struct();
-    sensor.mask = zeros(Nx, Ny, Nz);
-
-    % Face positions: 1 voxel inside the PML boundary
-    face_lo = pml_size + 1;
-    face_hi_x = Nx - pml_size;
-    face_hi_y = Ny - pml_size;
-    face_hi_z = Nz - pml_size;
-
-    % Interior range (excluding edge overlaps for clean face assignment)
-    ix = face_lo:face_hi_x;
-    iy = face_lo:face_hi_y;
-    iz = face_lo:face_hi_z;
-
-    % -X face (x = face_lo) and +X face (x = face_hi_x)
-    sensor.mask(face_lo, iy, iz) = 1;
-    sensor.mask(face_hi_x, iy, iz) = 1;
-
-    % -Y face (y = face_lo) and +Y face (y = face_hi_y)
-    sensor.mask(ix, face_lo, iz) = 1;
-    sensor.mask(ix, face_hi_y, iz) = 1;
-
-    % -Z face (z = face_lo) and +Z face (z = face_hi_z)
-    sensor.mask(ix, iy, face_lo) = 1;
-    sensor.mask(ix, iy, face_hi_z) = 1;
 end
 
 

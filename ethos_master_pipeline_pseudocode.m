@@ -42,6 +42,8 @@ CONFIG.pml_size = 10;                    % Perfectly matched layer (voxels)
 CONFIG.cfl_number = 0.3;                 % CFL stability criterion
 CONFIG.use_gpu = true;                   % GPU acceleration
 CONFIG.num_time_reversal_iter = 1;       % Time reversal iterations
+CONFIG.enable_spherical_correction = true;   % Compute PSF correction via get_psf
+CONFIG.regularization_lambda = 0.01;         % Wiener regularization for PSF filter
 
 % --- Sensor Placement Parameters ---
 CONFIG.sensor_size_cm       = [10, 10];  % Physical sensor [X, Z] in cm
@@ -219,7 +221,17 @@ for p_idx = 1:length(CONFIG.patients)
                 
                 % Create acoustic medium from CT
                 medium = create_acoustic_medium(sct_resampled, CONFIG);
-                
+
+                % Pre-compute PSF correction filter (once for all fields)
+                if CONFIG.enable_spherical_correction
+                    fprintf('         Computing PSF correction filter...\n');
+                    psf_filter = get_psf(total_rs_dose, sct_resampled, medium, CONFIG);
+                    fprintf('         PSF filter computed (%.1f s)\n', psf_filter.computation_time_s);
+                else
+                    psf_filter = [];
+                    fprintf('         PSF correction: disabled\n');
+                end
+
                 % Get number of valid fields
                 valid_field_indices = find(~cellfun(@isempty, field_doses));
                 num_fields = length(valid_field_indices);
@@ -243,7 +255,7 @@ for p_idx = 1:length(CONFIG.patients)
                         
                         [recon_doses{f_idx}, ~] = run_single_field_simulation(...
                             field_doses{field_idx}, sct_resampled, medium, ...
-                            beam_metadata, CONFIG);
+                            beam_metadata, CONFIG, psf_filter);
                         
                         % Save individual field result
                         save_field_reconstruction(recon_doses{f_idx}, field_idx, ...
@@ -271,7 +283,7 @@ for p_idx = 1:length(CONFIG.patients)
                         
                         [recon_dose, sim_results] = run_single_field_simulation(...
                             field_doses{field_idx}, sct_resampled, medium, ...
-                            beam_metadata, CONFIG);
+                            beam_metadata, CONFIG, psf_filter);
                         
                         total_recon = total_recon + recon_dose;
                         sim_results_all{f_idx} = sim_results;
