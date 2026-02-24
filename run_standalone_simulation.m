@@ -92,7 +92,7 @@ CONFIG.gantry_angle = 180;  % degrees (only used when sensor_mode = 'dose_based'
 %   'threshold_1'   : 9-tissue model (air, lung, fat, water, blood,
 %                     muscle, soft tissue, bone, metal)
 %   'threshold_2'   : 4-tissue model (water, fat, soft tissue, bone)
-CONFIG.gruneisen_method = 'uniform';
+CONFIG.gruneisen_method = 'threshold_2';
 
 % --- Per-Property Heterogeneity Overrides ---
 % When gruneisen_method is NOT 'uniform', you can selectively force
@@ -106,13 +106,13 @@ CONFIG.force_uniform_gruneisen   = false;
 % --- Uniform Property Values (used when uniform or force_uniform_*) ---
 CONFIG.uniform_density      = 1000;    % kg/m^3  (water)
 CONFIG.uniform_sound_speed  = 1540;    % m/s     (soft tissue average)
-CONFIG.uniform_alpha_coeff  = 0.5;     % dB/MHz^y/cm
+CONFIG.uniform_alpha_coeff  = 0;     % dB/MHz^y/cm
 CONFIG.uniform_alpha_power  = 1.1;     % exponent
 CONFIG.uniform_gruneisen    = 1.0;     % dimensionless
 
 % --- Simulation Parameters ---
 CONFIG.dose_per_pulse_cGy     = 0.16;   % cGy per LINAC pulse
-CONFIG.meterset               = 100;    % MU (monitor units) for total dose
+CONFIG.meterset               = 140;    % MU (monitor units) for total dose
 CONFIG.pml_size               = 10;     % PML thickness (voxels)
 CONFIG.cfl_number             = 0.3;    % CFL stability number
 CONFIG.use_gpu                = true;   % Use GPU acceleration
@@ -154,7 +154,7 @@ CONFIG.convergence_tol = 1e-4;         % Early stop if relative change < tol
 %   COMPUTATIONAL COST: Approximately doubles the simulation time (one
 %   extra forward + TR cycle for the spherical sensor).
 CONFIG.spherical_compensation = struct();
-CONFIG.spherical_compensation.enable = false;         % Master toggle
+CONFIG.spherical_compensation.enable = true;         % Master toggle
 CONFIG.spherical_compensation.regularization_lambda = 0.01;  % Wiener regularization
 CONFIG.spherical_compensation.num_iterations = 1;     % TR iterations for spherical (1 is usually enough)
 CONFIG.spherical_compensation.apply_to_dose = true;   % Apply filter in dose domain (after p->D conversion)
@@ -440,7 +440,7 @@ inputArgs = {'Smooth', false, ...
              'PMLInside', false, ...
              'PMLSize', CONFIG.pml_size, ...
              'DataCast', dataCast, ...
-             'PlotSim', false};
+             'PlotSim', true};
 
 %% ========================= FORWARD SIMULATION ============================
 
@@ -490,7 +490,7 @@ reconPressure = run_iterative_tr(kgrid, kmedium, sensor, sensorData_measured, ..
 %
 %  Theory:
 %    Let p0_true be the actual initial pressure distribution.
-%    Spherical TR (full enclosure) recovers:  p0_S ≈ p0_true
+%    Spherical TR (full enclosure) recovers:  p0_S  p0_true
 %    Planar TR (limited view) recovers:       p0_P = H_lv * p0_true  (convolution)
 %    where H_lv is the limited-view point spread function.
 %
@@ -850,7 +850,7 @@ function [corrected, filter_info] = apply_spherical_filter(planar_recon, sphere_
     S = fftn(sphere_recon);
 
     % Wiener deconvolution:
-    %   We want to find F such that planar * F ≈ sphere
+    %   We want to find F such that planar * F  sphere
     %   In frequency domain: P * F = S  ->  F = S / P
     %   Regularized: F = S * conj(P) / (|P|^2 + lambda^2 * noise_power)
     %
@@ -883,7 +883,7 @@ function [corrected, filter_info] = apply_spherical_filter(planar_recon, sphere_
     %   Corrected(k) = P(k) * [ S(k) * conj(P(k)) ] / [ |P(k)|^2 + noise_est ]
     %                = S(k) * |P(k)|^2 / [ |P(k)|^2 + noise_est ]
     %
-    % This blends: where P is strong -> corrected ≈ S (spherical result)
+    % This blends: where P is strong -> corrected  S (spherical result)
     %              where P is weak  -> corrected -> 0 (regularized away)
     %
     % For actual NEW data (cross-application), the filter would be stored:
@@ -1024,7 +1024,7 @@ function tables = define_tissue_tables()
     tables.threshold_2.sound_speed   = [1480,    1450, 1540,          3200];
     tables.threshold_2.alpha_coeff   = [0.0022,  0.48, 0.5,           10];
     tables.threshold_2.alpha_power   = [2.0,     1.5,  1.1,           1.0];
-    tables.threshold_2.gruneisen     = [0.11,    0.7,  1.0,           0];
+    tables.threshold_2.gruneisen     = [0.11,    0.7,  1.0,           1];
 end
 
 

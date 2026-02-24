@@ -183,6 +183,7 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, sct
     kmedium.density     = density;
     kmedium.sound_speed = soundSpeed;
     kmedium.alpha_coeff = medium.alpha_coeff;
+    kmedium.alpha_coeff = 0; 
     kmedium.alpha_power = medium.alpha_power;  % scalar
 
     %% ======================== SENSOR PLACEMENT ========================
