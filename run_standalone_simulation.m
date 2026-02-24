@@ -77,7 +77,7 @@ CONFIG.sct_file_override  = '';   % e.g., '/some/path/sct_resampled.mat'
 %                           Simple, no geometry dependence, good baseline.
 %   'dose_based'          : Sensor placed on beam-exit side based on dose
 %                           extent and gantry angle (original pipeline logic).
-%   'spherical'           : Full enclosing sensor on all 6 faces of the grid.
+%   'spherical'           : Spherical sensor via makeSphere, centered on grid.
 %                           Best possible reconstruction (simulation-only).
 %                           Useful as a reference / for filter calibration.
 CONFIG.sensor_mode = 'full_anterior_plane';  % 'full_anterior_plane' | 'dose_based' | 'spherical'
@@ -374,10 +374,10 @@ switch lower(CONFIG.sensor_mode)
         fprintf('       Gantry angle: %.1f deg\n', CONFIG.gantry_angle);
 
     case 'spherical'
-        % ---- Full enclosing sensor (all 6 grid faces) ----
+        % ---- Spherical sensor via makeSphere ----
         % Best-possible reconstruction for simulation reference.
-        sensor.mask = create_enclosing_sensor(Nx, Ny, Nz, CONFIG.pml_size);
-        fprintf('       Full enclosing sensor (6 faces inside PML)\n');
+        sensor.mask = create_spherical_sensor(Nx, Ny, Nz);
+        fprintf('       Spherical sensor (makeSphere, centered on grid)\n');
 
     otherwise
         error('Unknown sensor_mode: %s. Use ''full_anterior_plane'', ''dose_based'', or ''spherical''.', ...
@@ -513,12 +513,12 @@ spherical_comp_results = struct();
 if do_spherical_comp
     fprintf('\n========= SPHERICAL COMPENSATION =========\n');
 
-    % ---- Step 1: Create enclosing sensor and run forward ----
-    fprintf('  [SC 1/4] Creating enclosing sensor...\n');
+    % ---- Step 1: Create spherical sensor and run forward ----
+    fprintf('  [SC 1/4] Creating spherical sensor...\n');
     sensor_sphere = struct();
-    sensor_sphere.mask = create_enclosing_sensor(Nx, Ny, Nz, CONFIG.pml_size);
+    sensor_sphere.mask = create_spherical_sensor(Nx, Ny, Nz);
     numSpherePts = sum(sensor_sphere.mask(:));
-    fprintf('           Enclosing sensor: %d voxels\n', numSpherePts);
+    fprintf('           Spherical sensor: %d voxels\n', numSpherePts);
 
     fprintf('  [SC 2/4] Forward simulation (enclosing sensor)...\n');
     try
@@ -797,29 +797,26 @@ function reconPressure = run_iterative_tr(kgrid, kmedium, sensor, ...
 end
 
 
-function sensor_mask = create_enclosing_sensor(Nx, Ny, Nz, pml_size)
-%CREATE_ENCLOSING_SENSOR Create a full-enclosure sensor on all 6 grid faces
+function sensor_mask = create_spherical_sensor(Nx, Ny, Nz)
+%CREATE_SPHERICAL_SENSOR Create a spherical sensor using k-Wave makeSphere
 %
-%   Places sensor voxels on the 6 faces of the 3D grid, inset from the PML
-%   boundary by 1 voxel.  This provides maximum solid-angle coverage and
-%   serves as the "ideal" reconstruction reference.
+%   Places a spherical sensor shell at the grid center with a radius chosen
+%   to fit within the usable domain (inside the PML layer).  Provides full
+%   solid-angle coverage and serves as the "ideal" reconstruction reference.
+%
+%   The radius is the largest sphere that fits within the grid, with a
+%   1-voxel margin from the boundary.
 
-    sensor_mask = zeros(Nx, Ny, Nz);
+    % Radius: largest sphere fitting inside the grid (PML is outside the grid)
+    radius = floor(min([Nx, Ny, Nz]) / 2) - 1;
 
-    % Inset from PML (sensor should be just inside the PML layer)
-    s = pml_size + 1;
+    if radius < 1
+        error('create_spherical_sensor:InvalidRadius', ...
+            'Grid [%d x %d x %d] is too small for a spherical sensor.', ...
+            Nx, Ny, Nz);
+    end
 
-    % Face 1 & 2: X = s and X = Nx-pml_size (left/right)
-    sensor_mask(s, s:Ny-pml_size, s:Nz-pml_size) = 1;
-    sensor_mask(Nx-pml_size, s:Ny-pml_size, s:Nz-pml_size) = 1;
-
-    % Face 3 & 4: Y = s and Y = Ny-pml_size (anterior/posterior)
-    sensor_mask(s:Nx-pml_size, s, s:Nz-pml_size) = 1;
-    sensor_mask(s:Nx-pml_size, Ny-pml_size, s:Nz-pml_size) = 1;
-
-    % Face 5 & 6: Z = s and Z = Nz-pml_size (superior/inferior)
-    sensor_mask(s:Nx-pml_size, s:Ny-pml_size, s) = 1;
-    sensor_mask(s:Nx-pml_size, s:Ny-pml_size, Nz-pml_size) = 1;
+    sensor_mask = makeSphere(Nx, Ny, Nz, radius);
 end
 
 
