@@ -58,7 +58,7 @@ CONFIG.gamma_dose_cutoff_pct = 10.0;     % Ignore voxels below this % of max
 
 % --- SSIM & Visualization Parameters ---
 CONFIG.analysis_compute_ssim = true;     % Compute SSIM alongside gamma
-CONFIG.analysis_plot_results = false;    % Generate PNG figures
+CONFIG.analysis_plot_results = true;    % Generate PNG figures
 CONFIG.analysis_plot_slices  = 'auto';   % Slice indices or 'auto' (25/50/75th %ile)
 
 % --- MLC Gap Correction Parameters ---
@@ -69,10 +69,10 @@ CONFIG.mlc_position_range = [-140, 140]; % Valid leaf position range (mm)
 % --- Pipeline Control Flags ---
 CONFIG.run_step0  = false;   % Sort DICOM files
 CONFIG.run_step05 = false;   % Fix MLC gaps
-CONFIG.run_step15 = false;   % Process doses and resample CT
-CONFIG.run_step2  = false;   % k-Wave simulation
-CONFIG.run_step3  = false;   % Gamma analysis
-CONFIG.use_parallel = false; % Use parfor for simulations
+CONFIG.run_step15 = true;   % Process doses and resample CT
+CONFIG.run_step2  = true;   % k-Wave simulation
+CONFIG.run_step3  = true;   % Gamma analysis
+CONFIG.use_parallel = true; % Use parfor for simulations
 
 % --- Define Tissue Property Tables ---
 CONFIG.tissue_tables = define_tissue_tables();
@@ -203,7 +203,7 @@ for p_idx = 1:length(CONFIG.patients)
                     length(beam_metadata));
             else
                 beam_metadata = [];
-                fprintf('         [WARNING] No beam metadata in dose_metadata — sensor placement will use legacy mode\n');
+                fprintf('         [WARNING] No beam metadata in dose_metadata  sensor placement will use legacy mode\n');
             end
             
             % ============================================================
@@ -235,12 +235,13 @@ for p_idx = 1:length(CONFIG.patients)
                     parfor f_idx = 1:num_fields
                         field_idx = valid_field_indices(f_idx);
                         
-                        fprintf('           Field %d (gantry: %.1f°)...\n', ...
+                        fprintf('           Field %d (gantry: %.1f)...\n', ...
                             field_idx, field_doses{field_idx}.gantry_angle);
                         
                         [recon_doses{f_idx}, ~] = run_single_field_simulation(...
                             field_doses{field_idx}, sct_resampled, medium, ...
                             beam_metadata, CONFIG);
+                        recon_doses{f_idx} = gather(recon_doses{f_idx}); 
                         
                         % Save individual field result
                         save_field_reconstruction(recon_doses{f_idx}, field_idx, ...
@@ -263,12 +264,12 @@ for p_idx = 1:length(CONFIG.patients)
                     for f_idx = 1:num_fields
                         field_idx = valid_field_indices(f_idx);
                         
-                        fprintf('           Field %d/%d (gantry: %.1f°)...\n', ...
+                        fprintf('           Field %d/%d (gantry: %.1f)...\n', ...
                             f_idx, num_fields, field_doses{field_idx}.gantry_angle);
                         
                         [recon_dose, sim_results] = run_single_field_simulation(...
-                            field_doses{field_idx}, sct_resampled, medium, ...
-                            beam_metadata, CONFIG);
+                            field_doses{field_idx}, sct_resampled, medium, beam_metadata, ...
+                             CONFIG);
                         
                         total_recon = total_recon + recon_dose;
                         sim_results_all{f_idx} = sim_results;
@@ -302,7 +303,7 @@ for p_idx = 1:length(CONFIG.patients)
                 total_recon = double(gather(total_recon));
                 fprintf('\n[STEP 3] Running analysis (gamma + SSIM)...\n');
                 
-                % Call step3_analysis â€” loads all data, computes gamma and
+                % Call step3_analysis  loads all data, computes gamma and
                 % SSIM, optionally generates figures, saves results to disk.
                 % Signature matches: step3_analysis(patient_id, session, config)
                 step3_results = step3_analysis(patient_id, session, CONFIG);
@@ -402,13 +403,13 @@ function tables = define_tissue_tables()
     tables.threshold_2.sound_speed   = [1480,    1450, 1540,          3200];
     tables.threshold_2.alpha_coeff   = [0.0022,  0.48, 0.5,           10];
     tables.threshold_2.alpha_power   = [2.0,     1.5,  1.1,           1.0];
-    tables.threshold_2.gruneisen     = [0.11,    0.7,  1.0,           0];
+    tables.threshold_2.gruneisen     = [0.11,    0.7,  1.0,           1.0];
     
     % UNIFORM: Single property values
     tables.uniform = struct();
     tables.uniform.density      = 1000;
     tables.uniform.sound_speed  = 1540;
-    tables.uniform.alpha_coeff  = 0.5;
+    tables.uniform.alpha_coeff  = 0;
     tables.uniform.alpha_power  = 1.1;
     tables.uniform.gruneisen    = 1.0;
 end
