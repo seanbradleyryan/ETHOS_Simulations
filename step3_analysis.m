@@ -104,6 +104,7 @@ if ~isfield(config, 'gamma_dose_cutoff_pct'),   config.gamma_dose_cutoff_pct = 1
 if ~isfield(config, 'analysis_compute_ssim'),    config.analysis_compute_ssim = true; end
 if ~isfield(config, 'analysis_plot_results'),    config.analysis_plot_results = false; end
 if ~isfield(config, 'analysis_plot_slices'),     config.analysis_plot_slices = 'auto'; end
+if ~isfield(config, 'sensor_mode'),              config.sensor_mode = 'full_lateral_plane'; end
 
 %% ======================== PRINT HEADER ========================
 
@@ -138,11 +139,20 @@ fprintf('      Size: [%s], Max: %.4f Gy\n', ...
 
 % --- Load Raystation processed data ---
 fprintf('    Loading Raystation total dose and metadata...\n');
-[~, ~, total_rs_dose, dose_metadata] = load_processed_data(patient_id, session, config);
+[~, sct_resampled, total_rs_dose, dose_metadata] = load_processed_data(patient_id, session, config);
 fprintf('      Size: [%s], Max: %.4f Gy\n', ...
     num2str(size(total_rs_dose), '%d x '), max(total_rs_dose(:)));
 fprintf('      Spacing: [%.2f, %.2f, %.2f] mm\n', ...
     dose_metadata.spacing(1), dose_metadata.spacing(2), dose_metadata.spacing(3));
+
+% Extract body mask for visualization overlays
+if isfield(sct_resampled, 'bodyMask')
+    body_mask = logical(sct_resampled.bodyMask);
+    fprintf('      Body mask: [%s]\n', num2str(size(body_mask), '%d x '));
+else
+    body_mask = [];
+    fprintf('      [NOTE] No body mask in sct_resampled; contour overlay skipped.\n');
+end
 
 % --- Load reconstructed dose ---
 fprintf('    Loading reconstructed dose...\n');
@@ -233,11 +243,11 @@ if config.analysis_plot_results
     
     plot_analysis_results(ethos_truth_dose, total_rs_dose, ...
         results.ethos_vs_rs.gamma, results.ethos_vs_rs.ssim, ...
-        dose_metadata.spacing, 'ETHOS_vs_RS', fig_dir, config);
-    
+        dose_metadata.spacing, 'ETHOS_vs_RS', fig_dir, config, body_mask);
+
     plot_analysis_results(total_rs_dose, total_recon, ...
         results.rs_vs_recon.gamma, results.rs_vs_recon.ssim, ...
-        dose_metadata.spacing, 'RS_vs_Recon', fig_dir, config);
+        dose_metadata.spacing, 'RS_vs_Recon', fig_dir, config, body_mask);
     
     fprintf('    Figures saved to: %s\n', fig_dir);
 end
@@ -669,7 +679,7 @@ end
 %  VISUALIZATION
 %  =========================================================================
 
-function plot_analysis_results(reference, evaluated, gamma_result, ssim_result, spacing, comparison_name, output_dir, config) %#ok<INUSD>
+function plot_analysis_results(reference, evaluated, gamma_result, ssim_result, spacing, comparison_name, output_dir, config, body_mask) %#ok<INUSD>
 %% PLOT_ANALYSIS_RESULTS - Generate dose comparison and gamma figures
 %
 %   Creates two figures per comparison:
@@ -701,32 +711,45 @@ function plot_analysis_results(reference, evaluated, gamma_result, ssim_result, 
         ref_slice  = reference(:, :, k);
         eval_slice = evaluated(:, :, k);
         diff_slice = eval_slice - ref_slice;
-        
+
         % Row 1: Reference
         subplot(3, num_plot, s);
         imagesc(ref_slice, dose_clim);
         colormap(gca, 'jet'); colorbar;
-        title(sprintf('Reference (z=%d)', k));
         axis image; axis off;
-        
+        hold on;
+        overlay_body_contour(body_mask, k);
+        overlay_sensor(config.sensor_mode, size(reference), k);
+        hold off;
+        title(sprintf('Reference (z=%d)', k));
+
         % Row 2: Evaluated
         subplot(3, num_plot, num_plot + s);
         imagesc(eval_slice, dose_clim);
         colormap(gca, 'jet'); colorbar;
-        title(sprintf('Evaluated (z=%d)', k));
         axis image; axis off;
-        
+        hold on;
+        overlay_body_contour(body_mask, k);
+        overlay_sensor(config.sensor_mode, size(reference), k);
+        hold off;
+        title(sprintf('Evaluated (z=%d)', k));
+
         % Row 3: Difference
         subplot(3, num_plot, 2*num_plot + s);
         diff_lim = max(abs(diff_slice(:)));
         if diff_lim < 1e-10, diff_lim = 1; end
         imagesc(diff_slice, [-diff_lim, diff_lim]);
         colormap(gca, rdbu_colormap()); colorbar;
-        title(sprintf('Difference (z=%d)', k));
         axis image; axis off;
+        hold on;
+        overlay_body_contour(body_mask, k);
+        overlay_sensor(config.sensor_mode, size(reference), k);
+        hold off;
+        title(sprintf('Difference (z=%d)', k));
     end
-    
-    sgtitle(sprintf('Dose Comparison: %s', title_name), 'FontSize', 14, 'FontWeight', 'bold');
+
+    sgtitle(sprintf('Dose Comparison: %s\n(green = body contour  |  purple = sensor)', ...
+        title_name), 'FontSize', 14, 'FontWeight', 'bold');
     
     fig_path = fullfile(output_dir, sprintf('dose_comparison_%s.png', lower(comparison_name)));
     exportgraphics(fig1, fig_path, 'Resolution', 150);
@@ -827,6 +850,49 @@ function slices = select_plot_slices(dose, config)
             active_slices(max(1, round(0.25 * n))), ...
             active_slices(max(1, round(0.50 * n))), ...
             active_slices(max(1, round(0.75 * n)))]);
+    end
+end
+
+
+function overlay_body_contour(body_mask, slice_k)
+%OVERLAY_BODY_CONTOUR Draw the body outline in green on the current axes
+%
+%   Draws a contour at the body/non-body boundary for the given transverse
+%   (axial) slice.  Must be called between hold on / hold off.
+
+    if isempty(body_mask) || slice_k > size(body_mask, 3)
+        return;
+    end
+    body_slice = double(body_mask(:, :, slice_k));
+    if any(body_slice(:))
+        contour(body_slice, [0.5, 0.5], 'Color', [0, 0.8, 0], 'LineWidth', 1.5);
+    end
+end
+
+
+function overlay_sensor(sensor_mode, grid_size, slice_k) %#ok<INUSD>
+%OVERLAY_SENSOR Draw sensor location in bright purple on the current axes
+%
+%   Draws an indicator of the sensor position for the given transverse
+%   (axial) slice based on sensor_mode.  Must be called between hold on /
+%   hold off.
+%
+%   Supported modes:
+%     'full_lateral_plane' : sensor.mask(1,:,:) — entire first lateral face.
+%                            Shown as a horizontal line at the top of each
+%                            transverse (x-y) slice, marking dim1 = 1.
+
+    purple = [0.7, 0, 1];
+    Ny = grid_size(2);
+
+    switch lower(sensor_mode)
+        case 'full_lateral_plane'
+            % sensor.mask(1,:,:): first lateral face of the grid.
+            % In a transverse slice (dim1 x dim2 at fixed dim3 = slice_k),
+            % the sensor occupies dim1=1 (top row in imagesc orientation).
+            % Draw a line spanning the full width at the boundary of row 1.
+            plot([0.5, Ny + 0.5], [1.5, 1.5], 'Color', purple, 'LineWidth', 2.5);
+        % Additional sensor modes can be added here as needed
     end
 end
 
