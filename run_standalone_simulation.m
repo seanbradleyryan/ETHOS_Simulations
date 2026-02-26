@@ -567,6 +567,49 @@ fprintf('       Running iterative time reversal (%d iterations, tol=%.1e)...\n',
 reconPressure      = zeros(gridSize);
 reconPressure_prev = zeros(gridSize);
 
+%% ========================= LIVE RECONSTRUCTION FIGURE ====================
+%  Persistent figure that updates after every TR iteration.
+%  Shows the transverse (XY) slice at the true pressure maximum.
+
+if CONFIG.plot_results
+    % Locate the Z slice where the true initial pressure peaks
+    [~, p0_max_idx] = max(p0(:));
+    [~, ~, z_plot]  = ind2sub([Nx, Ny, Nz], p0_max_idx);
+
+    p0_slice    = squeeze(p0(:, :, z_plot))';   % transpose -> [Ny x Nx] for imagesc
+    p0_max_disp = max(p0(:));
+    if p0_max_disp == 0; p0_max_disp = 1; end
+
+    hFig = figure('Name', 'TR Reconstruction Progress', ...
+                  'NumberTitle', 'off', ...
+                  'Color', 'w', ...
+                  'Position', [100, 100, 1400, 420]);
+
+    ax1 = subplot(1, 3, 1);
+    imagesc(ax1, p0_slice, [0, p0_max_disp]);
+    axis(ax1, 'image'); colormap(ax1, 'jet'); colorbar(ax1);
+    xlabel(ax1, 'X (voxel)'); ylabel(ax1, 'Y (voxel)');
+    title(ax1, sprintf('True  p_0  |  z = %d', z_plot));
+
+    ax2 = subplot(1, 3, 2);
+    hImg2   = imagesc(ax2, zeros(size(p0_slice)), [0, p0_max_disp]);
+    axis(ax2, 'image'); colormap(ax2, 'jet'); colorbar(ax2);
+    xlabel(ax2, 'X (voxel)'); ylabel(ax2, 'Y (voxel)');
+    hTitle2 = title(ax2, 'Reconstruction  |  Iter 0');
+
+    ax3 = subplot(1, 3, 3);
+    hImg3   = imagesc(ax3, zeros(size(p0_slice)), [0, p0_max_disp]);
+    axis(ax3, 'image'); colormap(ax3, 'hot'); colorbar(ax3);
+    xlabel(ax3, 'X (voxel)'); ylabel(ax3, 'Y (voxel)');
+    hTitle3 = title(ax3, 'Absolute error  |  Iter 0');
+
+    sgtitle(hFig, 'Time Reversal Reconstruction Progress', 'FontWeight', 'bold');
+    drawnow;
+else
+    hFig = [];
+    z_plot = 1;  % unused, but keeps variable defined
+end
+
 try
     tr_total_tic = tic;
 
@@ -604,6 +647,27 @@ try
         reconPressure = max(reconPressure, 0);
 
         fprintf('       Max pressure: %.4e Pa\n', max(reconPressure(:)));
+
+        % --- Update live reconstruction figure ---
+        if CONFIG.plot_results && ~isempty(hFig) && ishandle(hFig)
+            recon_slice = squeeze(reconPressure(:, :, z_plot))';
+            err_slice   = abs(p0_slice - recon_slice);
+            err_max     = max(err_slice(:));
+            if err_max == 0; err_max = 1; end
+
+            set(hImg2, 'CData', recon_slice);
+            set(hTitle2, 'String', ...
+                sprintf('Reconstruction  |  Iter %d/%d  |  Max: %.2e Pa', ...
+                    tr_iter, CONFIG.num_time_reversal_iter, max(reconPressure(:))));
+
+            set(hImg3, 'CData', err_slice);
+            set(ax3, 'CLim', [0, err_max]);
+            set(hTitle3, 'String', ...
+                sprintf('|True - Recon|  |  Iter %d/%d', ...
+                    tr_iter, CONFIG.num_time_reversal_iter));
+
+            drawnow;
+        end
 
         % Convergence check (from iteration 2 onward)
         if tr_iter > 1
