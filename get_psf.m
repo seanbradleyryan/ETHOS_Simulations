@@ -77,7 +77,6 @@ function psf_filter = get_psf(total_rs_dose, sct_resampled, medium, config)
     cfl        = safe_config(config, 'cfl_number', 0.3);
     use_gpu    = safe_config(config, 'use_gpu', true);
     reg_lambda = safe_config(config, 'regularization_lambda', 0.01);
-    sensor_x   = safe_config(config, 'sensor_x_index', 1);
 
     %% ======================== GRID SETUP ========================
 
@@ -177,6 +176,30 @@ function psf_filter = get_psf(total_rs_dose, sct_resampled, medium, config)
         alphaCoeff_pad = medium.alpha_coeff;
     end
 
+    %% ======================== SPHERICAL EARLY-EXIT ========================
+    % For 'spherical' sensor mode the actual sensor has full-view coverage,
+    % so limited-view PSF correction is not meaningful.  Return an identity
+    % filter (ones in Fourier space = no correction) immediately, skipping
+    % both forward simulations.
+
+    sensor_method = safe_config(config, 'sensor_placement_method', 'full_plane_anterior');
+
+    if strcmp(sensor_method, 'spherical')
+        fprintf('[PSF] Spherical sensor mode — PSF correction not applicable.\n');
+        fprintf('[PSF] Returning identity filter (no limited-view correction).\n');
+        psf_filter = struct();
+        psf_filter.F                     = ones(gridSize);
+        psf_filter.grid_size             = gridSize;
+        psf_filter.regularization_lambda = reg_lambda;
+        psf_filter.computation_time_s    = toc(total_tic);
+        psf_filter.planar_sensor_pts     = 0;
+        psf_filter.sphere_sensor_pts     = 0;
+        psf_filter.sphere_radius         = 0;
+        psf_filter.ball_centroid         = [cx, cy, cz];
+        psf_filter.ball_radius           = ball_radius;
+        return;
+    end
+
     %% ======================== k-WAVE GRID & TIMING ========================
 
     kgrid = kWaveGrid(Nx, dx, Ny, dy, Nz, dz);
@@ -228,12 +251,24 @@ function psf_filter = get_psf(total_rs_dose, sct_resampled, medium, config)
     source_fwd.p0 = p0;
 
     %% ======================== PLANAR RECONSTRUCTION ========================
-
-    fprintf('[PSF] Step 1/4: Forward simulation (planar sensor at x=%d)...\n', sensor_x);
+    % Build the limited sensor matching the active sensor_placement_method so
+    % the Wiener filter characterises the correct geometric aperture.
 
     sensor_planar = struct();
     sensor_planar.mask = zeros(Nx, Ny, Nz);
-    sensor_planar.mask(sensor_x, :, :) = 1;
+
+    switch sensor_method
+        case 'full_plane_anterior'
+            sensor_x = safe_config(config, 'sensor_x_index', 1);
+            sensor_planar.mask(sensor_x, :, :) = 1;
+            fprintf('[PSF] Step 1/4: Forward simulation (full_plane_anterior, x=%d)...\n', sensor_x);
+
+        case 'full_plane_lateral'
+            sensor_y = safe_config(config, 'sensor_y_index', 1);
+            sensor_planar.mask(:, sensor_y, :) = 1;
+            fprintf('[PSF] Step 1/4: Forward simulation (full_plane_lateral, y=%d)...\n', sensor_y);
+    end
+
     planarPts = sum(sensor_planar.mask(:));
 
     planar_fwd_tic = tic;

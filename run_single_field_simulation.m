@@ -239,17 +239,37 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, sct
     kmedium.alpha_power = medium.alpha_power;  % scalar
 
     %% ======================== SENSOR PLACEMENT ========================
-    %  Simple lateral sensor: full YZ plane at a fixed X index.
+    %  Sensor geometry is selected via config.sensor_placement_method.
     %  X = left-right (lateral), Y = anterior-posterior, Z = sup-inf (transverse).
 
-    sensor_x = safe_config(config, 'sensor_x_index', 1);  % default: x = 1 face
+    sensor_method = safe_config(config, 'sensor_placement_method', 'full_plane_anterior');
     sensor = struct();
     sensor.mask = zeros(Nx, Ny, Nz);
-    sensor.mask(sensor_x, :, :) = 1;
+
+    switch sensor_method
+        case 'full_plane_anterior'
+            sensor_x = safe_config(config, 'sensor_x_index', 1);
+            sensor.mask(sensor_x, :, :) = 1;
+            fprintf('        Sensor: full_plane_anterior — YZ plane at x = %d\n', sensor_x);
+
+        case 'full_plane_lateral'
+            sensor_y = safe_config(config, 'sensor_y_index', 1);
+            sensor.mask(:, sensor_y, :) = 1;
+            fprintf('        Sensor: full_plane_lateral — XZ plane at y = %d\n', sensor_y);
+
+        case 'spherical'
+            sph_radius = floor(min([Nx, Ny, Nz]) / 2) - safe_config(config, 'pml_size', 10);
+            sensor.mask = makeSphere(Nx, Ny, Nz, sph_radius);
+            fprintf('        Sensor: spherical — radius %d voxels\n', sph_radius);
+
+        otherwise
+            error('run_single_field_simulation:UnknownSensorMethod', ...
+                'Unknown sensor_placement_method: "%s". Expected ''full_plane_anterior'', ''full_plane_lateral'', or ''spherical''.', ...
+                sensor_method);
+    end
+
     sensor_info = struct('element_map', [], 'num_elements', 0);
     sim_results.sensor_info = sensor_info;
-
-    fprintf('        Sensor: full YZ plane at x = %d\n', sensor_x);
 
     % --- COMMENTED OUT: advanced sensor placement (for future use) ----------
     % use_new_sensor = ~isempty(beam_metadata) && isstruct(beam_metadata) && ...

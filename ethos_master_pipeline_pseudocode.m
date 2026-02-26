@@ -51,10 +51,19 @@ CONFIG.sensor_standoff_mm   = 5;         % Gap between body surface and sensor (
 CONFIG.element_size_mm      = [];        % Element patch size for averaging (mm)
                                          % Empty = no averaging; set to sweep parametrically
 CONFIG.jaw_margin_mm        = 10;        % Extra margin around jaw projection (mm)
-CONFIG.sensor_placement     = 'anterior'; % Placement side
-CONFIG.sensor_mode          = 'full_lateral_plane';  % Sensor geometry for dose visualization
-                                                      %   'full_lateral_plane': sensor.mask(1,:,:) = 1
-                                                      %   (entire first lateral face of the grid)
+
+% --- Sensor Placement Method ---
+% Controls the geometry of the k-Wave sensor mask used in every simulation.
+%   'full_plane_anterior' : Full YZ plane at x = sensor_x_index (default 1).
+%                           Sensor faces the anterior side of the patient.
+%   'full_plane_lateral'  : Full XZ plane at y = sensor_y_index (default 1).
+%                           Sensor faces the lateral (left) side of the patient.
+%   'spherical'           : Spherical shell enclosing the full grid via makeSphere.
+%                           Radius = floor(min(grid_dims)/2) - pml_size voxels.
+%                           No PSF correction is applied (identity filter returned).
+CONFIG.sensor_placement_method = 'full_plane_anterior';
+CONFIG.sensor_x_index = 1;   % X face index — used by 'full_plane_anterior'
+CONFIG.sensor_y_index = 1;   % Y face index — used by 'full_plane_lateral'
 
 % --- Gamma Analysis Parameters ---
 CONFIG.gamma_dose_pct = 3.0;             % Dose difference threshold (%)
