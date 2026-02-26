@@ -156,59 +156,6 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, sct
         return;
     end
 
-    %% ======================== OPTIMAL GRID PADDING ========================
-    %  Pad grid to FFT-friendly dimensions for k-Wave performance.
-    %  Original data sits at indices 1:N_orig; padding at N_orig+1:N_pad.
-    %  Padding region filled with water medium properties.
-
-    Nx_orig = Nx;
-    Ny_orig = Ny;
-    Nz_orig = Nz;
-    gridSize_orig = gridSize;
-
-    Nx_pad = find_optimal_kwave_size(Nx);
-    Ny_pad = find_optimal_kwave_size(Ny);
-    Nz_pad = find_optimal_kwave_size(Nz);
-
-    if ~isequal([Nx_pad, Ny_pad, Nz_pad], [Nx, Ny, Nz])
-        fprintf('        Padding grid: [%d %d %d] -> [%d %d %d] (FFT-optimal)\n', ...
-            Nx, Ny, Nz, Nx_pad, Ny_pad, Nz_pad);
-
-        % Pad medium arrays with water properties
-        density_pad    = ones(Nx_pad, Ny_pad, Nz_pad) * 1000;   % kg/m^3
-        soundSpeed_pad = ones(Nx_pad, Ny_pad, Nz_pad) * 1540;   % m/s
-        gruneisen_pad  = zeros(Nx_pad, Ny_pad, Nz_pad);
-
-        density_pad(1:Nx, 1:Ny, 1:Nz)    = density;
-        soundSpeed_pad(1:Nx, 1:Ny, 1:Nz) = soundSpeed;
-        gruneisen_pad(1:Nx, 1:Ny, 1:Nz)  = gruneisen;
-
-        density    = density_pad;
-        soundSpeed = soundSpeed_pad;
-        gruneisen  = gruneisen_pad;
-
-        % Pad p0 with zeros (no pressure in padding region)
-        p0_pad = zeros(Nx_pad, Ny_pad, Nz_pad);
-        p0_pad(1:Nx, 1:Ny, 1:Nz) = p0;
-        p0 = p0_pad;
-
-        % Update dimensions
-        Nx = Nx_pad;
-        Ny = Ny_pad;
-        Nz = Nz_pad;
-        gridSize = [Nx, Ny, Nz];
-
-        sim_results.grid_padding = struct( ...
-            'original_size', [Nx_orig, Ny_orig, Nz_orig], ...
-            'padded_size',   [Nx_pad, Ny_pad, Nz_pad]);
-    else
-        fprintf('        Grid [%d %d %d] already FFT-optimal, no padding needed.\n', ...
-            Nx, Ny, Nz);
-        sim_results.grid_padding = struct( ...
-            'original_size', [Nx_orig, Ny_orig, Nz_orig], ...
-            'padded_size',   [Nx_orig, Ny_orig, Nz_orig]);
-    end
-
     %% ======================== k-WAVE GRID ========================
 
     kgrid = kWaveGrid(Nx, dx, Ny, dy, Nz, dz);
@@ -411,27 +358,8 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, sct
     catch ME
         warning('run_single_field_simulation:TRFail', ...
             'Time reversal failed: %s', ME.message);
-        recon_dose = zeros(gridSize_orig);
+        recon_dose = zeros(gridSize);
         return;
-    end
-
-    %% ======================== CROP TO ORIGINAL SIZE ========================
-    %  Remove padding before PSF correction (computed at original grid
-    %  size) and dose conversion (uses original-size gruneisen/density).
-
-    if ~isequal([Nx, Ny, Nz], [Nx_orig, Ny_orig, Nz_orig])
-        fprintf('        Cropping reconstruction: [%d %d %d] -> [%d %d %d]\n', ...
-            Nx, Ny, Nz, Nx_orig, Ny_orig, Nz_orig);
-
-        reconPressure = reconPressure(1:Nx_orig, 1:Ny_orig, 1:Nz_orig);
-
-        % Restore original dimensions and medium arrays for dose conversion
-        Nx = Nx_orig;
-        Ny = Ny_orig;
-        Nz = Nz_orig;
-        gridSize = gridSize_orig;
-        density   = medium.density;
-        gruneisen = medium.gruneisen;
     end
 
     %% ======================== PSF CORRECTION (OPTIONAL) ========================
