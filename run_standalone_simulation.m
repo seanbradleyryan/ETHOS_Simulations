@@ -74,9 +74,17 @@ CONFIG.dose_file_override = '';   % e.g., '/some/path/total_rs_dose.mat'
 CONFIG.sct_file_override  = '';   % e.g., '/some/path/sct_resampled.mat'
 
 % --- Sensor Placement ---
-% YZ plane sensor at a fixed X index, matching run_single_field_simulation.
-% X = 1 corresponds to the face at x-min (lateral edge).
-CONFIG.sensor_x_index = 1;
+% Controls the geometry of the k-Wave sensor mask.
+%   'full_plane_anterior' : Full YZ plane at x = sensor_x_index (default 1).
+%                           Sensor faces the anterior side of the patient.
+%   'full_plane_lateral'  : Full XZ plane at y = sensor_y_index (default 1).
+%                           Sensor faces the lateral (left) side of the patient.
+%   'spherical'           : Spherical shell enclosing the full grid via makeSphere.
+%                           Radius = floor(min(grid_dims)/2) - pml_size voxels.
+%                           No PSF correction is applied (identity filter returned).
+CONFIG.sensor_placement_method = 'full_plane_anterior';
+CONFIG.sensor_x_index = 1;   % X face index — used by 'full_plane_anterior'
+CONFIG.sensor_y_index = 1;   % Y face index — used by 'full_plane_lateral'
 
 % --- Tissue Heterogeneity ---
 %   'uniform'       : Homogeneous water-like medium everywhere
@@ -306,15 +314,35 @@ end
 
 %% ========================= SENSOR PLACEMENT ==============================
 
-fprintf('[5/7] Placing sensor (YZ plane at x = %d)...\n', CONFIG.sensor_x_index);
+fprintf('[5/7] Placing sensor (method: %s)...\n', CONFIG.sensor_placement_method);
 
-sensor        = struct();
-sensor.mask   = zeros(Nx, Ny, Nz);
-sensor.mask(CONFIG.sensor_x_index, :, :) = 1;
+sensor      = struct();
+sensor.mask = zeros(Nx, Ny, Nz);
+
+switch CONFIG.sensor_placement_method
+    case 'full_plane_anterior'
+        sensor.mask(CONFIG.sensor_x_index, :, :) = 1;
+        fprintf('       Sensor: full_plane_anterior — YZ plane at x = %d\n', ...
+            CONFIG.sensor_x_index);
+
+    case 'full_plane_lateral'
+        sensor.mask(:, CONFIG.sensor_y_index, :) = 1;
+        fprintf('       Sensor: full_plane_lateral — XZ plane at y = %d\n', ...
+            CONFIG.sensor_y_index);
+
+    case 'spherical'
+        sph_radius = floor(min([Nx, Ny, Nz]) / 2) - CONFIG.pml_size;
+        sensor.mask = makeSphere(Nx, Ny, Nz, sph_radius);
+        fprintf('       Sensor: spherical — radius %d voxels\n', sph_radius);
+
+    otherwise
+        error('run_standalone_simulation:UnknownSensorMethod', ...
+            'Unknown sensor_placement_method: "%s". Expected ''full_plane_anterior'', ''full_plane_lateral'', or ''spherical''.', ...
+            CONFIG.sensor_placement_method);
+end
 
 numSensorPts = sum(sensor.mask(:));
-fprintf('       Sensor: %d active points (%d x %d YZ plane)\n', ...
-    numSensorPts, Ny, Nz);
+fprintf('       Sensor: %d active points\n', numSensorPts);
 
 if numSensorPts == 0
     warning('Sensor mask is empty. Aborting.');
