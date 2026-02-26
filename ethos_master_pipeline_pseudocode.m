@@ -74,7 +74,7 @@ CONFIG.mlc_position_range = [-140, 140]; % Valid leaf position range (mm)
 % --- Pipeline Control Flags ---
 CONFIG.run_step0  = false;   % Sort DICOM files
 CONFIG.run_step05 = false;   % Fix MLC gaps
-CONFIG.run_step15 = true;   % Process doses and resample CT
+CONFIG.run_step15 = false;   % Process doses and resample CT
 CONFIG.run_step2  = true;   % k-Wave simulation
 CONFIG.run_step3  = true;   % Gamma analysis
 CONFIG.use_parallel = true; % Use parfor for simulations

@@ -46,6 +46,7 @@ MATLAB-based photoacoustic dose verification system for Varian ETHOS adaptive ra
 - **Stateless functions:** Designed for `parfor` safety. No persistent variables, no globals, no shared state.
 - **Memory-conscious:** Field doses are processed and saved individually as `field_dose_XXX.mat` files, not held in a single large array. Use `-v7.3` for large .mat files.
 - **Only the first function in a .m file is externally visible.** All helper functions go below the main function in the same file.
+- **HIPPA Regulation:** Code must be executed on a remote device for testing, so do not bother testing. Additionally, commit all changes to the main branch so they can be easily pushed for remote testing.
 
 ### Input Validation
 Every pipeline function starts with input validation:
