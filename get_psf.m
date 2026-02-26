@@ -10,21 +10,28 @@ function psf_filter = get_psf(total_rs_dose, sct_resampled, medium, config)
 %   then passed to every per-field run_single_field_simulation call.
 %
 %   ALGORITHM:
-%     1. Convert total dose to initial pressure: p0 = D * Gamma * rho
-%     2. Forward simulate with planar sensor, time-reverse -> p0_planar
-%     3. Forward simulate with spherical sensor (makeSphere), time-reverse
+%     1. Compute dose centroid from total_rs_dose (weighted centre of mass)
+%     2. Place a 5-voxel-radius ball at the centroid via makeBall, then
+%        smooth it with the k-Wave smooth() function (Hann window) to give
+%        a compact, well-conditioned calibration source.  Using a simple
+%        ball rather than the full dose avoids the large amplitude /
+%        complex-spatial-structure issues that cause simulation divergence.
+%     3. Forward simulate with planar sensor, time-reverse -> p0_planar
+%     4. Forward simulate with spherical sensor (makeSphere), time-reverse
 %        -> p0_sphere
-%     4. Compute Wiener filter in Fourier space:
+%     5. Compute Wiener filter in Fourier space:
 %          F(k) = S(k) * conj(P(k)) / (|P(k)|^2 + lambda^2 * mean(|P|^2))
 %        where P = FFT3(p0_planar), S = FFT3(p0_sphere)
-%     5. Return F for application to per-field planar reconstructions
+%     6. Return F for application to per-field planar reconstructions
 %
 %   The filter characterises the geometry-dependent frequency loss of the
 %   limited planar aperture and is scale-invariant (the calibration source
 %   magnitude does not affect the result).
 %
 %   INPUTS:
-%       total_rs_dose   - 3D total dose array (Gy) from step15_process_doses
+%       total_rs_dose   - 3D total dose array (Gy) from step15_process_doses.
+%                         Used ONLY to locate the dose centroid; the actual
+%                         dose values are not used as the calibration source.
 %       sct_resampled   - Struct with .spacing, .cubeHU, .bodyMask, etc.
 %       medium          - Acoustic medium struct from create_acoustic_medium:
 %                         .density, .sound_speed, .alpha_coeff, .alpha_power,
@@ -45,6 +52,8 @@ function psf_filter = get_psf(total_rs_dose, sct_resampled, medium, config)
 %           .planar_sensor_pts      - Number of planar sensor voxels
 %           .sphere_sensor_pts      - Number of spherical sensor voxels
 %           .sphere_radius          - Radius used for makeSphere
+%           .ball_centroid          - [cx, cy, cz] voxel indices of ball centre
+%           .ball_radius            - Radius of calibration ball (voxels)
 %
 %   EXAMPLE:
 %       psf = get_psf(total_rs_dose, sct_resampled, medium, CONFIG);
@@ -85,20 +94,47 @@ function psf_filter = get_psf(total_rs_dose, sct_resampled, medium, config)
     fprintf('[PSF] Grid: [%d x %d x %d], spacing: [%.3f, %.3f, %.3f] mm\n', ...
         Nx, Ny, Nz, dx*1000, dy*1000, dz*1000);
 
-    %% ======================== INITIAL PRESSURE ========================
-    % Use total dose directly as calibration source.  The filter is
-    % scale-invariant, so the per-pulse division is unnecessary.
+    %% ======================== DOSE CENTROID ========================
+    % Use total_rs_dose only to locate the centre of mass of the dose
+    % distribution.  The dose values themselves are not used as p0 because
+    % the large amplitudes and complex spatial structure cause the forward
+    % simulation to diverge.
 
-    p0 = total_rs_dose .* medium.gruneisen .* medium.density;
-
-    fprintf('[PSF] p0 range: [%.2e, %.2e] Pa\n', min(p0(:)), max(p0(:)));
-
-    if max(p0(:)) == 0
-        warning('get_psf:ZeroPressure', ...
-            'Initial pressure is all zero. Returning empty filter.');
+    doseSum = sum(total_rs_dose(:));
+    if doseSum == 0
+        warning('get_psf:ZeroDose', ...
+            'total_rs_dose is all zero. Returning empty filter.');
         psf_filter = struct('F', [], 'grid_size', gridSize);
         return;
     end
+
+    [xg, yg, zg] = ndgrid(1:Nx, 1:Ny, 1:Nz);
+    cx = round(sum(xg(:) .* total_rs_dose(:)) / doseSum);
+    cy = round(sum(yg(:) .* total_rs_dose(:)) / doseSum);
+    cz = round(sum(zg(:) .* total_rs_dose(:)) / doseSum);
+
+    % Clamp centroid to valid interior (keep away from PML boundary)
+    margin = pml_size + 6;  % ball radius (5) + 1
+    cx = max(margin, min(Nx - margin + 1, cx));
+    cy = max(margin, min(Ny - margin + 1, cy));
+    cz = max(margin, min(Nz - margin + 1, cz));
+
+    fprintf('[PSF] Dose centroid (voxel): [%d, %d, %d]\n', cx, cy, cz);
+
+    %% ======================== BALL CALIBRATION SOURCE ========================
+    % Place a compact 5-voxel-radius ball at the centroid and smooth it.
+    % This gives a well-conditioned, amplitude-controlled calibration source
+    % whose PSF is purely geometry-dependent (independent of dose magnitude).
+
+    ball_radius = 5;
+    p0_ball = makeBall(Nx, Ny, Nz, cx, cy, cz, ball_radius);
+    p0      = smooth(p0_ball, true);          % k-Wave Hann-window smoothing
+    p0      = double(p0);                     % ensure double for kspaceFirstOrder3D
+
+    fprintf('[PSF] Ball source: centre [%d,%d,%d], radius %d voxels\n', ...
+        cx, cy, cz, ball_radius);
+    fprintf('[PSF] p0 range after smoothing: [%.2e, %.2e]\n', ...
+        min(p0(:)), max(p0(:)));
 
     %% ======================== k-WAVE GRID & TIMING ========================
 
@@ -224,6 +260,8 @@ function psf_filter = get_psf(total_rs_dose, sct_resampled, medium, config)
     psf_filter.planar_sensor_pts      = planarPts;
     psf_filter.sphere_sensor_pts      = spherePts;
     psf_filter.sphere_radius          = radius;
+    psf_filter.ball_centroid          = [cx, cy, cz];
+    psf_filter.ball_radius            = ball_radius;
 
     fprintf('[PSF] Complete (%.1f s). Filter dynamic range: [%.2e, %.2e]\n', ...
         total_time, min(abs(F(:))), max(abs(F(:))));
