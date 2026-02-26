@@ -392,6 +392,62 @@ if numSensorPts == 0
     return;
 end
 
+%% ========================= OPTIMAL GRID PADDING ===========================
+%  Pad grid to FFT-friendly dimensions for k-Wave performance.
+%  Original data sits at indices 1:N_orig; padding at N_orig+1:N_pad.
+%  Padding region filled with water medium properties.
+
+Nx_orig = Nx;
+Ny_orig = Ny;
+Nz_orig = Nz;
+gridSize_orig = gridSize;
+
+Nx_pad = find_optimal_kwave_size(Nx);
+Ny_pad = find_optimal_kwave_size(Ny);
+Nz_pad = find_optimal_kwave_size(Nz);
+
+did_pad = ~isequal([Nx_pad, Ny_pad, Nz_pad], [Nx, Ny, Nz]);
+
+if did_pad
+    fprintf('[PAD] Padding grid: [%d %d %d] -> [%d %d %d] (FFT-optimal)\n', ...
+        Nx, Ny, Nz, Nx_pad, Ny_pad, Nz_pad);
+
+    % Save originals for post-crop restoration
+    medium_orig      = medium;
+    sensor_mask_orig = sensor.mask;
+
+    % Pad medium property arrays with water values
+    fields_to_pad = {'density', 'sound_speed', 'alpha_coeff', 'gruneisen'};
+    water_values  = [1000,      1540,           0,             0          ];
+
+    for i = 1:length(fields_to_pad)
+        orig_arr = medium.(fields_to_pad{i});
+        padded_arr = ones(Nx_pad, Ny_pad, Nz_pad) * water_values(i);
+        padded_arr(1:Nx, 1:Ny, 1:Nz) = orig_arr;
+        medium.(fields_to_pad{i}) = padded_arr;
+    end
+    medium.grid_size = [Nx_pad, Ny_pad, Nz_pad];
+
+    % Pad p0 with zeros (no initial pressure in padding)
+    p0_pad = zeros(Nx_pad, Ny_pad, Nz_pad);
+    p0_pad(1:Nx, 1:Ny, 1:Nz) = p0;
+    p0 = p0_pad;
+
+    % Pad sensor mask with zeros (no sensor in padding)
+    sensor_pad = zeros(Nx_pad, Ny_pad, Nz_pad);
+    sensor_pad(1:Nx, 1:Ny, 1:Nz) = sensor.mask;
+    sensor.mask = sensor_pad;
+
+    % Update active dimensions
+    Nx = Nx_pad;
+    Ny = Ny_pad;
+    Nz = Nz_pad;
+    gridSize = [Nx, Ny, Nz];
+else
+    fprintf('[PAD] Grid [%d %d %d] already FFT-optimal, no padding needed.\n', ...
+        Nx, Ny, Nz);
+end
+
 %% ========================= k-WAVE GRID & COMMON SETUP ===================
 
 fprintf('[6/8] Setting up k-Wave grid...\n');
@@ -614,6 +670,35 @@ if ~isempty(reconPressure_compensated)
     end
 else
     recon_dose_compensated = [];
+end
+
+%% ========================= CROP TO ORIGINAL SIZE ==========================
+%  Remove padding from all reconstruction arrays so dimensions match
+%  the original doseGrid for error metrics, saving, and visualization.
+
+if did_pad
+    fprintf('\n[CROP] Restoring original dimensions: [%d %d %d] -> [%d %d %d]\n', ...
+        Nx, Ny, Nz, Nx_orig, Ny_orig, Nz_orig);
+
+    reconPressure = reconPressure(1:Nx_orig, 1:Ny_orig, 1:Nz_orig);
+    recon_dose    = recon_dose(1:Nx_orig, 1:Ny_orig, 1:Nz_orig);
+    p0            = p0(1:Nx_orig, 1:Ny_orig, 1:Nz_orig);
+
+    if ~isempty(reconPressure_compensated)
+        reconPressure_compensated = reconPressure_compensated(1:Nx_orig, 1:Ny_orig, 1:Nz_orig);
+    end
+    if exist('recon_dose_compensated', 'var') && ~isempty(recon_dose_compensated)
+        recon_dose_compensated = recon_dose_compensated(1:Nx_orig, 1:Ny_orig, 1:Nz_orig);
+    end
+
+    % Restore sensor mask and medium for saving/visualization
+    sensor.mask = sensor_mask_orig;
+    medium      = medium_orig;
+
+    Nx = Nx_orig;
+    Ny = Ny_orig;
+    Nz = Nz_orig;
+    gridSize = gridSize_orig;
 end
 
 %% ========================= RESULTS SUMMARY ===============================
