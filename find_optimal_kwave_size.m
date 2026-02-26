@@ -1,4 +1,4 @@
-function N_opt = find_optimal_kwave_size(N)
+function N_opt = find_optimal_kwave_size(N,pml_size)
 %FIND_OPTIMAL_KWAVE_SIZE Find FFT-optimal grid dimension for k-Wave
 %
 %   N_opt = find_optimal_kwave_size(N)
@@ -34,6 +34,7 @@ function N_opt = find_optimal_kwave_size(N)
 %
 %   See also: run_single_field_simulation, run_standalone_simulation
 
+    N = N + 2*pml_size; 
     if N <= 0 || N ~= round(N)
         error('find_optimal_kwave_size:InvalidInput', ...
             'N must be a positive integer. Got %.4f.', N);
@@ -53,5 +54,6 @@ function N_opt = find_optimal_kwave_size(N)
     end
 
     N_opt = best_candidate;
+    N_opt = N_opt - 2*pml_size; 
 
 end
