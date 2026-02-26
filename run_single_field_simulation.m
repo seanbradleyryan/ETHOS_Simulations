@@ -166,9 +166,9 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, sct
     Nz_orig = Nz;
     gridSize_orig = gridSize;
 
-    Nx_pad = find_optimal_kwave_size(Nx);
-    Ny_pad = find_optimal_kwave_size(Ny);
-    Nz_pad = find_optimal_kwave_size(Nz);
+    Nx_pad = find_optimal_kwave_size(Nx+2*pml_size);
+    Ny_pad = find_optimal_kwave_size(Ny+2*pml_size);
+    Nz_pad = find_optimal_kwave_size(Nz+2*pml_size);
 
     if ~isequal([Nx_pad, Ny_pad, Nz_pad], [Nx, Ny, Nz])
         fprintf('        Padding grid: [%d %d %d] -> [%d %d %d] (FFT-optimal)\n', ...
