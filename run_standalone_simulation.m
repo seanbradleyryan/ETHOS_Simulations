@@ -594,6 +594,35 @@ recon_dose        = reconDosePerPulse * num_pulses;
 fprintf('       Reconstructed dose: [%.4f, %.4f] Gy\n', ...
     min(recon_dose(:)), max(recon_dose(:)));
 
+%% ========================= CROP TO ORIGINAL SIZE ==========================
+%  Remove padding from all reconstruction arrays so dimensions match
+%  the original doseGrid for error metrics, saving, and visualization.
+
+if did_pad
+    fprintf('\n[CROP] Restoring original dimensions: [%d %d %d] -> [%d %d %d]\n', ...
+        Nx, Ny, Nz, Nx_orig, Ny_orig, Nz_orig);
+
+    reconPressure = reconPressure(1:Nx_orig, 1:Ny_orig, 1:Nz_orig);
+    recon_dose    = recon_dose(1:Nx_orig, 1:Ny_orig, 1:Nz_orig);
+    p0            = p0(1:Nx_orig, 1:Ny_orig, 1:Nz_orig);
+
+    if ~isempty(reconPressure_compensated)
+        reconPressure_compensated = reconPressure_compensated(1:Nx_orig, 1:Ny_orig, 1:Nz_orig);
+    end
+    if exist('recon_dose_compensated', 'var') && ~isempty(recon_dose_compensated)
+        recon_dose_compensated = recon_dose_compensated(1:Nx_orig, 1:Ny_orig, 1:Nz_orig);
+    end
+
+    % Restore sensor mask and medium for saving/visualization
+    sensor.mask = sensor_mask_orig;
+    medium      = medium_orig;
+
+    Nx = Nx_orig;
+    Ny = Ny_orig;
+    Nz = Nz_orig;
+    gridSize = gridSize_orig;
+end
+
 %% ========================= RESULTS SUMMARY ===============================
 
 fprintf('\n========= RESULTS =========\n');
