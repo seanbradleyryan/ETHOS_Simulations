@@ -78,6 +78,7 @@ CONFIG.run_step15 = true;   % Process doses and resample CT
 CONFIG.run_step2  = true;   % k-Wave simulation
 CONFIG.run_step3  = true;   % Gamma analysis
 CONFIG.use_parallel = true; % Use parfor for simulations
+CONFIG.num_parallel_workers = 16; % Number of parallel pool workers
 
 % --- Define Tissue Property Tables ---
 CONFIG.tissue_tables = define_tissue_tables();
@@ -241,60 +242,108 @@ for p_idx = 1:length(CONFIG.patients)
                 % Initialize total reconstructed dose
                 grid_dims = dose_metadata.dimensions;
                 
-                if CONFIG.use_parallel && num_fields > 1
-                    % Parallel processing
+                % --- Simulation cache: scan for already-completed field reconstructions ---
+                % Compares field_recon_*.mat files in the simulation directory against
+                % the list of valid input fields so the loop can resume from any state.
+                sim_dir_cache = get_simulation_directory(patient_id, session, CONFIG);
+                existing_recon = dir(fullfile(sim_dir_cache, 'field_recon_*.mat'));
+                completed_field_indices = [];
+                for ef = 1:length(existing_recon)
+                    tok = regexp(existing_recon(ef).name, 'field_recon_(\d+)\.mat', 'tokens');
+                    if ~isempty(tok) && ~isempty(tok{1})
+                        completed_field_indices(end+1) = str2double(tok{1}{1}); %#ok<AGROW>
+                    end
+                end
+
+                % Determine which fields still need to be computed
+                pending_field_indices = setdiff(valid_field_indices, completed_field_indices);
+                cached_field_indices  = intersect(valid_field_indices, completed_field_indices);
+                num_pending           = length(pending_field_indices);
+
+                if ~isempty(cached_field_indices)
+                    fprintf('         Cache: %d/%d field(s) already computed, %d pending.\n', ...
+                        length(cached_field_indices), num_fields, num_pending);
+                else
+                    fprintf('         Cache: no existing results found, computing all %d field(s).\n', num_fields);
+                end
+
+                % Initialize total reconstructed dose
+                total_recon = zeros(grid_dims);
+
+                if CONFIG.use_parallel && num_pending > 1
+                    % Parallel processing (pending fields only)
                     fprintf('         Using parallel processing (parfor)...\n');
-                    
-                    recon_doses = cell(num_fields, 1);
-                    
-                    parfor f_idx = 1:num_fields
-                        field_idx = valid_field_indices(f_idx);
-                        
-                        fprintf('           Field %d (gantry: %.1f)...\n', ...
+
+                    % Start or reuse a parallel pool with the configured worker count
+                    pool = gcp('nocreate');
+                    if isempty(pool) || pool.NumWorkers ~= CONFIG.num_parallel_workers
+                        if ~isempty(pool)
+                            delete(pool);
+                        end
+                        parpool(CONFIG.num_parallel_workers);
+                    end
+
+                    recon_doses = cell(num_pending, 1);
+
+                    parfor f_idx = 1:num_pending
+                        field_idx = pending_field_indices(f_idx);
+
+                        fprintf('           Field %d (gantry: %.1f)...\n', ...
                             field_idx, field_doses{field_idx}.gantry_angle);
-                        
+
                         [recon_doses{f_idx}, ~] = run_single_field_simulation(...
                             field_doses{field_idx}, sct_resampled, medium, ...
                             beam_metadata, CONFIG, psf_filter);
-                        recon_doses{f_idx} = gather(recon_doses{f_idx}); 
-                        
+                        recon_doses{f_idx} = gather(recon_doses{f_idx});
+
                         % Save individual field result
                         save_field_reconstruction(recon_doses{f_idx}, field_idx, ...
                             patient_id, session, CONFIG);
                     end
-                    
-                    % Sum all reconstructed doses
-                    total_recon = zeros(grid_dims);
-                    for f_idx = 1:num_fields
+
+                    % Accumulate newly computed fields
+                    for f_idx = 1:num_pending
                         total_recon = total_recon + recon_doses{f_idx};
                     end
-                    
+
                 else
-                    % Serial processing
-                    fprintf('         Using serial processing...\n');
-                    
-                    total_recon = zeros(grid_dims);
-                    sim_results_all = cell(num_fields, 1);
-                    
-                    for f_idx = 1:num_fields
-                        field_idx = valid_field_indices(f_idx);
-                        
-                        fprintf('           Field %d/%d (gantry: %.1f)...\n', ...
-                            f_idx, num_fields, field_doses{field_idx}.gantry_angle);
-                        
-                        [recon_dose, sim_results] = run_single_field_simulation(...
+                    % Serial processing (pending fields only)
+                    if num_pending > 0
+                        fprintf('         Using serial processing...\n');
+                    end
+
+                    sim_results_all = cell(num_pending, 1);
+
+                    for f_idx = 1:num_pending
+                        field_idx = pending_field_indices(f_idx);
+
+                        fprintf('           Field %d/%d (gantry: %.1f)...\n', ...
+                            f_idx, num_pending, field_doses{field_idx}.gantry_angle);
+
+                        [recon_dose, sim_results_all{f_idx}] = run_single_field_simulation(...
                             field_doses{field_idx}, sct_resampled, medium, ...
                             beam_metadata, CONFIG, psf_filter);
-                        
+
                         total_recon = total_recon + recon_dose;
-                        sim_results_all{f_idx} = sim_results;
-                        
+
                         % Save individual field result (with sensor geometry)
                         save_field_reconstruction(recon_dose, field_idx, ...
                             patient_id, session, CONFIG);
                     end
                 end
-                
+
+                % Load and add previously cached field reconstructions
+                if ~isempty(cached_field_indices)
+                    fprintf('         Loading %d cached field reconstruction(s)...\n', ...
+                        length(cached_field_indices));
+                    for c_idx = 1:length(cached_field_indices)
+                        field_idx = cached_field_indices(c_idx);
+                        cached_data = load(fullfile(sim_dir_cache, ...
+                            sprintf('field_recon_%03d.mat', field_idx)));
+                        total_recon = total_recon + cached_data.recon_dose;
+                    end
+                end
+
                 sim_time = toc(sim_start);
                 
                 % Save total reconstructed dose
