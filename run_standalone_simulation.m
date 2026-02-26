@@ -82,16 +82,16 @@ CONFIG.sct_file_override  = '';   % e.g., '/some/path/sct_resampled.mat'
 %   'spherical'           : Spherical shell enclosing the full grid via makeSphere.
 %                           Radius = floor(min(grid_dims)/2) - pml_size voxels.
 %                           No PSF correction is applied (identity filter returned).
-CONFIG.sensor_placement_method = 'full_plane_anterior';
-CONFIG.sensor_x_index = 1;   % X face index — used by 'full_plane_anterior'
-CONFIG.sensor_y_index = 1;   % Y face index — used by 'full_plane_lateral'
+CONFIG.sensor_placement_method = 'full_plane_lateral';
+CONFIG.sensor_x_index = 1;   % X face index  used by 'full_plane_anterior'
+CONFIG.sensor_y_index = 1;   % Y face index  used by 'full_plane_lateral'
 
 % --- Tissue Heterogeneity ---
 %   'uniform'       : Homogeneous water-like medium everywhere
 %   'threshold_1'   : 9-tissue model (air, lung, fat, water, blood,
 %                     muscle, soft tissue, bone, metal)
 %   'threshold_2'   : 4-tissue model (water, fat, soft tissue, bone)
-CONFIG.gruneisen_method = 'threshold_2';
+CONFIG.gruneisen_method = 'uniform';
 
 % --- Per-Property Heterogeneity Overrides ---
 % When gruneisen_method is NOT 'uniform', you can selectively force
@@ -322,18 +322,18 @@ sensor.mask = zeros(Nx, Ny, Nz);
 switch CONFIG.sensor_placement_method
     case 'full_plane_anterior'
         sensor.mask(CONFIG.sensor_x_index, :, :) = 1;
-        fprintf('       Sensor: full_plane_anterior — YZ plane at x = %d\n', ...
+        fprintf('       Sensor: full_plane_anterior  YZ plane at x = %d\n', ...
             CONFIG.sensor_x_index);
 
     case 'full_plane_lateral'
         sensor.mask(:, CONFIG.sensor_y_index, :) = 1;
-        fprintf('       Sensor: full_plane_lateral — XZ plane at y = %d\n', ...
+        fprintf('       Sensor: full_plane_lateral  XZ plane at y = %d\n', ...
             CONFIG.sensor_y_index);
 
     case 'spherical'
         sph_radius = floor(min([Nx, Ny, Nz]) / 2) - CONFIG.pml_size;
         sensor.mask = makeSphere(Nx, Ny, Nz, sph_radius);
-        fprintf('       Sensor: spherical — radius %d voxels\n', sph_radius);
+        fprintf('       Sensor: spherical  radius %d voxels\n', sph_radius);
 
     otherwise
         error('run_standalone_simulation:UnknownSensorMethod', ...
@@ -350,8 +350,8 @@ if numSensorPts == 0
 end
 
 % --- COMMENTED OUT: multi-mode sensor placement (for reference) ----------
-% CONFIG.sensor_mode  — 'full_anterior_plane' | 'dose_based' | 'spherical'
-% CONFIG.gantry_angle — degrees (only for dose_based)
+% CONFIG.sensor_mode   'full_anterior_plane' | 'dose_based' | 'spherical'
+% CONFIG.gantry_angle  degrees (only for dose_based)
 %
 % switch lower(CONFIG.sensor_mode)
 %     case 'full_anterior_plane'
@@ -451,7 +451,7 @@ simTime  = 2.5 * gridDiag / minC;
 Nt       = ceil(simTime / dt);
 
 kgrid.dt = dt;
-kgrid.Nt = Nt;
+kgrid.Nt = Nt/2;
 
 fprintf('       dt = %.2e s, Nt = %d, T_sim = %.2e s\n', dt, Nt, simTime);
 
@@ -651,7 +651,9 @@ try
         % --- Update live reconstruction figure ---
         if CONFIG.plot_results && ~isempty(hFig) && ishandle(hFig)
             recon_slice = squeeze(reconPressure(:, :, z_plot))';
+            recon_slice = gather(recon_slice);
             err_slice   = abs(p0_slice - recon_slice);
+            err_slice = gather(err_slice);
             err_max     = max(err_slice(:));
             if err_max == 0; err_max = 1; end
 
