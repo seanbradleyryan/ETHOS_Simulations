@@ -352,6 +352,60 @@ end
 % end
 % -------------------------------------------------------------------------
 
+%% ========================= OPTIMAL GRID PADDING ==========================
+%  Pad grid to FFT-friendly dimensions for k-Wave performance.
+%  Original data sits at indices 1:N_orig; padding at N_orig+1:N_pad.
+%  Padding region filled with water medium properties.
+
+fprintf('[PAD] Computing FFT-optimal padded dimensions...\n');
+
+Nx_orig = Nx;  Ny_orig = Ny;  Nz_orig = Nz;
+gridSize_orig    = gridSize;
+medium_orig      = medium;
+sensor_mask_orig = sensor.mask;
+
+Nx_pad = find_optimal_kwave_size(Nx, CONFIG.pml_size);
+Ny_pad = find_optimal_kwave_size(Ny, CONFIG.pml_size);
+Nz_pad = find_optimal_kwave_size(Nz, CONFIG.pml_size);
+
+did_pad = ~isequal([Nx_pad, Ny_pad, Nz_pad], [Nx, Ny, Nz]);
+if did_pad
+    fprintf('[PAD] Padding grid: [%d %d %d] -> [%d %d %d] (FFT-optimal)\n', ...
+        Nx, Ny, Nz, Nx_pad, Ny_pad, Nz_pad);
+
+    density_pad    = ones(Nx_pad, Ny_pad, Nz_pad) * 1000;
+    soundSpeed_pad = ones(Nx_pad, Ny_pad, Nz_pad) * 1540;
+    alphaCoeff_pad = zeros(Nx_pad, Ny_pad, Nz_pad);
+    gruneisen_pad  = zeros(Nx_pad, Ny_pad, Nz_pad);
+
+    density_pad(1:Nx, 1:Ny, 1:Nz)    = medium.density;
+    soundSpeed_pad(1:Nx, 1:Ny, 1:Nz) = medium.sound_speed;
+    if numel(medium.alpha_coeff) > 1
+        alphaCoeff_pad(1:Nx, 1:Ny, 1:Nz) = medium.alpha_coeff;
+    else
+        alphaCoeff_pad(:) = medium.alpha_coeff;
+    end
+    gruneisen_pad(1:Nx, 1:Ny, 1:Nz)  = medium.gruneisen;
+
+    medium.density     = density_pad;
+    medium.sound_speed = soundSpeed_pad;
+    medium.alpha_coeff = alphaCoeff_pad;
+    medium.gruneisen   = gruneisen_pad;
+
+    p0_pad = zeros(Nx_pad, Ny_pad, Nz_pad);
+    p0_pad(1:Nx, 1:Ny, 1:Nz) = p0;
+    p0 = p0_pad;
+
+    sensor_pad = zeros(Nx_pad, Ny_pad, Nz_pad);
+    sensor_pad(1:Nx, 1:Ny, 1:Nz) = sensor.mask;
+    sensor.mask = sensor_pad;
+
+    Nx = Nx_pad;  Ny = Ny_pad;  Nz = Nz_pad;
+    gridSize = [Nx, Ny, Nz];
+else
+    fprintf('[PAD] Grid [%d %d %d] already FFT-optimal, no padding needed.\n', Nx, Ny, Nz);
+end
+
 %% ========================= k-WAVE GRID & MEDIUM SETUP ===================
 
 fprintf('[6/7] Setting up k-Wave grid...\n');
@@ -431,7 +485,7 @@ psf_filter = [];
 if CONFIG.use_psf_correction
     fprintf('\n[PSF] Computing PSF correction filter (get_psf)...\n');
     try
-        psf_filter = get_psf(doseGrid, sct, medium, CONFIG);
+        psf_filter = get_psf(doseGrid, sct, medium_orig, CONFIG);
         fprintf('[PSF] Filter ready. Grid: [%d x %d x %d]\n', psf_filter.grid_size);
     catch ME
         warning('run_standalone_simulation:PSFFail', ...
@@ -562,6 +616,22 @@ catch ME
     return;
 end
 
+%% ========================= CROP TO ORIGINAL SIZE =========================
+%  Remove padding before PSF correction and dose conversion.
+%  psf_filter.F is computed at the original grid size; reconPressure must
+%  match.  medium.gruneisen/density used for dose conversion must also be
+%  the original tissue-property arrays, not the water-padded versions.
+
+if did_pad
+    fprintf('\n[CROP] Restoring original dimensions: [%d %d %d] -> [%d %d %d]\n', ...
+        Nx, Ny, Nz, Nx_orig, Ny_orig, Nz_orig);
+    reconPressure = reconPressure(1:Nx_orig, 1:Ny_orig, 1:Nz_orig);
+    Nx = Nx_orig;  Ny = Ny_orig;  Nz = Nz_orig;
+    gridSize    = gridSize_orig;
+    medium      = medium_orig;
+    sensor.mask = sensor_mask_orig;
+end
+
 %% ========================= PSF CORRECTION ================================
 %
 %  If a pre-computed PSF filter (from get_psf) is available, apply it to
@@ -594,33 +664,12 @@ recon_dose        = reconDosePerPulse * num_pulses;
 fprintf('       Reconstructed dose: [%.4f, %.4f] Gy\n', ...
     min(recon_dose(:)), max(recon_dose(:)));
 
-%% ========================= CROP TO ORIGINAL SIZE ==========================
-%  Remove padding from all reconstruction arrays so dimensions match
-%  the original doseGrid for error metrics, saving, and visualization.
+%% ========================= CROP p0 TO ORIGINAL SIZE ======================
+%  reconPressure and recon_dose are already original size (cropped above).
+%  Crop p0 here so the saved results struct is self-consistent.
 
 if did_pad
-    fprintf('\n[CROP] Restoring original dimensions: [%d %d %d] -> [%d %d %d]\n', ...
-        Nx, Ny, Nz, Nx_orig, Ny_orig, Nz_orig);
-
-    reconPressure = reconPressure(1:Nx_orig, 1:Ny_orig, 1:Nz_orig);
-    recon_dose    = recon_dose(1:Nx_orig, 1:Ny_orig, 1:Nz_orig);
-    p0            = p0(1:Nx_orig, 1:Ny_orig, 1:Nz_orig);
-
-    if ~isempty(reconPressure_compensated)
-        reconPressure_compensated = reconPressure_compensated(1:Nx_orig, 1:Ny_orig, 1:Nz_orig);
-    end
-    if exist('recon_dose_compensated', 'var') && ~isempty(recon_dose_compensated)
-        recon_dose_compensated = recon_dose_compensated(1:Nx_orig, 1:Ny_orig, 1:Nz_orig);
-    end
-
-    % Restore sensor mask and medium for saving/visualization
-    sensor.mask = sensor_mask_orig;
-    medium      = medium_orig;
-
-    Nx = Nx_orig;
-    Ny = Ny_orig;
-    Nz = Nz_orig;
-    gridSize = gridSize_orig;
+    p0 = p0(1:Nx_orig, 1:Ny_orig, 1:Nz_orig);
 end
 
 %% ========================= RESULTS SUMMARY ===============================

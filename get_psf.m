@@ -100,6 +100,48 @@ function psf_filter = get_psf(total_rs_dose, sct_resampled, medium, config)
         return;
     end
 
+    %% ======================== OPTIMAL GRID PADDING ========================
+    %  Pad grid to FFT-friendly dimensions for k-Wave performance.
+    %  Original data sits at indices 1:N_orig; padding at N_orig+1:N_pad.
+    %  Padding region filled with water medium properties.
+
+    Nx_orig = Nx;  Ny_orig = Ny;  Nz_orig = Nz;
+    gridSize_orig = gridSize;
+
+    Nx_pad = find_optimal_kwave_size(Nx, pml_size);
+    Ny_pad = find_optimal_kwave_size(Ny, pml_size);
+    Nz_pad = find_optimal_kwave_size(Nz, pml_size);
+
+    did_pad = ~isequal([Nx_pad, Ny_pad, Nz_pad], [Nx, Ny, Nz]);
+    if did_pad
+        fprintf('[PSF] Padding grid: [%d %d %d] -> [%d %d %d] (FFT-optimal)\n', ...
+            Nx, Ny, Nz, Nx_pad, Ny_pad, Nz_pad);
+
+        density_pad    = ones(Nx_pad, Ny_pad, Nz_pad) * 1000;
+        soundSpeed_pad = ones(Nx_pad, Ny_pad, Nz_pad) * 1540;
+        density_pad(1:Nx, 1:Ny, 1:Nz)    = medium.density;
+        soundSpeed_pad(1:Nx, 1:Ny, 1:Nz) = medium.sound_speed;
+
+        if numel(medium.alpha_coeff) > 1
+            alphaCoeff_pad = zeros(Nx_pad, Ny_pad, Nz_pad);
+            alphaCoeff_pad(1:Nx, 1:Ny, 1:Nz) = medium.alpha_coeff;
+        else
+            alphaCoeff_pad = medium.alpha_coeff;   % scalar — no padding needed
+        end
+
+        p0_pad = zeros(Nx_pad, Ny_pad, Nz_pad);
+        p0_pad(1:Nx, 1:Ny, 1:Nz) = p0;
+        p0 = p0_pad;
+
+        Nx = Nx_pad;  Ny = Ny_pad;  Nz = Nz_pad;
+        gridSize = [Nx, Ny, Nz];
+    else
+        fprintf('[PSF] Grid [%d %d %d] already FFT-optimal, no padding needed.\n', Nx, Ny, Nz);
+        density_pad    = medium.density;
+        soundSpeed_pad = medium.sound_speed;
+        alphaCoeff_pad = medium.alpha_coeff;
+    end
+
     %% ======================== k-WAVE GRID & TIMING ========================
 
     kgrid = kWaveGrid(Nx, dx, Ny, dy, Nz, dz);
@@ -120,10 +162,10 @@ function psf_filter = get_psf(total_rs_dose, sct_resampled, medium, config)
     %% ======================== MEDIUM ========================
 
     kmedium = struct();
-    kmedium.density     = medium.density;
-    kmedium.sound_speed = medium.sound_speed;
-    kmedium.alpha_coeff = medium.alpha_coeff;
-    kmedium.alpha_power = medium.alpha_power;
+    kmedium.density     = density_pad;
+    kmedium.sound_speed = soundSpeed_pad;
+    kmedium.alpha_coeff = alphaCoeff_pad;
+    kmedium.alpha_power = medium.alpha_power;   % scalar, unchanged
 
     %% ======================== DATA CAST ========================
 
@@ -199,6 +241,18 @@ function psf_filter = get_psf(total_rs_dose, sct_resampled, medium, config)
     sphere_tr_time = toc(sphere_tr_tic);
     fprintf('[PSF]   Sphere TR complete (%.1f s). Range: [%.2e, %.2e] Pa\n', ...
         sphere_tr_time, min(p0_sphere(:)), max(p0_sphere(:)));
+
+    %% ======================== CROP TO ORIGINAL SIZE ========================
+    %  Remove padding so the Wiener filter is computed at the original grid
+    %  size, matching the size expected by run_single_field_simulation.
+
+    if did_pad
+        fprintf('[PSF] Cropping TR results: [%d %d %d] -> [%d %d %d]\n', ...
+            Nx, Ny, Nz, Nx_orig, Ny_orig, Nz_orig);
+        p0_planar = p0_planar(1:Nx_orig, 1:Ny_orig, 1:Nz_orig);
+        p0_sphere = p0_sphere(1:Nx_orig, 1:Ny_orig, 1:Nz_orig);
+        gridSize  = gridSize_orig;
+    end
 
     %% ======================== WIENER FILTER ========================
 
