@@ -141,6 +141,12 @@ CONFIG.regularization_lambda   = 0.01;  % Wiener regularisation (get_psf)
 %   Subsequent calls (residual passes, iterations 2+) use no recording.
 CONFIG.record_movie = true;   % Record movies for first fwd + first TR
 
+% --- Grid Downscaling ---
+% Divide each grid dimension by this factor (round to nearest integer) and
+% resample all data arrays before simulation.  Spacing is scaled to
+% preserve the physical extent of the grid.  Set to 1 to disable (default).
+CONFIG.downscale_factor = 1;
+
 % --- Output ---
 CONFIG.save_results = true;             % Save reconstruction to .mat
 CONFIG.output_file  = 'standalone_recon_results.mat';
@@ -185,6 +191,9 @@ else
     fprintf('  PSF correction:  off\n');
 end
 fprintf('  Movie recording: %s\n', mat2str(CONFIG.record_movie));
+if CONFIG.downscale_factor ~= 1
+    fprintf('  Downscale factor: %g\n', CONFIG.downscale_factor);
+end
 fprintf('=========================================================\n\n');
 
 %% ========================= LOAD DATA ====================================
@@ -261,6 +270,54 @@ end
 
 fprintf('       Spacing: [%.2f, %.2f, %.2f] mm\n', spacing_mm);
 fprintf('       HU range: [%.0f, %.0f]\n', min(sct.cubeHU(:)), max(sct.cubeHU(:)));
+
+%% ========================= GRID DOWNSCALING ==============================
+%  Reduce grid dimensions before simulation to trade spatial resolution for
+%  speed.  Spacing is scaled to preserve the physical extent of the domain.
+%  Skipped when downscale_factor == 1 (default).
+
+if CONFIG.downscale_factor ~= 1
+    df     = CONFIG.downscale_factor;
+    new_Nx = max(1, round(Nx / df));
+    new_Ny = max(1, round(Ny / df));
+    new_Nz = max(1, round(Nz / df));
+
+    fprintf('[DS]  Downscaling grid: [%d x %d x %d] -> [%d x %d x %d] (factor %g)\n', ...
+        Nx, Ny, Nz, new_Nx, new_Ny, new_Nz, df);
+
+    % Resample dose (linear) and clamp to non-negative
+    doseGrid = imresize3(doseGrid, [new_Nx, new_Ny, new_Nz]);
+    doseGrid = max(doseGrid, 0);
+
+    % Resample CT fields
+    sct.cubeHU = imresize3(sct.cubeHU, [new_Nx, new_Ny, new_Nz]);
+
+    if isfield(sct, 'bodyMask')
+        sct.bodyMask = imresize3(single(sct.bodyMask), ...
+            [new_Nx, new_Ny, new_Nz], 'nearest') > 0.5;
+    end
+    if isfield(sct, 'couchMask')
+        sct.couchMask = imresize3(single(sct.couchMask), ...
+            [new_Nx, new_Ny, new_Nz], 'nearest') > 0.5;
+    end
+    if isfield(sct, 'cubeDensity')
+        sct.cubeDensity = imresize3(sct.cubeDensity, [new_Nx, new_Ny, new_Nz]);
+    end
+
+    % Scale spacing to preserve physical extent
+    spacing_mm = spacing_mm .* ([Nx, Ny, Nz] ./ [new_Nx, new_Ny, new_Nz]);
+    dx = spacing_mm(1) / 1000;
+    dy = spacing_mm(2) / 1000;
+    dz = spacing_mm(3) / 1000;
+    sct.spacing = spacing_mm;
+
+    Nx = new_Nx;  Ny = new_Ny;  Nz = new_Nz;
+    gridSize = [Nx, Ny, Nz];
+
+    fprintf('[DS]  New spacing: [%.3f, %.3f, %.3f] mm\n', spacing_mm);
+    fprintf('[DS]  Dose range after resample: [%.6f, %.4f] Gy\n', ...
+        min(doseGrid(:)), max(doseGrid(:)));
+end
 
 %% ========================= CREATE ACOUSTIC MEDIUM ========================
 
