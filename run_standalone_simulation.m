@@ -83,8 +83,8 @@ CONFIG.sct_file_override  = '';   % e.g., '/some/path/sct_resampled.mat'
 %                           Radius = floor(min(grid_dims)/2) - pml_size voxels.
 %                           No PSF correction is applied (identity filter returned).
 CONFIG.sensor_placement_method = 'full_plane_lateral';
-CONFIG.sensor_x_index = 1;   % X face index  used by 'full_plane_anterior'
-CONFIG.sensor_y_index = 1;   % Y face index  used by 'full_plane_lateral'
+CONFIG.sensor_x_index = 2;   % X face index  used by 'full_plane_anterior'
+CONFIG.sensor_y_index = 20;   % Y face index  used by 'full_plane_lateral'
 
 % --- Tissue Heterogeneity ---
 %   'uniform'       : Homogeneous water-like medium everywhere
@@ -124,7 +124,7 @@ CONFIG.use_gpu                = true;   % Use GPU acceleration
 %             measured_data += residual   (corrected data)
 %             TR(corrected_data) -> p0_est (updated), positivity constraint
 %             check convergence
-CONFIG.num_time_reversal_iter = 5;       % Maximum TR iterations
+CONFIG.num_time_reversal_iter = 50;       % Maximum TR iterations
 CONFIG.convergence_tol        = 1e-4;   % Early stop if relative change < tol
 
 % --- PSF Correction ---
@@ -133,7 +133,7 @@ CONFIG.convergence_tol        = 1e-4;   % Early stop if relative change < tol
 %   for limited-angle artifacts in the planar reconstruction.
 %   The filter is then applied after the iterative TR loop.
 CONFIG.use_psf_correction      = true;  % Master toggle
-CONFIG.regularization_lambda   = 0.01;  % Wiener regularisation (get_psf)
+CONFIG.regularization_lambda   = 0.001;  % Wiener regularisation (get_psf)
 
 % --- Movie Recording ---
 %   k-Wave can record the visualised simulation as a movie file.
@@ -145,7 +145,7 @@ CONFIG.record_movie = true;   % Record movies for first fwd + first TR
 % Divide each grid dimension by this factor (round to nearest integer) and
 % resample all data arrays before simulation.  Spacing is scaled to
 % preserve the physical extent of the grid.  Set to 1 to disable (default).
-CONFIG.downscale_factor = 1;
+CONFIG.downscale_factor = 2;
 
 % --- Output ---
 CONFIG.save_results = true;             % Save reconstruction to .mat
@@ -508,7 +508,7 @@ simTime  = 2.5 * gridDiag / minC;
 Nt       = ceil(simTime / dt);
 
 kgrid.dt = dt;
-kgrid.Nt = Nt/2;
+kgrid.Nt = Nt;
 
 fprintf('       dt = %.2e s, Nt = %d, T_sim = %.2e s\n', dt, Nt, simTime);
 
@@ -549,15 +549,15 @@ if CONFIG.record_movie
                            'PMLInside', false, ...
                            'PMLSize', CONFIG.pml_size, ...
                            'DataCast', dataCast, ...
-                           'PlotSim', true, ...
-                           'RecordMovie', true, ...
+                           'PlotSim', false, ...
+                           'RecordMovie', false, ...
                            'MovieName', 'forward_sim'};
     inputArgs_tr_movie  = {'Smooth', false, ...
                            'PMLInside', false, ...
                            'PMLSize', CONFIG.pml_size, ...
                            'DataCast', dataCast, ...
-                           'PlotSim', true, ...
-                           'RecordMovie', true, ...
+                           'PlotSim', false, ...
+                           'RecordMovie', false, ...
                            'MovieName', 'time_reversal'};
 else
     inputArgs_fwd_movie = inputArgs;
@@ -810,7 +810,7 @@ conversionFactor = medium.gruneisen .* medium.density;
 conversionFactor(conversionFactor == 0) = 1;  % prevent div-by-zero
 
 reconDosePerPulse = reconPressure ./ conversionFactor;
-recon_dose        = reconDosePerPulse * num_pulses;
+recon_dose        =  reconDosePerPulse * num_pulses;
 
 fprintf('       Reconstructed dose: [%.4f, %.4f] Gy\n', ...
     min(recon_dose(:)), max(recon_dose(:)));
@@ -959,10 +959,10 @@ function medium = create_medium(sct, config)
         if isfield(sct, 'couchMask')
             outside_body = outside_body | sct.couchMask;
         end
-        medium.density(outside_body)     = 1000;
-        medium.sound_speed(outside_body) = 1480;
-        medium.alpha_coeff(outside_body) = 0.0022;
-        medium.gruneisen(outside_body)   = 0.11;
+        medium.density(outside_body)     = config.uniform_density;
+        medium.sound_speed(outside_body) = config.uniform_sound_speed;
+        medium.alpha_coeff(outside_body) = config.uniform_alpha_coeff;
+        medium.gruneisen(outside_body)   = config.uniform_gruneisen;
     end
 
     medium.grid_size = gridSize;

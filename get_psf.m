@@ -134,6 +134,7 @@ function psf_filter = get_psf(total_rs_dose, sct_resampled, medium, config)
         cx, cy, cz, ball_radius);
     fprintf('[PSF] p0 range after smoothing: [%.2e, %.2e]\n', ...
         min(p0(:)), max(p0(:)));
+    % p0 = total_rs_dose * medium.density * medium.gruneisen * .001; 
     %% ======================== OPTIMAL GRID PADDING ========================
     %  Pad grid to FFT-friendly dimensions for k-Wave performance.
     %  Original data sits at indices 1:N_orig; padding at N_orig+1:N_pad.
@@ -160,7 +161,7 @@ function psf_filter = get_psf(total_rs_dose, sct_resampled, medium, config)
             alphaCoeff_pad = zeros(Nx_pad, Ny_pad, Nz_pad);
             alphaCoeff_pad(1:Nx, 1:Ny, 1:Nz) = medium.alpha_coeff;
         else
-            alphaCoeff_pad = medium.alpha_coeff;   % scalar — no padding needed
+            alphaCoeff_pad = medium.alpha_coeff;   % scalar  no padding needed
         end
 
         p0_pad = zeros(Nx_pad, Ny_pad, Nz_pad);
@@ -185,7 +186,7 @@ function psf_filter = get_psf(total_rs_dose, sct_resampled, medium, config)
     sensor_method = safe_config(config, 'sensor_placement_method', 'full_plane_anterior');
 
     if strcmp(sensor_method, 'spherical')
-        fprintf('[PSF] Spherical sensor mode — PSF correction not applicable.\n');
+        fprintf('[PSF] Spherical sensor mode  PSF correction not applicable.\n');
         fprintf('[PSF] Returning identity filter (no limited-view correction).\n');
         psf_filter = struct();
         psf_filter.F                     = ones(gridSize);
@@ -209,7 +210,7 @@ function psf_filter = get_psf(total_rs_dose, sct_resampled, medium, config)
     dt   = cfl * min([dx, dy, dz]) / maxC;
 
     gridDiag = sqrt((Nx*dx)^2 + (Ny*dy)^2 + (Nz*dz)^2);
-    simTime  = 2.5 * gridDiag / minC;
+    simTime  = 1 * gridDiag / minC;
     Nt       = ceil(simTime / dt);
 
     kgrid.dt = dt;
@@ -245,7 +246,7 @@ function psf_filter = get_psf(total_rs_dose, sct_resampled, medium, config)
                  'PMLInside', false, ...
                  'PMLSize', pml_size, ...
                  'DataCast', dataCast, ...
-                 'PlotSim', false};
+                 'PlotSim', true};
 
     source_fwd    = struct();
     source_fwd.p0 = p0;
@@ -388,7 +389,7 @@ function p0_recon = run_single_tr(kgrid, kmedium, sensor, sensorData, gridSize, 
         p0_recon = reshape(p0_raw, [Nx, Ny, Nz]);
     end
 
-    p0_recon = max(p0_recon, 0);  % positivity constraint
+    % p0_recon = max(p0_recon, 0);  % positivity constraint
 end
 
 
