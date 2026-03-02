@@ -1,4 +1,4 @@
-%% =========================================================================
+﻿%% =========================================================================
 %  RUN_STANDALONE_SIMULATION.m
 %  Standalone k-Wave Photoacoustic Forward + Time-Reversal Simulation
 %  =========================================================================
@@ -146,6 +146,12 @@ CONFIG.record_movie = true;   % Record movies for first fwd + first TR
 % resample all data arrays before simulation.  Spacing is scaled to
 % preserve the physical extent of the grid.  Set to 1 to disable (default).
 CONFIG.downscale_factor = 2;
+
+% --- Grid Padding ---
+% Pad grid dimensions to FFT-optimal sizes for k-Wave performance.
+% Set to false to disable (useful for debugging or when the grid is
+% already a product of small primes).
+CONFIG.use_grid_padding = true;
 
 % --- Output ---
 CONFIG.save_results = true;             % Save reconstruction to .mat
@@ -369,74 +375,6 @@ if ~any(doseMask(:)) || max(p0(:)) == 0
     return;
 end
 
-%% ========================= SENSOR PLACEMENT ==============================
-
-fprintf('[5/7] Placing sensor (method: %s)...\n', CONFIG.sensor_placement_method);
-
-sensor      = struct();
-sensor.mask = zeros(Nx, Ny, Nz);
-
-switch CONFIG.sensor_placement_method
-    case 'full_plane_anterior'
-        sensor.mask(CONFIG.sensor_x_index, :, :) = 1;
-        fprintf('       Sensor: full_plane_anterior  YZ plane at x = %d\n', ...
-            CONFIG.sensor_x_index);
-
-    case 'full_plane_lateral'
-        sensor.mask(:, CONFIG.sensor_y_index, :) = 1;
-        fprintf('       Sensor: full_plane_lateral  XZ plane at y = %d\n', ...
-            CONFIG.sensor_y_index);
-
-    case 'spherical'
-        sph_radius = floor(min([Nx, Ny, Nz]) / 2) - CONFIG.pml_size;
-        sensor.mask = makeSphere(Nx, Ny, Nz, sph_radius);
-        fprintf('       Sensor: spherical  radius %d voxels\n', sph_radius);
-
-    otherwise
-        error('run_standalone_simulation:UnknownSensorMethod', ...
-            'Unknown sensor_placement_method: "%s". Expected ''full_plane_anterior'', ''full_plane_lateral'', or ''spherical''.', ...
-            CONFIG.sensor_placement_method);
-end
-
-numSensorPts = sum(sensor.mask(:));
-fprintf('       Sensor: %d active points\n', numSensorPts);
-
-if numSensorPts == 0
-    warning('Sensor mask is empty. Aborting.');
-    return;
-end
-
-% --- COMMENTED OUT: multi-mode sensor placement (for reference) ----------
-% CONFIG.sensor_mode   'full_anterior_plane' | 'dose_based' | 'spherical'
-% CONFIG.gantry_angle  degrees (only for dose_based)
-%
-% switch lower(CONFIG.sensor_mode)
-%     case 'full_anterior_plane'
-%         sensor.mask = zeros(Nx, Ny, Nz);
-%         if isfield(sct, 'bodyMask')
-%             body = sct.bodyMask;
-%             if isfield(sct, 'couchMask')
-%                 body = body & ~sct.couchMask;
-%             end
-%             y_has_body = squeeze(any(any(body, 1), 3));
-%             anterior_y = find(y_has_body, 1, 'first');
-%             if ~isempty(anterior_y)
-%                 sensor_y = max(1, anterior_y - 3);
-%             else
-%                 sensor_y = 1;
-%             end
-%         else
-%             sensor_y = 1;
-%         end
-%         sensor.mask(:, sensor_y, :) = 1;
-%     case 'dose_based'
-%         sensor = place_sensor_for_field(doseMask, Nx, Ny, Nz, CONFIG.gantry_angle);
-%     case 'spherical'
-%         radius = floor(min([Nx, Ny, Nz]) / 2) - 1;
-%         sensor.mask = makeSphere(Nx, Ny, Nz, radius);
-% end
-% -------------------------------------------------------------------------
-
 %% ========================= OPTIMAL GRID PADDING ==========================
 %  Pad grid to FFT-friendly dimensions for k-Wave performance.
 %  Original data sits at indices 1:N_orig; padding at N_orig+1:N_pad.
@@ -447,11 +385,16 @@ fprintf('[PAD] Computing FFT-optimal padded dimensions...\n');
 Nx_orig = Nx;  Ny_orig = Ny;  Nz_orig = Nz;
 gridSize_orig    = gridSize;
 medium_orig      = medium;
-sensor_mask_orig = sensor.mask;
 
-Nx_pad = find_optimal_kwave_size(Nx, CONFIG.pml_size);
-Ny_pad = find_optimal_kwave_size(Ny, CONFIG.pml_size);
-Nz_pad = find_optimal_kwave_size(Nz, CONFIG.pml_size);
+if CONFIG.use_grid_padding
+    Nx_pad = find_optimal_kwave_size(Nx, CONFIG.pml_size);
+    Ny_pad = find_optimal_kwave_size(Ny, CONFIG.pml_size);
+    Nz_pad = find_optimal_kwave_size(Nz, CONFIG.pml_size);
+else
+    Nx_pad = Nx;
+    Ny_pad = Ny;
+    Nz_pad = Nz;
+end
 
 did_pad = ~isequal([Nx_pad, Ny_pad, Nz_pad], [Nx, Ny, Nz]);
 if did_pad
@@ -481,14 +424,50 @@ if did_pad
     p0_pad(1:Nx, 1:Ny, 1:Nz) = p0;
     p0 = p0_pad;
 
-    sensor_pad = zeros(Nx_pad, Ny_pad, Nz_pad);
-    sensor_pad(1:Nx, 1:Ny, 1:Nz) = sensor.mask;
-    sensor.mask = sensor_pad;
-
     Nx = Nx_pad;  Ny = Ny_pad;  Nz = Nz_pad;
     gridSize = [Nx, Ny, Nz];
 else
     fprintf('[PAD] Grid [%d %d %d] already FFT-optimal, no padding needed.\n', Nx, Ny, Nz);
+end
+
+%% ========================= SENSOR PLACEMENT ==============================
+%  Sensor is defined using the (possibly padded) grid dimensions so that
+%  planar sensors lie within the simulation domain and spherical sensors
+%  are correctly centred in the padded grid.
+
+fprintf('[5/7] Placing sensor (method: %s)...\n', CONFIG.sensor_placement_method);
+
+sensor      = struct();
+sensor.mask = zeros(Nx, Ny, Nz);
+
+switch CONFIG.sensor_placement_method
+    case 'full_plane_anterior'
+        sensor.mask(CONFIG.sensor_x_index, :, :) = 1;
+        fprintf('       Sensor: full_plane_anterior  YZ plane at x = %d\n', ...
+            CONFIG.sensor_x_index);
+
+    case 'full_plane_lateral'
+        sensor.mask(:, CONFIG.sensor_y_index, :) = 1;
+        fprintf('       Sensor: full_plane_lateral  XZ plane at y = %d\n', ...
+            CONFIG.sensor_y_index);
+
+    case 'spherical'
+        sph_radius = floor(min([Nx, Ny, Nz]) / 2) - CONFIG.pml_size;
+        sensor.mask = makeSphere(Nx, Ny, Nz, sph_radius);
+        fprintf('       Sensor: spherical  radius %d voxels\n', sph_radius);
+
+    otherwise
+        error('run_standalone_simulation:UnknownSensorMethod', ...
+            'Unknown sensor_placement_method: "%s". Expected ''full_plane_anterior'', ''full_plane_lateral'', or ''spherical''.', ...
+            CONFIG.sensor_placement_method);
+end
+
+numSensorPts = sum(sensor.mask(:));
+fprintf('       Sensor: %d active points\n', numSensorPts);
+
+if numSensorPts == 0
+    warning('Sensor mask is empty. Aborting.');
+    return;
 end
 
 %% ========================= k-WAVE GRID & MEDIUM SETUP ===================
@@ -780,7 +759,7 @@ if did_pad
     Nx = Nx_orig;  Ny = Ny_orig;  Nz = Nz_orig;
     gridSize    = gridSize_orig;
     medium      = medium_orig;
-    sensor.mask = sensor_mask_orig;
+    sensor.mask = sensor.mask(1:Nx_orig, 1:Ny_orig, 1:Nz_orig);
 end
 
 %% ========================= PSF CORRECTION ================================
