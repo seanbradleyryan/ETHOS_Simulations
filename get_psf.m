@@ -1,4 +1,4 @@
-function psf_filter = get_psf(total_rs_dose, sct_resampled, medium, config)
+﻿function psf_filter = get_psf(total_rs_dose, sct_resampled, medium, config)
 %GET_PSF Compute limited-view PSF correction filter via spherical reference
 %
 %   psf_filter = get_psf(total_rs_dose, sct_resampled, medium, config)
@@ -76,6 +76,7 @@ function psf_filter = get_psf(total_rs_dose, sct_resampled, medium, config)
     pml_size   = safe_config(config, 'pml_size', 10);
     cfl        = safe_config(config, 'cfl_number', 0.3);
     use_gpu    = safe_config(config, 'use_gpu', true);
+    use_grid_padding = safe_config(config, 'use_grid_padding', true);
     reg_lambda = safe_config(config, 'regularization_lambda', 0.01);
 
     %% ======================== GRID SETUP ========================
@@ -143,9 +144,15 @@ function psf_filter = get_psf(total_rs_dose, sct_resampled, medium, config)
     Nx_orig = Nx;  Ny_orig = Ny;  Nz_orig = Nz;
     gridSize_orig = gridSize;
 
-    Nx_pad = find_optimal_kwave_size(Nx, pml_size);
-    Ny_pad = find_optimal_kwave_size(Ny, pml_size);
-    Nz_pad = find_optimal_kwave_size(Nz, pml_size);
+    if use_grid_padding
+        Nx_pad = find_optimal_kwave_size(Nx, pml_size);
+        Ny_pad = find_optimal_kwave_size(Ny, pml_size);
+        Nz_pad = find_optimal_kwave_size(Nz, pml_size);
+    else
+        Nx_pad = Nx;
+        Ny_pad = Ny;
+        Nz_pad = Nz;
+    end
 
     did_pad = ~isequal([Nx_pad, Ny_pad, Nz_pad], [Nx, Ny, Nz]);
     if did_pad
