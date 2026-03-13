@@ -823,6 +823,95 @@ end
 
 fprintf('===========================\n');
 
+%% ========================= GAMMA ANALYSIS ================================
+%
+%  Computes 3-D global gamma index (original = reference, recon = target)
+%  for three criteria: 10%/10mm, 5%/5mm, 3%/3mm.
+%  Low-dose cutoff: voxels below 10% of the reference maximum are excluded
+%  from both the pass-rate calculation and the gamma map display.
+%
+%  CalcGamma usage:
+%    gamma = CalcGamma(ref, target, percent_crit, dta_mm_crit, ...)
+%  where ref/target structs have fields: start, width, data.
+%  width must be in the same units as the DTA criterion (mm here).
+%  =========================================================================
+
+gamma_results = struct();
+
+if exist('CalcGamma', 'file') == 2
+
+    fprintf('\n[Gamma] Running gamma analysis (reference = original dose)...\n');
+
+    % Build CalcGamma input structs
+    % start = coordinate of the first voxel centre (mm); width = voxel pitch (mm)
+    ref_struct.start = [0, 0, 0];
+    ref_struct.width = spacing_mm;          % [dx dy dz] in mm
+    ref_struct.data  = double(doseGrid);
+
+    tgt_struct.start = [0, 0, 0];
+    tgt_struct.width = spacing_mm;
+    tgt_struct.data  = double(recon_dose);
+
+    % 10% low-dose cutoff mask (applied after CalcGamma returns)
+    low_dose_cutoff  = 0.10 * max(doseGrid(:));
+    gamma_eval_mask  = doseGrid >= low_dose_cutoff;
+
+    % Criteria: {percent, DTA_mm, label}
+    gamma_criteria = {10, 10, '10%/10mm'; ...
+                       5,  5, '5%/5mm';   ...
+                       3,  3, '3%/3mm'};
+
+    gamma_maps  = cell(size(gamma_criteria, 1), 1);
+    pass_rates  = zeros(size(gamma_criteria, 1), 1);
+
+    for gc = 1:size(gamma_criteria, 1)
+        pct_crit = gamma_criteria{gc, 1};
+        dta_crit = gamma_criteria{gc, 2};
+        lbl      = gamma_criteria{gc, 3};
+
+        fprintf('  [%s] Computing...', lbl);
+        try
+            gmap = CalcGamma(ref_struct, tgt_struct, pct_crit, dta_crit, ...
+                             'local', 0, 'limit', dta_crit * 2, 'restrict', 1);
+            gamma_maps{gc} = gmap;
+
+            % Pass rate: fraction of eval voxels with gamma <= 1
+            eval_vals  = gmap(gamma_eval_mask);
+            pass_rate  = 100 * mean(eval_vals <= 1);
+            pass_rates(gc) = pass_rate;
+            fprintf('  Pass rate: %.2f%%\n', pass_rate);
+        catch ME
+            warning('Gamma [%s] failed: %s', lbl, ME.message);
+            gamma_maps{gc} = [];
+            pass_rates(gc) = NaN;
+            fprintf('  FAILED (%s)\n', ME.message);
+        end
+    end
+
+    gamma_results.maps        = gamma_maps;
+    gamma_results.pass_rates  = pass_rates;
+    gamma_results.criteria    = gamma_criteria;
+    gamma_results.cutoff_Gy   = low_dose_cutoff;
+    gamma_results.eval_mask   = gamma_eval_mask;
+
+    % Print summary table
+    fprintf('\n  ------ Gamma Pass Rates (10%% low-dose cutoff) ------\n');
+    fprintf('  %-12s  %s\n', 'Criteria', 'Pass Rate');
+    fprintf('  %s\n', repmat('-', 1, 30));
+    for gc = 1:size(gamma_criteria, 1)
+        if isnan(pass_rates(gc))
+            fprintf('  %-12s  FAILED\n', gamma_criteria{gc, 3});
+        else
+            fprintf('  %-12s  %.2f%%\n', gamma_criteria{gc, 3}, pass_rates(gc));
+        end
+    end
+    fprintf('  %s\n', repmat('-', 1, 30));
+
+else
+    warning('CalcGamma not found on MATLAB path. Skipping gamma analysis.');
+    gamma_results = [];
+end
+
 %% ========================= SAVE RESULTS =================================
 
 if CONFIG.save_results
@@ -841,6 +930,9 @@ if CONFIG.save_results
     if psf_applied
         results.psf_filter = psf_filter;
     end
+    if ~isempty(gamma_results)
+        results.gamma = gamma_results;
+    end
 
     save(CONFIG.output_file, '-struct', 'results', '-v7.3');
     fprintf('\nResults saved to: %s\n', CONFIG.output_file);
@@ -851,6 +943,11 @@ end
 if CONFIG.plot_results
     plot_dose_comparison(doseGrid, recon_dose, sensor.mask, spacing_mm, ...
         'Standalone Reconstruction');
+
+    % Gamma maps figure (one column per criterion, 3 row slices)
+    if ~isempty(gamma_results) && ~isempty(gamma_results.maps)
+        plot_gamma_maps(gamma_results, doseGrid, spacing_mm);
+    end
 end
 
 fprintf('\nStandalone simulation complete.\n');
@@ -976,7 +1073,125 @@ function tables = define_tissue_tables()
 end
 
 
-function plot_dose_comparison(original, reconstructed, sensor_mask, spacing_mm, titleStr)
+function plot_gamma_maps(gamma_results, doseGrid, spacing_mm)
+%PLOT_GAMMA_MAPS  Display gamma index maps for each criterion.
+%  Three orthogonal slices (transverse, coronal, sagittal) through the
+%  dose centroid.  One column per criterion; max 3 rows on screen.
+%  Gamma values are masked to the 10% low-dose cutoff region.
+
+    criteria  = gamma_results.criteria;     % {pct, dta, label}
+    maps      = gamma_results.maps;
+    pass_rates = gamma_results.pass_rates;
+    eval_mask  = gamma_results.eval_mask;
+    nCrit     = size(criteria, 1);          % should be 3
+
+    gridSize = size(doseGrid);
+
+    % Dose-weighted centroid
+    dose_thresh = doseGrid > 0.01 * max(doseGrid(:));
+    [ix, iy, iz] = ind2sub(gridSize, find(dose_thresh));
+    dose_vals    = doseGrid(dose_thresh);
+    if isempty(ix)
+        fprintf('  [plot_gamma] No dose voxels found, skipping.\n');
+        return;
+    end
+    cx = max(1, min(gridSize(1), round(sum(ix .* dose_vals) / sum(dose_vals))));
+    cy = max(1, min(gridSize(2), round(sum(iy .* dose_vals) / sum(dose_vals))));
+    cz = max(1, min(gridSize(3), round(sum(iz .* dose_vals) / sum(dose_vals))));
+
+    sliceLabels = {'Transverse (XY)', 'Coronal (XZ)', 'Sagittal (YZ)'};
+    nRows = 3;   % exactly 3 rows = 3 orthogonal planes
+
+    % One figure; nRows rows x nCrit columns
+    figure('Name', 'Gamma Index Maps', ...
+           'NumberTitle', 'off', ...
+           'Color', 'w', ...
+           'Position', [200, 80, 420 * nCrit, 360 * nRows]);
+
+    % Build super-title with pass rates
+    pass_strs = cell(1, nCrit);
+    for g = 1:nCrit
+        if isnan(pass_rates(g))
+            pass_strs{g} = sprintf('%s: FAILED', criteria{g,3});
+        else
+            pass_strs{g} = sprintf('%s: %.1f%%', criteria{g,3}, pass_rates(g));
+        end
+    end
+    sgtitle(sprintf('Gamma Index Maps  |  %s', strjoin(pass_strs, '   |   ')), ...
+            'FontWeight', 'bold');
+
+    gamma_clim = [0, 2];   % clamp display at gamma = 2
+
+    for g = 1:nCrit
+        lbl  = criteria{g, 3};
+        gmap = maps{g};
+        pr   = pass_rates(g);
+
+        % Apply low-dose mask: set excluded voxels to NaN for display
+        if ~isempty(gmap)
+            gmap_disp = double(gmap);
+            gmap_disp(~eval_mask) = NaN;
+        else
+            gmap_disp = nan(gridSize);
+        end
+
+        if isnan(pr)
+            pr_str = 'FAILED';
+        else
+            pr_str = sprintf('%.2f%%', pr);
+        end
+
+        % --- Row 1: Transverse (XY at z = cz) ---
+        subplot(nRows, nCrit, (0)*nCrit + g);
+        slice2d = squeeze(gmap_disp(:, :, cz))';
+        imagesc(slice2d, gamma_clim);
+        axis image; colorbar;
+        colormap(gca, gamma_colormap());
+        title(sprintf('%s | %s\n%s  pass=%s', lbl, sliceLabels{1}, ...
+                      'z-slice', pr_str));
+        xlabel('X'); ylabel('Y');
+
+        % --- Row 2: Coronal (XZ at y = cy) ---
+        subplot(nRows, nCrit, (1)*nCrit + g);
+        slice2d = squeeze(gmap_disp(:, cy, :))';
+        imagesc(slice2d, gamma_clim);
+        axis image; colorbar;
+        colormap(gca, gamma_colormap());
+        title(sprintf('%s | %s', lbl, sliceLabels{2}));
+        xlabel('X'); ylabel('Z');
+
+        % --- Row 3: Sagittal (YZ at x = cx) ---
+        subplot(nRows, nCrit, (2)*nCrit + g);
+        slice2d = squeeze(gmap_disp(cx, :, :))';
+        imagesc(slice2d, gamma_clim);
+        axis image; colorbar;
+        colormap(gca, gamma_colormap());
+        title(sprintf('%s | %s', lbl, sliceLabels{3}));
+        xlabel('Y'); ylabel('Z');
+    end
+
+    drawnow;
+end
+
+
+function cmap = gamma_colormap()
+%GAMMA_COLORMAP  Green (pass, gamma<=1) -> red (fail, gamma>1) colormap.
+%  Uses a white band at gamma = 1 to make the pass/fail boundary clear.
+    n = 256;
+    cmap = zeros(n, 3);
+    mid  = round(n / 2);
+
+    % Lower half: green -> white (gamma 0 -> 1)
+    for k = 1:mid
+        t = (k-1) / (mid-1);
+        cmap(k, :) = [t, 1, t];   % (t,1,t): pure green at t=0, white at t=1
+    end
+    % Upper half: white -> red (gamma 1 -> 2)
+    for k = mid+1:n
+        t = (k - mid) / (n - mid);
+        cmap(k, :) = [1, 1-t, 1-t];  % white at t=0, pure red at t=1
+    end
+end
 %PLOT_DOSE_COMPARISON Visualize original vs reconstructed dose
 
     if nargin < 5, titleStr = 'Dose Comparison'; end
