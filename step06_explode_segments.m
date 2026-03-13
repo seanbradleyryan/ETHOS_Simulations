@@ -177,20 +177,20 @@ for b = 1:num_original_beams
         % --- Build Item_1 (entry CP): ensure all geometry fields present ---
         cp_entry_new = cp_entry_orig;
         cp_entry_new.CumulativeMetersetWeight = 0;
+        cp_entry_new.ControlPointIndex = 0;
 
-        % Geometry fields that ETHOS may omit from non-first CPs
-        geom_fields = {'GantryAngle', 'GantryRotationDirection', ...
-                       'BeamLimitingDeviceAngle', 'BeamLimitingDeviceRotationDirection', ...
-                       'PatientSupportAngle', 'PatientSupportRotationDirection', ...
-                       'TableTopEccentricAngle', 'TableTopEccentricRotationDirection', ...
-                       'TableTopPitchAngle', 'TableTopPitchRotationDirection', ...
-                       'TableTopRollAngle', 'TableTopRollRotationDirection', ...
-                       'IsocenterPosition', 'SourceToSurfaceDistance', ...
-                       'BeamLimitingDevicePositionSequence'};
+        % Copy ALL fields from the original beam's first CP that are absent
+        % from this entry CP, EXCEPT fields that legitimately vary between
+        % control points and must come from the actual segment CP.
+        cp1_varying_fields = { ...
+            'BeamLimitingDevicePositionSequence', ...  % MLC/jaw positions
+            'CumulativeMetersetWeight', ...            % already set to 0 above
+            'ControlPointIndex'};                      % already set to 0 above
 
-        for gf = 1:numel(geom_fields)
-            fld = geom_fields{gf};
-            if ~isfield(cp_entry_new, fld) && isfield(cp1_orig, fld)
+        cp1_all_fields = fieldnames(cp1_orig);
+        for gf = 1:numel(cp1_all_fields)
+            fld = cp1_all_fields{gf};
+            if ~isfield(cp_entry_new, fld) && ~ismember(fld, cp1_varying_fields)
                 cp_entry_new.(fld) = cp1_orig.(fld);
             end
         end
@@ -198,6 +198,7 @@ for b = 1:num_original_beams
         % --- Build Item_2 (exit CP) ---
         cp_exit_new = cp_exit_orig;
         cp_exit_new.CumulativeMetersetWeight = 1;
+        cp_exit_new.ControlPointIndex = 1;
 
         % Ensure MLC positions are present in exit CP (backfill if missing)
         if ~isfield(cp_exit_new, 'BeamLimitingDevicePositionSequence') && ...
