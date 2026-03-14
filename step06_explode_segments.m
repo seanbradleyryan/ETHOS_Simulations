@@ -41,12 +41,11 @@ end
 
 input_rtplan = fullfile(sct_dir, listing(1).name);
 
-% Derive output path
+% Derive base name for per-beam output filenames
 [~, base_name, ~] = fileparts(listing(1).name);
-output_rtplan = fullfile(sct_dir, [base_name '_exploded_segments.dcm']);
 
 fprintf('Input:  %s\n', input_rtplan);
-fprintf('Output: %s\n\n', output_rtplan);
+fprintf('Output: one file per beam -> %s_B<N>_exploded_segments.dcm\n\n', base_name);
 
 % Load DICOM
 fprintf('Loading RTPLAN...\n');
@@ -86,17 +85,21 @@ end
 fprintf('MU map loaded for %d beams.\n\n', mu_map.Count);
 
 %% -----------------------------------------------------------------------
-% Step 3 — Explode each beam into N single-segment beams
+% Step 3 — Explode each beam; one output RTPLAN file per original beam
 % -----------------------------------------------------------------------
-new_beam_seq     = struct();
-new_ref_beam_seq = struct();
-global_beam_idx  = 0;
-
 % For MU validation: accumulate per-original-beam sums
-mu_sum_per_orig = containers.Map('KeyType', 'int32', 'ValueType', 'double');
+mu_sum_per_orig  = containers.Map('KeyType', 'int32', 'ValueType', 'double');
 mu_orig_per_beam = containers.Map('KeyType', 'int32', 'ValueType', 'double');
 
+output_paths = {};   % collect for final summary
+any_warn_global = false;
+
 for b = 1:num_original_beams
+
+    % Per-beam accumulators (reset each iteration)
+    new_beam_seq     = struct();
+    new_ref_beam_seq = struct();
+    local_beam_idx   = 0;
     orig_beam = rtplan.BeamSequence.(beam_fields_orig{b});
 
     original_beam_number = int32(orig_beam.BeamNumber);
@@ -142,13 +145,13 @@ for b = 1:num_original_beams
         original_beam_number, original_beam_name, gantry_str, N_seg, total_mu);
 
     for s = 1:N_seg
-        global_beam_idx = global_beam_idx + 1;
+        local_beam_idx = local_beam_idx + 1;
 
         % --- Deep-copy original beam (MATLAB structs are value types) ---
         new_beam = orig_beam;
 
         % Update identifying fields
-        new_beam.BeamNumber = global_beam_idx;
+        new_beam.BeamNumber = local_beam_idx;
         new_beam.BeamName   = sprintf('B%d_S%03d', original_beam_number, s - 1);
         new_beam.NumberOfControlPoints = 2;
 
@@ -241,82 +244,86 @@ for b = 1:num_original_beams
         new_beam.FinalCumulativeMetersetWeight = 1;
 
         % --- Store new beam ---
-        new_beam_seq.(sprintf('Item_%d', global_beam_idx)) = new_beam;
+        new_beam_seq.(sprintf('Item_%d', local_beam_idx)) = new_beam;
 
         % --- Build FractionGroup reference entry ---
         ref_entry = struct();
-        ref_entry.ReferencedBeamNumber = global_beam_idx;
+        ref_entry.ReferencedBeamNumber = local_beam_idx;
         ref_entry.BeamMeterset         = seg_mu;
-        new_ref_beam_seq.(sprintf('Item_%d', global_beam_idx)) = ref_entry;
+        new_ref_beam_seq.(sprintf('Item_%d', local_beam_idx)) = ref_entry;
 
         % Progress report every 50 new beams
-        if mod(global_beam_idx, 50) == 0
+        if mod(local_beam_idx, 50) == 0
             fprintf('  Created beam %d (orig B%d S%d, MU=%.4f)\n', ...
-                global_beam_idx, original_beam_number, s - 1, seg_mu);
+                local_beam_idx, original_beam_number, s - 1, seg_mu);
         end
     end % segment loop
-end % beam loop
 
-fprintf('\nTotal new beams created: %d\n\n', global_beam_idx);
+    fprintf('  -> %d segments exploded for beam B%d\n', local_beam_idx, original_beam_number);
 
-%% -----------------------------------------------------------------------
-% Step 4 — Assemble the output plan
-% -----------------------------------------------------------------------
-rtplan_out = rtplan;   % deep copy (struct assignment in MATLAB)
+    %% -------------------------------------------------------------------
+    % Step 4 — Assemble per-beam output plan
+    % -------------------------------------------------------------------
+    rtplan_out = rtplan;   % deep copy
 
-rtplan_out.BeamSequence = new_beam_seq;
-rtplan_out.FractionGroupSequence.Item_1.ReferencedBeamSequence = new_ref_beam_seq;
-rtplan_out.FractionGroupSequence.Item_1.NumberOfBeams = global_beam_idx;
+    rtplan_out.BeamSequence = new_beam_seq;
+    rtplan_out.FractionGroupSequence.Item_1.ReferencedBeamSequence = new_ref_beam_seq;
+    rtplan_out.FractionGroupSequence.Item_1.NumberOfBeams = local_beam_idx;
 
-% New SOP Instance UID
-new_uid = dicomuid();
-rtplan_out.SOPInstanceUID           = new_uid;
-rtplan_out.MediaStorageSOPInstanceUID = new_uid;
+    % New SOP Instance UID (unique per file)
+    new_uid = dicomuid();
+    rtplan_out.SOPInstanceUID             = new_uid;
+    rtplan_out.MediaStorageSOPInstanceUID = new_uid;
 
-% Plan label / description (LO max 16 chars)
-rtplan_out.RTPlanLabel       = 'exploded_segs';   % 13 chars — safe
-rtplan_out.RTPlanDescription = 'Per-segment explosion for RS import';
+    % Plan label: e.g. 'exp_B1' — max 16 chars
+    rtplan_out.RTPlanLabel       = sprintf('exp_B%d', original_beam_number);
+    rtplan_out.RTPlanDescription = sprintf('Exploded segments beam B%d', original_beam_number);
 
-%% -----------------------------------------------------------------------
-% Step 5 — Validate MU totals
-% -----------------------------------------------------------------------
-fprintf('MU Validation:\n');
-any_warn = false;
-orig_beam_nums = keys(mu_orig_per_beam);
-for k = 1:numel(orig_beam_nums)
-    bnum     = orig_beam_nums{k};
-    orig_mu  = mu_orig_per_beam(bnum);
-    summed   = mu_sum_per_orig(bnum);
+    %% -------------------------------------------------------------------
+    % Step 5 — Validate MU total for this beam
+    % -------------------------------------------------------------------
+    orig_mu   = mu_orig_per_beam(original_beam_number);
+    summed    = mu_sum_per_orig(original_beam_number);
     delta_abs = abs(summed - orig_mu);
+    delta_pct = 0;
     if orig_mu > 0
         delta_pct = 100 * delta_abs / orig_mu;
-    else
-        delta_pct = 0;
     end
     if delta_pct > 0.5
-        status = '[WARN >0.5%]';
-        any_warn = true;
+        mu_status = '[WARN >0.5%]';
+        any_warn_global = true;
     else
-        status = '[OK]';
+        mu_status = '[OK]';
     end
-    fprintf('  B%d: orig=%.4f  sum=%.4f  delta=%.4f%%  %s\n', ...
-        bnum, orig_mu, summed, delta_pct, status);
-end
-if any_warn
-    warning('step06:muMismatch', ...
-        'One or more beams have MU sum deviating >0.5%% from original. Check output carefully.');
-end
+    fprintf('  MU: orig=%.4f  sum=%.4f  delta=%.4f%%  %s\n', ...
+        orig_mu, summed, delta_pct, mu_status);
+
+    %% -------------------------------------------------------------------
+    % Step 6 — Write per-beam output file
+    % -------------------------------------------------------------------
+    beam_output_path = fullfile(sct_dir, ...
+        sprintf('%s_B%d_exploded_segments.dcm', base_name, original_beam_number));
+
+    fprintf('  Writing: %s\n', beam_output_path);
+    try
+        dicomwrite([], beam_output_path, rtplan_out, 'CreateMode', 'Copy');
+    catch ME
+        error('step06:writeFailed', ...
+            'Failed to write output RTPLAN:\n  %s\nError: %s', beam_output_path, ME.message);
+    end
+    output_paths{end+1} = beam_output_path; %#ok<AGROW>
+
+end % beam loop
 
 %% -----------------------------------------------------------------------
-% Step 6 — Write output
+% Final summary
 % -----------------------------------------------------------------------
-fprintf('\nWriting output DICOM...\n');
-try
-    dicomwrite([], output_rtplan, rtplan_out, 'CreateMode', 'Copy');
-catch ME
-    error('step06:writeFailed', ...
-        'Failed to write output RTPLAN:\n  %s\nError: %s', output_rtplan, ME.message);
+fprintf('\n=== Step 0.6 complete ===\n');
+fprintf('Output files written (%d plans):\n', numel(output_paths));
+for k = 1:numel(output_paths)
+    fprintf('  %s\n', output_paths{k});
 end
-
-fprintf('Write complete: %s\n', output_rtplan);
-fprintf('\n=== Step 0.6 complete. Total new beams: %d ===\n', global_beam_idx);
+if any_warn_global
+    warning('step06:muMismatch', ...
+        'One or more beams had MU sum deviating >0.5%% from original. Check output carefully.');
+end
