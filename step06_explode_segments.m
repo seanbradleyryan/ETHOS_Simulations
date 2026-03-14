@@ -183,7 +183,7 @@ for b = 1:num_original_beams
         % from this entry CP, EXCEPT fields that legitimately vary between
         % control points and must come from the actual segment CP.
         cp1_varying_fields = { ...
-            'BeamLimitingDevicePositionSequence', ...  % MLC/jaw positions
+            'BeamLimitingDevicePositionSequence', ...  % handled separately below
             'CumulativeMetersetWeight', ...            % already set to 0 above
             'ControlPointIndex'};                      % already set to 0 above
 
@@ -195,16 +195,38 @@ for b = 1:num_original_beams
             end
         end
 
+        % --- Build BeamLimitingDevicePositionSequence for entry CP ---
+        % Entry CP (Item_1 of new beam) must have all four items:
+        %   Item_1: X jaw  (from original beam CP_1 — jaws don't change between CPs)
+        %   Item_2: Y jaw  (from original beam CP_1)
+        %   Item_3: MLC1   (from this segment's actual entry CP)
+        %   Item_4: MLC2   (from this segment's actual entry CP)
+        %
+        % The segment CPs only carry MLC positions (Item_1=MLC1, Item_2=MLC2),
+        % so we splice the jaw items in from CP_1 of the original beam.
+        bldps_cp1   = cp1_orig.BeamLimitingDevicePositionSequence;
+        bldps_entry = cp_entry_orig.BeamLimitingDevicePositionSequence;
+
+        bldps_new_entry = struct();
+        bldps_new_entry.Item_1 = bldps_cp1.Item_1;   % X jaw
+        bldps_new_entry.Item_2 = bldps_cp1.Item_2;   % Y jaw
+        bldps_new_entry.Item_3 = bldps_entry.Item_1; % MLC1 from segment entry
+        bldps_new_entry.Item_4 = bldps_entry.Item_2; % MLC2 from segment entry
+        cp_entry_new.BeamLimitingDevicePositionSequence = bldps_new_entry;
+
         % --- Build Item_2 (exit CP) ---
+        % Exit CP only needs MLC positions (Item_1=MLC1, Item_2=MLC2).
+        % Jaws are not repeated on intermediate/exit CPs.
         cp_exit_new = cp_exit_orig;
         cp_exit_new.CumulativeMetersetWeight = 1;
         cp_exit_new.ControlPointIndex = 1;
 
-        % Ensure MLC positions are present in exit CP (backfill if missing)
-        if ~isfield(cp_exit_new, 'BeamLimitingDevicePositionSequence') && ...
-                isfield(cp_entry_new, 'BeamLimitingDevicePositionSequence')
-            cp_exit_new.BeamLimitingDevicePositionSequence = ...
-                cp_entry_new.BeamLimitingDevicePositionSequence;
+        % Ensure MLC positions are present in exit CP (backfill from entry if missing)
+        if ~isfield(cp_exit_new, 'BeamLimitingDevicePositionSequence')
+            bldps_exit_fallback = struct();
+            bldps_exit_fallback.Item_1 = bldps_entry.Item_1;
+            bldps_exit_fallback.Item_2 = bldps_entry.Item_2;
+            cp_exit_new.BeamLimitingDevicePositionSequence = bldps_exit_fallback;
         end
 
         % --- Assign new 2-item ControlPointSequence ---
