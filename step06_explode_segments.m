@@ -24,7 +24,7 @@ treatment_site = 'Pancreas';
 fprintf('Patient: %s | Session: %s\n', patient_id, session);
 
 %% -----------------------------------------------------------------------
-% Step 1 — Derive paths and load the adjusted RTPLAN
+% Step 1  Derive paths and load the adjusted RTPLAN
 % -----------------------------------------------------------------------
 sct_dir = fullfile(working_dir, 'EthosExports', patient_id, treatment_site, session, 'sct');
 
@@ -65,7 +65,7 @@ fprintf('RTPlanLabel: %s\n', rtplan.RTPlanLabel);
 fprintf('Original beam count: %d\n\n', num_original_beams);
 
 %% -----------------------------------------------------------------------
-% Step 2 — Extract original beam MU map  (beam_number -> total_MU)
+% Step 2  Extract original beam MU map  (beam_number -> total_MU)
 % -----------------------------------------------------------------------
 mu_map = containers.Map('KeyType', 'int32', 'ValueType', 'double');
 
@@ -85,7 +85,7 @@ end
 fprintf('MU map loaded for %d beams.\n\n', mu_map.Count);
 
 %% -----------------------------------------------------------------------
-% Step 3 — Explode each beam; one output RTPLAN file per original beam
+% Step 3  Explode each beam; one output RTPLAN file per original beam
 % -----------------------------------------------------------------------
 % For MU validation: accumulate per-original-beam sums
 mu_sum_per_orig  = containers.Map('KeyType', 'int32', 'ValueType', 'double');
@@ -127,7 +127,7 @@ for b = 1:num_original_beams
 
     if N_seg < 1
         warning('step06:noSegments', ...
-            'Beam %d (%s) has only %d control points — skipping.', ...
+            'Beam %d (%s) has only %d control points  skipping.', ...
             original_beam_number, original_beam_name, N_cp);
         continue;
     end
@@ -200,7 +200,7 @@ for b = 1:num_original_beams
 
         % --- Build BeamLimitingDevicePositionSequence for entry CP ---
         % Entry CP (Item_1 of new beam) must have all four items:
-        %   Item_1: X jaw  (from original beam CP_1 — jaws don't change between CPs)
+        %   Item_1: X jaw  (from original beam CP_1  jaws don't change between CPs)
         %   Item_2: Y jaw  (from original beam CP_1)
         %   Item_3: MLC1   (from this segment's actual entry CP)
         %   Item_4: MLC2   (from this segment's actual entry CP)
@@ -262,7 +262,7 @@ for b = 1:num_original_beams
     fprintf('  -> %d segments exploded for beam B%d\n', local_beam_idx, original_beam_number);
 
     %% -------------------------------------------------------------------
-    % Step 4 — Assemble per-beam output plan
+    % Step 4  Assemble per-beam output plan
     % -------------------------------------------------------------------
     rtplan_out = rtplan;   % deep copy
 
@@ -275,12 +275,12 @@ for b = 1:num_original_beams
     rtplan_out.SOPInstanceUID             = new_uid;
     rtplan_out.MediaStorageSOPInstanceUID = new_uid;
 
-    % Plan label: e.g. 'exp_B1' — max 16 chars
+    % Plan label: e.g. 'exp_B1'  max 16 chars
     rtplan_out.RTPlanLabel       = sprintf('exp_B%d', original_beam_number);
     rtplan_out.RTPlanDescription = sprintf('Exploded segments beam B%d', original_beam_number);
 
     %% -------------------------------------------------------------------
-    % Step 5 — Validate MU total for this beam
+    % Step 5  Validate MU total for this beam
     % -------------------------------------------------------------------
     orig_mu   = mu_orig_per_beam(original_beam_number);
     summed    = mu_sum_per_orig(original_beam_number);
@@ -299,9 +299,10 @@ for b = 1:num_original_beams
         orig_mu, summed, delta_pct, mu_status);
 
     %% -------------------------------------------------------------------
-    % Step 6 — Write per-beam output file
+    % Step 6  Write per-beam output file
     % -------------------------------------------------------------------
-    beam_output_path = fullfile(sct_dir, ...
+    beam_output_path = fullfile(working_dir, ...
+        'Raystation_Input',...
         sprintf('%s_B%d_exploded_segments.dcm', base_name, original_beam_number));
 
     fprintf('  Writing: %s\n', beam_output_path);
