@@ -41,11 +41,18 @@ end
 
 input_rtplan = fullfile(sct_dir, listing(1).name);
 
-% Derive base name for per-beam output filenames
+% Derive base name (used for plan labels)
 [~, base_name, ~] = fileparts(listing(1).name);
 
+% Output directory for RayStation import
+output_dir = fullfile(working_dir, 'Raystation_Input', patient_id, session);
+if ~exist(output_dir, 'dir')
+    mkdir(output_dir);
+end
+
 fprintf('Input:  %s\n', input_rtplan);
-fprintf('Output: one file per beam -> %s_B<N>_exploded_segments.dcm\n\n', base_name);
+fprintf('Output dir: %s\n', output_dir);
+fprintf('Filename pattern: %s_%s_B<N>.dcm\n\n', patient_id, session);
 
 % Load DICOM
 fprintf('Loading RTPLAN...\n');
@@ -289,9 +296,10 @@ for b = 1:num_original_beams
     rtplan_out.SOPInstanceUID             = new_uid;
     rtplan_out.MediaStorageSOPInstanceUID = new_uid;
 
-    % Plan label: e.g. 'exp_B1' — max 16 chars
-    rtplan_out.RTPlanLabel       = sprintf('exp_B%d', original_beam_number);
-    rtplan_out.RTPlanDescription = sprintf('Exploded segments beam B%d', original_beam_number);
+    % Plan label: e.g. '1194203_Session_1_B1' truncated to 16 chars
+    full_label = sprintf('%s_%s_B%d', patient_id, session, original_beam_number);
+    rtplan_out.RTPlanLabel       = full_label(1:min(16, end));
+    rtplan_out.RTPlanDescription = sprintf('%s %s beam B%d exploded segments', patient_id, session, original_beam_number);
 
     %% -------------------------------------------------------------------
     % Step 5 — Validate MU total for this beam
@@ -315,8 +323,8 @@ for b = 1:num_original_beams
     %% -------------------------------------------------------------------
     % Step 6 — Write per-beam output file
     % -------------------------------------------------------------------
-    beam_output_path = fullfile(sct_dir, ...
-        sprintf('%s_B%d_exploded_segments.dcm', base_name, original_beam_number));
+    beam_output_path = fullfile(output_dir, ...
+        sprintf('%s_%s_B%d.dcm', patient_id, session, original_beam_number));
 
     fprintf('  Writing: %s\n', beam_output_path);
     try
