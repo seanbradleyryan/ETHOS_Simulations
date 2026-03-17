@@ -296,10 +296,15 @@ for b = 1:num_original_beams
     rtplan_out.SOPInstanceUID             = new_uid;
     rtplan_out.MediaStorageSOPInstanceUID = new_uid;
 
-    % Plan label: e.g. '1194203_Session_1_B1' truncated to 16 chars
-    full_label = sprintf('%s_%s_B%d', patient_id, session, original_beam_number);
-    rtplan_out.RTPlanLabel       = full_label(1:min(16, end));
-    rtplan_out.RTPlanDescription = sprintf('%s %s beam B%d exploded segments', patient_id, session, original_beam_number);
+    % Name the plan after the original beam name everywhere it appears in the metadata.
+    % original_beam_name is the clinical BeamName string (e.g. 'BEAM_1', 'G040').
+    % RTPlanLabel is LO, max 16 chars — truncate if necessary.
+    rtplan_out.RTPlanLabel       = original_beam_name(1:min(16, end));
+    if isfield(rtplan_out, 'RTPlanName')
+        rtplan_out.RTPlanName    = original_beam_name;
+    end
+    rtplan_out.RTPlanDescription = sprintf('Beam %s (%s %s) exploded segments', ...
+        original_beam_name, patient_id, session);
 
     %% -------------------------------------------------------------------
     % Step 5 — Validate MU total for this beam
