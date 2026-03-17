@@ -1192,6 +1192,9 @@ function cmap = gamma_colormap()
         cmap(k, :) = [1, 1-t, 1-t];  % white at t=0, pure red at t=1
     end
 end
+
+
+function plot_dose_comparison(original, reconstructed, sensor_mask, spacing_mm, titleStr)
 %PLOT_DOSE_COMPARISON Visualize original vs reconstructed dose
 
     if nargin < 5, titleStr = 'Dose Comparison'; end
