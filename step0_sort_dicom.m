@@ -1,4 +1,4 @@
-function sct_dir = step0_sort_dicom(patient_id, session, config)
+function [sct_dir, sim_ct_dir] = step0_sort_dicom(patient_id, session, config)
 %% STEP0_SORT_DICOM - Sort DICOM files for ETHOS pipeline
 %
 %   sct_dir = step0_sort_dicom(patient_id, session, config)
@@ -22,6 +22,11 @@ function sct_dir = step0_sort_dicom(patient_id, session, config)
 %                     - Matched RS*.dcm (RTSTRUCT)
 %                     - Matched RP*.dcm (RTPLAN)
 %                     - Matched RD*.dcm (RTDOSE)
+%       sim_ct_dir  - String, path to directory containing the most recent
+%                     simulation CT series (original planning CT, not SCT).
+%                     Searches for CT series whose SeriesDescription is NOT
+%                     'sct', preferring descriptions that contain 'sim'.
+%                     Returns '' if no simulation CT is found.
 %
 %   ALGORITHM:
 %   1. Create 'sct' subdirectory if not exists
@@ -94,8 +99,9 @@ end
 rawwd = fullfile(config.working_dir, 'EthosExports', patient_id, ...
     config.treatment_site, session);
 
-% Define output sct directory
-sct_dir = fullfile(rawwd, 'sct');
+% Define output directories
+sct_dir    = fullfile(rawwd, 'sct');
+sim_ct_dir = '';   % populated later if a simulation CT is found
 
 fprintf('  Processing: Patient %s, %s\n', patient_id, session);
 fprintf('  Raw directory: %s\n', rawwd);
@@ -106,7 +112,8 @@ if ~isfolder(rawwd)
     warning('step0_sort_dicom:DirectoryNotFound', ...
         'Raw directory not found for patient %s, %s: %s', ...
         patient_id, session, rawwd);
-    sct_dir = '';
+    sct_dir    = '';
+    sim_ct_dir = '';
     return;
 end
 
@@ -124,7 +131,8 @@ end
 if isempty(ctInfo) || height(ctInfo) == 0
     warning('step0_sort_dicom:EmptyCollection', ...
         'No DICOM files found in: %s', rawwd);
-    sct_dir = '';
+    sct_dir    = '';
+    sim_ct_dir = '';
     return;
 end
 
@@ -158,6 +166,12 @@ end
 fprintf('  Sorting RT files (RTSTRUCT, RTPLAN, RTDOSE)...\n');
 sortRTFiles(ctInfo, rawwd, sct_dir, sctSeriesUID);
 
+%% ======================== SORT SIMULATION CT FILES ========================
+
+fprintf('  Searching for simulation CT series...\n');
+sim_ct_dir = fullfile(rawwd, 'sim_ct');
+sim_ct_dir = sortSimCtFiles(ctInfo, rawwd, sim_ct_dir, sctSeriesUID);
+
 %% ======================== VERIFY OUTPUT ========================
 
 % Count files in sct directory
@@ -166,10 +180,10 @@ fprintf('  Sorting complete. %d files in sct directory.\n', length(sctFiles));
 
 % Verify critical files exist
 hasRTSTRUCT = ~isempty(dir(fullfile(sct_dir, 'RS*.dcm')));
-hasRTPLAN = ~isempty(dir(fullfile(sct_dir, 'RP*.dcm')));
-hasRTDOSE = ~isempty(dir(fullfile(sct_dir, 'RD*.dcm')));
-hasCT = ~isempty(dir(fullfile(sct_dir, 'CT*.dcm'))) || ...
-        ~isempty(dir(fullfile(sct_dir, '*CT*.dcm')));
+hasRTPLAN   = ~isempty(dir(fullfile(sct_dir, 'RP*.dcm')));
+hasRTDOSE   = ~isempty(dir(fullfile(sct_dir, 'RD*.dcm')));
+hasCT       = ~isempty(dir(fullfile(sct_dir, 'CT*.dcm'))) || ...
+              ~isempty(dir(fullfile(sct_dir, '*CT*.dcm')));
 
 if ~hasRTSTRUCT
     warning('step0_sort_dicom:MissingFile', 'No RTSTRUCT file found in sct directory');
@@ -182,6 +196,15 @@ if ~hasRTDOSE
 end
 if ~hasCT
     warning('step0_sort_dicom:MissingFile', 'No CT files found in sct directory');
+end
+
+% Report sim_ct result
+if ~isempty(sim_ct_dir)
+    simCtFiles = dir(fullfile(sim_ct_dir, '*.dcm'));
+    fprintf('  Simulation CT: %d files in %s\n', length(simCtFiles), sim_ct_dir);
+else
+    warning('step0_sort_dicom:NoSimCT', ...
+        'No simulation CT series found for patient %s, %s', patient_id, session);
 end
 
 fprintf('  Step 0 complete for %s/%s\n', patient_id, session);
@@ -272,6 +295,131 @@ function sctSeriesUID = sortSctFiles(ctInfo, sourceDir, destDir)
     end
     
     fprintf('    SCT files: %d moved, %d already existed\n', numMoved, numSkipped);
+end
+
+
+function sim_ct_dir = sortSimCtFiles(ctInfo, sourceDir, sim_ct_dir, sctSeriesUID)
+%SORTSIMCTFILES Find and move the most recent simulation CT to sim_ct folder
+%
+%   sim_ct_dir = sortSimCtFiles(ctInfo, sourceDir, sim_ct_dir, sctSeriesUID)
+%
+%   Searches for a CT series whose SeriesDescription is NOT 'sct'.
+%   Priority:
+%     1. CT series with SeriesDescription containing 'sim' (case-insensitive)
+%     2. Most recent remaining CT series
+%   Moves all files from the selected series to sim_ct_dir and returns
+%   that path.  Returns '' if no eligible series is found.
+
+    sim_ct_dir = '';
+
+    if ~ismember('Modality', ctInfo.Properties.VariableNames) || ...
+       ~ismember('SeriesDescription', ctInfo.Properties.VariableNames)
+        warning('sortSimCtFiles:MissingColumns', ...
+            'Modality or SeriesDescription column not found in DICOM collection');
+        return;
+    end
+
+    % Find all CT rows that are NOT the SCT series
+    isCT    = strcmpi(ctInfo.Modality, 'CT');
+    isSct   = strcmpi(ctInfo.SeriesDescription, 'sct');
+    eligible = isCT & ~isSct;
+
+    if ~any(eligible)
+        fprintf('    No non-SCT CT series found.\n');
+        return;
+    end
+
+    eligibleInfo = ctInfo(eligible, :);
+    fprintf('    Found %d non-SCT CT series\n', height(eligibleInfo));
+
+    % Prefer series whose description contains 'sim'
+    hasSim = contains(lower(eligibleInfo.SeriesDescription), 'sim');
+    if any(hasSim)
+        candidateInfo = eligibleInfo(hasSim, :);
+        fprintf('    Found %d series with ''sim'' in description\n', height(candidateInfo));
+    else
+        candidateInfo = eligibleInfo;
+    end
+
+    % Among candidates, pick the most recent by SeriesDate/SeriesTime
+    % Build a comparable datetime vector from the first file in each series
+    bestIdx      = 1;
+    bestDateTime = 0;
+
+    for i = 1:height(candidateInfo)
+        fileCell = candidateInfo.Filenames{i};
+        if isempty(fileCell) || isempty(fileCell{1})
+            continue;
+        end
+        try
+            meta = dicominfo(fileCell{1});
+            dt   = str2double([meta.SeriesDate, meta.SeriesTime]);
+            if isnan(dt), dt = 0; end
+            if dt > bestDateTime
+                bestDateTime = dt;
+                bestIdx      = i;
+            end
+        catch
+            % Keep current best if metadata unreadable
+        end
+    end
+
+    selectedSeries = candidateInfo(bestIdx, :);
+    simFiles       = selectedSeries.Filenames{1};
+
+    if isempty(simFiles)
+        fprintf('    Selected simulation CT series has no files.\n');
+        return;
+    end
+
+    % Log selected series info
+    try
+        meta = dicominfo(simFiles{1});
+        fprintf('    Simulation CT: "%s"  Date: %s  Files: %d\n', ...
+            meta.SeriesDescription, meta.SeriesDate, length(simFiles));
+    catch
+        fprintf('    Simulation CT: %d files (metadata unavailable)\n', length(simFiles));
+    end
+
+    % Create destination directory (rawwd/sim_ct, passed in as sim_ct_dir arg)
+    destDir = fullfile(sourceDir, 'sim_ct');
+
+    if ~isfolder(destDir)
+        mkdir(destDir);
+        fprintf('    Created sim_ct directory: %s\n', destDir);
+    else
+        fprintf('    sim_ct directory exists: %s\n', destDir);
+    end
+
+    % Move files
+    numMoved   = 0;
+    numSkipped = 0;
+
+    for k = 1:length(simFiles)
+        srcFile = simFiles{k};
+        [~, name, ext] = fileparts(srcFile);
+        destFile = fullfile(destDir, [name, ext]);
+
+        if ~exist(srcFile, 'file')
+            continue;
+        end
+        if exist(destFile, 'file')
+            numSkipped = numSkipped + 1;
+        else
+            try
+                movefile(srcFile, destFile);
+                numMoved = numMoved + 1;
+            catch ME
+                warning('sortSimCtFiles:MoveError', ...
+                    'Failed to move %s: %s', name, ME.message);
+            end
+        end
+    end
+
+    fprintf('    Simulation CT files: %d moved, %d already existed\n', ...
+        numMoved, numSkipped);
+
+    sim_ct_dir = destDir;
 end
 
 

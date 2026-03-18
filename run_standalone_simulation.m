@@ -24,12 +24,6 @@
 %    - GPU/CPU selection, PML size, CFL number, TR iterations
 %    - Movie recording for first forward simulation and first TR iteration
 %
-%  PSF CORRECTION (CONFIG.use_psf_correction = true):
-%    Calls get_psf() once to compute a Wiener-regularised frequency-domain
-%    filter that compensates for limited-angle planar-sensor artifacts:
-%      F(k) = FFT3(p0_sphere) * conj(P(k)) / (|P(k)|^2 + lambda^2 * mean(|P|^2))
-%    Applied to the planar reconstruction:
-%      p0_corrected = IFFT3( FFT3(p0_planar) * F(k) )
 %
 %  REQUIRED FILES (in processed/ directory from step15_process_doses):
 %    - total_rs_dose.mat  (contains total_rs_dose: 3D Gy array)
@@ -41,12 +35,6 @@
 %    - k-Wave Toolbox (http://www.k-wave.org)
 %    - Image Processing Toolbox (optional)
 %
-%  AUTHOR: ETHOS Pipeline Team
-%  DATE: February 2026
-%  VERSION: 3.0 (PSF correction via get_psf, conforms to run_single_field_simulation)
-%
-%  See also: run_single_field_simulation, get_psf, determine_sensor_mask,
-%            step15_process_doses, load_processed_data
 %  =========================================================================
 
 clear; clc; close all;
@@ -127,19 +115,14 @@ CONFIG.use_gpu                = true;   % Use GPU acceleration
 CONFIG.num_time_reversal_iter = 10;       % Maximum TR iterations
 CONFIG.convergence_tol        = 1e-3;   % Early stop if relative change < tol
 
-% --- PSF Correction ---
+% --- PSF Correction --- Depreceated
 %   Calls get_psf() once (using the total dose as calibration source) to
 %   compute a Wiener-regularised frequency-domain filter that compensates
 %   for limited-angle artifacts in the planar reconstruction.
 %   The filter is then applied after the iterative TR loop.
 CONFIG.use_psf_correction      = false;  % Master toggle
 CONFIG.regularization_lambda   = 0.05;  % Wiener regularisation (get_psf)
-
-% --- Movie Recording ---
-%   k-Wave can record the visualised simulation as a movie file.
-%   Enabled for the FIRST forward simulation and the FIRST TR iteration.
-%   Subsequent calls (residual passes, iterations 2+) use no recording.
-CONFIG.record_movie = true;   % Record movies for first fwd + first TR
+CONFIG.record_movie = false;   % Record movies for first fwd + first TR
 
 % --- Grid Downscaling ---
 % Divide each grid dimension by this factor (round to nearest integer) and
@@ -647,6 +630,8 @@ else
     z_plot = 1;  % unused, but keeps variable defined
 end
 
+%% Reconstruction
+
 try
     tr_total_tic = tic;
 
@@ -746,6 +731,8 @@ catch ME
     fprintf('[ERROR] Time reversal failed: %s\n', ME.message);
     return;
 end
+
+reconPressure = gather(reconPressure); 
 
 %% ========================= CROP TO ORIGINAL SIZE =========================
 %  Remove padding before PSF correction and dose conversion.
