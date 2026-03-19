@@ -341,27 +341,56 @@ function sim_ct_dir = sortSimCtFiles(ctInfo, sourceDir, sim_ct_dir, sctSeriesUID
         candidateInfo = eligibleInfo;
     end
 
-    % Among candidates, pick the most recent by SeriesDate/SeriesTime
-    % Build a comparable datetime vector from the first file in each series
-    bestIdx      = 1;
-    bestDateTime = 0;
+    % Selection priority among candidates:
+    %   1. Series with an empty/missing SeriesDate or SeriesTime — ETHOS
+    %      sometimes exports the simulation CT without a date stamp.
+    %   2. Oldest series by SeriesDate/SeriesTime (simulation CT is acquired
+    %      before the adaptive fractions, so it has the earliest timestamp).
+    %
+    % Build a datetime value for every candidate series.
+    % NaN is used as a sentinel for missing/empty datetime (highest priority).
+    numCandidates = height(candidateInfo);
+    dtValues      = zeros(numCandidates, 1);   % 0 = placeholder
 
-    for i = 1:height(candidateInfo)
+    for i = 1:numCandidates
         fileCell = candidateInfo.Filenames{i};
         if isempty(fileCell) || isempty(fileCell{1})
+            dtValues(i) = NaN;   % treat unreadable file same as missing date
             continue;
         end
         try
-            meta = dicominfo(fileCell{1});
-            dt   = str2double([meta.SeriesDate, meta.SeriesTime]);
-            if isnan(dt), dt = 0; end
-            if dt > bestDateTime
-                bestDateTime = dt;
-                bestIdx      = i;
+            meta     = dicominfo(fileCell{1});
+            dateStr  = '';
+            timeStr  = '';
+            if isfield(meta, 'SeriesDate'), dateStr = strtrim(meta.SeriesDate); end
+            if isfield(meta, 'SeriesTime'), timeStr = strtrim(meta.SeriesTime); end
+
+            if isempty(dateStr) && isempty(timeStr)
+                % Empty datetime — highest priority candidate
+                dtValues(i) = NaN;
+            else
+                dt = str2double([dateStr, timeStr]);
+                if isnan(dt) || dt == 0
+                    dtValues(i) = NaN;   % treat unparseable as missing
+                else
+                    dtValues(i) = dt;
+                end
             end
         catch
-            % Keep current best if metadata unreadable
+            dtValues(i) = NaN;   % unreadable metadata → treat as missing date
         end
+    end
+
+    % Choose: first prefer any NaN (empty datetime) entry, then the oldest
+    nanIdx = find(isnan(dtValues));
+    if ~isempty(nanIdx)
+        % Multiple NaN entries — just take the first
+        bestIdx = nanIdx(1);
+        fprintf('    Selecting simulation CT with empty/missing datetime (index %d)\n', bestIdx);
+    else
+        % All have valid timestamps — pick the oldest (smallest value)
+        [~, bestIdx] = min(dtValues);
+        fprintf('    Selecting oldest simulation CT by SeriesDate/Time\n');
     end
 
     selectedSeries = candidateInfo(bestIdx, :);
