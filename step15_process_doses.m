@@ -174,25 +174,43 @@ end
 
 fprintf('\n[1/8] Finding field dose files...\n');
 
-% Find all Beam*_Seg*_Field*.dcm files (Raystation naming convention)
-rd_files = dir(fullfile(rs_dir, 'Beam*_Seg*_Field*.dcm'));
+% --- PREFERRED format: Plan_Field [n]_Beam[m]_B[n]_S[m].dcm ---
+% Produced by step06_explode_segments + RayStation export.
+% If ANY files in this format exist, use ONLY those and skip all other patterns.
+rd_files_preferred = dir(fullfile(rs_dir, 'Plan_Field*_Beam*_B*_S*.dcm'));
 
-% Also check for alternative patterns as fallback
-if isempty(rd_files)
-    rd_files = dir(fullfile(rs_dir, 'Beam*.dcm'));
-end
+if ~isempty(rd_files_preferred)
+    rd_files = rd_files_preferred;
+    fprintf('  Using preferred format (Plan_Field*_Beam*_B*_S*.dcm): %d file(s) found\n', ...
+        numel(rd_files));
+else
+    % --- Legacy fallback patterns (preserved from original implementation) ---
+    rd_files = dir(fullfile(rs_dir, 'Beam*_Seg*_Field*.dcm'));
 
-if isempty(rd_files)
-    % Legacy pattern fallback
-    rd_files = dir(fullfile(rs_dir, 'RD.*.dcm'));
     if isempty(rd_files)
-        rd_files = dir(fullfile(rs_dir, 'RD*.dcm'));
+        rd_files = dir(fullfile(rs_dir, 'Beam*.dcm'));
+    end
+
+    if isempty(rd_files)
+        rd_files = dir(fullfile(rs_dir, 'RD.*.dcm'));
+        if isempty(rd_files)
+            rd_files = dir(fullfile(rs_dir, 'RD*.dcm'));
+        end
+    end
+
+    if ~isempty(rd_files)
+        fprintf('  Preferred format not found; using legacy pattern: %d file(s)\n', numel(rd_files));
     end
 end
 
 if isempty(rd_files)
     error('step15_process_doses:NoFieldDoses', ...
-        'No field dose files found in: %s\nExpected pattern: Beam*_Seg*_Field*.dcm', rs_dir);
+        ['No field dose files found in: %s\n' ...
+         'Searched patterns (in priority order):\n' ...
+         '  1. Plan_Field*_Beam*_B*_S*.dcm  (preferred)\n' ...
+         '  2. Beam*_Seg*_Field*.dcm\n' ...
+         '  3. Beam*.dcm\n' ...
+         '  4. RD.*.dcm / RD*.dcm'], rs_dir);
 end
 
 num_files = length(rd_files);
@@ -857,45 +875,59 @@ end
 function [beam_num, seg_num, field_num] = extractBeamInfo(filename, default_index)
 %EXTRACTBEAMINFO Extract beam, segment, and field numbers from dose filename
 %
-%   Handles patterns like: Beam1_Seg0_Field 1.dcm, Beam2_Seg0_Field 2.dcm, etc.
-%   Also handles legacy patterns: RD.1.dcm, RD.2.dcm
+%   Supported patterns (checked in priority order):
+%     1. Plan_Field [n]_Beam[m]_B[n]_S[m].dcm  (preferred, from step06 explosion)
+%        e.g. Plan_Field 10_Beam162_B10_S162.dcm
+%        -> field_num = n (Field number = original beam number)
+%        -> beam_num  = n (B[n] value)
+%        -> seg_num   = m (S[m] value)
+%     2. Beam[n]_Seg[m]_Field [o].dcm  (legacy RayStation export)
+%     3. Beam[n]_Seg[m]_Field[o].dcm   (legacy, no space)
+%     4. RD.[n].dcm                    (legacy DICOM default)
 %
 %   OUTPUTS:
-%       beam_num  - Beam number from filename (n in Beam[n])
-%       seg_num   - Segment number from filename (m in Seg[m])
-%       field_num - Field number from filename (o in Field [o])
-%                   This is used to match to RTPLAN beam metadata
+%       beam_num  - Original beam number (B[n])
+%       seg_num   - Segment number within that beam (S[m])
+%       field_num - Field number used to match RTPLAN beam metadata
 
     beam_num = default_index;
     seg_num = 0;
     field_num = default_index;
-    
-    % Try new pattern: Beam[n]_Seg[m]_Field [o].dcm
-    % Note: Field number may have a space before the number
+
+    % --- Pattern 1 (preferred): Plan_Field [n]_Beam[m]_B[n]_S[m].dcm ---
+    tokens = regexp(filename, 'Plan_Field\s*(\d+)_Beam(\d+)_B(\d+)_S(\d+)', 'tokens');
+    if ~isempty(tokens) && ~isempty(tokens{1})
+        % field_num  = the "Field n" / "B n" value (original beam number in plan)
+        % beam_num   = same n (B[n])
+        % seg_num    = the S[m] value (segment index within that beam)
+        field_num = str2double(tokens{1}{1});   % Field [n]
+        beam_num  = str2double(tokens{1}{3});   % B[n]  (should equal field_num)
+        seg_num   = str2double(tokens{1}{4});   % S[m]
+        return;
+    end
+
+    % --- Pattern 2: Beam[n]_Seg[m]_Field [o].dcm ---
     tokens = regexp(filename, 'Beam(\d+)_Seg(\d+)_Field\s*(\d+)', 'tokens');
-    
     if ~isempty(tokens) && ~isempty(tokens{1})
-        beam_num = str2double(tokens{1}{1});
-        seg_num = str2double(tokens{1}{2});
+        beam_num  = str2double(tokens{1}{1});
+        seg_num   = str2double(tokens{1}{2});
         field_num = str2double(tokens{1}{3});
         return;
     end
-    
-    % Try alternative pattern without space: Beam[n]_Seg[m]_Field[o].dcm
+
+    % --- Pattern 3: Beam[n]_Seg[m]_Field[o].dcm (no space) ---
     tokens = regexp(filename, 'Beam(\d+)_Seg(\d+)_Field(\d+)', 'tokens');
-    
     if ~isempty(tokens) && ~isempty(tokens{1})
-        beam_num = str2double(tokens{1}{1});
-        seg_num = str2double(tokens{1}{2});
+        beam_num  = str2double(tokens{1}{1});
+        seg_num   = str2double(tokens{1}{2});
         field_num = str2double(tokens{1}{3});
         return;
     end
-    
-    % Legacy pattern: RD.[n].dcm
+
+    % --- Pattern 4 (legacy): RD.[n].dcm ---
     tokens = regexp(filename, 'RD\.(\d+)', 'tokens');
-    
     if ~isempty(tokens) && ~isempty(tokens{1})
-        beam_num = str2double(tokens{1}{1});
+        beam_num  = str2double(tokens{1}{1});
         field_num = beam_num;
     end
 end
