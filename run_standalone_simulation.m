@@ -58,7 +58,7 @@ CONFIG.sct_filename  = 'sct_resampled.mat';   % CT file in processed/
 
 % Override: set to a full path to bypass the patient/session directory
 % structure. Leave empty to use the standard processed/ directory.
-CONFIG.dose_file_override = '';   % e.g., '/some/path/total_rs_dose.mat'
+CONFIG.dose_file_override = 'field1dose.mat';   % e.g., '/some/path/total_rs_dose.mat'
 CONFIG.sct_file_override  = '';   % e.g., '/some/path/sct_resampled.mat'
 
 % --- Sensor Placement ---
@@ -71,20 +71,20 @@ CONFIG.sct_file_override  = '';   % e.g., '/some/path/sct_resampled.mat'
 %                           Radius = floor(min(grid_dims)/2) - pml_size voxels.
 %                           No PSF correction is applied (identity filter returned).
 CONFIG.sensor_placement_method = 'full_plane_lateral';
-CONFIG.sensor_x_index = 2;   % X face index  used by 'full_plane_anterior'
-CONFIG.sensor_y_index = 2;   % Y face index  used by 'full_plane_lateral'
+CONFIG.sensor_x_index = 20;   % X face index  used by 'full_plane_anterior'
+CONFIG.sensor_y_index = 20;   % Y face index  used by 'full_plane_lateral'
 
 % --- Tissue Heterogeneity ---
 %   'uniform'       : Homogeneous water-like medium everywhere
 %   'threshold_1'   : 9-tissue model (air, lung, fat, water, blood,
 %                     muscle, soft tissue, bone, metal)
 %   'threshold_2'   : 4-tissue model (water, fat, soft tissue, bone)
-CONFIG.gruneisen_method = 'threshold_2';
-
-% --- Per-Property Heterogeneity Overrides ---
-% When gruneisen_method is NOT 'uniform', you can selectively force
-% individual properties to be spatially constant while keeping others
-% heterogeneous.  Set to true to DISABLE heterogeneity for that property.
+CONFIG.gruneisen_method = 'uniform';
+% 
+% % --- Per-Property Heterogeneity Overrides ---
+% % When gruneisen_method is NOT 'uniform', you can selectively force
+% % individual properties to be spatially constant while keeping others
+% % heterogeneous.  Set to true to DISABLE heterogeneity for that property.
 CONFIG.force_uniform_density     = false;
 CONFIG.force_uniform_sound_speed = false;
 CONFIG.force_uniform_attenuation = false;
@@ -103,6 +103,7 @@ CONFIG.meterset               = 140;    % MU (monitor units) for total dose
 CONFIG.pml_size               = 10;     % PML thickness (voxels)
 CONFIG.cfl_number             = 0.3;    % CFL stability number
 CONFIG.use_gpu                = true;   % Use GPU acceleration
+CONFIG.correction_factor = 1.5; 
 
 % --- Iterative Time-Reversal Reconstruction ---
 %   Uses Dirichlet-BC time-reversal with iterative residual correction:
@@ -112,7 +113,7 @@ CONFIG.use_gpu                = true;   % Use GPU acceleration
 %             measured_data += residual   (corrected data)
 %             TR(corrected_data) -> p0_est (updated), positivity constraint
 %             check convergence
-CONFIG.num_time_reversal_iter = 10;       % Maximum TR iterations
+CONFIG.num_time_reversal_iter = 20;       % Maximum TR iterations
 CONFIG.convergence_tol        = 1e-3;   % Early stop if relative change < tol
 
 % --- PSF Correction --- Depreceated
@@ -128,13 +129,13 @@ CONFIG.record_movie = false;   % Record movies for first fwd + first TR
 % Divide each grid dimension by this factor (round to nearest integer) and
 % resample all data arrays before simulation.  Spacing is scaled to
 % preserve the physical extent of the grid.  Set to 1 to disable (default).
-CONFIG.downscale_factor = 2;
+CONFIG.downscale_factor = 1;
 
 % --- Grid Padding ---
 % Pad grid dimensions to FFT-optimal sizes for k-Wave performance.
 % Set to false to disable (useful for debugging or when the grid is
 % already a product of small primes).
-CONFIG.use_grid_padding = false;
+CONFIG.use_grid_padding = true;
 
 % --- Output ---
 CONFIG.save_results = true;             % Save reconstruction to .mat
@@ -334,6 +335,9 @@ if ~isempty(overrides)
 end
 
 %% ========================= INITIAL PRESSURE p0 ==========================
+
+% Mask away the couch dose
+doseGrid = doseGrid .* sct.bodyMask; 
 
 fprintf('[4/7] Computing initial pressure...\n');
 
@@ -718,9 +722,10 @@ try
                 source_resid, sensor, inputArgs{:});
 
             % Update working sensor data with residual
-            sensorData = sensorData_measured + (sensorData_measured - sensorDataRecon);
+            sensorData = sensorData + (sensorData_measured - sensorDataRecon);
         end
     end
+    reconPressure = reconPressure * CONFIG.correction_factor; 
 
     tr_time = toc(tr_total_tic);
     fprintf('       Time reversal complete (%.1f s).\n', tr_time);
