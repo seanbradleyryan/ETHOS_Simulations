@@ -77,7 +77,7 @@ end
 %% ========================= PRINT CONFIGURATION ===========================
 
 fprintf('=========================================================\n');
-fprintf('  Standalone k-Wave Photoacoustic Simulation  (v4.0)\n');
+fprintf('  Standalone k-Wave Photoacoustic Simulation  (v4.1)\n');
 fprintf('=========================================================\n');
 fprintf('  Patient:         %s / %s\n', CONFIG.patient_id, CONFIG.session);
 fprintf('  Dose file:       %s\n', dose_filepath);
@@ -309,13 +309,12 @@ if numSensorPts == 0
 end
 
 %% ========================= 3D SENSOR vs DOSE VISUALIZATION ==============
-%  Displayed before simulation so you can inspect placement while it runs.
+%  Displayed before simulation starts — rotate to inspect geometry.
 
 if CONFIG.plot_results
-    % Crop sensor to original domain for visualization
     sensor_vis = logical(sensor.mask(1:Nx_orig, 1:Ny_orig, 1:Nz_orig));
     plot_3d_sensor_dose(double(doseGrid), sensor_vis, spacing_mm, CONFIG);
-    fprintf('       [3D sensor visualization displayed - rotate to inspect]\n');
+    fprintf('       [3D sensor visualization displayed — rotate to inspect]\n');
     drawnow;
 end
 
@@ -408,6 +407,51 @@ conv_max_pressure = zeros(CONFIG.num_time_reversal_iter, 1);
 conv_rel_change   = nan(CONFIG.num_time_reversal_iter, 1);
 num_iters_done    = 0;
 
+% ---- Set up live TR figure ----
+% Axial slice through the max-dose voxel (in original, pre-pad coords).
+[~, dose_max_idx] = max(doseGrid(:));
+[cx_live, cy_live, cz_live] = ind2sub([Nx_orig, Ny_orig, Nz_orig], dose_max_idx);
+
+if CONFIG.plot_results
+    fig_live = figure('Name', 'Live TR Reconstruction', 'Color', 'w', ...
+        'NumberTitle', 'off', 'Position', [100, 100, 1060, 440]);
+
+    % Panel 1 — initial p0 (axial slice, fixed reference)
+    ax_p0 = subplot(1, 3, 1);
+    p0_orig_slice = squeeze(p0(1:Nx_orig, 1:Ny_orig, cz_live))';
+    imagesc(ax_p0, p0_orig_slice);
+    axis(ax_p0, 'xy'); axis(ax_p0, 'image');
+    colormap(ax_p0, 'hot'); colorbar(ax_p0);
+    clim_p0 = [0, max(p0_orig_slice(:)) + eps];
+    caxis(ax_p0, clim_p0);
+    xlabel(ax_p0, 'X (voxel)'); ylabel(ax_p0, 'Y (voxel)');
+    title(ax_p0, sprintf('Initial p_0   (Z=%d)', cz_live), 'FontWeight', 'bold');
+
+    % Panel 2 — current reconstructed p0 (updates each iteration)
+    ax_recon = subplot(1, 3, 2);
+    hImg_recon = imagesc(ax_recon, zeros(Ny_orig, Nx_orig));
+    axis(ax_recon, 'xy'); axis(ax_recon, 'image');
+    colormap(ax_recon, 'hot'); colorbar(ax_recon);
+    xlabel(ax_recon, 'X (voxel)'); ylabel(ax_recon, 'Y (voxel)');
+    title(ax_recon, 'Reconstructed p_0   (iter 0)', 'FontWeight', 'bold');
+
+    % Panel 3 — live max-pressure convergence
+    ax_conv = subplot(1, 3, 3);
+    hLine_max = plot(ax_conv, NaN, NaN, 'b-o', 'LineWidth', 1.6, ...
+        'MarkerSize', 4, 'MarkerFaceColor', [0.2, 0.4, 1.0]);
+    xlabel(ax_conv, 'TR Iteration');
+    ylabel(ax_conv, 'Max Reconstructed p_0 (Pa)');
+    title(ax_conv, 'Convergence (live)', 'FontWeight', 'bold');
+    grid(ax_conv, 'on');
+    xlim(ax_conv, [0.5, CONFIG.num_time_reversal_iter + 0.5]);
+
+    sgtitle(fig_live, sprintf( ...
+        'Live TR Reconstruction — Axial Z=%d   |   Patient %s', ...
+        cz_live, CONFIG.patient_id), 'FontWeight', 'bold', 'FontSize', 11);
+    drawnow;
+end
+
+% ---- TR iteration loop ----
 try
     tr_total_tic = tic;
 
@@ -441,6 +485,7 @@ try
         fprintf('       Max pressure: %.4e Pa\n', conv_max_pressure(tr_iter));
 
         % Convergence check (from iteration 2 onward)
+        converged = false;
         if tr_iter > 1
             norm_prev = norm(reconPressure_prev(:));
             if norm_prev > 0
@@ -452,11 +497,35 @@ try
             fprintf('       Rel change: %.4e\n', rel_change);
             if rel_change < CONFIG.convergence_tol
                 fprintf('       *** Converged at iteration %d ***\n', tr_iter);
-                break;
+                converged = true;
             end
         end
 
         reconPressure_prev = reconPressure;
+
+        % ---- Update live figure ----
+        if CONFIG.plot_results && ishandle(fig_live)
+            recon_slice_crop = squeeze( ...
+                reconPressure(1:Nx_orig, 1:Ny_orig, cz_live))';
+            set(hImg_recon, 'CData', recon_slice_crop);
+            caxis(ax_recon, [0, max(recon_slice_crop(:)) + eps]);
+            if converged
+                title(ax_recon, ...
+                    sprintf('Reconstructed p_0   (iter %d — CONVERGED)', tr_iter), ...
+                    'FontWeight', 'bold', 'Color', [0, 0.55, 0]);
+            else
+                title(ax_recon, ...
+                    sprintf('Reconstructed p_0   (iter %d / %d)', ...
+                    tr_iter, CONFIG.num_time_reversal_iter), 'FontWeight', 'bold');
+            end
+            set(hLine_max, 'XData', 1:tr_iter, ...
+                'YData', conv_max_pressure(1:tr_iter));
+            drawnow;
+        end
+
+        if converged
+            break;
+        end
 
         % Residual correction for next iteration
         if tr_iter < CONFIG.num_time_reversal_iter
@@ -629,19 +698,21 @@ if CONFIG.save_results
     fprintf('\nResults saved to: %s\n', CONFIG.output_file);
 end
 
-%% ========================= VISUALIZATION =================================
+%% ========================= POST-SIMULATION VISUALIZATION ================
 
 if CONFIG.plot_results
 
-    % --- Figure 1: 2x3 dose comparison (coronal, sagittal, axial) ---
+    % Figure 1 — 2x3 dose comparison (original top, recon bottom)
+    %            Coronal | Sagittal | Axial
+    %            Isocenter = max-dose voxel; sensor contour in red
     plot_dose_panels(doseGrid, recon_dose, sensor.mask, spacing_mm, ...
         'Dose Comparison: Original vs Reconstructed');
 
-    % --- Figure 2: TR convergence ---
+    % Figure 2 — p0 convergence (max pressure + relative change)
     plot_convergence_history(conv_max_pressure, conv_rel_change, ...
         num_iters_done, CONFIG.convergence_tol);
 
-    % --- Figure 3: Axial gamma maps + absolute error ---
+    % Figure 3 — Axial gamma (3 criteria) + absolute error
     if ~isempty(gamma_results) && isfield(gamma_results, 'maps')
         [~, max_dose_idx] = max(doseGrid(:));
         [~, ~, cz_gamma]  = ind2sub(gridSize, max_dose_idx);
@@ -660,162 +731,166 @@ fprintf('\nStandalone simulation complete.\n');
 
 function plot_3d_sensor_dose(dose_3d, sensor_mask_vis, spacing_mm, config)
 %PLOT_3D_SENSOR_DOSE Interactive 3D view of sensor placement vs dose volume.
-%  Displayed before simulation so the user can inspect placement.
-%  Dose shown as a semi-transparent isosurface at 30% of maximum.
-%  Sensor shown as a red translucent plane or scattered points.
+%  Dose shown as semi-transparent isosurface at 30% of max.
+%  Sensor shown as a red translucent plane (or scatter for spherical).
+%  Yellow star marks the dose maximum.  Drag to rotate.
 
     figure('Name', '3D Sensor vs Dose Volume', 'Color', 'w', ...
-        'NumberTitle', 'off', 'Position', [80, 80, 780, 640]);
+        'NumberTitle', 'off', 'Position', [80, 80, 800, 660]);
     ax = axes;
     hold(ax, 'on');
 
     [Nx3, Ny3, Nz3] = size(dose_3d);
     max_d = max(dose_3d(:));
 
+    legend_handles = [];
+    legend_entries = {};
+
     % Dose isosurface at 30% of max
     iso_level = 0.30 * max_d;
     if iso_level > 0
-        % Scale vertices by spacing so axes reflect mm
         [f, v] = isosurface(dose_3d, iso_level);
         if ~isempty(f)
-            % v columns: x=col2, y=col1, z=col3 for isosurface (meshgrid convention)
             v_mm = v .* [spacing_mm(2), spacing_mm(1), spacing_mm(3)];
-            dp = patch(ax, 'Faces', f, 'Vertices', v_mm);
-            dp.FaceColor = [0.20, 0.55, 1.0];
-            dp.EdgeColor = 'none';
-            dp.FaceAlpha = 0.35;
+            h_dose = patch(ax, 'Faces', f, 'Vertices', v_mm);
+            h_dose.FaceColor = [0.20, 0.55, 1.0];
+            h_dose.EdgeColor = 'none';
+            h_dose.FaceAlpha = 0.35;
+            legend_handles(end+1) = h_dose;
+            legend_entries{end+1} = 'Dose 30% isosurface';
         end
     end
 
-    % Sensor surface
+    % Dose max marker
+    [~, midx] = max(dose_3d(:));
+    [mi, mj, mk] = ind2sub([Nx3, Ny3, Nz3], midx);
+    h_max = scatter3(ax, mi * spacing_mm(1), mj * spacing_mm(2), mk * spacing_mm(3), ...
+        160, [1, 0.85, 0], 'filled', 'MarkerEdgeColor', 'k', 'LineWidth', 1.5);
+    legend_handles(end+1) = h_max;
+    legend_entries{end+1} = 'Dose maximum';
+
+    % Sensor geometry
+    h_sensor = [];
     switch lower(config.sensor_placement_method)
         case 'full_plane_anterior'
-            xi = config.sensor_x_index * spacing_mm(1);
-            y_range = linspace(0, Ny3 * spacing_mm(2), 20);
-            z_range = linspace(0, Nz3 * spacing_mm(3), 20);
+            xi      = config.sensor_x_index * spacing_mm(1);
+            y_range = linspace(0, Ny3 * spacing_mm(2), 30);
+            z_range = linspace(0, Nz3 * spacing_mm(3), 30);
             [Ys, Zs] = meshgrid(y_range, z_range);
             Xs = xi * ones(size(Ys));
-            surf(ax, Xs, Ys, Zs, 'FaceColor', [1, 0.1, 0.1], ...
-                'EdgeColor', 'none', 'FaceAlpha', 0.50);
+            h_sensor = surf(ax, Xs, Ys, Zs, 'FaceColor', [0.9, 0.1, 0.1], ...
+                'EdgeColor', 'none', 'FaceAlpha', 0.45);
 
         case 'full_plane_lateral'
-            yi = config.sensor_y_index * spacing_mm(2);
-            x_range = linspace(0, Nx3 * spacing_mm(1), 20);
-            z_range = linspace(0, Nz3 * spacing_mm(3), 20);
+            yi      = config.sensor_y_index * spacing_mm(2);
+            x_range = linspace(0, Nx3 * spacing_mm(1), 30);
+            z_range = linspace(0, Nz3 * spacing_mm(3), 30);
             [Xs, Zs] = meshgrid(x_range, z_range);
             Ys = yi * ones(size(Xs));
-            surf(ax, Xs, Ys, Zs, 'FaceColor', [1, 0.1, 0.1], ...
-                'EdgeColor', 'none', 'FaceAlpha', 0.50);
+            h_sensor = surf(ax, Xs, Ys, Zs, 'FaceColor', [0.9, 0.1, 0.1], ...
+                'EdgeColor', 'none', 'FaceAlpha', 0.45);
 
         case 'spherical'
             [si, sj, sk] = ind2sub(size(sensor_mask_vis), find(sensor_mask_vis));
-            scatter3(ax, si * spacing_mm(1), sj * spacing_mm(2), sk * spacing_mm(3), ...
-                3, [1, 0.1, 0.1], 'filled', 'MarkerFaceAlpha', 0.25);
+            h_sensor = scatter3(ax, si * spacing_mm(1), sj * spacing_mm(2), sk * spacing_mm(3), ...
+                3, [0.9, 0.1, 0.1], 'filled', 'MarkerFaceAlpha', 0.25);
+    end
+    if ~isempty(h_sensor)
+        legend_handles(end+1) = h_sensor;
+        legend_entries{end+1} = sprintf('Sensor (%s)', config.sensor_placement_method);
     end
 
-    % Mark max dose location
-    [~, midx] = max(dose_3d(:));
-    [mi, mj, mk] = ind2sub([Nx3, Ny3, Nz3], midx);
-    scatter3(ax, mi * spacing_mm(1), mj * spacing_mm(2), mk * spacing_mm(3), ...
-        120, [1, 0.8, 0], 'filled', 'MarkerEdgeColor', 'k', 'LineWidth', 1.5);
-
-    camlight(ax, 'headlight'); lighting(ax, 'gouraud');
-    axis(ax, 'equal'); grid(ax, 'on');
+    camlight(ax, 'headlight');
+    lighting(ax, 'gouraud');
+    axis(ax, 'equal');
+    grid(ax, 'on');
     view(ax, [-38, 24]);
     rotate3d(ax, 'on');
 
     xlabel(ax, 'X (mm)'); ylabel(ax, 'Y (mm)'); zlabel(ax, 'Z (mm)');
-    title(ax, sprintf('3D Sensor Placement (red) vs Dose (blue, 30%% iso)\nSensor: %s   |   Yellow star = dose max   |   Drag to rotate', ...
+    title(ax, sprintf( ...
+        '3D Sensor Placement vs Dose Volume\nSensor: %s   |   Yellow star = dose max   |   Drag to rotate', ...
         config.sensor_placement_method), 'FontSize', 10);
 
-    legend(ax, {'Dose 30% isosurface', 'Sensor plane', 'Dose maximum'}, ...
-        'Location', 'northeastoutside', 'FontSize', 8);
+    if ~isempty(legend_handles)
+        legend(ax, legend_handles, legend_entries, ...
+            'Location', 'northeastoutside', 'FontSize', 8);
+    end
 
     hold(ax, 'off');
 end
 
 
 function plot_dose_panels(original, recon, sensor_mask, spacing_mm, titleStr)
-%PLOT_DOSE_PANELS 2x3 dose comparison: coronal, sagittal, axial views.
-%  Slices centred at the maximum of the original dose.
-%  Sensor plane shown as red contour on each panel.
+%PLOT_DOSE_PANELS 2x3 dose comparison: coronal, sagittal, axial.
+%  Row 1 = original dose,  Row 2 = reconstructed dose.
+%  Isocenter at max-dose voxel.  Sensor contour in red on every panel.
 
     gridSize = size(original);
     if ~isequal(size(sensor_mask), gridSize)
         sensor_mask = sensor_mask(1:gridSize(1), 1:gridSize(2), 1:gridSize(3));
     end
 
-    % Centre at maximum dose voxel
     [~, max_idx] = max(original(:));
     [cx, cy, cz] = ind2sub(gridSize, max_idx);
 
     max_dose = max(original(:));
     if max_dose == 0, max_dose = 1; end
 
-    % Physical axes in mm
     x_ax = (1:gridSize(1)) * spacing_mm(1);
     y_ax = (1:gridSize(2)) * spacing_mm(2);
     z_ax = (1:gridSize(3)) * spacing_mm(3);
 
     figure('Name', titleStr, 'Color', 'w', 'NumberTitle', 'off', ...
-        'Position', [50, 50, 1350, 680]);
-    sgtitle(sprintf('%s\n(max-dose slices: X=%d, Y=%d, Z=%d voxel)', ...
+        'Position', [50, 50, 1380, 700]);
+    sgtitle(sprintf('%s\nIsocenter (max dose): X=%d  Y=%d  Z=%d voxel', ...
         titleStr, cx, cy, cz), 'FontWeight', 'bold', 'FontSize', 11);
 
     row_labels = {'Original', 'Reconstructed'};
     doses = {original, recon};
 
     for row = 1:2
-        d = doses{row};
+        d   = doses{row};
         lbl = row_labels{row};
 
-        % --- Coronal: XZ plane at y = cy ---
+        % Coronal — XZ plane at y = cy
         ax = subplot(2, 3, (row-1)*3 + 1);
-        img = squeeze(d(:, cy, :))';      % [Nz x Nx]
-        imagesc(ax, x_ax, z_ax, img);
+        img = squeeze(d(:, cy, :))';
+        imagesc(ax, x_ax, z_ax, img, [0, max_dose]);
         axis(ax, 'xy'); axis(ax, 'image');
-        colormap(ax, 'jet'); cb = colorbar(ax);
-        cb.Label.String = 'Dose (Gy)';
-        caxis(ax, [0, max_dose]);
+        colormap(ax, 'jet');
+        cb = colorbar(ax); cb.Label.String = 'Dose (Gy)';
         hold(ax, 'on');
         s = squeeze(sensor_mask(:, cy, :))';
-        if any(s(:))
-            contour(ax, x_ax, z_ax, s, [0.5, 0.5], 'r-', 'LineWidth', 2);
-        end
+        if any(s(:)), contour(ax, x_ax, z_ax, s, [0.5,0.5], 'r-', 'LineWidth', 2); end
         hold(ax, 'off');
         xlabel(ax, 'X (mm)'); ylabel(ax, 'Z (mm)');
         title(ax, sprintf('%s — Coronal (Y=%d)', lbl, cy));
 
-        % --- Sagittal: YZ plane at x = cx ---
+        % Sagittal — YZ plane at x = cx
         ax = subplot(2, 3, (row-1)*3 + 2);
-        img = squeeze(d(cx, :, :))';      % [Nz x Ny]
-        imagesc(ax, y_ax, z_ax, img);
+        img = squeeze(d(cx, :, :))';
+        imagesc(ax, y_ax, z_ax, img, [0, max_dose]);
         axis(ax, 'xy'); axis(ax, 'image');
-        colormap(ax, 'jet'); cb = colorbar(ax);
-        cb.Label.String = 'Dose (Gy)';
-        caxis(ax, [0, max_dose]);
+        colormap(ax, 'jet');
+        cb = colorbar(ax); cb.Label.String = 'Dose (Gy)';
         hold(ax, 'on');
         s = squeeze(sensor_mask(cx, :, :))';
-        if any(s(:))
-            contour(ax, y_ax, z_ax, s, [0.5, 0.5], 'r-', 'LineWidth', 2);
-        end
+        if any(s(:)), contour(ax, y_ax, z_ax, s, [0.5,0.5], 'r-', 'LineWidth', 2); end
         hold(ax, 'off');
         xlabel(ax, 'Y (mm)'); ylabel(ax, 'Z (mm)');
         title(ax, sprintf('%s — Sagittal (X=%d)', lbl, cx));
 
-        % --- Axial: XY plane at z = cz ---
+        % Axial — XY plane at z = cz
         ax = subplot(2, 3, (row-1)*3 + 3);
-        img = squeeze(d(:, :, cz))';      % [Ny x Nx]
-        imagesc(ax, x_ax, y_ax, img);
+        img = squeeze(d(:, :, cz))';
+        imagesc(ax, x_ax, y_ax, img, [0, max_dose]);
         axis(ax, 'xy'); axis(ax, 'image');
-        colormap(ax, 'jet'); cb = colorbar(ax);
-        cb.Label.String = 'Dose (Gy)';
-        caxis(ax, [0, max_dose]);
+        colormap(ax, 'jet');
+        cb = colorbar(ax); cb.Label.String = 'Dose (Gy)';
         hold(ax, 'on');
         s = squeeze(sensor_mask(:, :, cz))';
-        if any(s(:))
-            contour(ax, x_ax, y_ax, s, [0.5, 0.5], 'r-', 'LineWidth', 2);
-        end
+        if any(s(:)), contour(ax, x_ax, y_ax, s, [0.5,0.5], 'r-', 'LineWidth', 2); end
         hold(ax, 'off');
         xlabel(ax, 'X (mm)'); ylabel(ax, 'Y (mm)');
         title(ax, sprintf('%s — Axial (Z=%d)', lbl, cz));
@@ -825,14 +900,16 @@ end
 
 
 function plot_convergence_history(conv_max_pressure, conv_rel_change, num_iters, tol)
-%PLOT_CONVERGENCE_HISTORY Single figure: max p0 estimate and relative change per TR iteration.
+%PLOT_CONVERGENCE_HISTORY p0 convergence over TR iterations.
+%  Left axis:  max reconstructed p0 per iteration (blue).
+%  Right axis: relative change between iterations (red, log-scale).
 
-    iters  = 1:num_iters;
-    p_vals = conv_max_pressure(iters);
-    rc_vals = conv_rel_change(iters);     % NaN on iter 1
+    iters   = 1:num_iters;
+    p_vals  = conv_max_pressure(iters);
+    rc_vals = conv_rel_change(iters);
 
-    figure('Name', 'TR Convergence History', 'Color', 'w', ...
-        'NumberTitle', 'off', 'Position', [150, 520, 700, 380]);
+    figure('Name', 'p0 Convergence', 'Color', 'w', ...
+        'NumberTitle', 'off', 'Position', [150, 520, 720, 390]);
 
     yyaxis left;
     plot(iters, p_vals, 'b-o', 'LineWidth', 1.8, 'MarkerSize', 5, ...
@@ -850,11 +927,12 @@ function plot_convergence_history(conv_max_pressure, conv_rel_change, num_iters,
             'LabelHorizontalAlignment', 'right');
         hold off;
     end
-    ylabel('Relative Change ||p_n - p_{n-1}|| / ||p_{n-1}||', 'Color', [0.8, 0.1, 0.1]);
+    ylabel('Relative Change ||p_n - p_{n-1}|| / ||p_{n-1}||', ...
+        'Color', [0.8, 0.1, 0.1]);
 
     xlabel('TR Iteration');
-    title(sprintf('Iterative TR Convergence  (%d/%d iterations)', ...
-        num_iters, numel(conv_max_pressure)), 'FontWeight', 'bold');
+    title(sprintf('p_0 Convergence  (%d/%d iterations)', num_iters, numel(conv_max_pressure)), ...
+        'FontWeight', 'bold');
     xlim([0.5, num_iters + 0.5]);
     grid on;
     drawnow;
@@ -862,9 +940,9 @@ end
 
 
 function plot_gamma_and_error_axial(gamma_results, original, recon, sensor_mask, cz)
-%PLOT_GAMMA_AND_ERROR_AXIAL 1x4 figure in the axial plane:
-%  gamma 10/10, gamma 5/5, gamma 3/3, absolute error.
-%  Sensor shown in red on each panel.
+%PLOT_GAMMA_AND_ERROR_AXIAL 1x4 axial figure:
+%  gamma 10/10 | gamma 5/5 | gamma 3/3 | absolute dose error.
+%  Sensor contour in red.  Slice at cz (max-dose axial index).
 
     gridSize = size(original);
     cz = max(1, min(gridSize(3), cz));
@@ -879,14 +957,15 @@ function plot_gamma_and_error_axial(gamma_results, original, recon, sensor_mask,
     pass_rates = gamma_results.pass_rates;
     nCrit      = size(criteria, 1);
 
-    figure('Name', 'Gamma & Error — Axial Plane', 'Color', 'w', ...
+    figure('Name', 'Gamma & Absolute Error — Axial', 'Color', 'w', ...
         'NumberTitle', 'off', 'Position', [50, 300, 1400, 370]);
     sgtitle(sprintf('Axial Plane (Z = %d voxel) — Gamma Index & Absolute Error', cz), ...
         'FontWeight', 'bold', 'FontSize', 11);
 
-    gamma_clim = [0, 2];
-    sensor_slice = squeeze(sensor_mask(:, :, cz))';   % [Ny x Nx]
+    gamma_clim   = [0, 2];
+    sensor_slice = squeeze(sensor_mask(:, :, cz))';
 
+    % Gamma panels
     for g = 1:nCrit
         ax = subplot(1, 4, g);
         gmap = maps{g};
@@ -910,16 +989,15 @@ function plot_gamma_and_error_axial(gamma_results, original, recon, sensor_mask,
         end
         hold(ax, 'off');
 
-        if isnan(pass_rates(g))
-            pr_str = 'FAILED';
-        else
+        pr_str = 'FAILED';
+        if ~isnan(pass_rates(g))
             pr_str = sprintf('%.1f%%', pass_rates(g));
         end
         xlabel(ax, 'X (voxel)'); ylabel(ax, 'Y (voxel)');
         title(ax, sprintf('%s\nPass rate: %s', criteria{g, 3}, pr_str));
     end
 
-    % --- Panel 4: Absolute error ---
+    % Absolute error panel
     ax = subplot(1, 4, 4);
     orig_slice  = squeeze(original(:, :, cz))';
     recon_slice = squeeze(recon(:, :, cz))';
@@ -946,8 +1024,8 @@ end
 
 
 function cmap = gamma_colormap_gyr()
-%GAMMA_COLORMAP_GYR Green-yellow-red colormap for gamma index display.
-%  Green = gamma <= 1 (pass), red = gamma > 1 (fail).
+%GAMMA_COLORMAP_GYR Green-yellow-red colormap for gamma index.
+%  Green = pass (gamma <= 1),  Red = fail (gamma > 1).
     n    = 256;
     half = round(n / 2);
     rest = n - half;
@@ -1008,7 +1086,6 @@ function medium = create_medium(sct, config)
             error('Unknown gruneisen_method: %s', config.gruneisen_method);
     end
 
-    % Per-property uniform overrides
     if config.force_uniform_density
         medium.density = ones(gridSize) * config.uniform_density;
     end
@@ -1023,7 +1100,6 @@ function medium = create_medium(sct, config)
         medium.gruneisen = ones(gridSize) * config.uniform_gruneisen;
     end
 
-    % Fill outside body with water properties
     if isfield(sct, 'bodyMask')
         outside_body = ~logical(sct.bodyMask);
         if isfield(sct, 'couchMask')
