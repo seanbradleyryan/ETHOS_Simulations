@@ -135,7 +135,7 @@ CONFIG.downscale_factor = 1;
 % Pad grid dimensions to FFT-optimal sizes for k-Wave performance.
 % Set to false to disable (useful for debugging or when the grid is
 % already a product of small primes).
-CONFIG.use_grid_padding = false;
+CONFIG.use_grid_padding = true;
 
 % --- Output ---
 CONFIG.save_results = true;             % Save reconstruction to .mat
@@ -336,6 +336,9 @@ if ~isempty(overrides)
 end
 
 %% ========================= INITIAL PRESSURE p0 ==========================
+
+% Mask away the couch dose
+doseGrid = doseGrid .* sct.bodyMask; 
 
 fprintf('[4/7] Computing initial pressure...\n');
 
@@ -736,6 +739,7 @@ try
             sensorData = sensorData + (sensorData_measured - sensorDataRecon);
         end
     end
+    reconPressure = reconPressure * CONFIG.correction_factor; 
 
     tr_time = toc(tr_total_tic);
 fprintf('       Time reversal complete (%.1f s).\n', tr_time);
