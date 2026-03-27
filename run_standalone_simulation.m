@@ -72,7 +72,7 @@ CONFIG.sct_file_override  = '';   % e.g., '/some/path/sct_resampled.mat'
 %                           No PSF correction is applied (identity filter returned).
 CONFIG.sensor_placement_method = 'full_plane_lateral';
 CONFIG.sensor_x_index = 20;   % X face index  used by 'full_plane_anterior'
-CONFIG.sensor_y_index = 20;   % Y face index  used by 'full_plane_lateral'
+CONFIG.sensor_y_index = 40;   % Y face index  used by 'full_plane_lateral'
 
 % --- Tissue Heterogeneity ---
 %   'uniform'       : Homogeneous water-like medium everywhere
@@ -80,11 +80,11 @@ CONFIG.sensor_y_index = 20;   % Y face index  used by 'full_plane_lateral'
 %                     muscle, soft tissue, bone, metal)
 %   'threshold_2'   : 4-tissue model (water, fat, soft tissue, bone)
 CONFIG.gruneisen_method = 'uniform';
-% 
-% % --- Per-Property Heterogeneity Overrides ---
-% % When gruneisen_method is NOT 'uniform', you can selectively force
-% % individual properties to be spatially constant while keeping others
-% % heterogeneous.  Set to true to DISABLE heterogeneity for that property.
+
+% --- Per-Property Heterogeneity Overrides ---
+% When gruneisen_method is NOT 'uniform', you can selectively force
+% individual properties to be spatially constant while keeping others
+% heterogeneous.  Set to true to DISABLE heterogeneity for that property.
 CONFIG.force_uniform_density     = false;
 CONFIG.force_uniform_sound_speed = false;
 CONFIG.force_uniform_attenuation = false;
@@ -103,7 +103,7 @@ CONFIG.meterset               = 140;    % MU (monitor units) for total dose
 CONFIG.pml_size               = 10;     % PML thickness (voxels)
 CONFIG.cfl_number             = 0.3;    % CFL stability number
 CONFIG.use_gpu                = true;   % Use GPU acceleration
-CONFIG.correction_factor = 1.5; 
+CONFIG.correction_factor = 1.9; 
 
 % --- Iterative Time-Reversal Reconstruction ---
 %   Uses Dirichlet-BC time-reversal with iterative residual correction:
@@ -113,7 +113,7 @@ CONFIG.correction_factor = 1.5;
 %             measured_data += residual   (corrected data)
 %             TR(corrected_data) -> p0_est (updated), positivity constraint
 %             check convergence
-CONFIG.num_time_reversal_iter = 20;       % Maximum TR iterations
+CONFIG.num_time_reversal_iter = 30;       % Maximum TR iterations
 CONFIG.convergence_tol        = 1e-3;   % Early stop if relative change < tol
 
 % --- PSF Correction --- Depreceated
@@ -260,6 +260,7 @@ end
 
 fprintf('       Spacing: [%.2f, %.2f, %.2f] mm\n', spacing_mm);
 fprintf('       HU range: [%.0f, %.0f]\n', min(sct.cubeHU(:)), max(sct.cubeHU(:)));
+doseGrid = doseGrid .* sct.bodyMask; 
 
 %% ========================= GRID DOWNSCALING ==============================
 %  Reduce grid dimensions before simulation to trade spatial resolution for
@@ -591,6 +592,11 @@ fprintf('       Running iterative time reversal (%d iterations, tol=%.1e)...\n',
 reconPressure      = zeros(gridSize);
 reconPressure_prev = zeros(gridSize);
 
+% Convergence tracking across TR iterations
+conv_max_pressure = zeros(CONFIG.num_time_reversal_iter, 1);
+conv_rel_change   = nan(CONFIG.num_time_reversal_iter, 1);   % NaN = not yet computed
+num_iters_done    = 0;
+
 %% ========================= LIVE RECONSTRUCTION FIGURE ====================
 %  Persistent figure that updates after every TR iteration.
 %  Shows the transverse (XY) slice at the true pressure maximum.
@@ -672,6 +678,13 @@ try
         % Positivity constraint (dose and pressure are non-negative)
         reconPressure = max(reconPressure, 0);
 
+        % --- Record convergence metrics ---
+        p_max_iter = max(reconPressure(:));
+        conv_max_pressure(tr_iter) = p_max_iter;
+        num_iters_done = tr_iter;
+
+        fprintf('       Max pressure: %.4e Pa\n', p_max_iter);
+
         fprintf('       Max pressure: %.4e Pa\n', max(reconPressure(:)));
 
         % --- Update live reconstruction figure ---
@@ -705,6 +718,7 @@ try
             else
                 rel_change = Inf;
             end
+            conv_rel_change(tr_iter) = rel_change;   % <-- store it
             fprintf('       Rel change: %.4e\n', rel_change);
             if rel_change < CONFIG.convergence_tol
                 fprintf('       *** Converged at iteration %d ***\n', tr_iter);
@@ -728,16 +742,63 @@ try
     reconPressure = reconPressure * CONFIG.correction_factor; 
 
     tr_time = toc(tr_total_tic);
-    fprintf('       Time reversal complete (%.1f s).\n', tr_time);
+fprintf('       Time reversal complete (%.1f s).\n', tr_time);
     fprintf('       Reconstructed pressure: [%.2e, %.2e] Pa\n', ...
         min(reconPressure(:)), max(reconPressure(:)));
 
-catch ME
-    fprintf('[ERROR] Time reversal failed: %s\n', ME.message);
+    %% Plot TR convergence history (1 x 2 layout)
+    if CONFIG.plot_results && num_iters_done > 0
+        iters_vec = 1:num_iters_done;
+        p_vals    = conv_max_pressure(iters_vec);
+        rc_vals   = conv_rel_change(iters_vec);   % NaN on iter 1  handled below
+
+        hConv = figure('Name', 'TR Convergence', 'NumberTitle', 'off', ...
+            'Color', 'w', 'Position', [100, 500, 900, 380]);
+        sgtitle(sprintf('Iterative TR Convergence  (%d/%d iterations)', ...
+            num_iters_done, CONFIG.num_time_reversal_iter), ...
+            'FontWeight', 'bold');
+
+        % Left panel  max reconstructed pressure per iteration
+        subplot(1, 2, 1);
+        plot(iters_vec, p_vals, 'b-o', 'LineWidth', 1.8, 'MarkerSize', 6, ...
+            'MarkerFaceColor', 'b');
+        xlabel('TR Iteration');
+        ylabel('Max Reconstructed Pressure  (Pa)');
+        title('Peak  p_0  Estimate');
+        grid on;
+        xlim([0.5, num_iters_done + 0.5]);
+
+        % Right panel  relative change (from iter 2 onward, log scale)
+        subplot(1, 2, 2);
+        valid_rc = ~isnan(rc_vals);
+        if any(valid_rc)
+            semilogy(iters_vec(valid_rc), rc_vals(valid_rc), 'r-s', ...
+                'LineWidth', 1.8, 'MarkerSize', 6, 'MarkerFaceColor', 'r');
+            hold on;
+            yline(CONFIG.convergence_tol, 'k--', 'LineWidth', 1.2);
+            hold off;
+            text(iters_vec(end), CONFIG.convergence_tol * 1.3, ...
+                sprintf(' tol = %.1e', CONFIG.convergence_tol), ...
+                'FontSize', 8, 'Color', 'k');
+        else
+            text(0.5, 0.5, 'Single iteration  no rel-change history', ...
+                'Units', 'normalized', 'HorizontalAlignment', 'center');
+        end
+        xlabel('TR Iteration');
+        ylabel('Relative Change  ||p_n - p_{n-1}|| / ||p_{n-1}||');
+        title('Convergence');
+        grid on;
+        xlim([0.5, num_iters_done + 0.5]);
+
+        drawnow;
+    end
+
+catch ME    fprintf('[ERROR] Time reversal failed: %s\n', ME.message);
     return;
 end
 
 reconPressure = gather(reconPressure); 
+reconPressure = reconPressure * CONFIG.correction_factor;
 
 %% ========================= CROP TO ORIGINAL SIZE =========================
 %  Remove padding before PSF correction and dose conversion.
@@ -829,6 +890,10 @@ fprintf('===========================\n');
 %  =========================================================================
 
 gamma_results = struct();
+
+% Normalization
+% recon_dose = recon_dose/max(recon_dose(:)); 
+% doseGrid = doseGrid/max(doseGrid(:)); 
 
 if exist('CalcGamma', 'file') == 2
 
