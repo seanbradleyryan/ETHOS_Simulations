@@ -58,7 +58,7 @@ CONFIG.sct_filename  = 'sct_resampled.mat';   % CT file in processed/
 
 % Override: set to a full path to bypass the patient/session directory
 % structure. Leave empty to use the standard processed/ directory.
-CONFIG.dose_file_override = '';   % e.g., '/some/path/total_rs_dose.mat'
+CONFIG.dose_file_override = 'field1dose.mat';   % e.g., '/some/path/total_rs_dose.mat'
 CONFIG.sct_file_override  = '';   % e.g., '/some/path/sct_resampled.mat'
 
 % --- Sensor Placement ---
@@ -71,15 +71,15 @@ CONFIG.sct_file_override  = '';   % e.g., '/some/path/sct_resampled.mat'
 %                           Radius = floor(min(grid_dims)/2) - pml_size voxels.
 %                           No PSF correction is applied (identity filter returned).
 CONFIG.sensor_placement_method = 'full_plane_lateral';
-CONFIG.sensor_x_index = 2;   % X face index  used by 'full_plane_anterior'
-CONFIG.sensor_y_index = 2;   % Y face index  used by 'full_plane_lateral'
+CONFIG.sensor_x_index = 20;   % X face index  used by 'full_plane_anterior'
+CONFIG.sensor_y_index = 40;   % Y face index  used by 'full_plane_lateral'
 
 % --- Tissue Heterogeneity ---
 %   'uniform'       : Homogeneous water-like medium everywhere
 %   'threshold_1'   : 9-tissue model (air, lung, fat, water, blood,
 %                     muscle, soft tissue, bone, metal)
 %   'threshold_2'   : 4-tissue model (water, fat, soft tissue, bone)
-CONFIG.gruneisen_method = 'threshold_2';
+CONFIG.gruneisen_method = 'uniform';
 
 % --- Per-Property Heterogeneity Overrides ---
 % When gruneisen_method is NOT 'uniform', you can selectively force
@@ -103,6 +103,7 @@ CONFIG.meterset               = 140;    % MU (monitor units) for total dose
 CONFIG.pml_size               = 10;     % PML thickness (voxels)
 CONFIG.cfl_number             = 0.3;    % CFL stability number
 CONFIG.use_gpu                = true;   % Use GPU acceleration
+CONFIG.correction_factor = 1.9; 
 
 % --- Iterative Time-Reversal Reconstruction ---
 %   Uses Dirichlet-BC time-reversal with iterative residual correction:
@@ -112,7 +113,7 @@ CONFIG.use_gpu                = true;   % Use GPU acceleration
 %             measured_data += residual   (corrected data)
 %             TR(corrected_data) -> p0_est (updated), positivity constraint
 %             check convergence
-CONFIG.num_time_reversal_iter = 10;       % Maximum TR iterations
+CONFIG.num_time_reversal_iter = 30;       % Maximum TR iterations
 CONFIG.convergence_tol        = 1e-3;   % Early stop if relative change < tol
 
 % --- PSF Correction --- Depreceated
@@ -128,7 +129,7 @@ CONFIG.record_movie = false;   % Record movies for first fwd + first TR
 % Divide each grid dimension by this factor (round to nearest integer) and
 % resample all data arrays before simulation.  Spacing is scaled to
 % preserve the physical extent of the grid.  Set to 1 to disable (default).
-CONFIG.downscale_factor = 2;
+CONFIG.downscale_factor = 1;
 
 % --- Grid Padding ---
 % Pad grid dimensions to FFT-optimal sizes for k-Wave performance.
@@ -259,6 +260,7 @@ end
 
 fprintf('       Spacing: [%.2f, %.2f, %.2f] mm\n', spacing_mm);
 fprintf('       HU range: [%.0f, %.0f]\n', min(sct.cubeHU(:)), max(sct.cubeHU(:)));
+doseGrid = doseGrid .* sct.bodyMask; 
 
 %% ========================= GRID DOWNSCALING ==============================
 %  Reduce grid dimensions before simulation to trade spatial resolution for
@@ -731,7 +733,7 @@ try
                 source_resid, sensor, inputArgs{:});
 
             % Update working sensor data with residual
-            sensorData = sensorData_measured + (sensorData_measured - sensorDataRecon);
+            sensorData = sensorData + (sensorData_measured - sensorDataRecon);
         end
     end
 
@@ -744,7 +746,7 @@ fprintf('       Time reversal complete (%.1f s).\n', tr_time);
     if CONFIG.plot_results && num_iters_done > 0
         iters_vec = 1:num_iters_done;
         p_vals    = conv_max_pressure(iters_vec);
-        rc_vals   = conv_rel_change(iters_vec);   % NaN on iter 1 — handled below
+        rc_vals   = conv_rel_change(iters_vec);   % NaN on iter 1  handled below
 
         hConv = figure('Name', 'TR Convergence', 'NumberTitle', 'off', ...
             'Color', 'w', 'Position', [100, 500, 900, 380]);
@@ -752,7 +754,7 @@ fprintf('       Time reversal complete (%.1f s).\n', tr_time);
             num_iters_done, CONFIG.num_time_reversal_iter), ...
             'FontWeight', 'bold');
 
-        % Left panel — max reconstructed pressure per iteration
+        % Left panel  max reconstructed pressure per iteration
         subplot(1, 2, 1);
         plot(iters_vec, p_vals, 'b-o', 'LineWidth', 1.8, 'MarkerSize', 6, ...
             'MarkerFaceColor', 'b');
@@ -762,7 +764,7 @@ fprintf('       Time reversal complete (%.1f s).\n', tr_time);
         grid on;
         xlim([0.5, num_iters_done + 0.5]);
 
-        % Right panel — relative change (from iter 2 onward, log scale)
+        % Right panel  relative change (from iter 2 onward, log scale)
         subplot(1, 2, 2);
         valid_rc = ~isnan(rc_vals);
         if any(valid_rc)
@@ -775,7 +777,7 @@ fprintf('       Time reversal complete (%.1f s).\n', tr_time);
                 sprintf(' tol = %.1e', CONFIG.convergence_tol), ...
                 'FontSize', 8, 'Color', 'k');
         else
-            text(0.5, 0.5, 'Single iteration — no rel-change history', ...
+            text(0.5, 0.5, 'Single iteration  no rel-change history', ...
                 'Units', 'normalized', 'HorizontalAlignment', 'center');
         end
         xlabel('TR Iteration');
@@ -792,6 +794,7 @@ catch ME    fprintf('[ERROR] Time reversal failed: %s\n', ME.message);
 end
 
 reconPressure = gather(reconPressure); 
+reconPressure = reconPressure * CONFIG.correction_factor;
 
 %% ========================= CROP TO ORIGINAL SIZE =========================
 %  Remove padding before PSF correction and dose conversion.
@@ -883,6 +886,10 @@ fprintf('===========================\n');
 %  =========================================================================
 
 gamma_results = struct();
+
+% Normalization
+% recon_dose = recon_dose/max(recon_dose(:)); 
+% doseGrid = doseGrid/max(doseGrid(:)); 
 
 if exist('CalcGamma', 'file') == 2
 
