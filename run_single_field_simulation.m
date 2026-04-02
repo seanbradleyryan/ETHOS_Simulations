@@ -42,8 +42,12 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, sct
 %           .pml_size                - PML thickness, voxels (default: 10)
 %           .cfl_number              - CFL stability number (default: 0.3)
 %           .use_gpu                 - Boolean (default: true)
-%           .num_time_reversal_iter  - TR iterations (default: 1)
-%           .sensor_x_index          - X voxel index for lateral sensor plane (default: 1)
+%           .num_time_reversal_iter  - TR iterations (default: 30)
+%           .convergence_tol         - Relative change threshold for early TR exit (default: 1e-3)
+%           .correction_factor       - Scalar multiplier on reconstructed pressure (default: 1.9)
+%           .use_grid_padding        - Pad grid to FFT-optimal dims (default: true)
+%           .sensor_x_index          - X voxel index for anterior sensor plane (default: 1)
+%           .sensor_y_index          - Y voxel index for lateral sensor plane (default: 1)
 %       psf_filter - (OPTIONAL, 6th arg) Pre-computed PSF correction from get_psf():
 %           .F              - 3D complex Wiener filter in Fourier domain
 %           If provided and non-empty, applied to the planar reconstruction
@@ -57,8 +61,11 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, sct
 %           .tr_time_s      - Time reversal wall time
 %           .num_pulses     - Number of LINAC pulses
 %           .p0_max         - Maximum initial pressure (Pa)
-%           .recon_max      - Maximum reconstructed pressure (Pa)
-%           .psf_applied    - Boolean, whether PSF correction was applied
+%           .recon_max          - Maximum reconstructed pressure (Pa)
+%           .psf_applied        - Boolean, whether PSF correction was applied
+%           .num_iters_done     - Number of TR iterations completed
+%           .conv_max_pressure  - Max pressure per iteration (vector)
+%           .conv_rel_change    - Relative change per iteration (vector)
 %
 %   NOTES:
 %       - Stateless: safe for parfor execution.
@@ -81,7 +88,10 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, sct
     pml_size           = safe_config(config, 'pml_size', 10);
     cfl                = safe_config(config, 'cfl_number', 0.3);
     use_gpu            = safe_config(config, 'use_gpu', true);
-    num_tr_iter        = safe_config(config, 'num_time_reversal_iter', 1);
+    num_tr_iter        = safe_config(config, 'num_time_reversal_iter', 30);
+    convergence_tol    = safe_config(config, 'convergence_tol', 1e-3);
+    correction_factor  = safe_config(config, 'correction_factor', 1.9);
+    use_grid_padding   = safe_config(config, 'use_grid_padding', true);
 
     if nargin < 6, psf_filter = []; end
 
@@ -101,11 +111,6 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, sct
     dx = spacing_mm(1) / 1000;
     dy = spacing_mm(2) / 1000;
     dz = spacing_mm(3) / 1000;
-
-    % Local copies of acoustic property arrays (parfor safety)
-    density    = medium.density;
-    soundSpeed = medium.sound_speed;
-    gruneisen  = medium.gruneisen;
 
     %% ======================== VALIDATE DIMENSIONS ========================
 
@@ -134,7 +139,8 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, sct
 
     % p0(r) = D(r)/N_pulses * Gamma(r) * rho(r)
     dose_per_pulse = doseGrid / num_pulses;
-    p0 = dose_per_pulse .* gruneisen .* density;
+    p0 = dose_per_pulse .* medium.gruneisen .* medium.density;
+    p0 = smooth(p0);
 
     fprintf('        Max dose: %.4f Gy, Per-pulse max: %.6f Gy\n', ...
         max(doseGrid(:)), max(dose_per_pulse(:)));
@@ -165,26 +171,40 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, sct
     Ny_orig = Ny;
     Nz_orig = Nz;
     gridSize_orig = gridSize;
+    medium_orig   = medium;
 
-    Nx_pad = find_optimal_kwave_size(Nx,pml_size);
-    Ny_pad = find_optimal_kwave_size(Ny,pml_size);
-    Nz_pad = find_optimal_kwave_size(Nz,pml_size);
-    if ~isequal([Nx_pad, Ny_pad, Nz_pad], [Nx, Ny, Nz])
+    if use_grid_padding
+        Nx_pad = find_optimal_kwave_size(Nx, pml_size);
+        Ny_pad = find_optimal_kwave_size(Ny, pml_size);
+        Nz_pad = find_optimal_kwave_size(Nz, pml_size);
+    else
+        Nx_pad = Nx; Ny_pad = Ny; Nz_pad = Nz;
+    end
+
+    did_pad = ~isequal([Nx_pad, Ny_pad, Nz_pad], [Nx, Ny, Nz]);
+    if did_pad
         fprintf('        Padding grid: [%d %d %d] -> [%d %d %d] (FFT-optimal)\n', ...
             Nx, Ny, Nz, Nx_pad, Ny_pad, Nz_pad);
 
         % Pad medium arrays with water properties
-        density_pad    = ones(Nx_pad, Ny_pad, Nz_pad) * 1000;   % kg/m^3
-        soundSpeed_pad = ones(Nx_pad, Ny_pad, Nz_pad) * 1540;   % m/s
+        density_pad    = ones(Nx_pad, Ny_pad, Nz_pad) * 1000;
+        soundSpeed_pad = ones(Nx_pad, Ny_pad, Nz_pad) * 1540;
+        alphaCoeff_pad = zeros(Nx_pad, Ny_pad, Nz_pad);
         gruneisen_pad  = zeros(Nx_pad, Ny_pad, Nz_pad);
 
-        density_pad(1:Nx, 1:Ny, 1:Nz)    = density;
-        soundSpeed_pad(1:Nx, 1:Ny, 1:Nz) = soundSpeed;
-        gruneisen_pad(1:Nx, 1:Ny, 1:Nz)  = gruneisen;
+        density_pad(1:Nx, 1:Ny, 1:Nz)    = medium.density;
+        soundSpeed_pad(1:Nx, 1:Ny, 1:Nz) = medium.sound_speed;
+        if numel(medium.alpha_coeff) > 1
+            alphaCoeff_pad(1:Nx, 1:Ny, 1:Nz) = medium.alpha_coeff;
+        else
+            alphaCoeff_pad(:) = medium.alpha_coeff;
+        end
+        gruneisen_pad(1:Nx, 1:Ny, 1:Nz)  = medium.gruneisen;
 
-        density    = density_pad;
-        soundSpeed = soundSpeed_pad;
-        gruneisen  = gruneisen_pad;
+        medium.density     = density_pad;
+        medium.sound_speed = soundSpeed_pad;
+        medium.alpha_coeff = alphaCoeff_pad;
+        medium.gruneisen   = gruneisen_pad;
 
         % Pad p0 with zeros (no pressure in padding region)
         p0_pad = zeros(Nx_pad, Ny_pad, Nz_pad);
@@ -213,8 +233,8 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, sct
     kgrid = kWaveGrid(Nx, dx, Ny, dy, Nz, dz);
 
     % CFL-stable time step
-    maxC = max(soundSpeed(:));
-    minC = min(soundSpeed(soundSpeed > 0));
+    maxC = max(medium.sound_speed(:));
+    minC = min(medium.sound_speed(medium.sound_speed > 0));
     dt   = cfl * min([dx, dy, dz]) / maxC;
 
     % Simulation time: 2.5x grid diagonal traversal at minimum speed
@@ -231,12 +251,11 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, sct
 
     %% ======================== k-WAVE MEDIUM ========================
 
-    kmedium = struct();
-    kmedium.density     = density;
-    kmedium.sound_speed = soundSpeed;
-    kmedium.alpha_coeff = medium.alpha_coeff;
-    kmedium.alpha_coeff = 0; 
-    kmedium.alpha_power = medium.alpha_power;  % scalar
+    kmedium             = struct();
+    kmedium.density     = medium.density;
+    kmedium.sound_speed = medium.sound_speed;
+    kmedium.alpha_coeff = 0 * medium.alpha_coeff;
+    kmedium.alpha_power = 0 * medium.alpha_power;
 
     %% ======================== SENSOR PLACEMENT ========================
     %  Sensor geometry is selected via config.sensor_placement_method.
@@ -270,36 +289,6 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, sct
 
     sensor_info = struct('element_map', [], 'num_elements', 0);
     sim_results.sensor_info = sensor_info;
-
-    % --- COMMENTED OUT: advanced sensor placement (for future use) ----------
-    % use_new_sensor = ~isempty(beam_metadata) && isstruct(beam_metadata) && ...
-    %                  isfield(sct_resampled, 'bodyMask');
-    %
-    % if use_new_sensor
-    %     % Physics-based sensor placement using determine_sensor_mask
-    %     [sensor_mask_3d, sensor_info] = determine_sensor_mask( ...
-    %         sct_resampled, field_dose, beam_metadata, config);
-    %
-    %     sensor = struct();
-    %     sensor.mask = sensor_mask_3d;
-    %
-    %     sim_results.sensor_info = sensor_info;
-    % else
-    %     % Fallback: no beam_metadata or bodyMask available
-    %     gantry_angle = field_dose.gantry_angle;
-    %     if use_bounded_sensor
-    %         warning('run_single_field_simulation:LegacySensor', ...
-    %             'Using legacy dose-bounded sensor placement.');
-    %         sensor = place_sensor_for_field_legacy(doseMask, Nx, Ny, Nz, gantry_angle);
-    %         fprintf('        Sensor mode: dose-bounded planar (legacy)\n');
-    %     else
-    %         sensor = place_fullface_sensor(Nx, Ny, Nz, gantry_angle);
-    %         fprintf('        Sensor mode: full-face planar\n');
-    %     end
-    %     sensor_info = struct('element_map', [], 'num_elements', 0);
-    %     sim_results.sensor_info = sensor_info;
-    % end
-    % ------------------------------------------------------------------------
 
     numSensorPts = sum(sensor.mask(:));
     fprintf('        Sensor: %d active points\n', numSensorPts);
@@ -354,30 +343,27 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, sct
         return;
     end
 
-    %% ======================== ELEMENT AVERAGING ========================
-
-    % --- COMMENTED OUT: element averaging (for future use) ------------------
-    % if use_new_sensor && ~isempty(sensor_info.element_map) && sensor_info.num_elements > 0
-    %     fprintf('        Applying element averaging (%d elements)...\n', sensor_info.num_elements);
-    %     [~, sensorData] = apply_element_averaging(sensorData, sensor_info);
-    %     fprintf('        Element averaging applied. Sensor data: [%d x %d]\n', ...
-    %         size(sensorData, 1), size(sensorData, 2));
-    % end
-    % ------------------------------------------------------------------------
+    sensorData_measured = sensorData;
 
     %% ======================== TIME REVERSAL RECONSTRUCTION ========================
 
-    fprintf('        Running time reversal (%d iteration(s))...\n', num_tr_iter);
+    fprintf('        Running iterative time reversal (%d iterations, tol=%.1e)...\n', ...
+        num_tr_iter, convergence_tol);
 
-    reconPressure = zeros(gridSize);
+    reconPressure      = zeros(gridSize);
+    reconPressure_prev = zeros(gridSize);
+
+    % Convergence tracking
+    conv_max_pressure = zeros(num_tr_iter, 1);
+    conv_rel_change   = nan(num_tr_iter, 1);
+    num_iters_done    = 0;
 
     try
         tr_tic = tic;
 
         for tr_iter = 1:num_tr_iter
-            if num_tr_iter > 1
-                fprintf('          TR iteration %d/%d...\n', tr_iter, num_tr_iter);
-            end
+
+            fprintf('          TR iteration %d/%d...\n', tr_iter, num_tr_iter);
 
             % Time-reversed source on sensor locations
             source_tr        = struct();
@@ -396,36 +382,65 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, sct
             if isstruct(p0_recon) && isfield(p0_recon, 'p_final')
                 reconPressure = reshape(p0_recon.p_final, [Nx, Ny, Nz]);
             else
-                reconPressure = p0_recon;
+                reconPressure = reshape(p0_recon, [Nx, Ny, Nz]);
             end
 
             % Positivity constraint (dose and pressure are non-negative)
             reconPressure = max(reconPressure, 0);
 
-            % Iterative TR: compute residual for next iteration
+            % Record convergence metrics
+            conv_max_pressure(tr_iter) = max(reconPressure(:));
+            num_iters_done = tr_iter;
+
+            fprintf('          Max pressure: %.4e Pa\n', conv_max_pressure(tr_iter));
+
+            % Convergence check (from iteration 2 onward)
+            converged = false;
+            if tr_iter > 1
+                norm_prev = norm(reconPressure_prev(:));
+                if norm_prev > 0
+                    rel_change = norm(reconPressure(:) - reconPressure_prev(:)) / norm_prev;
+                else
+                    rel_change = Inf;
+                end
+                conv_rel_change(tr_iter) = rel_change;
+                fprintf('          Rel change: %.4e\n', rel_change);
+                if rel_change < convergence_tol
+                    fprintf('          *** Converged at iteration %d ***\n', tr_iter);
+                    converged = true;
+                end
+            end
+
+            reconPressure_prev = reconPressure;
+
+            if converged
+                break;
+            end
+
+            % Residual correction for next iteration
             if tr_iter < num_tr_iter
                 source_resid    = struct();
                 source_resid.p0 = reconPressure;
                 sensorDataRecon = kspaceFirstOrder3D(kgrid, kmedium, ...
                     source_resid, sensor, inputArgs{:});
 
-                % --- COMMENTED OUT: element averaging on residual ---
-                % if use_new_sensor && ~isempty(sensor_info.element_map) && sensor_info.num_elements > 0
-                %     [~, sensorDataRecon] = apply_element_averaging(sensorDataRecon, sensor_info);
-                % end
-
-                % Residual correction
-                sensorData = sensorData + (sensorData - sensorDataRecon);
+                % Residual correction using measured data as reference
+                sensorData = sensorData + (sensorData_measured - sensorDataRecon);
             end
         end
+
+        reconPressure = gather(reconPressure) * correction_factor;
 
         tr_time = toc(tr_tic);
         fprintf('        Time reversal complete (%.1f s).\n', tr_time);
         fprintf('        Reconstructed pressure: [%.2e, %.2e] Pa\n', ...
             min(reconPressure(:)), max(reconPressure(:)));
 
-        sim_results.tr_time_s = tr_time;
-        sim_results.recon_max = max(reconPressure(:));
+        sim_results.tr_time_s         = tr_time;
+        sim_results.recon_max         = max(reconPressure(:));
+        sim_results.num_iters_done    = num_iters_done;
+        sim_results.conv_max_pressure = conv_max_pressure(1:num_iters_done);
+        sim_results.conv_rel_change   = conv_rel_change(1:num_iters_done);
 
     catch ME
         warning('run_single_field_simulation:TRFail', ...
@@ -438,19 +453,17 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, sct
     %  Remove padding before PSF correction (computed at original grid
     %  size) and dose conversion (uses original-size gruneisen/density).
 
-    if ~isequal([Nx, Ny, Nz], [Nx_orig, Ny_orig, Nz_orig])
+    if did_pad
         fprintf('        Cropping reconstruction: [%d %d %d] -> [%d %d %d]\n', ...
             Nx, Ny, Nz, Nx_orig, Ny_orig, Nz_orig);
 
         reconPressure = reconPressure(1:Nx_orig, 1:Ny_orig, 1:Nz_orig);
-
-        % Restore original dimensions and medium arrays for dose conversion
         Nx = Nx_orig;
         Ny = Ny_orig;
         Nz = Nz_orig;
-        gridSize = gridSize_orig;
-        density   = medium.density;
-        gruneisen = medium.gruneisen;
+        gridSize    = gridSize_orig;
+        medium      = medium_orig;
+        sensor.mask = sensor.mask(1:Nx_orig, 1:Ny_orig, 1:Nz_orig);
     end
 
     %% ======================== PSF CORRECTION (OPTIONAL) ========================
@@ -475,11 +488,16 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, sct
     %% ======================== PRESSURE -> DOSE CONVERSION ========================
 
     % D_recon = p0_recon / (Gamma * rho) * num_pulses
-    conversionFactor = gruneisen .* density;
+    conversionFactor = medium.gruneisen .* medium.density;
     conversionFactor(conversionFactor == 0) = 1;  % prevent div-by-zero
 
     reconDosePerPulse = reconPressure ./ conversionFactor;
-    recon_dose = reconDosePerPulse * num_pulses;
+
+    body_mask_plot = ones(gridSize);
+    if isfield(sct_resampled, 'bodyMask') && isequal(size(sct_resampled.bodyMask), gridSize)
+        body_mask_plot = double(sct_resampled.bodyMask);
+    end
+    recon_dose = reconDosePerPulse * num_pulses .* double(doseMask) .* body_mask_plot;
 
     fprintf('        Reconstructed dose: [%.4f, %.4f] Gy\n', ...
         min(recon_dose(:)), max(recon_dose(:)));
@@ -490,82 +508,6 @@ end
 %% ========================================================================
 %  LOCAL HELPER FUNCTIONS
 %% ========================================================================
-
-function sensor = place_fullface_sensor(Nx, Ny, Nz, gantry_angle)
-%PLACE_FULLFACE_SENSOR Place sensor as the entire face plane on beam exit side
-%
-%   Uses gantry angle to determine which grid face receives the sensor:
-%     0   deg -> beam from anterior  -> sensor on -Y face (full XZ plane)
-%     90  deg -> beam from right     -> sensor on +X face (full YZ plane)
-%     180 deg -> beam from posterior -> sensor on +Y face (full XZ plane)
-%     270 deg -> beam from left      -> sensor on -X face (full YZ plane)
-
-    sensor = struct();
-    sensor.mask = zeros(Nx, Ny, Nz);
-
-    ga = mod(gantry_angle, 360);
-
-    if (ga >= 315 || ga < 45)
-        % Beam from anterior -> sensor on -Y face
-        sensor.mask(:, 1, :) = 1;
-
-    elseif (ga >= 45 && ga < 135)
-        % Beam from right -> sensor on +X face
-        sensor.mask(Nx, :, :) = 1;
-
-    elseif (ga >= 135 && ga < 225)
-        % Beam from posterior -> sensor on +Y face
-        sensor.mask(:, Ny, :) = 1;
-
-    else  % 225 <= ga < 315
-        % Beam from left -> sensor on -X face
-        sensor.mask(1, :, :) = 1;
-    end
-end
-
-
-function sensor = place_sensor_for_field_legacy(doseMask, Nx, Ny, Nz, gantry_angle)
-%PLACE_SENSOR_FOR_FIELD_LEGACY Legacy planar sensor based on dose extent + gantry
-%
-%   Retained for backwards compatibility when beam_metadata or bodyMask
-%   is not available. See determine_sensor_mask for the recommended approach.
-
-    MARGIN = 10;   % voxels beyond dose extent
-    PAD_XZ = 5;    % padding around dose extent in plane
-
-    [xIdx, yIdx, zIdx] = ind2sub([Nx, Ny, Nz], find(doseMask));
-
-    sensor = struct();
-    sensor.mask = zeros(Nx, Ny, Nz);
-
-    if isempty(xIdx)
-        return;
-    end
-
-    xMin = max(1,  min(xIdx) - PAD_XZ);
-    xMax = min(Nx, max(xIdx) + PAD_XZ);
-    yMin = max(1,  min(yIdx) - PAD_XZ);
-    yMax = min(Ny, max(yIdx) + PAD_XZ);
-    zMin = max(1,  min(zIdx) - PAD_XZ);
-    zMax = min(Nz, max(zIdx) + PAD_XZ);
-
-    ga = mod(gantry_angle, 360);
-
-    if (ga >= 315 || ga < 45)
-        sY = max(1, min(yIdx) - MARGIN);
-        sensor.mask(xMin:xMax, sY, zMin:zMax) = 1;
-    elseif (ga >= 45 && ga < 135)
-        sX = min(Nx, max(xIdx) + MARGIN);
-        sensor.mask(sX, yMin:yMax, zMin:zMax) = 1;
-    elseif (ga >= 135 && ga < 225)
-        sY = min(Ny, max(yIdx) + MARGIN);
-        sensor.mask(xMin:xMax, sY, zMin:zMax) = 1;
-    else
-        sX = max(1, min(xIdx) - MARGIN);
-        sensor.mask(sX, yMin:yMax, zMin:zMax) = 1;
-    end
-end
-
 
 function val = safe_config(config, field_name, default_val)
 %SAFE_CONFIG Retrieve config field with fallback to default
