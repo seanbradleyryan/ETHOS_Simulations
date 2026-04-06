@@ -39,7 +39,8 @@ CONFIG.meterset               = 140;
 CONFIG.pml_size               = 10;
 CONFIG.cfl_number             = 0.3;
 CONFIG.use_gpu                = true;
-CONFIG.correction_factor      = 1.9;
+CONFIG.correction_factor           = 1.9;
+CONFIG.use_pressure_scale_correction = true;   % divide max(p0) / max(recon_pressure) before dose conversion
 
 CONFIG.num_time_reversal_iter = 30;
 CONFIG.convergence_tol        = 1e-3;
@@ -312,9 +313,10 @@ end
 %  Displayed before simulation starts  rotate to inspect geometry.
 
 if CONFIG.plot_results
-    sensor_vis = logical(sensor.mask(1:Nx_orig, 1:Ny_orig, 1:Nz_orig));
-    plot_3d_sensor_dose(double(doseGrid), sensor_vis, spacing_mm, CONFIG);
-    fprintf('       [3D sensor visualization displayed  rotate to inspect]\n');
+    sensor_vis    = logical(sensor.mask(1:Nx_orig, 1:Ny_orig, 1:Nz_orig));
+    dose_mask_vis = double(doseGrid) >= 0.10 * max(double(doseGrid(:)));
+    plot_sensor_dose_planes(dose_mask_vis, sensor_vis, spacing_mm, CONFIG);
+    fprintf('       [Sensor vs dose mask visualization displayed]\n');
     drawnow;
 end
 
@@ -575,6 +577,24 @@ if ~isempty(psf_filter) && isstruct(psf_filter) && isfield(psf_filter, 'F') ...
         min(reconPressure(:)), max(reconPressure(:)));
 end
 
+%% ========================= PRESSURE SCALE CORRECTION ====================
+
+if CONFIG.use_pressure_scale_correction
+    p0_max_orig = max(p0(1:Nx_orig, 1:Ny_orig, 1:Nz_orig), [], 'all');
+    recon_max   = max(reconPressure(:));
+    if recon_max > 0
+        pressure_scale_cf = p0_max_orig / recon_max;
+        reconPressure     = reconPressure * pressure_scale_cf;
+        fprintf('       Pressure scale correction: %.4f  (p0_max = %.3e  /  recon_max = %.3e)\n', ...
+            pressure_scale_cf, p0_max_orig, recon_max);
+    else
+        pressure_scale_cf = 1;
+        warning('Reconstructed pressure max is zero; skipping pressure scale correction.');
+    end
+else
+    pressure_scale_cf = 1;
+end
+
 %% ========================= PRESSURE -> DOSE ==============================
 
 fprintf('\n[Post] Converting pressure to dose...\n');
@@ -714,9 +734,10 @@ if CONFIG.plot_results
     plot_dose_panels(doseGrid, recon_dose, sensor.mask, medium_orig.density, spacing_mm, ...
         'Dose Comparison: Original vs Reconstructed');
 
-    % Figure 2  p0 convergence (max pressure + relative change)
+    % Figure 2  p0 convergence (max pressure + relative change)
+    p0_max_for_plot = max(p0(:));
     plot_convergence_history(conv_max_pressure, conv_rel_change, ...
-        num_iters_done, CONFIG.convergence_tol);
+        num_iters_done, CONFIG.convergence_tol, p0_max_for_plot);
 
     % Figure 3  Axial gamma (3 criteria) + absolute error
     if ~isempty(gamma_results) && isfield(gamma_results, 'maps')
@@ -735,95 +756,85 @@ fprintf('\nStandalone simulation complete.\n');
 %  LOCAL FUNCTIONS
 %% =========================================================================
 
-function plot_3d_sensor_dose(dose_3d, sensor_mask_vis, spacing_mm, config)
-%PLOT_3D_SENSOR_DOSE Interactive 3D view of sensor placement vs dose volume.
-%  Dose shown as semi-transparent isosurface at 30% of max.
-%  Sensor shown as a red translucent plane (or scatter for spherical).
-%  Yellow star marks the dose maximum.  Drag to rotate.
+function plot_sensor_dose_planes(dose_mask, sensor_mask, spacing_mm, config)
+%PLOT_SENSOR_DOSE_PLANES  1x3 anatomical view of sensor geometry vs dose mask.
+%  Shows three orthogonal projections (coronal, sagittal, axial).
+%  Dose mask (dose >= 10% max) drawn as a filled semi-transparent blue region.
+%  Sensor drawn as a solid red line/region — computed via max-projection so it
+%  always appears regardless of which slice the dose centroid falls on.
+%  This replaces the interactive 3-D isosurface view.
 
-    figure('Name', '3D Sensor vs Dose Volume', 'Color', 'w', ...
-        'NumberTitle', 'off', 'Position', [80, 80, 800, 660]);
-    ax = axes;
-    hold(ax, 'on');
+    [Nx3, Ny3, Nz3] = size(dose_mask);
 
-    [Nx3, Ny3, Nz3] = size(dose_3d);
-    max_d = max(dose_3d(:));
+    x_ax = (1:Nx3) * spacing_mm(1);
+    y_ax = (1:Ny3) * spacing_mm(2);
+    z_ax = (1:Nz3) * spacing_mm(3);
 
-    legend_handles = [];
-    legend_entries = {};
+    % Max-projections of dose mask and sensor (so features always appear)
+    dose_cor  = squeeze(any(dose_mask,   2));   % XZ  (Nx x Nz)
+    dose_sag  = squeeze(any(dose_mask,   1));   % YZ  (Ny x Nz)
+    dose_axi  = squeeze(any(dose_mask,   3));   % XY  (Nx x Ny)
 
-    % Dose isosurface at 30% of max
-    iso_level = 0.30 * max_d;
-    if iso_level > 0
-        [f, v] = isosurface(dose_3d, iso_level);
-        if ~isempty(f)
-            v_mm = v .* [spacing_mm(2), spacing_mm(1), spacing_mm(3)];
-            h_dose = patch(ax, 'Faces', f, 'Vertices', v_mm);
-            h_dose.FaceColor = [0.20, 0.55, 1.0];
-            h_dose.EdgeColor = 'none';
-            h_dose.FaceAlpha = 0.35;
-            legend_handles(end+1) = h_dose;
-            legend_entries{end+1} = 'Dose 30% isosurface';
+    sens_cor  = squeeze(any(sensor_mask, 2));   % XZ
+    sens_sag  = squeeze(any(sensor_mask, 1));   % YZ
+    sens_axi  = squeeze(any(sensor_mask, 3));   % XY
+
+    figure('Name', 'Sensor Placement vs Dose Mask', 'Color', 'w', ...
+        'NumberTitle', 'off', 'Position', [80, 80, 1300, 420]);
+    sgtitle(sprintf('Sensor Placement vs Dose Mask  (\\geq10%% max)   |   Sensor: %s', ...
+        config.sensor_placement_method), 'FontWeight', 'bold', 'FontSize', 11);
+
+    view_data = {
+        dose_cor', sens_cor', x_ax, z_ax, 'X (mm)', 'Z (mm)', 'Coronal  (max-proj along Y)';
+        dose_sag', sens_sag', y_ax, z_ax, 'Y (mm)', 'Z (mm)', 'Sagittal  (max-proj along X)';
+        dose_axi', sens_axi', x_ax, y_ax, 'X (mm)', 'Y (mm)', 'Axial  (max-proj along Z)';
+    };
+
+    dose_color   = [0.20, 0.50, 0.90];   % blue
+    sensor_color = [0.90, 0.10, 0.10];   % red
+
+    for col = 1:3
+        ax      = subplot(1, 3, col);
+        d2d     = double(view_data{col, 1});
+        s2d     = double(view_data{col, 2});
+        xv      = view_data{col, 3};
+        yv      = view_data{col, 4};
+
+        % Background: white
+        imagesc(ax, xv, yv, zeros(size(d2d)));
+        colormap(ax, 'gray'); caxis(ax, [0, 1]);
+        hold(ax, 'on');
+
+        % Dose mask: filled blue region
+        if any(d2d(:))
+            dose_rgb = repmat(reshape(dose_color, [1,1,3]), [size(d2d), 1]);
+            h_dose   = image(ax, xv, yv, dose_rgb);
+            h_dose.AlphaData = d2d * 0.45;
+        end
+
+        % Sensor: filled red region (appears as line for planar sensors)
+        if any(s2d(:))
+            sens_rgb = repmat(reshape(sensor_color, [1,1,3]), [size(s2d), 1]);
+            h_sens   = image(ax, xv, yv, sens_rgb);
+            h_sens.AlphaData = s2d * 0.85;
+        end
+
+        hold(ax, 'off');
+        axis(ax, 'xy'); axis(ax, 'image');
+        xlabel(ax, view_data{col, 5}); ylabel(ax, view_data{col, 6});
+        title(ax, view_data{col, 7}, 'FontSize', 10);
+
+        % Manual legend patches
+        hold(ax, 'on');
+        p1 = patch(ax, NaN, NaN, dose_color,   'FaceAlpha', 0.45, 'EdgeColor', 'none');
+        p2 = patch(ax, NaN, NaN, sensor_color,  'FaceAlpha', 0.85, 'EdgeColor', 'none');
+        hold(ax, 'off');
+        if col == 3
+            legend(ax, [p1, p2], {'Dose mask (>=10%)', 'Sensor'}, ...
+                'Location', 'southoutside', 'Orientation', 'horizontal', 'FontSize', 8);
         end
     end
-
-    % Dose max marker
-    [~, midx] = max(dose_3d(:));
-    [mi, mj, mk] = ind2sub([Nx3, Ny3, Nz3], midx);
-    h_max = scatter3(ax, mi * spacing_mm(1), mj * spacing_mm(2), mk * spacing_mm(3), ...
-        160, [1, 0.85, 0], 'filled', 'MarkerEdgeColor', 'k', 'LineWidth', 1.5);
-    legend_handles(end+1) = h_max;
-    legend_entries{end+1} = 'Dose maximum';
-
-    % Sensor geometry
-    h_sensor = [];
-    switch lower(config.sensor_placement_method)
-        case 'full_plane_anterior'
-            xi      = config.sensor_x_index * spacing_mm(1);
-            y_range = linspace(0, Ny3 * spacing_mm(2), 30);
-            z_range = linspace(0, Nz3 * spacing_mm(3), 30);
-            [Ys, Zs] = meshgrid(y_range, z_range);
-            Xs = xi * ones(size(Ys));
-            h_sensor = surf(ax, Xs, Ys, Zs, 'FaceColor', [0.9, 0.1, 0.1], ...
-                'EdgeColor', 'none', 'FaceAlpha', 0.45);
-
-        case 'full_plane_lateral'
-            yi      = config.sensor_y_index * spacing_mm(2);
-            x_range = linspace(0, Nx3 * spacing_mm(1), 30);
-            z_range = linspace(0, Nz3 * spacing_mm(3), 30);
-            [Xs, Zs] = meshgrid(x_range, z_range);
-            Ys = yi * ones(size(Xs));
-            h_sensor = surf(ax, Xs, Ys, Zs, 'FaceColor', [0.9, 0.1, 0.1], ...
-                'EdgeColor', 'none', 'FaceAlpha', 0.45);
-
-        case 'spherical'
-            [si, sj, sk] = ind2sub(size(sensor_mask_vis), find(sensor_mask_vis));
-            h_sensor = scatter3(ax, si * spacing_mm(1), sj * spacing_mm(2), sk * spacing_mm(3), ...
-                3, [0.9, 0.1, 0.1], 'filled', 'MarkerFaceAlpha', 0.25);
-    end
-    if ~isempty(h_sensor)
-        legend_handles(end+1) = h_sensor;
-        legend_entries{end+1} = sprintf('Sensor (%s)', config.sensor_placement_method);
-    end
-
-    camlight(ax, 'headlight');
-    lighting(ax, 'gouraud');
-    axis(ax, 'equal');
-    grid(ax, 'on');
-    view(ax, [-38, 24]);
-    rotate3d(ax, 'on');
-
-    xlabel(ax, 'X (mm)'); ylabel(ax, 'Y (mm)'); zlabel(ax, 'Z (mm)');
-    title(ax, sprintf( ...
-        '3D Sensor Placement vs Dose Volume\nSensor: %s   |   Yellow star = dose max   |   Drag to rotate', ...
-        config.sensor_placement_method), 'FontSize', 10);
-
-    if ~isempty(legend_handles)
-        legend(ax, legend_handles, legend_entries, ...
-            'Location', 'northeastoutside', 'FontSize', 8);
-    end
-
-    hold(ax, 'off');
+    drawnow;
 end
 
 
@@ -859,12 +870,13 @@ function plot_dose_panels(original, recon, sensor_mask, density, spacing_mm, tit
     % Jet LUT for manual RGB blending (avoids per-axes colormap conflict)
     cmap_jet = jet(256);
 
-    % Density normalisation range (shared across all panels)
-    if have_density
-        dmin = min(density(:));
-        dmax = max(density(:));
-        if dmax == dmin, dmax = dmin + 1; end
-    end
+    % Soft-tissue window/level for the density background (kg/m^3).
+    % W=350 / L=1050 keeps soft tissue in the mid-grey band and clips
+    % bone (~1900 kg/m^3) to white, preventing bone from dominating the display.
+    wl_center = 1050;          % kg/m^3  (soft tissue ~1000-1080)
+    wl_width  = 350;           % kg/m^3
+    wl_min    = wl_center - wl_width / 2;   % 875  kg/m^3
+    wl_max    = wl_center + wl_width / 2;   % 1225 kg/m^3
 
     figure('Name', titleStr, 'Color', 'w', 'NumberTitle', 'off', ...
         'Position', [50, 50, 1380, 700]);
@@ -904,7 +916,8 @@ function plot_dose_panels(original, recon, sensor_mask, density, spacing_mm, tit
 
             % --- Background: density as grayscale RGB ---
             if have_density
-                dn     = (density_slices{col} - dmin) / (dmax - dmin);
+                dn     = (density_slices{col} - wl_min) / wl_width;
+                dn     = max(0, min(1, dn));   % clip to [0,1]
                 bg_rgb = repmat(dn, [1, 1, 3]);
             else
                 bg_rgb = zeros([size(dose_slice), 3]);   % black
@@ -948,9 +961,10 @@ function plot_dose_panels(original, recon, sensor_mask, density, spacing_mm, tit
     drawnow;
 end
 
-function plot_convergence_history(conv_max_pressure, conv_rel_change, num_iters, tol)
+function plot_convergence_history(conv_max_pressure, conv_rel_change, num_iters, tol, p0_max_orig)
 %PLOT_CONVERGENCE_HISTORY p0 convergence over TR iterations.
 %  Left axis:  max reconstructed p0 per iteration (blue).
+%              Dashed black line = max of original p0 distribution (reference).
 %  Right axis: relative change between iterations (red, log-scale).
 
     iters   = 1:num_iters;
@@ -963,8 +977,18 @@ function plot_convergence_history(conv_max_pressure, conv_rel_change, num_iters,
     yyaxis left;
     plot(iters, p_vals, 'b-o', 'LineWidth', 1.8, 'MarkerSize', 5, ...
         'MarkerFaceColor', [0.2, 0.4, 1.0]);
+    hold on;
+    if nargin >= 5 && ~isempty(p0_max_orig) && p0_max_orig > 0
+        yline(p0_max_orig, 'k--', 'LineWidth', 1.8, ...
+            'Label', sprintf('p_{0}^{orig} max = %.2e Pa', p0_max_orig), ...
+            'LabelHorizontalAlignment', 'left', ...
+            'LabelVerticalAlignment', 'bottom', 'FontSize', 8);
+    end
+    hold off;
     ylabel('Max Reconstructed p_0 (Pa)', 'Color', [0.2, 0.4, 1.0]);
-    ylim([0, max(p_vals) * 1.15]);
+    top_val = max([max(p_vals), p0_max_orig]) * 1.20;
+    if top_val <= 0, top_val = 1; end
+    ylim([0, top_val]);
 
     yyaxis right;
     valid = ~isnan(rc_vals);
