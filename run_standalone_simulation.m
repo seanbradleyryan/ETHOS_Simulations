@@ -681,6 +681,11 @@ end
 %% ========================= SAVE RESULTS =================================
 
 if CONFIG.save_results
+    % Build filename from configuration parameters
+    output_fname = sprintf('standalone_results_%s_%s_%d.mat', ...
+        CONFIG.sensor_placement_method, CONFIG.gruneisen_method, ...
+        CONFIG.num_time_reversal_iter);
+
     results.recon_dose    = recon_dose;
     results.original_dose = doseGrid;
     results.p0            = p0;
@@ -695,8 +700,8 @@ if CONFIG.save_results
     if ~isempty(gamma_results)
         results.gamma = gamma_results;
     end
-    save(CONFIG.output_file, '-struct', 'results', '-v7.3');
-    fprintf('\nResults saved to: %s\n', CONFIG.output_file);
+    save(output_fname, '-struct', 'results', '-v7.3');
+    fprintf('\nResults saved to: %s\n', output_fname);
 end
 
 %% ========================= POST-SIMULATION VISUALIZATION ================
@@ -706,7 +711,7 @@ if CONFIG.plot_results
     % Figure 1  2x3 dose comparison (original top, recon bottom)
     %            Coronal | Sagittal | Axial
     %            Isocenter = max-dose voxel; sensor contour in red
-    plot_dose_panels(doseGrid, recon_dose, sensor.mask, spacing_mm, ...
+    plot_dose_panels(doseGrid, recon_dose, sensor.mask, medium_orig.density, spacing_mm, ...
         'Dose Comparison: Original vs Reconstructed');
 
     % Figure 2  p0 convergence (max pressure + relative change)
@@ -822,19 +827,28 @@ function plot_3d_sensor_dose(dose_3d, sensor_mask_vis, spacing_mm, config)
 end
 
 
-function plot_dose_panels(original, recon, sensor_mask, spacing_mm, titleStr)
+function plot_dose_panels(original, recon, sensor_mask, density, spacing_mm, titleStr)
 %PLOT_DOSE_PANELS 2x3 dose comparison: coronal, sagittal, axial.
 %  Row 1 = original dose,  Row 2 = reconstructed dose.
+%  Dose (jet, semi-transparent) is overlaid on the density map (grayscale).
+%  Voxels with dose < 10% of max are fully transparent (masked out).
+%  Both rows share an identical dose colour range [0, max(original)]
+%  so magnitudes are directly comparable.
 %  Isocenter at max-dose voxel.  Sensor contour in red on every panel.
+%
+%  Pass density=[] to show dose only with a black background.
 
     gridSize = size(original);
     if ~isequal(size(sensor_mask), gridSize)
         sensor_mask = sensor_mask(1:gridSize(1), 1:gridSize(2), 1:gridSize(3));
     end
 
+    have_density = ~isempty(density) && isequal(size(density), gridSize);
+
     [~, max_idx] = max(original(:));
     [cx, cy, cz] = ind2sub(gridSize, max_idx);
 
+    % Shared colour scale anchored to original (reference) dose
     max_dose = max(original(:));
     if max_dose == 0, max_dose = 1; end
 
@@ -842,63 +856,97 @@ function plot_dose_panels(original, recon, sensor_mask, spacing_mm, titleStr)
     y_ax = (1:gridSize(2)) * spacing_mm(2);
     z_ax = (1:gridSize(3)) * spacing_mm(3);
 
+    % Jet LUT for manual RGB blending (avoids per-axes colormap conflict)
+    cmap_jet = jet(256);
+
+    % Density normalisation range (shared across all panels)
+    if have_density
+        dmin = min(density(:));
+        dmax = max(density(:));
+        if dmax == dmin, dmax = dmin + 1; end
+    end
+
     figure('Name', titleStr, 'Color', 'w', 'NumberTitle', 'off', ...
         'Position', [50, 50, 1380, 700]);
-    sgtitle(sprintf('%s\nIsocenter (max dose): X=%d  Y=%d  Z=%d voxel', ...
-        titleStr, cx, cy, cz), 'FontWeight', 'bold', 'FontSize', 11);
+    sgtitle(sprintf('%s\nIsocenter (max dose): X=%d  Y=%d  Z=%d voxel  |  Dose clim [0, %.4f] Gy', ...
+        titleStr, cx, cy, cz, max_dose), 'FontWeight', 'bold', 'FontSize', 11);
 
     row_labels = {'Original', 'Reconstructed'};
-    doses = {original, recon};
+    doses      = {original, recon};
 
     for row = 1:2
         d   = doses{row};
         lbl = row_labels{row};
 
-        % Coronal  XZ plane at y = cy
-        ax = subplot(2, 3, (row-1)*3 + 1);
-        img = squeeze(d(:, cy, :))';
-        imagesc(ax, x_ax, z_ax, img, [0, max_dose]);
-        axis(ax, 'xy'); axis(ax, 'image');
-        colormap(ax, 'jet');
-        cb = colorbar(ax); cb.Label.String = 'Dose (Gy)';
-        hold(ax, 'on');
-        s = squeeze(sensor_mask(:, cy, :))';
-        if any(s(:)), contour(ax, x_ax, z_ax, s, [0.5,0.5], 'r-', 'LineWidth', 2); end
-        hold(ax, 'off');
-        xlabel(ax, 'X (mm)'); ylabel(ax, 'Z (mm)');
-        title(ax, sprintf('%s  Coronal (Y=%d)', lbl, cy));
+        % Slice data for the three views
+        dose_slices   = { squeeze(d(:, cy, :))',  squeeze(d(cx, :, :))',  squeeze(d(:, :, cz))' };
+        sensor_slices = { squeeze(sensor_mask(:, cy, :))', ...
+                          squeeze(sensor_mask(cx, :, :))', ...
+                          squeeze(sensor_mask(:, :, cz))' };
+        xvecs  = { x_ax, y_ax, x_ax };
+        yvecs  = { z_ax, z_ax, y_ax };
+        xlbls  = { 'X (mm)', 'Y (mm)', 'X (mm)' };
+        ylbls  = { 'Z (mm)', 'Z (mm)', 'Y (mm)' };
+        tsuffs = { sprintf('Coronal (Y=%d)', cy), ...
+                   sprintf('Sagittal (X=%d)', cx), ...
+                   sprintf('Axial (Z=%d)', cz) };
+        if have_density
+            density_slices = { squeeze(density(:, cy, :))', ...
+                               squeeze(density(cx, :, :))', ...
+                               squeeze(density(:, :, cz))' };
+        end
 
-        % Sagittal  YZ plane at x = cx
-        ax = subplot(2, 3, (row-1)*3 + 2);
-        img = squeeze(d(cx, :, :))';
-        imagesc(ax, y_ax, z_ax, img, [0, max_dose]);
-        axis(ax, 'xy'); axis(ax, 'image');
-        colormap(ax, 'jet');
-        cb = colorbar(ax); cb.Label.String = 'Dose (Gy)';
-        hold(ax, 'on');
-        s = squeeze(sensor_mask(cx, :, :))';
-        if any(s(:)), contour(ax, y_ax, z_ax, s, [0.5,0.5], 'r-', 'LineWidth', 2); end
-        hold(ax, 'off');
-        xlabel(ax, 'Y (mm)'); ylabel(ax, 'Z (mm)');
-        title(ax, sprintf('%s  Sagittal (X=%d)', lbl, cx));
+        for col = 1:3
+            ax         = subplot(2, 3, (row-1)*3 + col);
+            dose_slice = double(dose_slices{col});
+            xv         = xvecs{col};
+            yv         = yvecs{col};
 
-        % Axial  XY plane at z = cz
-        ax = subplot(2, 3, (row-1)*3 + 3);
-        img = squeeze(d(:, :, cz))';
-        imagesc(ax, x_ax, y_ax, img, [0, max_dose]);
-        axis(ax, 'xy'); axis(ax, 'image');
-        colormap(ax, 'jet');
-        cb = colorbar(ax); cb.Label.String = 'Dose (Gy)';
-        hold(ax, 'on');
-        s = squeeze(sensor_mask(:, :, cz))';
-        if any(s(:)), contour(ax, x_ax, y_ax, s, [0.5,0.5], 'r-', 'LineWidth', 2); end
-        hold(ax, 'off');
-        xlabel(ax, 'X (mm)'); ylabel(ax, 'Y (mm)');
-        title(ax, sprintf('%s  Axial (Z=%d)', lbl, cz));
+            % --- Background: density as grayscale RGB ---
+            if have_density
+                dn     = (density_slices{col} - dmin) / (dmax - dmin);
+                bg_rgb = repmat(dn, [1, 1, 3]);
+            else
+                bg_rgb = zeros([size(dose_slice), 3]);   % black
+            end
+            image(ax, xv, yv, bg_rgb);
+            hold(ax, 'on');
+
+            % --- Foreground: dose as jet RGB with alpha mask ---
+            %   mask: dose >= 10% of max_dose  (shared threshold)
+            norm_d   = max(0, min(1, dose_slice / max_dose));
+            idx      = max(1, min(256, round(norm_d * 255) + 1));
+            sz       = size(dose_slice);
+            dose_rgb = reshape(cmap_jet(idx(:), :), [sz, 3]);
+
+            above      = dose_slice >= 0.10 * max_dose;
+            ramp       = 0.45 + 0.35 * min(1, ...
+                (dose_slice - 0.10*max_dose) / max(0.40*max_dose, 1e-12));
+            dose_alpha = above .* ramp;
+
+            h_dose           = image(ax, xv, yv, dose_rgb);
+            h_dose.AlphaData = dose_alpha;
+
+            % --- Sensor contour ---
+            s = sensor_slices{col};
+            if any(s(:))
+                contour(ax, xv, yv, s, [0.5, 0.5], 'r-', 'LineWidth', 2);
+            end
+            hold(ax, 'off');
+
+            axis(ax, 'xy'); axis(ax, 'image');
+
+            % Colorbar: attach jet LUT with shared dose clim
+            colormap(ax, cmap_jet);
+            caxis(ax, [0, max_dose]);
+            cb = colorbar(ax); cb.Label.String = 'Dose (Gy)';
+
+            xlabel(ax, xlbls{col}); ylabel(ax, ylbls{col});
+            title(ax, sprintf('%s  %s', lbl, tsuffs{col}));
+        end
     end
     drawnow;
 end
-
 
 function plot_convergence_history(conv_max_pressure, conv_rel_change, num_iters, tol)
 %PLOT_CONVERGENCE_HISTORY p0 convergence over TR iterations.
