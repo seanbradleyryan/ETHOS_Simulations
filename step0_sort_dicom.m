@@ -110,7 +110,7 @@ rawwd = fullfile(config.working_dir, 'EthosExports', patient_id, ...
 sct_dir    = fullfile(rawwd, 'sct');
 sim_ct_dir = '';
 RT_metadata  = {};
-rt_meta_idx  = 0;   % External counter — increments across ALL modality loops
+rt_meta_idx  = 0;   % External counter  increments across ALL modality loops
 
 fprintf('\n========== STEP 0: SORT DICOM ==========\n');
 fprintf('  Patient:       %s\n', patient_id);
@@ -757,7 +757,7 @@ function confirmImageSet(planInfo, sctSeriesUID, sctStudyUID, sctFrameUID, planL
         fprintf('      [OK] %s plan image set confirmed: %s\n', planLabel, details);
     else
         warning('step0_sort_dicom:ImageSetMismatch', ...
-            '%s plan image set could NOT be confirmed to match SCT. ' ...
+            '%s plan image set could NOT be confirmed to match SCT. ', ...
             'Verify manually that plan references the correct SCT.', planLabel);
     end
 end

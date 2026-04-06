@@ -21,7 +21,7 @@ CONFIG.sensor_placement_method = 'full_plane_lateral';
 CONFIG.sensor_x_index = 20;
 CONFIG.sensor_y_index = 40;
 
-CONFIG.gruneisen_method = 'uniform';
+CONFIG.gruneisen_method = 'threshold_2';
 
 CONFIG.force_uniform_density     = false;
 CONFIG.force_uniform_sound_speed = false;
@@ -309,12 +309,12 @@ if numSensorPts == 0
 end
 
 %% ========================= 3D SENSOR vs DOSE VISUALIZATION ==============
-%  Displayed before simulation starts — rotate to inspect geometry.
+%  Displayed before simulation starts  rotate to inspect geometry.
 
 if CONFIG.plot_results
     sensor_vis = logical(sensor.mask(1:Nx_orig, 1:Ny_orig, 1:Nz_orig));
     plot_3d_sensor_dose(double(doseGrid), sensor_vis, spacing_mm, CONFIG);
-    fprintf('       [3D sensor visualization displayed — rotate to inspect]\n');
+    fprintf('       [3D sensor visualization displayed  rotate to inspect]\n');
     drawnow;
 end
 
@@ -416,7 +416,7 @@ if CONFIG.plot_results
     fig_live = figure('Name', 'Live TR Reconstruction', 'Color', 'w', ...
         'NumberTitle', 'off', 'Position', [100, 100, 1060, 440]);
 
-    % Panel 1 — initial p0 (axial slice, fixed reference)
+    % Panel 1  initial p0 (axial slice, fixed reference)
     ax_p0 = subplot(1, 3, 1);
     p0_orig_slice = squeeze(p0(1:Nx_orig, 1:Ny_orig, cz_live))';
     imagesc(ax_p0, p0_orig_slice);
@@ -427,7 +427,7 @@ if CONFIG.plot_results
     xlabel(ax_p0, 'X (voxel)'); ylabel(ax_p0, 'Y (voxel)');
     title(ax_p0, sprintf('Initial p_0   (Z=%d)', cz_live), 'FontWeight', 'bold');
 
-    % Panel 2 — current reconstructed p0 (updates each iteration)
+    % Panel 2  current reconstructed p0 (updates each iteration)
     ax_recon = subplot(1, 3, 2);
     hImg_recon = imagesc(ax_recon, zeros(Ny_orig, Nx_orig));
     axis(ax_recon, 'xy'); axis(ax_recon, 'image');
@@ -435,7 +435,7 @@ if CONFIG.plot_results
     xlabel(ax_recon, 'X (voxel)'); ylabel(ax_recon, 'Y (voxel)');
     title(ax_recon, 'Reconstructed p_0   (iter 0)', 'FontWeight', 'bold');
 
-    % Panel 3 — live max-pressure convergence
+    % Panel 3  live max-pressure convergence
     ax_conv = subplot(1, 3, 3);
     hLine_max = plot(ax_conv, NaN, NaN, 'b-o', 'LineWidth', 1.6, ...
         'MarkerSize', 4, 'MarkerFaceColor', [0.2, 0.4, 1.0]);
@@ -446,7 +446,7 @@ if CONFIG.plot_results
     xlim(ax_conv, [0.5, CONFIG.num_time_reversal_iter + 0.5]);
 
     sgtitle(fig_live, sprintf( ...
-        'Live TR Reconstruction — Axial Z=%d   |   Patient %s', ...
+        'Live TR Reconstruction  Axial Z=%d   |   Patient %s', ...
         cz_live, CONFIG.patient_id), 'FontWeight', 'bold', 'FontSize', 11);
     drawnow;
 end
@@ -507,11 +507,12 @@ try
         if CONFIG.plot_results && ishandle(fig_live)
             recon_slice_crop = squeeze( ...
                 reconPressure(1:Nx_orig, 1:Ny_orig, cz_live))';
+            recon_slice_crop = gather(recon_slice_crop);
             set(hImg_recon, 'CData', recon_slice_crop);
             caxis(ax_recon, [0, max(recon_slice_crop(:)) + eps]);
             if converged
                 title(ax_recon, ...
-                    sprintf('Reconstructed p_0   (iter %d — CONVERGED)', tr_iter), ...
+                    sprintf('Reconstructed p_0   (iter %d  CONVERGED)', tr_iter), ...
                     'FontWeight', 'bold', 'Color', [0, 0.55, 0]);
             else
                 title(ax_recon, ...
@@ -702,17 +703,17 @@ end
 
 if CONFIG.plot_results
 
-    % Figure 1 — 2x3 dose comparison (original top, recon bottom)
+    % Figure 1  2x3 dose comparison (original top, recon bottom)
     %            Coronal | Sagittal | Axial
     %            Isocenter = max-dose voxel; sensor contour in red
     plot_dose_panels(doseGrid, recon_dose, sensor.mask, spacing_mm, ...
         'Dose Comparison: Original vs Reconstructed');
 
-    % Figure 2 — p0 convergence (max pressure + relative change)
+    % Figure 2  p0 convergence (max pressure + relative change)
     plot_convergence_history(conv_max_pressure, conv_rel_change, ...
         num_iters_done, CONFIG.convergence_tol);
 
-    % Figure 3 — Axial gamma (3 criteria) + absolute error
+    % Figure 3  Axial gamma (3 criteria) + absolute error
     if ~isempty(gamma_results) && isfield(gamma_results, 'maps')
         [~, max_dose_idx] = max(doseGrid(:));
         [~, ~, cz_gamma]  = ind2sub(gridSize, max_dose_idx);
@@ -853,7 +854,7 @@ function plot_dose_panels(original, recon, sensor_mask, spacing_mm, titleStr)
         d   = doses{row};
         lbl = row_labels{row};
 
-        % Coronal — XZ plane at y = cy
+        % Coronal  XZ plane at y = cy
         ax = subplot(2, 3, (row-1)*3 + 1);
         img = squeeze(d(:, cy, :))';
         imagesc(ax, x_ax, z_ax, img, [0, max_dose]);
@@ -865,9 +866,9 @@ function plot_dose_panels(original, recon, sensor_mask, spacing_mm, titleStr)
         if any(s(:)), contour(ax, x_ax, z_ax, s, [0.5,0.5], 'r-', 'LineWidth', 2); end
         hold(ax, 'off');
         xlabel(ax, 'X (mm)'); ylabel(ax, 'Z (mm)');
-        title(ax, sprintf('%s — Coronal (Y=%d)', lbl, cy));
+        title(ax, sprintf('%s  Coronal (Y=%d)', lbl, cy));
 
-        % Sagittal — YZ plane at x = cx
+        % Sagittal  YZ plane at x = cx
         ax = subplot(2, 3, (row-1)*3 + 2);
         img = squeeze(d(cx, :, :))';
         imagesc(ax, y_ax, z_ax, img, [0, max_dose]);
@@ -879,9 +880,9 @@ function plot_dose_panels(original, recon, sensor_mask, spacing_mm, titleStr)
         if any(s(:)), contour(ax, y_ax, z_ax, s, [0.5,0.5], 'r-', 'LineWidth', 2); end
         hold(ax, 'off');
         xlabel(ax, 'Y (mm)'); ylabel(ax, 'Z (mm)');
-        title(ax, sprintf('%s — Sagittal (X=%d)', lbl, cx));
+        title(ax, sprintf('%s  Sagittal (X=%d)', lbl, cx));
 
-        % Axial — XY plane at z = cz
+        % Axial  XY plane at z = cz
         ax = subplot(2, 3, (row-1)*3 + 3);
         img = squeeze(d(:, :, cz))';
         imagesc(ax, x_ax, y_ax, img, [0, max_dose]);
@@ -893,7 +894,7 @@ function plot_dose_panels(original, recon, sensor_mask, spacing_mm, titleStr)
         if any(s(:)), contour(ax, x_ax, y_ax, s, [0.5,0.5], 'r-', 'LineWidth', 2); end
         hold(ax, 'off');
         xlabel(ax, 'X (mm)'); ylabel(ax, 'Y (mm)');
-        title(ax, sprintf('%s — Axial (Z=%d)', lbl, cz));
+        title(ax, sprintf('%s  Axial (Z=%d)', lbl, cz));
     end
     drawnow;
 end
@@ -957,9 +958,9 @@ function plot_gamma_and_error_axial(gamma_results, original, recon, sensor_mask,
     pass_rates = gamma_results.pass_rates;
     nCrit      = size(criteria, 1);
 
-    figure('Name', 'Gamma & Absolute Error — Axial', 'Color', 'w', ...
+    figure('Name', 'Gamma & Absolute Error  Axial', 'Color', 'w', ...
         'NumberTitle', 'off', 'Position', [50, 300, 1400, 370]);
-    sgtitle(sprintf('Axial Plane (Z = %d voxel) — Gamma Index & Absolute Error', cz), ...
+    sgtitle(sprintf('Axial Plane (Z = %d voxel)  Gamma Index & Absolute Error', cz), ...
         'FontWeight', 'bold', 'FontSize', 11);
 
     gamma_clim   = [0, 2];
