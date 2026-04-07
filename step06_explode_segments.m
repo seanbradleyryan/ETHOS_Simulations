@@ -1,25 +1,27 @@
 function output_paths = step06_explode_segments(patient_id, session, config)
-%STEP06_EXPLODE_SEGMENTS  Per-segment beam explosion for ETHOS RTPLAN files.
+%STEP06_EXPLODE_SEGMENTS  Per-segment beam explosion for both REFERENCE and ADAPTED plans.
 %
-%  Takes the *_adjusted_mlc.dcm RTPLAN (produced by step05_fix_mlc_gaps) and
-%  produces ONE output RTPLAN file PER SEGMENT, each containing a single
-%  independent two-control-point beam.
+%  Takes the MLC-gap-corrected RTPLAN files produced by step05_fix_mlc_gaps
+%  (RP_reference_adjusted_mlc.dcm and RP_adapted_adjusted_mlc.dcm) and
+%  produces ONE output RTPLAN file PER SEGMENT for each plan type.  Each
+%  output file contains a single independent two-control-point beam.
 %
 %  OUTPUT FILENAME FORMAT:
-%    plan_{patient_id}_{session}_B{orig_beam}_S{seg}.dcm
-%    e.g.  plan_1194203_Session_1_B10_S3.dcm
+%    RTPLAN_{patient_id}_{session}_{reference|adapted}_B{orig_beam}_S{seg}.dcm
+%    e.g.  RTPLAN_1194203_Session_1_reference_B10_S3.dcm
+%          RTPLAN_1194203_Session_1_adapted_B10_S3.dcm
 %
-%  INTRA-DICOM NAMING  (omits 'plan' and patient_id to reduce clutter):
-%    RTPlanLabel (max 16 chars): {session}_B{orig}_S{seg}  (truncated if needed)
-%    RTPlanName:                 {session}_B{orig}_S{seg}
-%    RTPlanDescription:          B{orig} ({beam_name}) segment {seg}
+%  INTRA-DICOM NAMING  (omits patient_id to reduce clutter):
+%    RTPlanLabel (max 16 chars): {plan_type}_B{orig}_S{seg}  (truncated if needed)
+%    RTPlanName:                 {session}_{plan_type}_B{orig}_S{seg}
+%    RTPlanDescription:          {plan_type} B{orig} ({beam_name}) segment {seg}
 %
 %  Each output file contains:
 %    - BeamSequence with one beam  (the single 2-CP exploded segment)
 %    - FractionGroupSequence with one referenced beam and its segment MU
 %
-%  RayStation then exports one dose file per plan, which step15 loads via
-%  the preferred pattern:  Plan_Field*_Beam*_B*_S*.dcm
+%  RayStation imports these plans; it exports one dose file per plan, which
+%  step15 loads via the preferred pattern:  Plan_Field*_Beam*_B*_S*.dcm
 %
 %  INPUTS:
 %    patient_id  - char,   e.g. '1194203'
@@ -29,11 +31,13 @@ function output_paths = step06_explode_segments(patient_id, session, config)
 %                    .treatment_site   (char)  e.g. 'Pancreas'
 %
 %  OUTPUT:
-%    output_paths - cell array of char, full paths to all written .dcm files
+%    output_paths - struct with fields:
+%                    .reference  - cell array of char, full paths for reference plan segments
+%                    .adapted    - cell array of char, full paths for adapted plan segments
+%                    .all        - cell array of char, all written paths combined
 %
-%  STANDALONE USAGE:
-%    Call with no arguments to run with built-in defaults (useful for
-%    manual / debug execution outside the pipeline).
+%  STANDALONE USAGE (no arguments — uses built-in defaults):
+%    step06_explode_segments();
 %
 %  PIPELINE USAGE (called by pipeline_setup.m):
 %    output_paths = step06_explode_segments(patient_id, session, CONFIG);
@@ -49,334 +53,377 @@ if nargin == 0
         'treatment_site', 'Pancreas');
 end
 
-fprintf('=== Step 0.6: Segment Explosion ===\n');
-fprintf('Patient: %s | Session: %s\n', patient_id, session);
+fprintf('=== Step 0.6: Segment Explosion (Reference + Adapted) ===\n');
+fprintf('Patient: %s | Session: %s\n\n', patient_id, session);
 
 % -----------------------------------------------------------------------
-% Step 1 — Derive paths and load the adjusted RTPLAN
+% Paths
 % -----------------------------------------------------------------------
 sct_dir = fullfile(config.working_dir, 'EthosExports', patient_id, ...
     config.treatment_site, session, 'sct');
 
-% Find the _adjusted_mlc.dcm file
-listing = dir(fullfile(sct_dir, '*_adjusted_mlc.dcm'));
-if isempty(listing)
-    error('step06:fileNotFound', ...
-        'No *_adjusted_mlc.dcm file found in:\n  %s', sct_dir);
-end
-if numel(listing) > 1
-    warning('step06:multipleFiles', ...
-        'Multiple *_adjusted_mlc.dcm files found; using first: %s', listing(1).name);
-end
-
-input_rtplan = fullfile(sct_dir, listing(1).name);
-
-% Output directory for RayStation import
 output_dir = fullfile(config.working_dir, 'Raystation_Input', patient_id, session);
 if ~exist(output_dir, 'dir')
     mkdir(output_dir);
 end
 
-fprintf('Input:      %s\n', input_rtplan);
-fprintf('Output dir: %s\n', output_dir);
-fprintf('Filename pattern: plan_%s_%s_B<orig>_S<seg>.dcm\n\n', patient_id, session);
-
-% Load DICOM
-fprintf('Loading RTPLAN...\n');
-rtplan = dicominfo(input_rtplan, 'UseDictionaryVR', true);
-
-% Validate
-if ~isfield(rtplan, 'Modality') || ~strcmp(rtplan.Modality, 'RTPLAN')
-    error('step06:wrongModality', 'File Modality is not RTPLAN: %s', rtplan.Modality);
-end
-if ~isfield(rtplan, 'BeamSequence')
-    error('step06:noBeams', 'RTPLAN has no BeamSequence.');
-end
-
-beam_fields_orig   = fieldnames(rtplan.BeamSequence);
-num_original_beams = numel(beam_fields_orig);
-fprintf('RTPlanLabel:         %s\n', rtplan.RTPlanLabel);
-fprintf('Original beam count: %d\n\n', num_original_beams);
+fprintf('SCT dir:    %s\n', sct_dir);
+fprintf('Output dir: %s\n\n', output_dir);
 
 % -----------------------------------------------------------------------
-% Step 2 — Extract original beam MU map  (beam_number -> total_MU)
+% Plan types to process
 % -----------------------------------------------------------------------
-mu_map = containers.Map('KeyType', 'int32', 'ValueType', 'double');
+plan_types  = {'reference', 'adapted'};
+input_files = { ...
+    fullfile(sct_dir, 'RP_reference_adjusted_mlc.dcm'), ...
+    fullfile(sct_dir, 'RP_adapted_adjusted_mlc.dcm')};
 
-if ~isfield(rtplan, 'FractionGroupSequence')
-    error('step06:noFractionGroup', 'RTPLAN has no FractionGroupSequence.');
-end
-frac_group      = rtplan.FractionGroupSequence.Item_1;
-ref_beam_fields = fieldnames(frac_group.ReferencedBeamSequence);
-
-for k = 1:numel(ref_beam_fields)
-    rb        = frac_group.ReferencedBeamSequence.(ref_beam_fields{k});
-    bnum      = int32(rb.ReferencedBeamNumber);
-    bmu       = double(rb.BeamMeterset);
-    mu_map(bnum) = bmu;
-end
-
-fprintf('MU map loaded for %d beams.\n\n', mu_map.Count);
+output_paths.reference = {};
+output_paths.adapted   = {};
 
 % -----------------------------------------------------------------------
-% Step 3 — Explode each beam; one output RTPLAN file per segment
+% Main loop — one pass per plan type
 % -----------------------------------------------------------------------
-output_paths    = {};
-any_warn_global = false;
+for pt = 1:numel(plan_types)
 
-% Per-original-beam MU validation accumulators
-mu_sum_per_orig  = containers.Map('KeyType', 'int32', 'ValueType', 'double');
-mu_orig_per_beam = containers.Map('KeyType', 'int32', 'ValueType', 'double');
+    plan_type    = plan_types{pt};
+    input_rtplan = input_files{pt};
 
-for b = 1:num_original_beams
+    fprintf('--- Processing %s plan ---\n', upper(plan_type));
+    fprintf('Input: %s\n', input_rtplan);
 
-    orig_beam            = rtplan.BeamSequence.(beam_fields_orig{b});
-    original_beam_number = int32(orig_beam.BeamNumber);
-    original_beam_name   = orig_beam.BeamName;
-
-    % Retrieve total MU for this beam
-    if ~isKey(mu_map, original_beam_number)
-        error('step06:muNotFound', ...
-            'No MU found in FractionGroup for beam %d (%s).', ...
-            original_beam_number, original_beam_name);
-    end
-    total_mu = mu_map(original_beam_number);
-    mu_orig_per_beam(original_beam_number) = total_mu;
-    mu_sum_per_orig(original_beam_number)  = 0;
-
-    % Sort control point fields numerically
-    cp_fields = fieldnames(orig_beam.ControlPointSequence);
-    cp_nums   = cellfun(@(f) sscanf(f, 'Item_%d'), cp_fields);
-    [~, sort_idx] = sort(cp_nums);
-    cp_fields = cp_fields(sort_idx);
-    N_cp  = numel(cp_fields);
-    N_seg = N_cp - 1;
-
-    if N_seg < 1
-        warning('step06:noSegments', ...
-            'Beam %d (%s) has only %d control points — skipping.', ...
-            original_beam_number, original_beam_name, N_cp);
+    if ~isfile(input_rtplan)
+        warning('step06:fileNotFound', ...
+            'Input file not found for %s plan, skipping:\n  %s', plan_type, input_rtplan);
+        fprintf('[SKIP] %s plan — file missing.\n\n', upper(plan_type));
         continue;
     end
 
-    % First control point of original beam (geometry back-fill source)
-    cp1_orig = orig_beam.ControlPointSequence.(cp_fields{1});
+    % -------------------------------------------------------------------
+    % Load and validate RTPLAN
+    % -------------------------------------------------------------------
+    fprintf('Loading RTPLAN...\n');
+    rtplan = dicominfo(input_rtplan, 'UseDictionaryVR', true);
 
-    % Gantry angle for progress display
-    if isfield(cp1_orig, 'GantryAngle')
-        gantry_str = sprintf('%.1f deg', double(cp1_orig.GantryAngle));
-    else
-        gantry_str = 'N/A';
+    if ~isfield(rtplan, 'Modality') || ~strcmp(rtplan.Modality, 'RTPLAN')
+        error('step06:wrongModality', ...
+            '[%s] File Modality is not RTPLAN: %s', plan_type, rtplan.Modality);
     end
-    fprintf('Processing beam B%d (%s, gantry %s, %d segments, total MU=%.4f)...\n', ...
-        original_beam_number, original_beam_name, gantry_str, N_seg, total_mu);
+    if ~isfield(rtplan, 'BeamSequence')
+        error('step06:noBeams', '[%s] RTPLAN has no BeamSequence.', plan_type);
+    end
 
-    % ------------------------------------------------------------------
-    % Loop over segments — each segment becomes its own output RTPLAN
-    % ------------------------------------------------------------------
-    for s = 1:N_seg
+    beam_fields_orig   = fieldnames(rtplan.BeamSequence);
+    num_original_beams = numel(beam_fields_orig);
+    fprintf('RTPlanLabel:         %s\n', rtplan.RTPlanLabel);
+    fprintf('Original beam count: %d\n\n', num_original_beams);
 
-        % Deep-copy original beam
-        new_beam                       = orig_beam;
-        new_beam.BeamNumber            = 1;   % single beam per plan -> always 1
-        new_beam.BeamName              = sprintf('B%d_S%03d', original_beam_number, s - 1);
-        new_beam.NumberOfControlPoints = 2;
+    % -------------------------------------------------------------------
+    % Build MU map: beam_number -> total_MU
+    % -------------------------------------------------------------------
+    mu_map = containers.Map('KeyType', 'int32', 'ValueType', 'double');
 
-        % Retrieve the two bounding control points
-        cp_entry_orig = orig_beam.ControlPointSequence.(cp_fields{s});
-        cp_exit_orig  = orig_beam.ControlPointSequence.(cp_fields{s + 1});
+    if ~isfield(rtplan, 'FractionGroupSequence')
+        error('step06:noFractionGroup', ...
+            '[%s] RTPLAN has no FractionGroupSequence.', plan_type);
+    end
+    frac_group      = rtplan.FractionGroupSequence.Item_1;
+    ref_beam_fields = fieldnames(frac_group.ReferencedBeamSequence);
 
-        % CumulativeMetersetWeight values
-        if isfield(cp_entry_orig, 'CumulativeMetersetWeight')
-            cmw_entry = double(cp_entry_orig.CumulativeMetersetWeight);
-        else
-            cmw_entry = (s - 1) / N_seg;
+    for k = 1:numel(ref_beam_fields)
+        rb        = frac_group.ReferencedBeamSequence.(ref_beam_fields{k});
+        bnum      = int32(rb.ReferencedBeamNumber);
+        bmu       = double(rb.BeamMeterset);
+        mu_map(bnum) = bmu;
+    end
+    fprintf('MU map loaded for %d beams.\n\n', mu_map.Count);
+
+    % -------------------------------------------------------------------
+    % Per-beam MU accumulators for validation
+    % -------------------------------------------------------------------
+    mu_sum_per_orig  = containers.Map('KeyType', 'int32', 'ValueType', 'double');
+    mu_orig_per_beam = containers.Map('KeyType', 'int32', 'ValueType', 'double');
+
+    plan_output_paths = {};
+    any_warn_global   = false;
+
+    % -------------------------------------------------------------------
+    % Beam loop
+    % -------------------------------------------------------------------
+    for b = 1:num_original_beams
+
+        orig_beam            = rtplan.BeamSequence.(beam_fields_orig{b});
+        original_beam_number = int32(orig_beam.BeamNumber);
+        original_beam_name   = orig_beam.BeamName;
+
+        if ~isKey(mu_map, original_beam_number)
+            error('step06:muNotFound', ...
+                '[%s] No MU found in FractionGroup for beam %d (%s).', ...
+                plan_type, original_beam_number, original_beam_name);
         end
-        if isfield(cp_exit_orig, 'CumulativeMetersetWeight')
-            cmw_exit = double(cp_exit_orig.CumulativeMetersetWeight);
-        else
-            cmw_exit = s / N_seg;
+        total_mu = mu_map(original_beam_number);
+        mu_orig_per_beam(original_beam_number) = total_mu;
+        mu_sum_per_orig(original_beam_number)  = 0;
+
+        % Sort control point fields numerically
+        cp_fields = fieldnames(orig_beam.ControlPointSequence);
+        cp_nums   = cellfun(@(f) sscanf(f, 'Item_%d'), cp_fields);
+        [~, sort_idx] = sort(cp_nums);
+        cp_fields = cp_fields(sort_idx);
+        N_cp  = numel(cp_fields);
+        N_seg = N_cp - 1;
+
+        if N_seg < 1
+            warning('step06:noSegments', ...
+                '[%s] Beam %d (%s) has only %d control points — skipping.', ...
+                plan_type, original_beam_number, original_beam_name, N_cp);
+            continue;
         end
 
-        % Segment MU
-        seg_mu = (cmw_exit - cmw_entry) * total_mu;
-        mu_sum_per_orig(original_beam_number) = ...
-            mu_sum_per_orig(original_beam_number) + seg_mu;
+        % First CP of original beam (geometry back-fill source)
+        cp1_orig = orig_beam.ControlPointSequence.(cp_fields{1});
 
-        % --- Build entry CP (Item_1): all geometry fields present ---
-        cp_entry_new = cp_entry_orig;
-        cp_entry_new.CumulativeMetersetWeight = 0;
-        cp_entry_new.ControlPointIndex        = 0;
+        if isfield(cp1_orig, 'GantryAngle')
+            gantry_str = sprintf('%.1f deg', double(cp1_orig.GantryAngle));
+        else
+            gantry_str = 'N/A';
+        end
+        fprintf('  B%d (%s, gantry %s, %d segments, MU=%.4f)...\n', ...
+            original_beam_number, original_beam_name, gantry_str, N_seg, total_mu);
 
-        % Back-fill any geometry fields absent from this intermediate CP
-        cp1_varying_fields = { ...
-            'BeamLimitingDevicePositionSequence', ...
-            'CumulativeMetersetWeight', ...
-            'ControlPointIndex'};
+        % ---------------------------------------------------------------
+        % Segment loop — each segment becomes its own output RTPLAN file
+        % ---------------------------------------------------------------
+        for s = 1:N_seg
 
-        cp1_all_fields = fieldnames(cp1_orig);
-        for gf = 1:numel(cp1_all_fields)
-            fld = cp1_all_fields{gf};
-            if ~isfield(cp_entry_new, fld) && ~ismember(fld, cp1_varying_fields)
-                cp_entry_new.(fld) = cp1_orig.(fld);
+            % Deep-copy original beam
+            new_beam                       = orig_beam;
+            new_beam.BeamNumber            = 1;   % single beam per plan -> always 1
+            new_beam.BeamName              = sprintf('%s_B%d_S%03d', ...
+                                                plan_type, original_beam_number, s - 1);
+            new_beam.NumberOfControlPoints = 2;
+
+            % Bounding control points
+            cp_entry_orig = orig_beam.ControlPointSequence.(cp_fields{s});
+            cp_exit_orig  = orig_beam.ControlPointSequence.(cp_fields{s + 1});
+
+            % CumulativeMetersetWeight values
+            if isfield(cp_entry_orig, 'CumulativeMetersetWeight')
+                cmw_entry = double(cp_entry_orig.CumulativeMetersetWeight);
+            else
+                cmw_entry = (s - 1) / N_seg;
             end
+            if isfield(cp_exit_orig, 'CumulativeMetersetWeight')
+                cmw_exit = double(cp_exit_orig.CumulativeMetersetWeight);
+            else
+                cmw_exit = s / N_seg;
+            end
+
+            % Segment MU
+            seg_mu = (cmw_exit - cmw_entry) * total_mu;
+            mu_sum_per_orig(original_beam_number) = ...
+                mu_sum_per_orig(original_beam_number) + seg_mu;
+
+            % --- Entry CP (Item_1): all geometry fields present ---
+            cp_entry_new = cp_entry_orig;
+            cp_entry_new.CumulativeMetersetWeight = 0;
+            cp_entry_new.ControlPointIndex        = 0;
+
+            % Back-fill geometry fields absent from this intermediate CP
+            cp1_varying_fields = { ...
+                'BeamLimitingDevicePositionSequence', ...
+                'CumulativeMetersetWeight', ...
+                'ControlPointIndex'};
+
+            cp1_all_fields = fieldnames(cp1_orig);
+            for gf = 1:numel(cp1_all_fields)
+                fld = cp1_all_fields{gf};
+                if ~isfield(cp_entry_new, fld) && ~ismember(fld, cp1_varying_fields)
+                    cp_entry_new.(fld) = cp1_orig.(fld);
+                end
+            end
+
+            % BeamLimitingDevicePositionSequence for entry CP:
+            %   Item_1: X jaw  (from original beam CP_1)
+            %   Item_2: Y jaw  (from original beam CP_1)
+            %   Item_3: MLC1   (from this segment's entry CP)
+            %   Item_4: MLC2   (from this segment's entry CP)
+            bldps_cp1   = cp1_orig.BeamLimitingDevicePositionSequence;
+            bldps_entry = cp_entry_orig.BeamLimitingDevicePositionSequence;
+
+            n_bldps_entry = numel(fieldnames(bldps_entry));
+            if n_bldps_entry == 4
+                bldps_entry_mlc1 = bldps_entry.Item_3;
+                bldps_entry_mlc2 = bldps_entry.Item_4;
+            else
+                bldps_entry_mlc1 = bldps_entry.Item_1;
+                bldps_entry_mlc2 = bldps_entry.Item_2;
+            end
+
+            bldps_new_entry        = struct();
+            bldps_new_entry.Item_1 = bldps_cp1.Item_1;    % X jaw
+            bldps_new_entry.Item_2 = bldps_cp1.Item_2;    % Y jaw
+            bldps_new_entry.Item_3 = bldps_entry_mlc1;    % MLC1
+            bldps_new_entry.Item_4 = bldps_entry_mlc2;    % MLC2
+            cp_entry_new.BeamLimitingDevicePositionSequence = bldps_new_entry;
+
+            % --- Exit CP (Item_2): MLC-only ---
+            cp_exit_new = cp_exit_orig;
+            cp_exit_new.CumulativeMetersetWeight = 1;
+            cp_exit_new.ControlPointIndex        = 1;
+
+            if ~isfield(cp_exit_new, 'BeamLimitingDevicePositionSequence')
+                bldps_exit_fb        = struct();
+                bldps_exit_fb.Item_1 = bldps_entry_mlc1;
+                bldps_exit_fb.Item_2 = bldps_entry_mlc2;
+                cp_exit_new.BeamLimitingDevicePositionSequence = bldps_exit_fb;
+            end
+
+            % 2-item ControlPointSequence
+            new_cp_seq        = struct();
+            new_cp_seq.Item_1 = cp_entry_new;
+            new_cp_seq.Item_2 = cp_exit_new;
+            new_beam.ControlPointSequence         = new_cp_seq;
+            new_beam.FinalCumulativeMetersetWeight = 1;
+
+            % -----------------------------------------------------------
+            % Assemble per-segment output plan
+            % -----------------------------------------------------------
+            rtplan_out = rtplan;   % deep copy
+
+            rtplan_out.BeamSequence = struct('Item_1', new_beam);
+
+            ref_entry                      = struct();
+            ref_entry.ReferencedBeamNumber = 1;
+            ref_entry.BeamMeterset         = seg_mu;
+
+            rtplan_out.FractionGroupSequence.Item_1.ReferencedBeamSequence = ...
+                struct('Item_1', ref_entry);
+            rtplan_out.FractionGroupSequence.Item_1.NumberOfBeams = 1;
+
+            % Unique SOP Instance UID
+            new_uid                               = dicomuid();
+            rtplan_out.SOPInstanceUID             = new_uid;
+            rtplan_out.MediaStorageSOPInstanceUID = new_uid;
+
+            % -----------------------------------------------------------
+            % Naming
+            %
+            %   File:              RTPLAN_{patient_id}_{session}_{plan_type}_B{orig}_S{seg}.dcm
+            %   RTPlanLabel:       {plan_type}_B{orig}_S{seg}   (max 16 chars, LO VR)
+            %   RTPlanName:        {session}_{plan_type}_B{orig}_S{seg}
+            %   RTPlanDescription: {plan_type} B{orig} ({beam_name}) segment {seg}
+            % -----------------------------------------------------------
+            seg_label_long  = sprintf('%s_B%d_S%d', plan_type, original_beam_number, s - 1);
+            seg_label_short = seg_label_long(1:min(16, end));  % LO VR max 16 chars
+
+            rtplan_out.RTPlanLabel       = seg_label_short;
+            if isfield(rtplan_out, 'RTPlanName')
+                rtplan_out.RTPlanName    = sprintf('%s_%s', session, seg_label_long);
+            end
+            rtplan_out.RTPlanDescription = sprintf('%s B%d (%s) segment %d', ...
+                plan_type, original_beam_number, original_beam_name, s - 1);
+
+            % -----------------------------------------------------------
+            % Write output file
+            % -----------------------------------------------------------
+            out_filename = sprintf('RTPLAN_%s_%s_%s_B%d_S%d.dcm', ...
+                patient_id, session, plan_type, original_beam_number, s - 1);
+            out_filepath = fullfile(output_dir, out_filename);
+
+            try
+                dicomwrite([], out_filepath, rtplan_out, 'CreateMode', 'Copy');
+            catch ME
+                error('step06:writeFailed', ...
+                    'Failed to write output RTPLAN:\n  %s\nError: %s', out_filepath, ME.message);
+            end
+
+            plan_output_paths{end+1} = out_filepath; %#ok<AGROW>
+
+            % Progress every 50 new files
+            if mod(numel(plan_output_paths), 50) == 0
+                fprintf('    Written %d files so far...\n', numel(plan_output_paths));
+            end
+
+        end  % segment loop
+
+        fprintf('    -> %d segment file(s) written for B%d\n', N_seg, original_beam_number);
+
+        % ---------------------------------------------------------------
+        % MU validation for this beam
+        % ---------------------------------------------------------------
+        orig_mu   = mu_orig_per_beam(original_beam_number);
+        summed    = mu_sum_per_orig(original_beam_number);
+        delta_abs = abs(summed - orig_mu);
+        delta_pct = 0;
+        if orig_mu > 0
+            delta_pct = 100 * delta_abs / orig_mu;
         end
-
-        % --- BeamLimitingDevicePositionSequence for entry CP ---
-        % Item_1: X jaw  (from original beam CP_1)
-        % Item_2: Y jaw  (from original beam CP_1)
-        % Item_3: MLC1   (from this segment's actual entry CP)
-        % Item_4: MLC2   (from this segment's actual entry CP)
-        bldps_cp1   = cp1_orig.BeamLimitingDevicePositionSequence;
-        bldps_entry = cp_entry_orig.BeamLimitingDevicePositionSequence;
-
-        n_bldps_entry = numel(fieldnames(bldps_entry));
-        if n_bldps_entry == 4
-            bldps_entry_mlc1 = bldps_entry.Item_3;
-            bldps_entry_mlc2 = bldps_entry.Item_4;
+        if delta_pct > 0.5
+            mu_status       = '[WARN >0.5%]';
+            any_warn_global = true;
         else
-            bldps_entry_mlc1 = bldps_entry.Item_1;
-            bldps_entry_mlc2 = bldps_entry.Item_2;
+            mu_status = '[OK]';
         end
+        fprintf('    MU: orig=%.4f  sum=%.4f  delta=%.4f%%  %s\n\n', ...
+            orig_mu, summed, delta_pct, mu_status);
 
-        bldps_new_entry        = struct();
-        bldps_new_entry.Item_1 = bldps_cp1.Item_1;    % X jaw
-        bldps_new_entry.Item_2 = bldps_cp1.Item_2;    % Y jaw
-        bldps_new_entry.Item_3 = bldps_entry_mlc1;    % MLC1
-        bldps_new_entry.Item_4 = bldps_entry_mlc2;    % MLC2
-        cp_entry_new.BeamLimitingDevicePositionSequence = bldps_new_entry;
-
-        % --- Build exit CP (Item_2): MLC-only ---
-        cp_exit_new = cp_exit_orig;
-        cp_exit_new.CumulativeMetersetWeight = 1;
-        cp_exit_new.ControlPointIndex        = 1;
-
-        if ~isfield(cp_exit_new, 'BeamLimitingDevicePositionSequence')
-            bldps_exit_fb        = struct();
-            bldps_exit_fb.Item_1 = bldps_entry_mlc1;
-            bldps_exit_fb.Item_2 = bldps_entry_mlc2;
-            cp_exit_new.BeamLimitingDevicePositionSequence = bldps_exit_fb;
-        end
-
-        % Assign 2-item ControlPointSequence
-        new_cp_seq        = struct();
-        new_cp_seq.Item_1 = cp_entry_new;
-        new_cp_seq.Item_2 = cp_exit_new;
-        new_beam.ControlPointSequence         = new_cp_seq;
-        new_beam.FinalCumulativeMetersetWeight = 1;
-
-        % ------------------------------------------------------------------
-        % Assemble per-segment output plan
-        % ------------------------------------------------------------------
-        rtplan_out = rtplan;   % deep copy from original
-
-        % BeamSequence: single beam
-        rtplan_out.BeamSequence = struct('Item_1', new_beam);
-
-        % FractionGroupSequence: single referenced beam
-        ref_entry                      = struct();
-        ref_entry.ReferencedBeamNumber = 1;
-        ref_entry.BeamMeterset         = seg_mu;
-
-        rtplan_out.FractionGroupSequence.Item_1.ReferencedBeamSequence = ...
-            struct('Item_1', ref_entry);
-        rtplan_out.FractionGroupSequence.Item_1.NumberOfBeams = 1;
-
-        % Unique SOP Instance UID
-        new_uid                               = dicomuid();
-        rtplan_out.SOPInstanceUID             = new_uid;
-        rtplan_out.MediaStorageSOPInstanceUID = new_uid;
-
-        % ------------------------------------------------------------------
-        % Naming
-        %   File:              plan_{patient_id}_{session}_B{orig}_S{seg}.dcm
-        %   RTPlanLabel:       {session}_B{orig}_S{seg}  (max 16 chars)
-        %   RTPlanName:        {session}_B{orig}_S{seg}
-        %   RTPlanDescription: B{orig} ({beam_name}) segment {seg}
-        % ------------------------------------------------------------------
-        seg_label_long  = sprintf('%s_B%d_S%d', session, original_beam_number, s - 1);
-        seg_label_short = seg_label_long(1:min(16, end));  % LO VR max 16 chars
-
-        rtplan_out.RTPlanLabel       = seg_label_short;
-        if isfield(rtplan_out, 'RTPlanName')
-            rtplan_out.RTPlanName    = seg_label_long;
-        end
-        rtplan_out.RTPlanDescription = sprintf('B%d (%s) segment %d', ...
-            original_beam_number, original_beam_name, s - 1);
-
-        % ------------------------------------------------------------------
-        % Write output file
-        % ------------------------------------------------------------------
-        out_filename = sprintf('plan_%s_%s_B%d_S%d.dcm', ...
-            patient_id, session, original_beam_number, s - 1);
-        out_filepath = fullfile(output_dir, out_filename);
-
-        try
-            dicomwrite([], out_filepath, rtplan_out, 'CreateMode', 'Copy');
-        catch ME
-            error('step06:writeFailed', ...
-                'Failed to write output RTPLAN:\n  %s\nError: %s', out_filepath, ME.message);
-        end
-
-        output_paths{end+1} = out_filepath; %#ok<AGROW>
-
-        % Progress every 50 new files
-        if mod(numel(output_paths), 50) == 0
-            fprintf('  Written %d files so far...\n', numel(output_paths));
-        end
-
-    end  % segment loop
-
-    fprintf('  -> %d segment file(s) written for beam B%d\n', N_seg, original_beam_number);
+    end  % beam loop
 
     % -------------------------------------------------------------------
-    % MU validation for this original beam
+    % Per-plan-type summary
     % -------------------------------------------------------------------
-    orig_mu   = mu_orig_per_beam(original_beam_number);
-    summed    = mu_sum_per_orig(original_beam_number);
-    delta_abs = abs(summed - orig_mu);
-    delta_pct = 0;
-    if orig_mu > 0
-        delta_pct = 100 * delta_abs / orig_mu;
-    end
-    if delta_pct > 0.5
-        mu_status       = '[WARN >0.5%]';
-        any_warn_global = true;
-    else
-        mu_status = '[OK]';
-    end
-    fprintf('  MU: orig=%.4f  sum=%.4f  delta=%.4f%%  %s\n\n', ...
-        orig_mu, summed, delta_pct, mu_status);
+    fprintf('%s plan: %d segment file(s) written.\n', upper(plan_type), numel(plan_output_paths));
+    print_file_list(plan_output_paths);
 
-end  % beam loop
+    if any_warn_global
+        warning('step06:muMismatch', ...
+            '[%s] One or more beams had MU sum deviating >0.5%% from original.', plan_type);
+    end
+
+    output_paths.(plan_type) = plan_output_paths;
+    fprintf('\n');
+
+end  % plan type loop
 
 % -----------------------------------------------------------------------
-% Final summary
+% Combine all paths for convenience
 % -----------------------------------------------------------------------
+output_paths.all = [output_paths.reference, output_paths.adapted];
+
+total = numel(output_paths.all);
 fprintf('=== Step 0.6 complete ===\n');
-fprintf('Total segment files written: %d\n', numel(output_paths));
+fprintf('Total segment files written: %d  (%d reference + %d adapted)\n', ...
+    total, ...
+    numel(output_paths.reference), ...
+    numel(output_paths.adapted));
 fprintf('Output directory: %s\n\n', output_dir);
 
-if numel(output_paths) <= 20
-    for k = 1:numel(output_paths)
-        [~, fn, ext] = fileparts(output_paths{k});
-        fprintf('  %s%s\n', fn, ext);
-    end
-else
-    for k = 1:5
-        [~, fn, ext] = fileparts(output_paths{k});
-        fprintf('  %s%s\n', fn, ext);
-    end
-    fprintf('  ... (%d files) ...\n', numel(output_paths) - 10);
-    for k = numel(output_paths)-4 : numel(output_paths)
-        [~, fn, ext] = fileparts(output_paths{k});
-        fprintf('  %s%s\n', fn, ext);
-    end
-end
-
-if any_warn_global
-    warning('step06:muMismatch', ...
-        'One or more beams had MU sum deviating >0.5%% from original. Check output carefully.');
-end
-
 end  % function step06_explode_segments
+
+
+% =========================================================================
+%  LOCAL HELPER
+% =========================================================================
+
+function print_file_list(paths)
+%PRINT_FILE_LIST Print a summary list of written file names.
+    n = numel(paths);
+    if n == 0, return; end
+    if n <= 20
+        for k = 1:n
+            [~, fn, ext] = fileparts(paths{k});
+            fprintf('  %s%s\n', fn, ext);
+        end
+    else
+        for k = 1:5
+            [~, fn, ext] = fileparts(paths{k});
+            fprintf('  %s%s\n', fn, ext);
+        end
+        fprintf('  ... (%d more files) ...\n', n - 10);
+        for k = n-4 : n
+            [~, fn, ext] = fileparts(paths{k});
+            fprintf('  %s%s\n', fn, ext);
+        end
+    end
+end

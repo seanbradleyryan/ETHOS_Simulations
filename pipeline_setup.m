@@ -128,25 +128,32 @@ for p_idx = 1:length(CONFIG.patients)
             end
 
             %% ============================================================
-            %  STEP 0.6: Explode Beam Segments
+            %  STEP 0.6: Explode Beam Segments (Reference + Adapted)
             %% ============================================================
             if CONFIG.run_step06
-                fprintf('\n[STEP 0.6] Exploding beam segments...\n');
+                fprintf('\n[STEP 0.6] Exploding beam segments (reference + adapted)...\n');
 
-                output_paths = step06_explode_segments(patient_id, session, CONFIG);
+                exploded = step06_explode_segments(patient_id, session, CONFIG);
 
-                RESULTS.patients.(result_key).exploded_plans = output_paths;
-                RESULTS.patients.(result_key).num_exploded_plans = numel(output_paths);
-                fprintf('[STEP 0.6] Complete. %d per-beam RTPLAN file(s) written.\n', ...
-                    numel(output_paths));
+                RESULTS.patients.(result_key).exploded_plans          = exploded;
+                RESULTS.patients.(result_key).num_exploded_reference  = numel(exploded.reference);
+                RESULTS.patients.(result_key).num_exploded_adapted    = numel(exploded.adapted);
+                RESULTS.patients.(result_key).num_exploded_total      = numel(exploded.all);
+
+                fprintf('[STEP 0.6] Complete. %d total segment RTPLAN file(s) written ', ...
+                    numel(exploded.all));
+                fprintf('(%d reference + %d adapted).\n', ...
+                    numel(exploded.reference), numel(exploded.adapted));
 
                 fprintf('\n--- RayStation Import Instructions ---\n');
                 rs_input_dir = fullfile(CONFIG.working_dir, 'Raystation_Input', ...
                     patient_id, session);
-                fprintf('  Import the following files into RayStation:\n');
+                fprintf('  Import all RTPLAN files from:\n');
                 fprintf('    %s\n', rs_input_dir);
+                fprintf('  Files follow the convention:\n');
+                fprintf('    RTPLAN_{patient}_{session}_{reference|adapted}_B<N>_S<M>.dcm\n');
                 fprintf('  Then:\n');
-                fprintf('    1. Recalculate dose for each exploded-segment beam\n');
+                fprintf('    1. Recalculate dose for each exploded-segment plan\n');
                 fprintf('    2. Export field doses as Plan_Field*_Beam*_B*_S*.dcm into:\n');
                 fprintf('       %s\n', fullfile(CONFIG.working_dir, ...
                     'RayStationFiles', patient_id, session));
@@ -227,8 +234,11 @@ function generate_setup_summary(results)
             if isfield(p, 'mlc_corrections')
 %                 fprintf('  MLC corrections: %d\n', p.mlc_corrections);
             end
-            if isfield(p, 'num_exploded_plans')
-                fprintf('  Exploded plans written: %d\n', p.num_exploded_plans);
+            if isfield(p, 'num_exploded_total')
+                fprintf('  Exploded plans written: %d  (%d reference + %d adapted)\n', ...
+                    p.num_exploded_total, ...
+                    p.num_exploded_reference, ...
+                    p.num_exploded_adapted);
             end
         elseif strcmp(p.status, 'error')
             fprintf('  Error: %s\n', p.error.message);
