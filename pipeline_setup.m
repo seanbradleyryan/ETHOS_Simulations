@@ -1,6 +1,6 @@
 %% =========================================================================
 %  PIPELINE_SETUP.m
-%  ETHOS Photoacoustic Pipeline — Pre-RayStation Steps
+%  ETHOS Photoacoustic Pipeline  Pre-RayStation Steps
 %  =========================================================================
 %
 %  PURPOSE:
@@ -14,9 +14,9 @@
 %    4. Run pipeline_simulate.m
 %
 %  STEPS EXECUTED:
-%    Step 0   — Sort DICOM files (SCT + matched RT files)
-%    Step 0.5 — Fix Halcyon dual-layer MLC minimum gaps in RTPLAN
-%    Step 0.6 — Explode each beam's segments into individual 2-CP beams
+%    Step 0    Sort DICOM files (SCT + matched RT files)
+%    Step 0.5  Fix Halcyon dual-layer MLC minimum gaps in RTPLAN
+%    Step 0.6  Explode each beam's segments into individual 2-CP beams
 %               (one output RTPLAN file per original beam)
 %
 %  PREREQUISITES:
@@ -54,7 +54,7 @@ CONFIG.run_step06  = true;   % Step 0.6: Explode beam segments
 %% ========================= INITIALIZATION ================================
 
 fprintf('=========================================================\n');
-fprintf('  ETHOS Pipeline — Setup (Steps 0 / 0.5 / 0.6)\n');
+fprintf('  ETHOS Pipeline  Setup (Steps 0 / 0.5 / 0.6)\n');
 fprintf('=========================================================\n');
 fprintf('  Started: %s\n', datetime('now'));
 fprintf('  Working directory: %s\n', CONFIG.working_dir);
@@ -115,13 +115,13 @@ for p_idx = 1:length(CONFIG.patients)
 
                 RESULTS.patients.(result_key).adjusted_rtplan = adjusted_rtplan_path;
                 RESULTS.patients.(result_key).mlc_corrections = num_corrections;
-                fprintf('[STEP 0.5] Complete. Corrections made: %d\n', num_corrections);
+                fprintf('[STEP 0.5] Complete. Corrections made: Hopefully a lot?');
             else
                 fprintf('\n[STEP 0.5] Skipped.\n');
                 % Verify the adjusted plan exists so Step 0.6 can proceed
                 adjusted_rtplan_path = find_adjusted_rtplan(sct_dir);
                 if isempty(adjusted_rtplan_path)
-                    error('No *_adjusted_mlc.dcm found in %s — run Step 0.5 first.', sct_dir);
+                    error('No *_adjusted_mlc.dcm found in %s  run Step 0.5 first.', sct_dir);
                 end
                 fprintf('[STEP 0.5] Using existing adjusted RTPLAN: %s\n', ...
                     adjusted_rtplan_path);
@@ -185,7 +185,7 @@ fprintf('\n=========================================================\n\n');
 
 %% =========================================================================
 %  STEP 0.6 IMPLEMENTATION
-%  (Calls dicominfo / dicomwrite directly — no external function file needed)
+%  (Calls dicominfo / dicomwrite directly  no external function file needed)
 %% =========================================================================
 
 function output_paths = step06_explode_segments(patient_id, session, config)
@@ -278,7 +278,7 @@ function output_paths = step06_explode_segments(patient_id, session, config)
 
         if N_seg < 1
             warning('step06_explode_segments:noSegments', ...
-                'Beam %d (%s) has only %d control points — skipping.', ...
+                'Beam %d (%s) has only %d control points  skipping.', ...
                 original_beam_number, original_beam_name, N_cp);
             continue;
         end
@@ -423,7 +423,7 @@ function output_paths = step06_explode_segments(patient_id, session, config)
 
     if any_warn_global
         warning('step06_explode_segments:globalMuWarn', ...
-            'One or more beams had MU sum deviation >0.5%% — verify output.');
+            'One or more beams had MU sum deviation >0.5%%  verify output.');
     end
     fprintf('  %d per-beam RTPLAN files written to:\n    %s\n', ...
         numel(output_paths), output_dir);
@@ -472,7 +472,7 @@ function generate_setup_summary(results)
                 fprintf('  SCT dir: %s\n', p.sct_dir);
             end
             if isfield(p, 'mlc_corrections')
-                fprintf('  MLC corrections: %d\n', p.mlc_corrections);
+%                 fprintf('  MLC corrections: %d\n', p.mlc_corrections);
             end
             if isfield(p, 'num_exploded_plans')
                 fprintf('  Exploded plans written: %d\n', p.num_exploded_plans);
