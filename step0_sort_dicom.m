@@ -1,85 +1,76 @@
-function [sct_dir, sim_ct_dir, RT_metadata] = step0_sort_dicom(patient_id, session, config)
+function [sct_dir, sim_ct_dir] = step0_sort_dicom(patient_id, session, config)
 %% STEP0_SORT_DICOM - Sort DICOM files for ETHOS pipeline
 %
-%   [sct_dir, sim_ct_dir, RT_metadata] = step0_sort_dicom(patient_id, session, config)
+%   [sct_dir, sim_ct_dir] = step0_sort_dicom(patient_id, session, config)
 %
 %   PURPOSE:
-%   Organize raw ETHOS DICOM export by:
-%     1. Identifying the SCT (synthetic CT) series via three-tier priority
-%     2. Identifying the simulation CT (original planning CT)
-%     3. Finding RTPLANs tagged as REFERENCE and ADAPTED via RTPlanRelationship
-%     4. Confirming each plan's referenced image set matches the SCT
-%     5. Sorting the RTSTRUCT referenced by each plan
-%     6. Sorting the RTDOSE corresponding to each plan
-%     7. Copying all matched files to a clean 'sct' subdirectory with
-%        descriptive filenames
-%     8. Collecting metadata for all RT files into RT_metadata
+%   Organize raw ETHOS DICOM export by identifying SCT (synthetic CT) series
+%   and classifying RT plan files as REFERENCE or ADAPTED based on the
+%   RTPlanRelationship field inside ReferenceRTPlanSequence.Item_1.
+%   Each plan type's associated RTSTRUCT and RTDOSE are traced through the
+%   standard DICOM reference chain and copied with standardized filenames.
+%
+%   INPUTS:
+%       patient_id  - String, patient identifier (e.g., '1194203')
+%       session     - String, session name (e.g., 'Session_1')
+%       config      - Struct with configuration parameters:
+%           .working_dir    - Base directory path
+%           .treatment_site - Subfolder name (default: 'Pancreas')
 %
 %   OUTPUTS:
-%     sct_dir     - Path to 'sct' subdirectory containing sorted files:
-%                     CT*.dcm          (SCT slices)
-%                     RP_reference.dcm (REFERENCE plan)
-%                     RP_adapted.dcm   (ADAPTED plan)
-%                     RS_reference.dcm (RTSTRUCT for REFERENCE plan)
-%                     RS_adapted.dcm   (RTSTRUCT for ADAPTED plan)
-%                     RD_reference.dcm (RTDOSE for REFERENCE plan)
-%                     RD_adapted.dcm   (RTDOSE for ADAPTED plan)
-%     sim_ct_dir  - Path to 'sim_ct' subdirectory containing simulation CT slices
-%     RT_metadata - Cell array of structs, one per RT file discovered across
-%                   all modalities (RTPLAN, RTSTRUCT, RTDOSE). Indexed by an
-%                   external counter that increments continuously across all
-%                   modality loops. Each struct contains fields:
-%                     .filepath           Full path to source file
-%                     .filename           Filename only
-%                     .modality           'RTPLAN' | 'RTSTRUCT' | 'RTDOSE'
-%                     .sorted_label       Label assigned (e.g. 'REFERENCE',
-%                                         'ADAPTED', 'unmatched')
-%                     .sorted_filename    Destination filename in sct dir,
-%                                         or '' if not sorted
-%                     .SOPInstanceUID     Unique ID for this object
-%                     .SOPClassUID        Class UID (if present)
-%                     .StudyInstanceUID   Study UID
-%                     .SeriesInstanceUID  Series UID
-%                     .SeriesDate         DICOM series date string
-%                     .SeriesTime         DICOM series time string
-%                   RTPLAN-specific:
-%                     .RTPlanLabel        Plan label
-%                     .RTPlanName         Plan name
-%                     .RTPlanRelationship Relationship string (REFERENCE/ADAPTED/etc)
-%                     .ReferencedStructSetUID  SOPInstanceUID of linked RTSTRUCT
-%                   RTSTRUCT-specific:
-%                     .StructureSetLabel  Structure set label
-%                     .StructureSetDate   Structure set date
-%                     .ReferencedFrameUID FrameOfReferenceUID (if present)
-%                   RTDOSE-specific:
-%                     .DoseType           PHYSICAL | EFFECTIVE | ERROR
-%                     .DoseUnits          GY | RELATIVE
-%                     .DoseSummationType  PLAN | FRACTION | BEAM | etc
-%                     .ReferencedPlanUID  SOPInstanceUID of linked RTPLAN
-%                   Also saved as RT_metadata.mat in the sct directory.
+%       sct_dir     - String, path to directory containing sorted files:
+%                     - CT*.dcm files from SCT series
+%                     - RS_reference.dcm  (RTSTRUCT for reference plan)
+%                     - RS_adapted.dcm    (RTSTRUCT for adapted plan)
+%                     - RP_reference.dcm  (reference RTPLAN)
+%                     - RP_adapted.dcm    (adapted RTPLAN)
+%                     - RD_reference.dcm  (RTDOSE for reference plan)
+%                     - RD_adapted.dcm    (RTDOSE for adapted plan)
+%       sim_ct_dir  - String, path to sim_ct directory (original planning CT).
+%                     Returns '' if no simulation CT is found.
 %
-%   SCT IDENTIFICATION (three-tier priority):
-%     1. SeriesDescription contains 'sct' (case-insensitive)
-%     2. Empty or unparseable SeriesDate/SeriesTime (ETHOS often exports sCT
-%        without timestamps)
-%     3. Oldest valid timestamp among remaining CT series
+%   ALGORITHM:
+%   1. Sort SCT series files as usual (three-tier priority)
+%   2. Scan all RTPLAN files; for each, read ReferenceRTPlanSequence.Item_1.RTPlanRelationship
+%      - Contains 'REFERENCE'  → reference plan
+%      - Contains 'ADAPTED'    → adapted plan
+%   3. For each classified plan:
+%      a. Trace ReferencedStructureSetSequence → find matching RTSTRUCT by SOPInstanceUID
+%      b. Confirm RTSTRUCT's referenced CT SeriesInstanceUID matches SCT
+%      c. Trace RTDOSE ReferencedRTPlanSequence → find RTDOSE referencing this plan
+%   4. Copy all files with standardized names into sct_dir
+%   5. Sort sim CT as usual
 %
-%   SIM CT IDENTIFICATION (three-tier priority):
-%     1. SeriesDescription contains 'sim' (case-insensitive)
-%     2. Empty or unparseable SeriesDate/SeriesTime (if not already used for SCT)
-%     3. Oldest valid timestamp among remaining CT series
+%   FILE NAMING CONVENTION:
+%       RP_reference.dcm   RP_adapted.dcm
+%       RS_reference.dcm   RS_adapted.dcm
+%       RD_reference.dcm   RD_adapted.dcm
+%
+%   EXAMPLE:
+%       config.working_dir = '/mnt/weka/home/80030361/ETHOS_Simulations';
+%       config.treatment_site = 'Pancreas';
+%       [sct_dir, sim_ct_dir] = step0_sort_dicom('1194203', 'Session_1', config);
+%
+%   DEPENDENCIES:
+%       - Image Processing Toolbox (dicomCollection, dicominfo)
+%
+%   AUTHOR: ETHOS Pipeline Team
+%   DATE: April 2026
+%   VERSION: 3.0 (REFERENCE/ADAPTED plan classification)
+%
+%   See also: dicomCollection, dicominfo, step05_fix_mlc_gaps
 
 %% ======================== INPUT VALIDATION ========================
 
 if ~ischar(patient_id) && ~isstring(patient_id)
     error('step0_sort_dicom:InvalidInput', ...
-        'patient_id must be a char or string. Received: %s', class(patient_id));
+        'patient_id must be a string or character array. Received: %s', class(patient_id));
 end
 patient_id = char(patient_id);
 
 if ~ischar(session) && ~isstring(session)
     error('step0_sort_dicom:InvalidInput', ...
-        'session must be a char or string. Received: %s', class(session));
+        'session must be a string or character array. Received: %s', class(session));
 end
 session = char(session);
 
@@ -107,892 +98,722 @@ end
 
 rawwd = fullfile(config.working_dir, 'EthosExports', patient_id, ...
     config.treatment_site, session);
+
 sct_dir    = fullfile(rawwd, 'sct');
 sim_ct_dir = '';
-RT_metadata  = {};
-rt_meta_idx  = 0;   % External counter  increments across ALL modality loops
 
-fprintf('\n========== STEP 0: SORT DICOM ==========\n');
-fprintf('  Patient:       %s\n', patient_id);
-fprintf('  Session:       %s\n', session);
+fprintf('  Processing: Patient %s, %s\n', patient_id, session);
 fprintf('  Raw directory: %s\n', rawwd);
 
 %% ======================== VERIFY RAW DIRECTORY ========================
 
 if ~isfolder(rawwd)
     warning('step0_sort_dicom:DirectoryNotFound', ...
-        'Raw directory not found: %s', rawwd);
+        'Raw directory not found for patient %s, %s: %s', ...
+        patient_id, session, rawwd);
     sct_dir    = '';
     sim_ct_dir = '';
-    RT_metadata = {};
     return;
 end
 
 %% ======================== SCAN DICOM COLLECTION ========================
 
-fprintf('\n  [1/6] Scanning DICOM collection...\n');
+fprintf('  Scanning DICOM collection...\n');
 
 try
-    dcmCol = dicomCollection(rawwd);
+    ctInfo = dicomCollection(rawwd);
 catch ME
     error('step0_sort_dicom:DicomScanFailed', ...
         'Failed to scan DICOM directory: %s\nError: %s', rawwd, ME.message);
 end
 
-if isempty(dcmCol) || height(dcmCol) == 0
+if isempty(ctInfo) || height(ctInfo) == 0
     warning('step0_sort_dicom:EmptyCollection', ...
         'No DICOM files found in: %s', rawwd);
     sct_dir    = '';
     sim_ct_dir = '';
-    RT_metadata = {};
     return;
 end
 
-fprintf('    Found %d DICOM series\n', height(dcmCol));
-printCollectionInfo(dcmCol);
+fprintf('  Found %d DICOM series\n', height(ctInfo));
 
-%% ======================== CREATE OUTPUT DIRECTORIES ========================
+%% ======================== PRINT DIAGNOSTIC INFO ========================
+
+printCollectionInfo(ctInfo);
+
+%% ======================== CREATE SCT DIRECTORY ========================
 
 if ~isfolder(sct_dir)
     mkdir(sct_dir);
-    fprintf('\n  Created sct directory: %s\n', sct_dir);
+    fprintf('  Created sct directory: %s\n', sct_dir);
 else
-    fprintf('\n  sct directory exists: %s\n', sct_dir);
-end
-
-sim_ct_dir = fullfile(rawwd, 'sim_ct');
-if ~isfolder(sim_ct_dir)
-    mkdir(sim_ct_dir);
+    fprintf('  sct directory exists: %s\n', sct_dir);
 end
 
 %% ======================== SORT SCT FILES ========================
 
-fprintf('\n  [2/6] Identifying and sorting SCT (synthetic CT)...\n');
-[sctSeriesUID, sctStudyUID, sctFrameUID] = sortSctFiles(dcmCol, sct_dir);
+fprintf('  Sorting SCT files...\n');
+sctSeriesUID = sortSctFiles(ctInfo, rawwd, sct_dir);
 
 if isempty(sctSeriesUID)
     warning('step0_sort_dicom:NoSCT', ...
         'No SCT series found for patient %s, %s', patient_id, session);
 end
 
-%% ======================== SORT SIM CT FILES ========================
+%% ======================== SORT RT FILES ========================
 
-fprintf('\n  [3/6] Identifying and sorting simulation CT...\n');
-sim_ct_dir = sortSimCtFiles(dcmCol, sim_ct_dir, sctSeriesUID);
+fprintf('  Classifying RTPLAN files (REFERENCE / ADAPTED)...\n');
+sortRTFiles(ctInfo, rawwd, sct_dir, sctSeriesUID);
 
-%% ======================== FIND ALL RTPLAN FILES ========================
+%% ======================== SORT SIMULATION CT FILES ========================
 
-fprintf('\n  [4/6] Scanning RTPLAN files for RTPlanRelationship...\n');
-allRtplanFiles = findAllRtplanFiles(rawwd);
-
-if isempty(allRtplanFiles)
-    warning('step0_sort_dicom:NoRTPlans', 'No RTPLAN files found in %s', rawwd);
-    return;
-end
-
-fprintf('    Found %d RTPLAN file(s) total\n', length(allRtplanFiles));
-
-% Search each RTPLAN for RTPlanRelationship = contains REFERENCE or ADAPTED
-% Also collect metadata for every RTPLAN encountered
-referencePlanFile = '';
-adaptedPlanFile   = '';
-referencePlanUID  = '';
-adaptedPlanUID    = '';
-referenceStructUID = '';
-adaptedStructUID   = '';
-
-for i = 1:length(allRtplanFiles)
-    fp = allRtplanFiles{i};
-    try
-        info = dicominfo(fp);
-    catch
-        fprintf('    [WARN] Could not read: %s\n', fp);
-        continue;
-    end
-
-    relationship = getRTPlanRelationship(info);
-    fprintf('    %s  -> RTPlanRelationship: "%s"\n', ...
-        getFriendlyName(fp), relationship);
-
-    % Determine sorted label for this plan
-    sorted_label    = 'unmatched';
-    sorted_filename = '';
-
-    % Check for REFERENCE
-    if contains(relationship, 'REFERENCE', 'IgnoreCase', true) && isempty(referencePlanFile)
-        referencePlanFile  = fp;
-        referencePlanUID   = info.SOPInstanceUID;
-        referenceStructUID = getReferencedStructUID(info);
-        sorted_label       = 'REFERENCE';
-        sorted_filename    = 'RP_reference.dcm';
-        fprintf('      ** Identified as REFERENCE plan\n');
-        confirmImageSet(info, sctSeriesUID, sctStudyUID, sctFrameUID, 'REFERENCE');
-    end
-
-    % Check for ADAPTED
-    if contains(relationship, 'ADAPTED', 'IgnoreCase', true) && isempty(adaptedPlanFile)
-        adaptedPlanFile  = fp;
-        adaptedPlanUID   = info.SOPInstanceUID;
-        adaptedStructUID = getReferencedStructUID(info);
-        sorted_label     = 'ADAPTED';
-        sorted_filename  = 'RP_adapted.dcm';
-        fprintf('      ** Identified as ADAPTED plan\n');
-        confirmImageSet(info, sctSeriesUID, sctStudyUID, sctFrameUID, 'ADAPTED');
-    end
-
-    % Collect metadata entry
-    rt_meta_idx = rt_meta_idx + 1;
-    RT_metadata{rt_meta_idx} = collectRTMetadata(info, fp, 'RTPLAN', ...
-        sorted_label, sorted_filename);
-end
-
-% Report
-if isempty(referencePlanFile)
-    warning('step0_sort_dicom:NoReferencePlan', ...
-        'No RTPLAN with RTPlanRelationship containing "REFERENCE" found.');
-end
-if isempty(adaptedPlanFile)
-    warning('step0_sort_dicom:NoAdaptedPlan', ...
-        'No RTPLAN with RTPlanRelationship containing "ADAPTED" found.');
-end
-
-%% ======================== COPY RTPLAN FILES ========================
-
-fprintf('\n  [5/6] Copying RTPLAN files to sct directory...\n');
-
-if ~isempty(referencePlanFile)
-    destRef = fullfile(sct_dir, 'RP_reference.dcm');
-    copyDicomFile(referencePlanFile, destRef, 'RP_reference.dcm');
-end
-
-if ~isempty(adaptedPlanFile)
-    destAdp = fullfile(sct_dir, 'RP_adapted.dcm');
-    copyDicomFile(adaptedPlanFile, destAdp, 'RP_adapted.dcm');
-end
-
-%% ======================== SORT RTSTRUCT FILES ========================
-
-fprintf('\n  [6a/6] Sorting RTSTRUCT files...\n');
-allRtstructFiles = findAllRtFiles(rawwd, 'RS');
-
-sortRtstructForPlan(allRtstructFiles, referenceStructUID, sct_dir, 'RS_reference.dcm', 'REFERENCE');
-sortRtstructForPlan(allRtstructFiles, adaptedStructUID,   sct_dir, 'RS_adapted.dcm',   'ADAPTED');
-
-% Collect metadata for all RTSTRUCT files
-for i = 1:length(allRtstructFiles)
-    fp = allRtstructFiles{i};
-    try
-        info = dicominfo(fp);
-    catch
-        fprintf('    [WARN] Could not read RTSTRUCT metadata: %s\n', getFriendlyName(fp));
-        continue;
-    end
-    % Determine label
-    sorted_label    = 'unmatched';
-    sorted_filename = '';
-    if isfield(info, 'SOPInstanceUID')
-        uid = strtrim(char(info.SOPInstanceUID));
-        if strcmp(uid, referenceStructUID)
-            sorted_label    = 'REFERENCE';
-            sorted_filename = 'RS_reference.dcm';
-        elseif strcmp(uid, adaptedStructUID)
-            sorted_label    = 'ADAPTED';
-            sorted_filename = 'RS_adapted.dcm';
-        end
-    end
-    rt_meta_idx = rt_meta_idx + 1;
-    RT_metadata{rt_meta_idx} = collectRTMetadata(info, fp, 'RTSTRUCT', ...
-        sorted_label, sorted_filename);
-end
-
-%% ======================== SORT RTDOSE FILES ========================
-
-fprintf('\n  [6b/6] Sorting RTDOSE files...\n');
-allRtdoseFiles = findAllRtFiles(rawwd, 'RD');
-
-sortRtdoseForPlan(allRtdoseFiles, referencePlanUID, sct_dir, 'RD_reference.dcm', 'REFERENCE');
-sortRtdoseForPlan(allRtdoseFiles, adaptedPlanUID,   sct_dir, 'RD_adapted.dcm',   'ADAPTED');
-
-% Collect metadata for all RTDOSE files
-for i = 1:length(allRtdoseFiles)
-    fp = allRtdoseFiles{i};
-    try
-        info = dicominfo(fp);
-    catch
-        fprintf('    [WARN] Could not read RTDOSE metadata: %s\n', getFriendlyName(fp));
-        continue;
-    end
-    % Determine label by matching referenced plan UID
-    sorted_label    = 'unmatched';
-    sorted_filename = '';
-    refPlanUID = getReferencedPlanUID(info);
-    if strcmp(refPlanUID, referencePlanUID) && ~isempty(referencePlanUID)
-        sorted_label    = 'REFERENCE';
-        sorted_filename = 'RD_reference.dcm';
-    elseif strcmp(refPlanUID, adaptedPlanUID) && ~isempty(adaptedPlanUID)
-        sorted_label    = 'ADAPTED';
-        sorted_filename = 'RD_adapted.dcm';
-    end
-    rt_meta_idx = rt_meta_idx + 1;
-    RT_metadata{rt_meta_idx} = collectRTMetadata(info, fp, 'RTDOSE', ...
-        sorted_label, sorted_filename);
-end
+fprintf('  Searching for simulation CT series...\n');
+sim_ct_dir = fullfile(rawwd, 'sim_ct');
+sim_ct_dir = sortSimCtFiles(ctInfo, rawwd, sim_ct_dir, sctSeriesUID);
 
 %% ======================== VERIFY OUTPUT ========================
 
-fprintf('\n  === Sorting complete ===\n');
-allOut = dir(fullfile(sct_dir, '*.dcm'));
-ctCount  = sum(~cellfun(@isempty, regexp({allOut.name}, '^CT', 'once')));
-rtCount  = length(allOut) - ctCount;
-fprintf('  SCT directory: %d CT slices, %d RT files\n', ctCount, rtCount);
-fprintf('  Expected RT files: RP_reference, RP_adapted, RS_reference, RS_adapted, RD_reference, RD_adapted\n');
+sctFiles = dir(fullfile(sct_dir, '*.dcm'));
+fprintf('  Sorting complete. %d files in sct directory.\n', length(sctFiles));
 
-% List RT files found
-for k = 1:length(allOut)
-    if ~startsWith(allOut(k).name, 'CT')
-        fprintf('    %s\n', allOut(k).name);
-    end
+hasCT          = ~isempty(dir(fullfile(sct_dir, 'CT*.dcm')));
+hasRTSTRUCTref = isfile(fullfile(sct_dir, 'RS_reference.dcm'));
+hasRTSTRUCTadp = isfile(fullfile(sct_dir, 'RS_adapted.dcm'));
+hasRTPLANref   = isfile(fullfile(sct_dir, 'RP_reference.dcm'));
+hasRTPLANadp   = isfile(fullfile(sct_dir, 'RP_adapted.dcm'));
+hasRTDOSEref   = isfile(fullfile(sct_dir, 'RD_reference.dcm'));
+hasRTDOSEadp   = isfile(fullfile(sct_dir, 'RD_adapted.dcm'));
+
+if ~hasCT
+    warning('step0_sort_dicom:MissingFile', 'No CT files found in sct directory');
+end
+if ~hasRTPLANref
+    warning('step0_sort_dicom:MissingFile', 'No RP_reference.dcm found in sct directory');
+end
+if ~hasRTPLANadp
+    warning('step0_sort_dicom:MissingFile', 'No RP_adapted.dcm found in sct directory');
+end
+if ~hasRTSTRUCTref
+    warning('step0_sort_dicom:MissingFile', 'No RS_reference.dcm found in sct directory');
+end
+if ~hasRTSTRUCTadp
+    warning('step0_sort_dicom:MissingFile', 'No RS_adapted.dcm found in sct directory');
+end
+if ~hasRTDOSEref
+    warning('step0_sort_dicom:MissingFile', 'No RD_reference.dcm found in sct directory');
+end
+if ~hasRTDOSEadp
+    warning('step0_sort_dicom:MissingFile', 'No RD_adapted.dcm found in sct directory');
 end
 
-simOut = dir(fullfile(sim_ct_dir, '*.dcm'));
-fprintf('  Sim CT directory: %d CT slices\n', length(simOut));
+fprintf('\n  --- Sorted file summary ---\n');
+fprintf('    CT slices      : %s\n',  tf2str(hasCT));
+fprintf('    RP_reference   : %s\n',  tf2str(hasRTPLANref));
+fprintf('    RP_adapted     : %s\n',  tf2str(hasRTPLANadp));
+fprintf('    RS_reference   : %s\n',  tf2str(hasRTSTRUCTref));
+fprintf('    RS_adapted     : %s\n',  tf2str(hasRTSTRUCTadp));
+fprintf('    RD_reference   : %s\n',  tf2str(hasRTDOSEref));
+fprintf('    RD_adapted     : %s\n',  tf2str(hasRTDOSEadp));
+fprintf('  ---------------------------\n');
 
-%% ======================== SAVE RT METADATA ========================
-
-fprintf('\n  RT_metadata: %d RT file entries collected\n', rt_meta_idx);
-fprintf('  %-12s  %-12s  %-30s  %s\n', 'Modality', 'Label', 'Sorted filename', 'Source file');
-fprintf('  %s\n', repmat('-', 1, 90));
-for k = 1:rt_meta_idx
-    m = RT_metadata{k};
-    fprintf('  %-12s  %-12s  %-30s  %s\n', ...
-        m.modality, m.sorted_label, m.sorted_filename, m.filename);
+if ~isempty(sim_ct_dir)
+    simCtFiles = dir(fullfile(sim_ct_dir, '*.dcm'));
+    fprintf('  Simulation CT: %d files in %s\n', length(simCtFiles), sim_ct_dir);
+else
+    warning('step0_sort_dicom:NoSimCT', ...
+        'No simulation CT series found for patient %s, %s', patient_id, session);
 end
 
-% Save to sct directory for downstream reference
-rt_meta_save_path = fullfile(sct_dir, 'RT_metadata.mat');
-save(rt_meta_save_path, 'RT_metadata');
-fprintf('\n  RT_metadata saved to: %s\n', rt_meta_save_path);
+fprintf('  Step 0 complete for %s/%s\n', patient_id, session);
 
-end % END MAIN FUNCTION
-
-
-%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-%% LOCAL FUNCTIONS
-%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-
-function printCollectionInfo(dcmCol)
-%PRINTCOLLECTIONINFO Display summary of DICOM collection
-    fprintf('    %-40s %-15s %-20s %-20s\n', ...
-        'SeriesDescription', 'Modality', 'SeriesDate', 'SeriesTime');
-    fprintf('    %s\n', repmat('-', 1, 100));
-    for i = 1:height(dcmCol)
-        desc = '';
-        mod  = '';
-        dat  = '';
-        tim  = '';
-        if ismember('SeriesDescription', dcmCol.Properties.VariableNames)
-            desc = char(dcmCol.SeriesDescription(i));
-        end
-        if ismember('Modality', dcmCol.Properties.VariableNames)
-            mod = char(dcmCol.Modality(i));
-        end
-        if ismember('SeriesDate', dcmCol.Properties.VariableNames)
-            dat = char(dcmCol.SeriesDate(i));
-        end
-        if ismember('SeriesTime', dcmCol.Properties.VariableNames)
-            tim = char(dcmCol.SeriesTime(i));
-        end
-        fprintf('    %-40s %-15s %-20s %-20s\n', ...
-            desc(1:min(end,40)), mod(1:min(end,15)), dat(1:min(end,20)), tim(1:min(end,20)));
-    end
 end
 
 
-function [sctSeriesUID, sctStudyUID, sctFrameUID] = sortSctFiles(dcmCol, destDir)
-%SORTSCTFILES Identify SCT series and copy CT slices to destDir
+%% ========================================================================
+%  LOCAL HELPER FUNCTIONS
+%% ========================================================================
+
+function s = tf2str(val)
+    if val, s = 'FOUND'; else, s = 'MISSING'; end
+end
+
+
+function sctSeriesUID = sortSctFiles(ctInfo, sourceDir, destDir) %#ok<INUSL>
+%SORTSCTFILES Sort SCT DICOM files and extract SeriesInstanceUID
+%
+%   sctSeriesUID = sortSctFiles(ctInfo, sourceDir, destDir)
+%
 %   Three-tier priority:
-%     1. SeriesDescription contains 'sct'
-%     2. Empty/unparseable SeriesDate or SeriesTime
-%     3. Oldest valid timestamp
+%     1. SeriesDescription exactly 'sct' (case-insensitive)
+%     2. CT series with empty SeriesDate/SeriesTime
+%     3. Oldest CT timestamp
 
     sctSeriesUID = '';
-    sctStudyUID  = '';
-    sctFrameUID  = '';
 
-    % Restrict to CT modality rows
-    if ismember('Modality', dcmCol.Properties.VariableNames)
-        ctMask = strcmpi(dcmCol.Modality, 'CT');
-        ctCol  = dcmCol(ctMask, :);
-    else
-        ctCol = dcmCol;
-    end
-
-    if height(ctCol) == 0
-        warning('sortSctFiles:NoCT', 'No CT series found in collection');
+    if ~ismember('SeriesDescription', ctInfo.Properties.VariableNames)
+        warning('sortSctFiles:NoSeriesDescription', ...
+            'SeriesDescription column not found in DICOM collection');
         return;
     end
 
-    % --- Tier 1: description contains 'sct' ---
-    selectedRow = [];
-    if ismember('SeriesDescription', ctCol.Properties.VariableNames)
-        descMatch = find(contains(ctCol.SeriesDescription, 'sct', 'IgnoreCase', true), 1);
-        if ~isempty(descMatch)
-            selectedRow = descMatch;
-            fprintf('    SCT identified by description match (Tier 1)\n');
-        end
-    end
+    rowIndex = strcmpi(ctInfo.SeriesDescription, 'sct');
+    sctInfo  = ctInfo(rowIndex, :);
 
-    % --- Tier 2: empty datetime ---
-    if isempty(selectedRow) && ismember('SeriesDate', ctCol.Properties.VariableNames)
-        for i = 1:height(ctCol)
-            d = char(ctCol.SeriesDate(i));
-            t = char(ctCol.SeriesTime(i));
-            if isempty(strtrim(d)) || isempty(strtrim(t))
-                selectedRow = i;
-                fprintf('    SCT identified by empty datetime (Tier 2)\n');
-                break;
-            end
-        end
-    end
-
-    % --- Tier 3: oldest valid timestamp ---
-    if isempty(selectedRow)
-        oldestTime = Inf;
-        for i = 1:height(ctCol)
-            dt = parseDateTime(char(ctCol.SeriesDate(i)), char(ctCol.SeriesTime(i)));
-            if ~isnan(dt) && dt < oldestTime
-                oldestTime   = dt;
-                selectedRow  = i;
-            end
-        end
-        if ~isempty(selectedRow)
-            fprintf('    SCT identified by oldest timestamp (Tier 3)\n');
-        end
-    end
-
-    if isempty(selectedRow)
-        warning('sortSctFiles:NotFound', 'Could not identify SCT series');
+    if height(sctInfo) == 0
+        warning('sortSctFiles:NoSCT', 'No SCT series found in collection');
         return;
     end
 
-    % Read first file for UIDs
-    files = ctCol.Filenames{selectedRow};
-    if isempty(files)
+    fprintf('    Found %d SCT series\n', height(sctInfo));
+
+    sctFiles = sctInfo.Filenames{1};
+
+    if isempty(sctFiles)
         warning('sortSctFiles:EmptySeries', 'SCT series has no files');
         return;
     end
 
+    firstFile = sctFiles{1};
     try
-        firstInfo    = dicominfo(files{1});
-        sctSeriesUID = firstInfo.SeriesInstanceUID;
-        sctStudyUID  = firstInfo.StudyInstanceUID;
-        if isfield(firstInfo, 'FrameOfReferenceUID')
-            sctFrameUID = firstInfo.FrameOfReferenceUID;
-        end
-        fprintf('    SCT SeriesUID: %s\n', sctSeriesUID);
-        fprintf('    SCT StudyUID:  %s\n', sctStudyUID);
-        if ~isempty(sctFrameUID)
-            fprintf('    SCT FrameUID:  %s\n', sctFrameUID);
-        end
+        sctMetadata  = dicominfo(firstFile);
+        sctSeriesUID = sctMetadata.SeriesInstanceUID;
+        fprintf('    SCT SeriesInstanceUID: %s\n', sctSeriesUID);
+        fprintf('    SCT Series Date/Time : %s / %s\n', ...
+            sctMetadata.SeriesDate, sctMetadata.SeriesTime);
     catch ME
-        warning('sortSctFiles:MetadataError', 'Failed to read SCT metadata: %s', ME.message);
+        warning('sortSctFiles:MetadataError', ...
+            'Failed to read SCT metadata: %s', ME.message);
         return;
     end
 
-    % Copy CT slices
-    numCopied  = 0;
+    numMoved   = 0;
     numSkipped = 0;
-    for k = 1:length(files)
-        src = files{k};
-        [~, nm, ex] = fileparts(src);
-        dst = fullfile(destDir, [nm ex]);
-        if exist(dst, 'file')
-            numSkipped = numSkipped + 1;
-        else
-            try
-                copyfile(src, dst);
-                numCopied = numCopied + 1;
-            catch ME
-                warning('sortSctFiles:CopyError', 'Failed to copy %s: %s', nm, ME.message);
-            end
-        end
-    end
-    fprintf('    SCT: %d slices copied, %d already existed\n', numCopied, numSkipped);
-end
 
+    for k = 1:length(sctFiles)
+        srcFile = sctFiles{k};
+        [~, name, ext] = fileparts(srcFile);
+        destFile = fullfile(destDir, [name, ext]);
 
-function sim_ct_dir = sortSimCtFiles(dcmCol, destDir, excludeSeriesUID)
-%SORTSIMCTFILES Identify simulation CT and copy slices to destDir
-%   Three-tier priority (excludes the SCT series):
-%     1. SeriesDescription contains 'sim'
-%     2. Empty/unparseable SeriesDate or SeriesTime
-%     3. Oldest valid timestamp
-
-    sim_ct_dir = destDir;
-
-    if ismember('Modality', dcmCol.Properties.VariableNames)
-        ctMask = strcmpi(dcmCol.Modality, 'CT');
-        ctCol  = dcmCol(ctMask, :);
-    else
-        ctCol = dcmCol;
-    end
-
-    if height(ctCol) == 0
-        warning('sortSimCtFiles:NoCT', 'No CT series found');
-        return;
-    end
-
-    % Exclude the already-identified SCT series
-    if ~isempty(excludeSeriesUID) && ismember('SeriesInstanceUID', ctCol.Properties.VariableNames)
-        notSct = ~strcmp(ctCol.SeriesInstanceUID, excludeSeriesUID);
-        ctCol  = ctCol(notSct, :);
-    end
-
-    if height(ctCol) == 0
-        fprintf('    No additional CT series found for sim CT\n');
-        return;
-    end
-
-    selectedRow = [];
-
-    % Tier 1: description contains 'sim'
-    if ismember('SeriesDescription', ctCol.Properties.VariableNames)
-        descMatch = find(contains(ctCol.SeriesDescription, 'sim', 'IgnoreCase', true), 1);
-        if ~isempty(descMatch)
-            selectedRow = descMatch;
-            fprintf('    Sim CT identified by description match (Tier 1)\n');
-        end
-    end
-
-    % Tier 2: empty datetime
-    if isempty(selectedRow) && ismember('SeriesDate', ctCol.Properties.VariableNames)
-        for i = 1:height(ctCol)
-            d = char(ctCol.SeriesDate(i));
-            t = char(ctCol.SeriesTime(i));
-            if isempty(strtrim(d)) || isempty(strtrim(t))
-                selectedRow = i;
-                fprintf('    Sim CT identified by empty datetime (Tier 2)\n');
-                break;
-            end
-        end
-    end
-
-    % Tier 3: oldest valid timestamp
-    if isempty(selectedRow)
-        oldestTime = Inf;
-        for i = 1:height(ctCol)
-            dt = parseDateTime(char(ctCol.SeriesDate(i)), char(ctCol.SeriesTime(i)));
-            if ~isnan(dt) && dt < oldestTime
-                oldestTime  = dt;
-                selectedRow = i;
-            end
-        end
-        if ~isempty(selectedRow)
-            fprintf('    Sim CT identified by oldest timestamp (Tier 3)\n');
-        end
-    end
-
-    if isempty(selectedRow)
-        fprintf('    [WARN] Could not identify simulation CT series\n');
-        return;
-    end
-
-    files = ctCol.Filenames{selectedRow};
-    numCopied  = 0;
-    numSkipped = 0;
-    for k = 1:length(files)
-        src = files{k};
-        [~, nm, ex] = fileparts(src);
-        dst = fullfile(destDir, [nm ex]);
-        if exist(dst, 'file')
-            numSkipped = numSkipped + 1;
-        else
-            try
-                copyfile(src, dst);
-                numCopied = numCopied + 1;
-            catch ME
-                warning('sortSimCtFiles:CopyError', 'Failed to copy %s: %s', nm, ME.message);
-            end
-        end
-    end
-    fprintf('    Sim CT: %d slices copied, %d already existed\n', numCopied, numSkipped);
-end
-
-
-function rtplanFiles = findAllRtplanFiles(searchDir)
-%FINDALLRTPLANFILES Recursively find all RTPLAN DICOM files
-%   Identifies by Modality = RTPLAN (reads each .dcm header)
-
-    rtplanFiles = {};
-    allDcm = dir(fullfile(searchDir, '**', '*.dcm'));
-
-    for i = 1:length(allDcm)
-        fp = fullfile(allDcm(i).folder, allDcm(i).name);
-        % Quick check via filename prefix
-        if startsWith(allDcm(i).name, 'RP')
-            rtplanFiles{end+1} = fp; %#ok<AGROW>
-            continue;
-        end
-        % Otherwise check modality tag
-        try
-            info = dicominfo(fp, 'UseDictionaryVR', false);
-            if isfield(info, 'Modality') && strcmpi(info.Modality, 'RTPLAN')
-                rtplanFiles{end+1} = fp; %#ok<AGROW>
-            end
-        catch
-            % Not a readable DICOM or not RTPLAN
-        end
-    end
-end
-
-
-function rtFiles = findAllRtFiles(searchDir, prefix)
-%FINDALLRTFILES Find all RT files with given filename prefix (RS or RD)
-
-    rtFiles = {};
-    allDcm = dir(fullfile(searchDir, '**', '*.dcm'));
-    for i = 1:length(allDcm)
-        if startsWith(allDcm(i).name, prefix)
-            rtFiles{end+1} = fullfile(allDcm(i).folder, allDcm(i).name); %#ok<AGROW>
-        end
-    end
-    % Also catch files that match by modality if none found by prefix
-    if isempty(rtFiles)
-        modTarget = '';
-        if strcmp(prefix, 'RS'), modTarget = 'RTSTRUCT'; end
-        if strcmp(prefix, 'RD'), modTarget = 'RTDOSE';   end
-        if ~isempty(modTarget)
-            for i = 1:length(allDcm)
-                fp = fullfile(allDcm(i).folder, allDcm(i).name);
+        if exist(srcFile, 'file')
+            if exist(destFile, 'file')
+                numSkipped = numSkipped + 1;
+            else
                 try
-                    info = dicominfo(fp, 'UseDictionaryVR', false);
-                    if isfield(info, 'Modality') && strcmpi(info.Modality, modTarget)
-                        rtFiles{end+1} = fp; %#ok<AGROW>
-                    end
-                catch
+                    movefile(srcFile, destFile);
+                    numMoved = numMoved + 1;
+                catch ME
+                    warning('sortSctFiles:MoveError', ...
+                        'Failed to move file %s: %s', name, ME.message);
                 end
             end
         end
     end
+
+    fprintf('    SCT files: %d moved, %d already existed\n', numMoved, numSkipped);
 end
 
 
-function relationship = getRTPlanRelationship(planInfo)
-%GETRTPLANRELATIONSHIP Extract RTPlanRelationship from plan DICOM info
-%   Checks ReferenceRTPlanSequence.Item_1.RTPlanRelationship
-%   Returns empty string if not found
+function sortRTFiles(ctInfo, sourceDir, destDir, sctSeriesUID) %#ok<INUSL>
+%SORTRTFILES Classify RTPLAN files as REFERENCE or ADAPTED, then trace and
+%            copy each plan's RTSTRUCT and RTDOSE.
+%
+%   sortRTFiles(ctInfo, sourceDir, destDir, sctSeriesUID)
+%
+%   For each RTPLAN, the field
+%       metadata.ReferenceRTPlanSequence.Item_1.RTPlanRelationship
+%   is read.  If it contains 'REFERENCE' the plan is classified as the
+%   reference plan; if it contains 'ADAPTED' it is the adaptive plan.
+%   The field name ReferencedRTPlanSequence is tried as a fallback.
+%
+%   For each classified plan the function:
+%     1. Traces the RTSTRUCT via ReferencedStructureSetSequence
+%     2. Confirms the RTSTRUCT's CT reference matches sctSeriesUID
+%     3. Traces the RTDOSE via its ReferencedRTPlanSequence
+%     4. Copies files with names  RP/RS/RD_reference.dcm  or  RP/RS/RD_adapted.dcm
+
+    % ---- collect all RTPLAN file paths --------------------------------
+    if ~ismember('Modality', ctInfo.Properties.VariableNames)
+        warning('sortRTFiles:NoModality', 'Modality column missing');
+        return;
+    end
+
+    planRows = strcmp(ctInfo.Modality, 'RTPLAN');
+    if ~any(planRows)
+        warning('sortRTFiles:NoRTPLAN', 'No RTPLAN files found in collection');
+        return;
+    end
+    planTable = ctInfo(planRows, :);
+    fprintf('    Found %d RTPLAN series to inspect\n', height(planTable));
+
+    % ---- collect all RTSTRUCT and RTDOSE paths ----------------------
+    allStructPaths = collectModalityPaths(ctInfo, 'RTSTRUCT');
+    allDosePaths   = collectModalityPaths(ctInfo, 'RTDOSE');
+    fprintf('    Found %d RTSTRUCT, %d RTDOSE files\n', ...
+        length(allStructPaths), length(allDosePaths));
+
+    % ---- classify each RTPLAN by RTPlanRelationship -----------------
+    refPlanPath = '';
+    adpPlanPath = '';
+
+    for pi = 1:height(planTable)
+        fileCell = planTable.Filenames{pi};
+        if isempty(fileCell) || isempty(fileCell{1}), continue; end
+        planPath = fileCell{1};
+
+        try
+            meta = dicominfo(planPath);
+        catch
+            warning('sortRTFiles:DicomReadError', ...
+                'Cannot read DICOM metadata from: %s', planPath);
+            continue;
+        end
+
+        relationship = extractRTPlanRelationship(meta);
+
+        if isempty(relationship)
+            fprintf('    [SKIP] No RTPlanRelationship found in: %s\n', planPath);
+            continue;
+        end
+
+        fprintf('    Plan: %s  →  RTPlanRelationship = "%s"\n', ...
+            planPath, relationship);
+
+        if contains(upper(relationship), 'REFERENCE')
+            if ~isempty(refPlanPath)
+                warning('sortRTFiles:DuplicatePlan', ...
+                    'Multiple REFERENCE plans found; keeping first.');
+            else
+                refPlanPath = planPath;
+                fprintf('      → Classified as REFERENCE plan\n');
+            end
+
+        elseif contains(upper(relationship), 'ADAPTED')
+            if ~isempty(adpPlanPath)
+                warning('sortRTFiles:DuplicatePlan', ...
+                    'Multiple ADAPTED plans found; keeping first.');
+            else
+                adpPlanPath = planPath;
+                fprintf('      → Classified as ADAPTED plan\n');
+            end
+        else
+            fprintf('      → Unrecognised relationship "%s" (skipped)\n', relationship);
+        end
+    end
+
+    % ---- process each plan type ------------------------------------
+    planTypes  = {'reference',  'adapted'};
+    planPaths  = {refPlanPath,  adpPlanPath};
+
+    for ti = 1:2
+        label    = planTypes{ti};
+        planPath = planPaths{ti};
+
+        if isempty(planPath)
+            warning('sortRTFiles:MissingPlan', ...
+                'No %s plan found; skipping RS/RP/RD for this type.', upper(label));
+            continue;
+        end
+
+        fprintf('\n  --- Processing %s plan ---\n', upper(label));
+
+        % Copy RTPLAN
+        destRP = fullfile(destDir, sprintf('RP_%s.dcm', label));
+        copyFileAs(planPath, destRP, sprintf('RP_%s', label));
+
+        planMeta = dicominfo(planPath);
+
+        % ---- find RTSTRUCT ------------------------------------------
+        structSOPUID = '';
+        try
+            refSSSeq = planMeta.ReferencedStructureSetSequence;
+            if isfield(refSSSeq, 'Item_1') && ...
+               isfield(refSSSeq.Item_1, 'ReferencedSOPInstanceUID')
+                structSOPUID = refSSSeq.Item_1.ReferencedSOPInstanceUID;
+            end
+        catch
+        end
+
+        if isempty(structSOPUID)
+            warning('sortRTFiles:NoStructRef', ...
+                '%s plan has no ReferencedStructureSetSequence.', upper(label));
+        else
+            structPath = findBySopUID(allStructPaths, structSOPUID);
+            if isempty(structPath)
+                warning('sortRTFiles:StructNotFound', ...
+                    'RTSTRUCT with SOPInstanceUID %s not found for %s plan.', ...
+                    structSOPUID, upper(label));
+            else
+                % Confirm RTSTRUCT references SCT
+                confirmStructReferencesSCT(structPath, sctSeriesUID, label);
+                destRS = fullfile(destDir, sprintf('RS_%s.dcm', label));
+                copyFileAs(structPath, destRS, sprintf('RS_%s', label));
+            end
+        end
+
+        % ---- find RTDOSE --------------------------------------------
+        planSOPUID = planMeta.SOPInstanceUID;
+        dosePath   = findDoseForPlan(allDosePaths, planSOPUID);
+
+        if isempty(dosePath)
+            warning('sortRTFiles:DoseNotFound', ...
+                'No RTDOSE referencing %s plan (SOPInstanceUID %s).', ...
+                upper(label), planSOPUID);
+        else
+            destRD = fullfile(destDir, sprintf('RD_%s.dcm', label));
+            copyFileAs(dosePath, destRD, sprintf('RD_%s', label));
+        end
+    end
+end
+
+
+function relationship = extractRTPlanRelationship(meta)
+%EXTRACTRTPLANRELATIONSHIP Read RTPlanRelationship from RTPLAN metadata.
+%   Tries 'ReferenceRTPlanSequence' first, then 'ReferencedRTPlanSequence'.
+%   Returns '' if not found.
 
     relationship = '';
 
-    if ~isfield(planInfo, 'ReferenceRTPlanSequence')
-        return;
-    end
+    candidates = {'ReferenceRTPlanSequence', 'ReferencedRTPlanSequence'};
 
-    seq = planInfo.ReferenceRTPlanSequence;
-
-    % Try Item_1 first
-    if isfield(seq, 'Item_1')
-        item = seq.Item_1;
-    elseif isstruct(seq) && ~isempty(fieldnames(seq))
-        fields = fieldnames(seq);
-        item = seq.(fields{1});
-    else
-        return;
-    end
-
-    if isfield(item, 'RTPlanRelationship')
-        relationship = strtrim(char(item.RTPlanRelationship));
-    end
-end
-
-
-function structUID = getReferencedStructUID(planInfo)
-%GETREFERENCEDSTRUCTUID Get the SOPInstanceUID of the referenced RTSTRUCT
-    structUID = '';
-    if isfield(planInfo, 'ReferencedStructureSetSequence')
-        seq = planInfo.ReferencedStructureSetSequence;
-        if isfield(seq, 'Item_1') && isfield(seq.Item_1, 'ReferencedSOPInstanceUID')
-            structUID = strtrim(char(seq.Item_1.ReferencedSOPInstanceUID));
-        end
-    end
-end
-
-
-function confirmImageSet(planInfo, sctSeriesUID, sctStudyUID, sctFrameUID, planLabel)
-%CONFIRMIMAGESETMATCH Check that plan's referenced image set matches the SCT
-%   Checks StudyInstanceUID and/or FrameOfReferenceUID linkage
-
-    matched = false;
-    details = '';
-
-    % Check ReferencedStudySequence
-    if isfield(planInfo, 'ReferencedStudySequence')
-        seq = planInfo.ReferencedStudySequence;
-        if isfield(seq, 'Item_1') && isfield(seq.Item_1, 'ReferencedSOPInstanceUID')
-            planStudy = strtrim(char(seq.Item_1.ReferencedSOPInstanceUID));
-            if strcmp(planStudy, sctStudyUID)
-                matched = true;
-                details = 'StudyInstanceUID matches SCT';
-            end
-        end
-    end
-
-    % Check StudyInstanceUID directly on plan
-    if ~matched && isfield(planInfo, 'StudyInstanceUID')
-        if strcmp(strtrim(char(planInfo.StudyInstanceUID)), sctStudyUID)
-            matched = true;
-            details = 'Plan StudyUID matches SCT StudyUID';
-        end
-    end
-
-    % Check FrameOfReferenceUID linkage
-    if ~matched && ~isempty(sctFrameUID) && isfield(planInfo, 'FrameOfReferenceUID')
-        if strcmp(strtrim(char(planInfo.FrameOfReferenceUID)), sctFrameUID)
-            matched = true;
-            details = 'FrameOfReferenceUID matches SCT';
-        end
-    end
-
-    if matched
-        fprintf('      [OK] %s plan image set confirmed: %s\n', planLabel, details);
-    else
-        warning('step0_sort_dicom:ImageSetMismatch', ...
-            '%s plan image set could NOT be confirmed to match SCT. ', ...
-            'Verify manually that plan references the correct SCT.', planLabel);
-    end
-end
-
-
-function sortRtstructForPlan(rtstructFiles, targetStructUID, destDir, outFilename, label)
-%SORTRSTRUCTFORPLAN Find the RTSTRUCT with matching SOPInstanceUID and copy it
-
-    if isempty(targetStructUID)
-        fprintf('    [WARN] No referenced RTSTRUCT UID for %s plan\n', label);
-        return;
-    end
-
-    for i = 1:length(rtstructFiles)
-        fp = rtstructFiles{i};
-        try
-            info = dicominfo(fp);
-        catch
-            continue;
-        end
-        if isfield(info, 'SOPInstanceUID') && ...
-                strcmp(strtrim(char(info.SOPInstanceUID)), targetStructUID)
-            copyDicomFile(fp, fullfile(destDir, outFilename), outFilename);
-            fprintf('    [OK] %s RTSTRUCT -> %s\n', label, outFilename);
-            return;
-        end
-    end
-
-    warning('step0_sort_dicom:RtstructNotFound', ...
-        'RTSTRUCT with SOPInstanceUID %s (for %s plan) not found.', ...
-        targetStructUID, label);
-end
-
-
-function sortRtdoseForPlan(rtdoseFiles, planSOPUID, destDir, outFilename, label)
-%SORTRTSOSEFORPLAN Find the RTDOSE referencing the given plan SOPInstanceUID
-
-    if isempty(planSOPUID)
-        fprintf('    [WARN] No plan SOPInstanceUID for %s RTDOSE search\n', label);
-        return;
-    end
-
-    for i = 1:length(rtdoseFiles)
-        fp = rtdoseFiles{i};
-        try
-            info = dicominfo(fp);
-        catch
-            continue;
-        end
-        referencedUID = getReferencedPlanUID(info);
-        if strcmp(referencedUID, planSOPUID)
-            copyDicomFile(fp, fullfile(destDir, outFilename), outFilename);
-            fprintf('    [OK] %s RTDOSE -> %s\n', label, outFilename);
-            return;
-        end
-    end
-
-    warning('step0_sort_dicom:RtdoseNotFound', ...
-        'RTDOSE referencing plan %s (for %s) not found.', planSOPUID, label);
-end
-
-
-function planUID = getReferencedPlanUID(doseInfo)
-%GETREFERENCEDPLANUID Extract the referenced RTPLAN SOPInstanceUID from RTDOSE
-    planUID = '';
-    if isfield(doseInfo, 'ReferencedRTPlanSequence')
-        seq = doseInfo.ReferencedRTPlanSequence;
-        if isfield(seq, 'Item_1') && isfield(seq.Item_1, 'ReferencedSOPInstanceUID')
-            planUID = strtrim(char(seq.Item_1.ReferencedSOPInstanceUID));
-        end
-    end
-end
-
-
-function copyDicomFile(src, dst, label)
-%COPYDICOMFILE Copy a single DICOM file with feedback
-    if exist(dst, 'file')
-        fprintf('    %s already exists, skipping copy\n', label);
-        return;
-    end
-    try
-        copyfile(src, dst);
-        fprintf('    Copied: %s\n', label);
-    catch ME
-        warning('step0_sort_dicom:CopyError', 'Failed to copy %s: %s', label, ME.message);
-    end
-end
-
-
-function name = getFriendlyName(filepath)
-%GETFRIENDLYNAME Return just the filename from a full path
-    [~, nm, ex] = fileparts(filepath);
-    name = [nm ex];
-end
-
-
-function meta = collectRTMetadata(info, filepath, modality, sorted_label, sorted_filename)
-%COLLECTRTMETADATA Extract key metadata fields from a DICOM info struct
-%
-%   Builds a flat struct with fields common to all RT modalities plus
-%   modality-specific fields. Missing DICOM fields are silently set to ''.
-
-    [~, nm, ex] = fileparts(filepath);
-    meta.filepath        = filepath;
-    meta.filename        = [nm ex];
-    meta.modality        = modality;
-    meta.sorted_label    = sorted_label;
-    meta.sorted_filename = sorted_filename;
-
-    % --- Common fields ---
-    meta.SOPInstanceUID      = getField(info, 'SOPInstanceUID');
-    meta.SOPClassUID         = getField(info, 'SOPClassUID');
-    meta.StudyInstanceUID    = getField(info, 'StudyInstanceUID');
-    meta.SeriesInstanceUID   = getField(info, 'SeriesInstanceUID');
-    meta.SeriesDate          = getField(info, 'SeriesDate');
-    meta.SeriesTime          = getField(info, 'SeriesTime');
-    meta.SeriesDescription   = getField(info, 'SeriesDescription');
-    meta.PatientID           = getField(info, 'PatientID');
-    meta.FrameOfReferenceUID = getField(info, 'FrameOfReferenceUID');
-
-    % --- Modality-specific fields ---
-    switch upper(modality)
-
-        case 'RTPLAN'
-            meta.RTPlanLabel    = getField(info, 'RTPlanLabel');
-            meta.RTPlanName     = getField(info, 'RTPlanName');
-            meta.RTPlanDate     = getField(info, 'RTPlanDate');
-            meta.RTPlanTime     = getField(info, 'RTPlanTime');
-            meta.RTPlanGeometry = getField(info, 'RTPlanGeometry');
-            meta.RTPlanRelationship     = getRTPlanRelationship(info);
-            meta.ReferencedStructSetUID = '';
-            if isfield(info, 'ReferencedStructureSetSequence')
-                seq = info.ReferencedStructureSetSequence;
-                if isfield(seq, 'Item_1') && isfield(seq.Item_1, 'ReferencedSOPInstanceUID')
-                    meta.ReferencedStructSetUID = ...
-                        strtrim(char(seq.Item_1.ReferencedSOPInstanceUID));
+    for ci = 1:length(candidates)
+        fieldName = candidates{ci};
+        if isfield(meta, fieldName)
+            seq = meta.(fieldName);
+            if isstruct(seq) && isfield(seq, 'Item_1')
+                item1 = seq.Item_1;
+                if isfield(item1, 'RTPlanRelationship')
+                    relationship = strtrim(item1.RTPlanRelationship);
+                    return;
                 end
             end
-            meta.NumberOfBeams = 0;
-            if isfield(info, 'BeamSequence')
-                meta.NumberOfBeams = length(fieldnames(info.BeamSequence));
-            end
-            meta.NumberOfFractionsPlanned = '';
-            if isfield(info, 'FractionGroupSequence') && ...
-               isfield(info.FractionGroupSequence, 'Item_1') && ...
-               isfield(info.FractionGroupSequence.Item_1, 'NumberOfFractionsPlanned')
-                meta.NumberOfFractionsPlanned = ...
-                    info.FractionGroupSequence.Item_1.NumberOfFractionsPlanned;
-            end
+        end
+    end
+end
 
-        case 'RTSTRUCT'
-            meta.StructureSetLabel = getField(info, 'StructureSetLabel');
-            meta.StructureSetName  = getField(info, 'StructureSetName');
-            meta.StructureSetDate  = getField(info, 'StructureSetDate');
-            meta.StructureSetTime  = getField(info, 'StructureSetTime');
-            meta.ReferencedSeriesUID = '';
-            if isfield(info, 'ReferencedFrameOfReferenceSequence')
-                seq = info.ReferencedFrameOfReferenceSequence;
-                if isfield(seq, 'Item_1') && ...
-                   isfield(seq.Item_1, 'RTReferencedStudySequence')
-                    studySeq = seq.Item_1.RTReferencedStudySequence;
-                    if isfield(studySeq, 'Item_1') && ...
-                       isfield(studySeq.Item_1, 'RTReferencedSeriesSequence')
-                        seriesSeq = studySeq.Item_1.RTReferencedSeriesSequence;
-                        if isfield(seriesSeq, 'Item_1') && ...
-                           isfield(seriesSeq.Item_1, 'SeriesInstanceUID')
-                            meta.ReferencedSeriesUID = ...
-                                strtrim(char(seriesSeq.Item_1.SeriesInstanceUID));
+
+function paths = collectModalityPaths(ctInfo, modality)
+%COLLECTMODALITYPATHS Return cell array of file paths for a given modality.
+
+    paths = {};
+    if ~ismember('Modality', ctInfo.Properties.VariableNames), return; end
+
+    rows = strcmp(ctInfo.Modality, modality);
+    if ~any(rows), return; end
+
+    subTable = ctInfo(rows, :);
+    for ri = 1:height(subTable)
+        fileCell = subTable.Filenames{ri};
+        if ~isempty(fileCell) && ~isempty(fileCell{1})
+            paths{end+1} = fileCell{1}; %#ok<AGROW>
+        end
+    end
+end
+
+
+function matchPath = findBySopUID(filePaths, targetSOPUID)
+%FINDBYSOPUID Return the first file whose SOPInstanceUID matches targetSOPUID.
+
+    matchPath = '';
+    for fi = 1:length(filePaths)
+        try
+            meta = dicominfo(filePaths{fi});
+            if isfield(meta, 'SOPInstanceUID') && ...
+               strcmp(meta.SOPInstanceUID, targetSOPUID)
+                matchPath = filePaths{fi};
+                return;
+            end
+        catch
+        end
+    end
+end
+
+
+function dosePath = findDoseForPlan(dosePaths, planSOPUID)
+%FINDDOSEFORPLAN Return first RTDOSE whose ReferencedRTPlanSequence points
+%               to planSOPUID.
+
+    dosePath = '';
+    for di = 1:length(dosePaths)
+        try
+            meta = dicominfo(dosePaths{di});
+            if isfield(meta, 'ReferencedRTPlanSequence')
+                seq = meta.ReferencedRTPlanSequence;
+                if isstruct(seq) && isfield(seq, 'Item_1') && ...
+                   isfield(seq.Item_1, 'ReferencedSOPInstanceUID')
+                    if strcmp(seq.Item_1.ReferencedSOPInstanceUID, planSOPUID)
+                        dosePath = dosePaths{di};
+                        return;
+                    end
+                end
+            end
+        catch
+        end
+    end
+end
+
+
+function confirmStructReferencesSCT(structPath, sctSeriesUID, label)
+%CONFIRMSTRUCTREFERENCESSCT Check RTSTRUCT's referenced CT series matches SCT.
+
+    if isempty(sctSeriesUID)
+        fprintf('    [WARN] SCT SeriesInstanceUID unknown; cannot confirm image match for %s plan.\n', upper(label));
+        return;
+    end
+
+    try
+        meta = dicominfo(structPath);
+        referencedUID = '';
+
+        if isfield(meta, 'ReferencedFrameOfReferenceSequence')
+            refFOR = meta.ReferencedFrameOfReferenceSequence;
+            if isstruct(refFOR) && isfield(refFOR, 'Item_1')
+                item1 = refFOR.Item_1;
+                if isfield(item1, 'RTReferencedStudySequence')
+                    studySeq = item1.RTReferencedStudySequence;
+                    if isstruct(studySeq) && isfield(studySeq, 'Item_1')
+                        studyItem = studySeq.Item_1;
+                        if isfield(studyItem, 'RTReferencedSeriesSequence')
+                            seriesSeq = studyItem.RTReferencedSeriesSequence;
+                            if isstruct(seriesSeq) && isfield(seriesSeq, 'Item_1') && ...
+                               isfield(seriesSeq.Item_1, 'SeriesInstanceUID')
+                                referencedUID = seriesSeq.Item_1.SeriesInstanceUID;
+                            end
                         end
                     end
                 end
             end
-            meta.NumberOfROIs = 0;
-            if isfield(info, 'StructureSetROISequence')
-                meta.NumberOfROIs = length(fieldnames(info.StructureSetROISequence));
-            end
-
-        case 'RTDOSE'
-            meta.DoseType          = getField(info, 'DoseType');
-            meta.DoseUnits         = getField(info, 'DoseUnits');
-            meta.DoseSummationType = getField(info, 'DoseSummationType');
-            meta.DoseGridScaling   = '';
-            if isfield(info, 'DoseGridScaling')
-                meta.DoseGridScaling = info.DoseGridScaling;
-            end
-            meta.ReferencedPlanUID = getReferencedPlanUID(info);
-            meta.Rows              = getField(info, 'Rows');
-            meta.Columns           = getField(info, 'Columns');
-            meta.NumberOfFrames    = getField(info, 'NumberOfFrames');
-    end
-end
-
-
-function val = getField(info, fieldName)
-%GETFIELD Safely extract a string or numeric field from a dicominfo struct
-%   Returns '' if the field does not exist
-    if isfield(info, fieldName)
-        raw = info.(fieldName);
-        if ischar(raw) || isstring(raw)
-            val = strtrim(char(raw));
-        else
-            val = raw;   % Return numeric/logical as-is
         end
-    else
-        val = '';
+
+        if isempty(referencedUID)
+            fprintf('    [WARN] Could not extract referenced CT SeriesInstanceUID from RS_%s.\n', label);
+            return;
+        end
+
+        if strcmp(referencedUID, sctSeriesUID)
+            fprintf('    [OK]   RS_%s references the SCT series (UIDs match).\n', label);
+        else
+            warning('sortRTFiles:ImageSetMismatch', ...
+                'RS_%s references CT series\n      %s\n    but SCT is\n      %s\n    — image sets do NOT match!', ...
+                label, referencedUID, sctSeriesUID);
+        end
+
+    catch ME
+        warning('sortRTFiles:ConfirmError', ...
+            'Could not verify image set for RS_%s: %s', label, ME.message);
     end
 end
 
 
-function dt = parseDateTime(dateStr, timeStr)
-%PARSEDATETIME Convert DICOM date/time strings to numeric value for comparison
-%   Returns NaN if either string is empty or unparseable
+function copyFileAs(srcPath, destPath, label)
+%COPYFILEAS Copy srcPath to destPath with logging.
 
-    dt = NaN;
-    dateStr = strtrim(char(dateStr));
-    timeStr = strtrim(char(timeStr));
-
-    if isempty(dateStr) || isempty(timeStr)
+    if isempty(srcPath) || ~isfile(srcPath)
+        warning('copyFileAs:NotFound', 'Source not found for %s: %s', label, srcPath);
         return;
     end
 
-    % DICOM date: YYYYMMDD, time: HHMMSS or HHMMSS.FFFFFF
+    if isfile(destPath)
+        fprintf('    %s already exists in destination (skipping)\n', label);
+        return;
+    end
+
     try
-        if length(dateStr) >= 8 && length(timeStr) >= 6
-            yr  = str2double(dateStr(1:4));
-            mo  = str2double(dateStr(5:6));
-            dy  = str2double(dateStr(7:8));
-            hr  = str2double(timeStr(1:2));
-            mn  = str2double(timeStr(3:4));
-            sc  = str2double(timeStr(5:6));
-            if ~any(isnan([yr mo dy hr mn sc]))
-                dt = datenum(yr, mo, dy, hr, mn, sc);
+        copyfile(srcPath, destPath);
+        fprintf('    Copied %s → %s\n', label, destPath);
+    catch ME
+        warning('copyFileAs:CopyError', 'Failed to copy %s: %s', label, ME.message);
+    end
+end
+
+
+function sim_ct_dir = sortSimCtFiles(ctInfo, sourceDir, sim_ct_dir, sctSeriesUID) %#ok<INUSL>
+%SORTSIMCTFILES Find and move the most recent simulation CT to sim_ct folder.
+%
+%   Three-tier selection priority:
+%     1. CT series with empty SeriesDate / SeriesTime (highest priority)
+%     2. CT series whose description contains 'sim'
+%     3. Oldest timestamp among remaining CT series
+
+    sim_ct_dir = '';
+
+    if ~ismember('Modality', ctInfo.Properties.VariableNames) || ...
+       ~ismember('SeriesDescription', ctInfo.Properties.VariableNames)
+        warning('sortSimCtFiles:MissingColumns', ...
+            'Modality or SeriesDescription column not found in DICOM collection');
+        return;
+    end
+
+    isCT     = strcmpi(ctInfo.Modality, 'CT');
+    isSct    = strcmpi(ctInfo.SeriesDescription, 'sct');
+    eligible = isCT & ~isSct;
+
+    if ~any(eligible)
+        fprintf('    No non-SCT CT series found.\n');
+        return;
+    end
+
+    eligibleInfo = ctInfo(eligible, :);
+    fprintf('    Found %d non-SCT CT series\n', height(eligibleInfo));
+
+    hasSim = contains(lower(eligibleInfo.SeriesDescription), 'sim');
+    if any(hasSim)
+        candidateInfo = eligibleInfo(hasSim, :);
+        fprintf('    Found %d series with ''sim'' in description\n', height(candidateInfo));
+    else
+        candidateInfo = eligibleInfo;
+    end
+
+    numCandidates = height(candidateInfo);
+    dtValues      = zeros(numCandidates, 1);
+
+    for i = 1:numCandidates
+        fileCell = candidateInfo.Filenames{i};
+        if isempty(fileCell) || isempty(fileCell{1})
+            dtValues(i) = NaN;
+            continue;
+        end
+        try
+            meta    = dicominfo(fileCell{1});
+            dateStr = '';
+            timeStr = '';
+            if isfield(meta, 'SeriesDate'), dateStr = strtrim(meta.SeriesDate); end
+            if isfield(meta, 'SeriesTime'), timeStr = strtrim(meta.SeriesTime); end
+
+            if isempty(dateStr) && isempty(timeStr)
+                dtValues(i) = NaN;
+            else
+                dt = str2double([dateStr, timeStr]);
+                dtValues(i) = (isnan(dt) || dt == 0) * NaN + ...
+                              (~(isnan(dt) || dt == 0)) * dt;
+            end
+        catch
+            dtValues(i) = NaN;
+        end
+    end
+
+    nanIdx = find(isnan(dtValues));
+    if ~isempty(nanIdx)
+        bestIdx = nanIdx(1);
+        fprintf('    Selecting sim CT with empty/missing datetime (index %d)\n', bestIdx);
+    else
+        [~, bestIdx] = min(dtValues);
+        fprintf('    Selecting oldest sim CT by SeriesDate/Time\n');
+    end
+
+    selectedSeries = candidateInfo(bestIdx, :);
+    simFiles       = selectedSeries.Filenames{1};
+
+    if isempty(simFiles)
+        fprintf('    Selected sim CT series has no files.\n');
+        return;
+    end
+
+    try
+        meta = dicominfo(simFiles{1});
+        fprintf('    Sim CT: "%s"  Date: %s  Files: %d\n', ...
+            meta.SeriesDescription, meta.SeriesDate, length(simFiles));
+    catch
+        fprintf('    Sim CT: %d files (metadata unavailable)\n', length(simFiles));
+    end
+
+    destDir = fullfile(sourceDir, 'sim_ct');
+
+    if ~isfolder(destDir)
+        mkdir(destDir);
+        fprintf('    Created sim_ct directory: %s\n', destDir);
+    else
+        fprintf('    sim_ct directory exists: %s\n', destDir);
+    end
+
+    numMoved   = 0;
+    numSkipped = 0;
+
+    for k = 1:length(simFiles)
+        srcFile = simFiles{k};
+        [~, name, ext] = fileparts(srcFile);
+        destFile = fullfile(destDir, [name, ext]);
+
+        if ~exist(srcFile, 'file'), continue; end
+        if exist(destFile, 'file')
+            numSkipped = numSkipped + 1;
+        else
+            try
+                movefile(srcFile, destFile);
+                numMoved = numMoved + 1;
+            catch ME
+                warning('sortSimCtFiles:MoveError', ...
+                    'Failed to move %s: %s', name, ME.message);
             end
         end
-    catch
-        % Leave as NaN
     end
+
+    fprintf('    Sim CT files: %d moved, %d already existed\n', numMoved, numSkipped);
+    sim_ct_dir = destDir;
+end
+
+
+function printCollectionInfo(ctInfo)
+%PRINTCOLLECTIONINFO Print diagnostic information about DICOM collection.
+
+    fprintf('\n  --- DICOM Collection Summary ---\n');
+    fprintf('  Total series: %d\n', height(ctInfo));
+
+    if ismember('Modality', ctInfo.Properties.VariableNames)
+        modalities = unique(ctInfo.Modality);
+        for i = 1:length(modalities)
+            count = sum(strcmp(ctInfo.Modality, modalities{i}));
+            fprintf('    %s: %d series\n', modalities{i}, count);
+        end
+    end
+
+    fprintf('\n  --- SCT Series ---\n');
+    if ismember('SeriesDescription', ctInfo.Properties.VariableNames)
+        sctRows = strcmpi(ctInfo.SeriesDescription, 'sct');
+        if any(sctRows)
+            sctInfo  = ctInfo(sctRows, :);
+            fileCell = sctInfo.Filenames{1};
+            if ~isempty(fileCell) && ~isempty(fileCell{1})
+                try
+                    metadata = dicominfo(fileCell{1});
+                    fprintf('    Series     : %s\n', metadata.SeriesDescription);
+                    fprintf('    Date/Time  : %s / %s\n', metadata.SeriesDate, metadata.SeriesTime);
+                    fprintf('    SeriesUID  : %s\n', metadata.SeriesInstanceUID);
+                    fprintf('    Image count: %d\n', length(fileCell));
+                catch
+                    fprintf('    (metadata unavailable)\n');
+                end
+            end
+        else
+            fprintf('    No SCT series found\n');
+        end
+    end
+
+    fprintf('\n  --- RT File Summary ---\n');
+    for mod = {'RTSTRUCT', 'RTPLAN', 'RTDOSE'}
+        if ismember('Modality', ctInfo.Properties.VariableNames)
+            n = sum(strcmp(ctInfo.Modality, mod{1}));
+            if n > 0
+                fprintf('    %s: %d found\n', mod{1}, n);
+                % For RTPLANs, print the RTPlanRelationship for each
+                if strcmp(mod{1}, 'RTPLAN')
+                    planRows = strcmp(ctInfo.Modality, 'RTPLAN');
+                    planTable = ctInfo(planRows, :);
+                    for pi = 1:height(planTable)
+                        fileCell = planTable.Filenames{pi};
+                        if isempty(fileCell) || isempty(fileCell{1}), continue; end
+                        try
+                            meta = dicominfo(fileCell{1});
+                            rel  = extractRTPlanRelationship(meta);
+                            if isempty(rel), rel = '(none)'; end
+                            fprintf('      Plan %d: RTPlanRelationship = "%s"\n', pi, rel);
+                        catch
+                            fprintf('      Plan %d: (unreadable)\n', pi);
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    fprintf('  --------------------------------\n\n');
 end
