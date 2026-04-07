@@ -1,26 +1,31 @@
 function output_paths = step06_explode_segments(patient_id, session, config)
-%STEP06_EXPLODE_SEGMENTS  Per-segment beam explosion for both REFERENCE and ADAPTED plans.
+%STEP06_EXPLODE_SEGMENTS  Per-beam plan explosion for both REFERENCE and ADAPTED plans.
 %
 %  Takes the MLC-gap-corrected RTPLAN files produced by step05_fix_mlc_gaps
 %  (RP_reference_adjusted_mlc.dcm and RP_adapted_adjusted_mlc.dcm) and
-%  produces ONE output RTPLAN file PER SEGMENT for each plan type.  Each
-%  output file contains a single independent two-control-point beam.
+%  produces ONE output RTPLAN file PER ORIGINAL BEAM for each plan type.
+%  Within each output file every segment of that beam is promoted to its
+%  own independent two-control-point beam, so:
+%
+%    original plan with 17 beams, 165 segments each
+%      -> 17 output RTPLAN files
+%         each file has 165 beams (one per segment), one FractionGroup
 %
 %  OUTPUT FILENAME FORMAT:
-%    RTPLAN_{patient_id}_{session}_{reference|adapted}_B{orig_beam}_S{seg}.dcm
-%    e.g.  RTPLAN_1194203_Session_1_reference_B10_S3.dcm
-%          RTPLAN_1194203_Session_1_adapted_B10_S3.dcm
+%    RTPLAN_{patient_id}_{session}_{reference|adapted}_B{orig_beam}.dcm
+%    e.g.  RTPLAN_1194203_Session_1_reference_B10.dcm
+%          RTPLAN_1194203_Session_1_adapted_B10.dcm
 %
 %  INTRA-DICOM NAMING  (omits patient_id to reduce clutter):
-%    RTPlanLabel (max 16 chars): {plan_type}_B{orig}_S{seg}  (truncated if needed)
-%    RTPlanName:                 {session}_{plan_type}_B{orig}_S{seg}
-%    RTPlanDescription:          {plan_type} B{orig} ({beam_name}) segment {seg}
+%    RTPlanLabel (max 16 chars): {orig_beam_name}  (truncated if needed)
+%    RTPlanName:                 {plan_type} B{orig_beam_number}
+%    RTPlanDescription:          {plan_type} B{orig} ({beam_name}) exploded segments
 %
 %  Each output file contains:
-%    - BeamSequence with one beam  (the single 2-CP exploded segment)
-%    - FractionGroupSequence with one referenced beam and its segment MU
+%    - BeamSequence with N_seg beams (one per segment, BeamNumber 1..N_seg)
+%    - FractionGroupSequence with N_seg referenced beams and per-segment MUs
 %
-%  RayStation imports these plans; it exports one dose file per plan, which
+%  RayStation imports these plans; it exports one dose file per beam, which
 %  step15 loads via the preferred pattern:  Plan_Field*_Beam*_B*_S*.dcm
 %
 %  INPUTS:
@@ -32,8 +37,8 @@ function output_paths = step06_explode_segments(patient_id, session, config)
 %
 %  OUTPUT:
 %    output_paths - struct with fields:
-%                    .reference  - cell array of char, full paths for reference plan segments
-%                    .adapted    - cell array of char, full paths for adapted plan segments
+%                    .reference  - cell array of char, full paths for reference plan files
+%                    .adapted    - cell array of char, full paths for adapted plan files
 %                    .all        - cell array of char, all written paths combined
 %
 %  STANDALONE USAGE (no arguments — uses built-in defaults):
@@ -53,7 +58,7 @@ if nargin == 0
         'treatment_site', 'Pancreas');
 end
 
-fprintf('=== Step 0.6: Segment Explosion (Reference + Adapted) ===\n');
+fprintf('=== Step 0.6: Segment Explosion — 1 Plan per Beam (Reference + Adapted) ===\n');
 fprintf('Patient: %s | Session: %s\n\n', patient_id, session);
 
 % -----------------------------------------------------------------------
@@ -148,7 +153,8 @@ for pt = 1:numel(plan_types)
     any_warn_global   = false;
 
     % -------------------------------------------------------------------
-    % Beam loop
+    % Beam loop — each original beam produces ONE output RTPLAN file
+    %             containing all its segments promoted to beams
     % -------------------------------------------------------------------
     for b = 1:num_original_beams
 
@@ -191,16 +197,27 @@ for pt = 1:numel(plan_types)
         fprintf('  B%d (%s, gantry %s, %d segments, MU=%.4f)...\n', ...
             original_beam_number, original_beam_name, gantry_str, N_seg, total_mu);
 
-        % ---------------------------------------------------------------
-        % Segment loop — each segment becomes its own output RTPLAN file
-        % ---------------------------------------------------------------
+        % -----------------------------------------------------------
+        % Accumulators for this beam's output plan
+        %   new_beam_seq:     BeamSequence of the output RTPLAN
+        %   new_ref_beam_seq: FractionGroup.ReferencedBeamSequence
+        %   local_beam_idx:   running beam counter within this plan (1..N_seg)
+        % -----------------------------------------------------------
+        new_beam_seq     = struct();
+        new_ref_beam_seq = struct();
+        local_beam_idx   = 0;
+
+        % -----------------------------------------------------------
+        % Segment loop — each segment becomes one beam in the output plan
+        % -----------------------------------------------------------
         for s = 1:N_seg
+
+            local_beam_idx = local_beam_idx + 1;
 
             % Deep-copy original beam
             new_beam                       = orig_beam;
-            new_beam.BeamNumber            = 1;   % single beam per plan -> always 1
-            new_beam.BeamName              = sprintf('%s_B%d_S%03d', ...
-                                                plan_type, original_beam_number, s - 1);
+            new_beam.BeamNumber            = local_beam_idx;   % sequential within this plan
+            new_beam.BeamName              = sprintf('B%d_S%03d', original_beam_number, s - 1);
             new_beam.NumberOfControlPoints = 2;
 
             % Bounding control points
@@ -287,67 +304,25 @@ for pt = 1:numel(plan_types)
             new_beam.FinalCumulativeMetersetWeight = 1;
 
             % -----------------------------------------------------------
-            % Assemble per-segment output plan
+            % Accumulate this segment-beam into the plan's BeamSequence
+            % and FractionGroup.ReferencedBeamSequence
             % -----------------------------------------------------------
-            rtplan_out = rtplan;   % deep copy
-
-            rtplan_out.BeamSequence = struct('Item_1', new_beam);
+            new_beam_seq.(sprintf('Item_%d', local_beam_idx)) = new_beam;
 
             ref_entry                      = struct();
-            ref_entry.ReferencedBeamNumber = 1;
+            ref_entry.ReferencedBeamNumber = local_beam_idx;
             ref_entry.BeamMeterset         = seg_mu;
+            new_ref_beam_seq.(sprintf('Item_%d', local_beam_idx)) = ref_entry;
 
-            rtplan_out.FractionGroupSequence.Item_1.ReferencedBeamSequence = ...
-                struct('Item_1', ref_entry);
-            rtplan_out.FractionGroupSequence.Item_1.NumberOfBeams = 1;
-
-            % Unique SOP Instance UID
-            new_uid                               = dicomuid();
-            rtplan_out.SOPInstanceUID             = new_uid;
-            rtplan_out.MediaStorageSOPInstanceUID = new_uid;
-
-            % -----------------------------------------------------------
-            % Naming
-            %
-            %   File:              RTPLAN_{patient_id}_{session}_{plan_type}_B{orig}_S{seg}.dcm
-            %   RTPlanLabel:       {plan_type}_B{orig}_S{seg}   (max 16 chars, LO VR)
-            %   RTPlanName:        {session}_{plan_type}_B{orig}_S{seg}
-            %   RTPlanDescription: {plan_type} B{orig} ({beam_name}) segment {seg}
-            % -----------------------------------------------------------
-            seg_label_long  = sprintf('%s_B%d_S%d', plan_type, original_beam_number, s - 1);
-            seg_label_short = seg_label_long(1:min(16, end));  % LO VR max 16 chars
-
-            rtplan_out.RTPlanLabel       = seg_label_short;
-            if isfield(rtplan_out, 'RTPlanName')
-                rtplan_out.RTPlanName    = sprintf('%s_%s', session, seg_label_long);
-            end
-            rtplan_out.RTPlanDescription = sprintf('%s B%d (%s) segment %d', ...
-                plan_type, original_beam_number, original_beam_name, s - 1);
-
-            % -----------------------------------------------------------
-            % Write output file
-            % -----------------------------------------------------------
-            out_filename = sprintf('RTPLAN_%s_%s_%s_B%d_S%d.dcm', ...
-                patient_id, session, plan_type, original_beam_number, s - 1);
-            out_filepath = fullfile(output_dir, out_filename);
-
-            try
-                dicomwrite([], out_filepath, rtplan_out, 'CreateMode', 'Copy');
-            catch ME
-                error('step06:writeFailed', ...
-                    'Failed to write output RTPLAN:\n  %s\nError: %s', out_filepath, ME.message);
-            end
-
-            plan_output_paths{end+1} = out_filepath; %#ok<AGROW>
-
-            % Progress every 50 new files
-            if mod(numel(plan_output_paths), 50) == 0
-                fprintf('    Written %d files so far...\n', numel(plan_output_paths));
+            % Progress every 50 new beams within this plan
+            if mod(local_beam_idx, 50) == 0
+                fprintf('    Created beam %d of ~%d (B%d S%d, MU=%.4f)\n', ...
+                    local_beam_idx, N_seg, original_beam_number, s - 1, seg_mu);
             end
 
         end  % segment loop
 
-        fprintf('    -> %d segment file(s) written for B%d\n', N_seg, original_beam_number);
+        fprintf('    -> %d segment-beams assembled for B%d\n', local_beam_idx, original_beam_number);
 
         % ---------------------------------------------------------------
         % MU validation for this beam
@@ -365,15 +340,64 @@ for pt = 1:numel(plan_types)
         else
             mu_status = '[OK]';
         end
-        fprintf('    MU: orig=%.4f  sum=%.4f  delta=%.4f%%  %s\n\n', ...
+        fprintf('    MU: orig=%.4f  sum=%.4f  delta=%.4f%%  %s\n', ...
             orig_mu, summed, delta_pct, mu_status);
+
+        % ---------------------------------------------------------------
+        % Assemble output RTPLAN for this beam
+        %   - BeamSequence         : N_seg beams (one per segment)
+        %   - FractionGroupSequence: N_seg referenced beams with per-segment MUs
+        %   - NumberOfBeams        : N_seg
+        % ---------------------------------------------------------------
+        rtplan_out = rtplan;   % deep copy of original header
+
+        rtplan_out.BeamSequence = new_beam_seq;
+        rtplan_out.FractionGroupSequence.Item_1.ReferencedBeamSequence = new_ref_beam_seq;
+        rtplan_out.FractionGroupSequence.Item_1.NumberOfBeams = local_beam_idx;
+
+        % Unique SOP Instance UID per file
+        new_uid                               = dicomuid();
+        rtplan_out.SOPInstanceUID             = new_uid;
+        rtplan_out.MediaStorageSOPInstanceUID = new_uid;
+
+        % -----------------------------------------------------------
+        % Naming  (plan describes the original beam, not a segment)
+        %
+        %   File:              RTPLAN_{patient_id}_{session}_{plan_type}_B{orig}.dcm
+        %   RTPlanLabel:       {orig_beam_name}   (max 16 chars, LO VR)
+        %   RTPlanName:        {plan_type} B{orig_beam_number}
+        %   RTPlanDescription: {plan_type} B{orig} ({beam_name}) exploded segments
+        % -----------------------------------------------------------
+        rtplan_out.RTPlanLabel       = original_beam_name(1:min(16, end));
+        if isfield(rtplan_out, 'RTPlanName')
+            rtplan_out.RTPlanName    = sprintf('%s B%d', plan_type, original_beam_number);
+        end
+        rtplan_out.RTPlanDescription = sprintf('%s B%d (%s) exploded segments', ...
+            plan_type, original_beam_number, original_beam_name);
+
+        % -----------------------------------------------------------
+        % Write output file  — one file per original beam
+        % -----------------------------------------------------------
+        out_filename = sprintf('RTPLAN_%s_%s_%s_B%d.dcm', ...
+            patient_id, session, plan_type, original_beam_number);
+        out_filepath = fullfile(output_dir, out_filename);
+
+        try
+            dicomwrite([], out_filepath, rtplan_out, 'CreateMode', 'Copy');
+        catch ME
+            error('step06:writeFailed', ...
+                'Failed to write output RTPLAN:\n  %s\nError: %s', out_filepath, ME.message);
+        end
+
+        plan_output_paths{end+1} = out_filepath; %#ok<AGROW>
+        fprintf('    Written: %s\n\n', out_filename);
 
     end  % beam loop
 
     % -------------------------------------------------------------------
     % Per-plan-type summary
     % -------------------------------------------------------------------
-    fprintf('%s plan: %d segment file(s) written.\n', upper(plan_type), numel(plan_output_paths));
+    fprintf('%s plan: %d beam file(s) written.\n', upper(plan_type), numel(plan_output_paths));
     print_file_list(plan_output_paths);
 
     if any_warn_global
@@ -393,7 +417,7 @@ output_paths.all = [output_paths.reference, output_paths.adapted];
 
 total = numel(output_paths.all);
 fprintf('=== Step 0.6 complete ===\n');
-fprintf('Total segment files written: %d  (%d reference + %d adapted)\n', ...
+fprintf('Total beam files written: %d  (%d reference + %d adapted)\n', ...
     total, ...
     numel(output_paths.reference), ...
     numel(output_paths.adapted));
