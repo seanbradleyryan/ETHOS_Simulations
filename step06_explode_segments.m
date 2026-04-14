@@ -64,8 +64,10 @@ fprintf('Patient: %s | Session: %s\n\n', patient_id, session);
 % -----------------------------------------------------------------------
 % Paths
 % -----------------------------------------------------------------------
-sct_dir = fullfile(config.working_dir, 'EthosExports', patient_id, ...
+sct_dir    = fullfile(config.working_dir, 'EthosExports', patient_id, ...
     config.treatment_site, session, 'sct');
+sim_ct_dir = fullfile(config.working_dir, 'EthosExports', patient_id, ...
+    config.treatment_site, session, 'sim_ct');
 
 output_dir = fullfile(config.working_dir, 'Raystation_Input', patient_id, session);
 if ~exist(output_dir, 'dir')
@@ -73,7 +75,64 @@ if ~exist(output_dir, 'dir')
 end
 
 fprintf('SCT dir:    %s\n', sct_dir);
+fprintf('Sim CT dir: %s\n', sim_ct_dir);
 fprintf('Output dir: %s\n\n', output_dir);
+
+% -----------------------------------------------------------------------
+% Copy CT image files from sct_dir into output_dir
+% -----------------------------------------------------------------------
+fprintf('--- Copying CT files to RayStation input directory ---\n');
+
+ct_files = dir(fullfile(sct_dir, 'CT*.dcm'));
+
+if isempty(ct_files)
+    warning('step06:noCTFiles', ...
+        'No CT*.dcm files found in sct directory:\n  %s', sct_dir);
+else
+    n_copied  = 0;
+    n_skipped = 0;
+    for k = 1:numel(ct_files)
+        src  = fullfile(sct_dir,    ct_files(k).name);
+        dst  = fullfile(output_dir, ct_files(k).name);
+        if isfile(dst)
+            n_skipped = n_skipped + 1;
+        else
+            copyfile(src, dst);
+            n_copied = n_copied + 1;
+        end
+    end
+    fprintf('CT files: %d copied, %d already present.\n\n', n_copied, n_skipped);
+end
+
+% -----------------------------------------------------------------------
+% Copy sim CT files from sim_ct_dir into output_dir
+% -----------------------------------------------------------------------
+fprintf('--- Copying sim CT files to RayStation input directory ---\n');
+
+if ~exist(sim_ct_dir, 'dir')
+    warning('step06:noSimCtDir', ...
+        'Sim CT directory not found, skipping:\n  %s', sim_ct_dir);
+else
+    sim_ct_files = dir(fullfile(sim_ct_dir, '*.dcm'));
+    if isempty(sim_ct_files)
+        warning('step06:noSimCtFiles', ...
+            'No .dcm files found in sim CT directory:\n  %s', sim_ct_dir);
+    else
+        n_copied  = 0;
+        n_skipped = 0;
+        for k = 1:numel(sim_ct_files)
+            src  = fullfile(sim_ct_dir, sim_ct_files(k).name);
+            dst  = fullfile(output_dir, sim_ct_files(k).name);
+            if isfile(dst)
+                n_skipped = n_skipped + 1;
+            else
+                copyfile(src, dst);
+                n_copied = n_copied + 1;
+            end
+        end
+        fprintf('Sim CT files: %d copied, %d already present.\n\n', n_copied, n_skipped);
+    end
+end
 
 % -----------------------------------------------------------------------
 % Plan types to process
