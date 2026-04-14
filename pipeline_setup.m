@@ -34,7 +34,7 @@ clear; clc; close all;
 
 % --- Patient and Session Selection ---
 CONFIG.patients        = {'1194203'};
-CONFIG.sessions        = {'Session_1'};
+CONFIG.sessions        = {'Session_1','Session_2'};
 CONFIG.treatment_site  = 'Pancreas';
 
 % --- Directory Paths ---
@@ -42,8 +42,8 @@ CONFIG.working_dir  = '/mnt/weka/home/80030361/ETHOS_Simulations';
 CONFIG.matrad_path  = '/mnt/weka/home/80030361/MATLAB/Addons/matRad';
 
 % --- MLC Gap Correction Parameters (Step 0.5) ---
-CONFIG.mlc_min_gap_mm       = 0.5;             % Minimum allowed leaf gap (mm)
-CONFIG.mlc_expansion_mm     = 0.4;             % Symmetric expansion per side (mm)
+CONFIG.mlc_min_gap_mm       = 0.5*2;             % Minimum allowed leaf gap (mm)
+CONFIG.mlc_expansion_mm     = 0.4*2;             % Symmetric expansion per side (mm)
 CONFIG.mlc_position_range   = [-140, 140];     % Valid Halcyon leaf position range (mm)
 
 % --- Pipeline Control Flags ---
