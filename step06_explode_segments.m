@@ -79,60 +79,28 @@ fprintf('Sim CT dir: %s\n', sim_ct_dir);
 fprintf('Output dir: %s\n\n', output_dir);
 
 % -----------------------------------------------------------------------
-% Copy CT image files from sct_dir into output_dir
+% Copy supporting files from sct_dir and sim_ct_dir into output_dir
 % -----------------------------------------------------------------------
-fprintf('--- Copying CT files to RayStation input directory ---\n');
+fprintf('--- Copying supporting files to RayStation input directory ---\n');
 
-ct_files = dir(fullfile(sct_dir, 'CT*.dcm'));
+% sCT image slices
+copy_files_to_dir(sct_dir, 'CT*.dcm', output_dir, 'sCT images');
 
-if isempty(ct_files)
-    warning('step06:noCTFiles', ...
-        'No CT*.dcm files found in sct directory:\n  %s', sct_dir);
-else
-    n_copied  = 0;
-    n_skipped = 0;
-    for k = 1:numel(ct_files)
-        src  = fullfile(sct_dir,    ct_files(k).name);
-        dst  = fullfile(output_dir, ct_files(k).name);
-        if isfile(dst)
-            n_skipped = n_skipped + 1;
-        else
-            copyfile(src, dst);
-            n_copied = n_copied + 1;
-        end
-    end
-    fprintf('CT files: %d copied, %d already present.\n\n', n_copied, n_skipped);
-end
-
-% -----------------------------------------------------------------------
-% Copy sim CT files from sim_ct_dir into output_dir
-% -----------------------------------------------------------------------
-fprintf('--- Copying sim CT files to RayStation input directory ---\n');
-
+% Sim CT image slices (entire directory — all .dcm files)
 if ~exist(sim_ct_dir, 'dir')
     warning('step06:noSimCtDir', ...
         'Sim CT directory not found, skipping:\n  %s', sim_ct_dir);
 else
-    sim_ct_files = dir(fullfile(sim_ct_dir, '*.dcm'));
-    if isempty(sim_ct_files)
-        warning('step06:noSimCtFiles', ...
-            'No .dcm files found in sim CT directory:\n  %s', sim_ct_dir);
-    else
-        n_copied  = 0;
-        n_skipped = 0;
-        for k = 1:numel(sim_ct_files)
-            src  = fullfile(sim_ct_dir, sim_ct_files(k).name);
-            dst  = fullfile(output_dir, sim_ct_files(k).name);
-            if isfile(dst)
-                n_skipped = n_skipped + 1;
-            else
-                copyfile(src, dst);
-                n_copied = n_copied + 1;
-            end
-        end
-        fprintf('Sim CT files: %d copied, %d already present.\n\n', n_copied, n_skipped);
-    end
+    copy_files_to_dir(sim_ct_dir, '*.dcm', output_dir, 'Sim CT images');
 end
+
+% RTSTRUCT files (reference + adapted)
+copy_files_to_dir(sct_dir, 'RS_*.dcm', output_dir, 'RTSTRUCT');
+
+% RTDOSE files (reference + adapted)
+copy_files_to_dir(sct_dir, 'RD_*.dcm', output_dir, 'RTDOSE');
+
+fprintf('\n');
 
 % -----------------------------------------------------------------------
 % Plan types to process
@@ -488,8 +456,34 @@ end  % function step06_explode_segments
 
 
 % =========================================================================
-%  LOCAL HELPER
+%  LOCAL HELPERS
 % =========================================================================
+
+function copy_files_to_dir(src_dir, pattern, dst_dir, label)
+%COPY_FILES_TO_DIR Copy files matching pattern from src_dir to dst_dir.
+%   Skips files already present. Reports counts.
+    files = dir(fullfile(src_dir, pattern));
+    if isempty(files)
+        warning('step06:noFiles', 'No %s files (%s) found in:\n  %s', ...
+            label, pattern, src_dir);
+        return;
+    end
+    n_copied  = 0;
+    n_skipped = 0;
+    for k = 1:numel(files)
+        src = fullfile(src_dir, files(k).name);
+        dst = fullfile(dst_dir, files(k).name);
+        if isfile(dst)
+            n_skipped = n_skipped + 1;
+        else
+            copyfile(src, dst);
+            n_copied = n_copied + 1;
+        end
+    end
+    fprintf('  %-20s %3d copied, %3d already present.\n', ...
+        [label ':'], n_copied, n_skipped);
+end
+
 
 function print_file_list(paths)
 %PRINT_FILE_LIST Print a summary list of written file names.
