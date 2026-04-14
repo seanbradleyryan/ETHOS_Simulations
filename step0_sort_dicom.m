@@ -171,6 +171,14 @@ fprintf('  Searching for simulation CT series...\n');
 sim_ct_dir = fullfile(rawwd, 'sim_ct');
 sim_ct_dir = sortSimCtFiles(ctInfo, rawwd, sim_ct_dir, sctSeriesUID);
 
+%% ======================== PATCH PATIENT NAMES ========================
+
+fprintf('  Patching PatientName to append "research" in sorted files...\n');
+appendResearchToPatientName(sct_dir);
+if ~isempty(sim_ct_dir)
+    appendResearchToPatientName(sim_ct_dir);
+end
+
 %% ======================== VERIFY OUTPUT ========================
 
 sctFiles = dir(fullfile(sct_dir, '*.dcm'));
@@ -749,6 +757,97 @@ function sim_ct_dir = sortSimCtFiles(ctInfo, sourceDir, sim_ct_dir, sctSeriesUID
 
     fprintf('    Sim CT files: %d moved, %d already existed\n', numMoved, numSkipped);
     sim_ct_dir = destDir;
+end
+
+
+function appendResearchToPatientName(dirPath)
+%APPENDRESEARCHTOPATIENTNAME Append " research" to PatientName in every .dcm
+%   file in dirPath.
+%
+%   Reads the PatientName field (expected format: "FirstName LastName"),
+%   and rewrites it as "FirstName LastName research" using dicomwrite with
+%   CreateMode='copy' to preserve all other tags.  Files that already
+%   contain 'research' in the patient name are skipped.
+
+    if isempty(dirPath) || ~isfolder(dirPath)
+        return;
+    end
+
+    dcmFiles = dir(fullfile(dirPath, '*.dcm'));
+    if isempty(dcmFiles)
+        return;
+    end
+
+    numPatched  = 0;
+    numSkipped  = 0;
+    numFailed   = 0;
+
+    for k = 1:length(dcmFiles)
+        fPath = fullfile(dcmFiles(k).folder, dcmFiles(k).name);
+
+        try
+            meta = dicominfo(fPath);
+        catch
+            numFailed = numFailed + 1;
+            continue;
+        end
+
+        % Extract current patient name --------------------------------
+        currentName = '';
+        if isfield(meta, 'PatientName')
+            pn = meta.PatientName;
+            if isstruct(pn)
+                % DICOM PN struct: FamilyName, GivenName, ...
+                given  = '';
+                family = '';
+                if isfield(pn, 'GivenName'),  given  = strtrim(pn.GivenName);  end
+                if isfield(pn, 'FamilyName'), family = strtrim(pn.FamilyName); end
+                if ~isempty(given) && ~isempty(family)
+                    currentName = sprintf('%s %s', given, family);
+                elseif ~isempty(family)
+                    currentName = family;
+                elseif ~isempty(given)
+                    currentName = given;
+                end
+            elseif ischar(pn) || isstring(pn)
+                currentName = strtrim(char(pn));
+            end
+        end
+
+        if isempty(currentName)
+            numSkipped = numSkipped + 1;
+            continue;
+        end
+
+        % Skip if already patched ------------------------------------
+        if contains(lower(currentName), 'research')
+            numSkipped = numSkipped + 1;
+            continue;
+        end
+
+        newName = [currentName, ' research'];
+
+        % Write patched file in-place --------------------------------
+        try
+            imgData = dicomread(fPath);
+            meta.PatientName = newName;
+            tmpPath = [fPath, '.tmp'];
+            dicomwrite(imgData, tmpPath, meta, 'CreateMode', 'copy', ...
+                'WritePrivate', true);
+            movefile(tmpPath, fPath, 'f');
+            numPatched = numPatched + 1;
+        catch ME
+            warning('appendResearchToPatientName:WriteError', ...
+                'Failed to patch %s: %s', dcmFiles(k).name, ME.message);
+            % Clean up temp file if it exists
+            tmpPath = [fPath, '.tmp'];
+            if isfile(tmpPath), delete(tmpPath); end
+            numFailed = numFailed + 1;
+        end
+    end
+
+    fprintf('    PatientName patched: %d updated, %d skipped, %d failed  [%s]\n', ...
+        numPatched, numSkipped, numFailed, dirPath);
 end
 
 

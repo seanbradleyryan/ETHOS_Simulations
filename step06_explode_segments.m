@@ -16,10 +16,10 @@ function output_paths = step06_explode_segments(patient_id, session, config)
 %    e.g.  RTPLAN_1194203_Session_1_reference_B10.dcm
 %          RTPLAN_1194203_Session_1_adapted_B10.dcm
 %
-%  INTRA-DICOM NAMING  (omits patient_id to reduce clutter):
-%    RTPlanLabel (max 16 chars): {orig_beam_name}  (truncated if needed)
-%    RTPlanName:                 {plan_type} B{orig_beam_number}
-%    RTPlanDescription:          {plan_type} B{orig} ({beam_name}) exploded segments
+%  INTRA-DICOM NAMING:
+%    RTPlanLabel (max 16 chars): {session} {plan_type} B{orig_beam_number}  (truncated if needed)
+%    RTPlanName:                 {session} {plan_type} B{orig_beam_number}
+%    RTPlanDescription:          {session} {plan_type} B{orig} ({beam_name}) exploded segments
 %
 %  Each output file contains:
 %    - BeamSequence with N_seg beams (one per segment, BeamNumber 1..N_seg)
@@ -361,19 +361,21 @@ for pt = 1:numel(plan_types)
         rtplan_out.MediaStorageSOPInstanceUID = new_uid;
 
         % -----------------------------------------------------------
-        % Naming  (plan describes the original beam, not a segment)
+        % Naming  (plan describes the original beam and session)
         %
         %   File:              RTPLAN_{patient_id}_{session}_{plan_type}_B{orig}.dcm
-        %   RTPlanLabel:       {orig_beam_name}   (max 16 chars, LO VR)
-        %   RTPlanName:        {plan_type} B{orig_beam_number}
-        %   RTPlanDescription: {plan_type} B{orig} ({beam_name}) exploded segments
+        %   RTPlanLabel:       {session} {plan_type} B{orig}  (truncated to 16 chars, LO VR)
+        %   RTPlanName:        {session} {plan_type} B{orig_beam_number}
+        %   RTPlanDescription: {session} {plan_type} B{orig} ({beam_name}) exploded segments
         % -----------------------------------------------------------
-        rtplan_out.RTPlanLabel       = original_beam_name(1:min(16, end));
+        % RTPlanLabel is max 16 chars (DICOM LO VR); include session prefix truncated to fit
+        label_full = sprintf('%s %s B%d', session, plan_type, original_beam_number);
+        rtplan_out.RTPlanLabel       = label_full(1:min(16, end));
         if isfield(rtplan_out, 'RTPlanName')
-            rtplan_out.RTPlanName    = sprintf('%s B%d', plan_type, original_beam_number);
+            rtplan_out.RTPlanName    = sprintf('%s %s B%d', session, plan_type, original_beam_number);
         end
-        rtplan_out.RTPlanDescription = sprintf('%s B%d (%s) exploded segments', ...
-            plan_type, original_beam_number, original_beam_name);
+        rtplan_out.RTPlanDescription = sprintf('%s %s B%d (%s) exploded segments', ...
+            session, plan_type, original_beam_number, original_beam_name);
 
         % -----------------------------------------------------------
         % Write output file  — one file per original beam
