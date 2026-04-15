@@ -34,7 +34,7 @@ clear; clc; close all;
 
 % --- Patient and Session Selection ---
 CONFIG.patients        = {'1194203'};
-CONFIG.sessions        = {'Session_1','Session_2'};
+CONFIG.sessions        = {'Session_1','Session_2','Session_3','Session_4','Session_5','Session_6','Session_7','Session_8','Session_9','Session_10'};
 CONFIG.treatment_site  = 'Pancreas';
 
 % --- Directory Paths ---
