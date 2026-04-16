@@ -32,12 +32,12 @@ function [sct_dir, sim_ct_dir] = step0_sort_dicom(patient_id, session, config)
 %   ALGORITHM:
 %   1. Sort SCT series files as usual (three-tier priority)
 %   2. Scan all RTPLAN files; for each, read ReferenceRTPlanSequence.Item_1.RTPlanRelationship
-%      - Contains 'REFERENCE'  → reference plan
-%      - Contains 'ADAPTED'    → adapted plan
+%      - Contains 'REFERENCE'   reference plan
+%      - Contains 'ADAPTED'     adapted plan
 %   3. For each classified plan:
-%      a. Trace ReferencedStructureSetSequence → find matching RTSTRUCT by SOPInstanceUID
+%      a. Trace ReferencedStructureSetSequence  find matching RTSTRUCT by SOPInstanceUID
 %      b. Confirm RTSTRUCT's referenced CT SeriesInstanceUID matches SCT
-%      c. Trace RTDOSE ReferencedRTPlanSequence → find RTDOSE referencing this plan
+%      c. Trace RTDOSE ReferencedRTPlanSequence  find RTDOSE referencing this plan
 %   4. Copy all files with standardized names into sct_dir
 %   5. Sort sim CT as usual
 %
@@ -169,15 +169,15 @@ sortRTFiles(ctInfo, rawwd, sct_dir, sctSeriesUID);
 
 fprintf('  Searching for simulation CT series...\n');
 sim_ct_dir = fullfile(rawwd, 'sim_ct');
-sim_ct_dir = sortSimCtFiles(ctInfo, rawwd, sim_ct_dir, sctSeriesUID);
+% sim_ct_dir = sortSimCtFiles(ctInfo, rawwd, sim_ct_dir, sctSeriesUID);
 
 %% ======================== PATCH PATIENT NAMES ========================
 
-fprintf('  Patching PatientName to append "research" in sorted files...\n');
-appendResearchToPatientName(sct_dir);
-if ~isempty(sim_ct_dir)
-    appendResearchToPatientName(sim_ct_dir);
-end
+%fprintf('  Patching PatientName to append "research" in sorted files...\n');
+%appendResearchToPatientName(sct_dir);
+%if ~isempty(sim_ct_dir)
+%    appendResearchToPatientName(sim_ct_dir);
+%end
 
 %% ======================== VERIFY OUTPUT ========================
 
@@ -383,7 +383,7 @@ function sortRTFiles(ctInfo, sourceDir, destDir, sctSeriesUID) %#ok<INUSL>
             continue;
         end
 
-        fprintf('    Plan: %s  →  RTPlanRelationship = "%s"\n', ...
+        fprintf('    Plan: %s    RTPlanRelationship = "%s"\n', ...
             planPath, relationship);
 
         if contains(upper(relationship), 'REFERENCE')
@@ -392,7 +392,7 @@ function sortRTFiles(ctInfo, sourceDir, destDir, sctSeriesUID) %#ok<INUSL>
                     'Multiple REFERENCE plans found; keeping first.');
             else
                 refPlanPath = planPath;
-                fprintf('      → Classified as REFERENCE plan\n');
+                fprintf('       Classified as REFERENCE plan\n');
             end
 
         elseif contains(upper(relationship), 'ADAPTED')
@@ -401,10 +401,10 @@ function sortRTFiles(ctInfo, sourceDir, destDir, sctSeriesUID) %#ok<INUSL>
                     'Multiple ADAPTED plans found; keeping first.');
             else
                 adpPlanPath = planPath;
-                fprintf('      → Classified as ADAPTED plan\n');
+                fprintf('       Classified as ADAPTED plan\n');
             end
         else
-            fprintf('      → Unrecognised relationship "%s" (skipped)\n', relationship);
+            fprintf('       Unrecognised relationship "%s" (skipped)\n', relationship);
         end
     end
 
@@ -601,7 +601,7 @@ function confirmStructReferencesSCT(structPath, sctSeriesUID, label)
             fprintf('    [OK]   RS_%s references the SCT series (UIDs match).\n', label);
         else
             warning('sortRTFiles:ImageSetMismatch', ...
-                'RS_%s references CT series\n      %s\n    but SCT is\n      %s\n    — image sets do NOT match!', ...
+                'RS_%s references CT series\n      %s\n    but SCT is\n      %s\n     image sets do NOT match!', ...
                 label, referencedUID, sctSeriesUID);
         end
 
@@ -627,7 +627,7 @@ function copyFileAs(srcPath, destPath, label)
 
     try
         copyfile(srcPath, destPath);
-        fprintf('    Copied %s → %s\n', label, destPath);
+        fprintf('    Copied %s  %s\n', label, destPath);
     catch ME
         warning('copyFileAs:CopyError', 'Failed to copy %s: %s', label, ME.message);
     end
