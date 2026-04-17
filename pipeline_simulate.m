@@ -1,6 +1,6 @@
 %% =========================================================================
 %  PIPELINE_SIMULATE.m
-%  ETHOS Photoacoustic Pipeline — Simulation and Analysis Steps
+%  ETHOS Photoacoustic Pipeline  Simulation and Analysis Steps
 %  =========================================================================
 %
 %  PURPOSE:
@@ -12,8 +12,8 @@
 %       RayStationFiles/<PatientID>/<Session>/
 %
 %  STEPS EXECUTED:
-%    Step 2   — k-Wave photoacoustic simulation (forward + time-reversal)
-%    Step 3   — Gamma analysis, SSIM, and visualization
+%    Step 2    k-Wave photoacoustic simulation (forward + time-reversal)
+%    Step 3    Gamma analysis, SSIM, and visualization
 %
 %  PREREQUISITES:
 %    - MATLAB R2022a or later
@@ -51,7 +51,7 @@ CONFIG.pml_size                 = 10;     % PML thickness (voxels)
 CONFIG.cfl_number               = 0.3;    % CFL stability criterion
 CONFIG.use_gpu                  = true;   % GPU acceleration
 CONFIG.num_time_reversal_iter   = 1;      % Time-reversal iterations per field
-CONFIG.enable_spherical_correction = true;    % Compute PSF filter via get_psf
+CONFIG.enable_spherical_correction = false;    % Compute PSF filter via get_psf
 CONFIG.regularization_lambda       = 0.01;   % Wiener regularization for PSF
 
 % --- Sensor Placement ---
@@ -80,7 +80,7 @@ CONFIG.num_parallel_workers  = 16;
 
 % --- Pipeline Control Flags ---
 CONFIG.run_step2   = true;    % Step 2  : k-Wave simulation
-CONFIG.run_step3   = true;    % Step 3  : Gamma analysis
+CONFIG.run_step3   = false;    % Step 3  : Gamma analysis
 
 % --- Define Tissue Property Tables ---
 CONFIG.tissue_tables = define_tissue_tables();
@@ -88,7 +88,7 @@ CONFIG.tissue_tables = define_tissue_tables();
 %% ========================= INITIALIZATION ================================
 
 fprintf('=========================================================\n');
-fprintf('  ETHOS Pipeline — Simulate & Analyse (Steps 2 / 3)\n');
+fprintf('  ETHOS Pipeline  Simulate & Analyse (Steps 2 / 3)\n');
 fprintf('=========================================================\n');
 fprintf('  Started: %s\n', datetime('now'));
 fprintf('  Working directory: %s\n', CONFIG.working_dir);
@@ -154,7 +154,7 @@ for p_idx = 1:length(CONFIG.patients)
                 fprintf('           Beam metadata: %d beams loaded.\n', length(beam_metadata));
             else
                 beam_metadata = [];
-                fprintf('           [WARNING] No beam metadata — legacy sensor placement.\n');
+                fprintf('           [WARNING] No beam metadata  legacy sensor placement.\n');
             end
 
             %% ============================================================
