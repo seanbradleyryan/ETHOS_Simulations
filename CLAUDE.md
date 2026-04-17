@@ -12,7 +12,10 @@ MATLAB-based photoacoustic dose verification system for Varian ETHOS adaptive ra
 /mnt/weka/home/80030361/ETHOS_Simulations/       # Working root
 ├── EthosExports/[PatientID]/Pancreas/[Session]/  # Raw DICOM exports
 │   └── sct/                                       # Sorted SCT + matched RT files (Step 0 output)
-├── RayStationFiles/[PatientID]/[Session]/         # Field doses from RayStation
+├── Raystation_Input/[PatientID]/[Session]/        # Exploded-segment RTPLAN files (Step 0.6 output)
+│                                                  #   RTPLAN_{patient}_{session}_{ref|adapted}_B<N>_S<M>.dcm
+├── RayStationFiles/[PatientID]/[Session]/         # Field dose DICOMs exported from RayStation
+│   │                                              #   Plan_Field*_Beam*_B*_S*.dcm
 │   └── processed/                                  # Processed .mat files (Step 1.5 output)
 ├── SimulationResults/[PatientID]/[Session]/[method]/ # k-Wave outputs (Step 2 output)
 ├── AnalysisResults/[PatientID]/[Session]/          # Gamma/SSIM results (Step 3 output)
@@ -25,18 +28,28 @@ MATLAB-based photoacoustic dose verification system for Varian ETHOS adaptive ra
 |------|------|--------------------|---------|
 | 0 | `step0_sort_dicom.m` | `sct_dir = step0_sort_dicom(patient_id, session, config)` | Sort DICOM by reference chains, extract SCT series |
 | 0.5 | `step05_fix_mlc_gaps.m` | `[path, n] = step05_fix_mlc_gaps(patient_id, session, config)` | Correct Halcyon dual-layer MLC minimum gaps |
-| 1 | *Manual* | — | Export field doses from RayStation |
+| 0.6 | `step06_explode_segments.m` | `exploded = step06_explode_segments(patient_id, session, config)` | Explode each beam's segments into individual 2-CP RTPLAN files |
+| 1 | *Manual* | — | Import exploded RTPLANs into RayStation, recalculate and export field doses |
 | 1.5 | `step15_process_doses.m` | `[fields, sct, total, meta] = step15_process_doses(...)` | Resample CT to dose grid, process per-field doses |
 | 2 | `run_single_field_simulation.m` | `[recon, results] = run_single_field_simulation(...)` | k-Wave forward + time-reversal for one field |
 | 3 | `step3_analysis.m` | `results = step3_analysis(patient_id, session, config)` | Gamma analysis (3%/3mm), SSIM, visualization |
 
+**Orchestrator scripts** (replace the former `ethos_master_pipeline_pseudocode.m`):
+- `pipeline_setup.m` — Runs Steps 0 / 0.5 / 0.6 (pre-RayStation). Configure patients/sessions in its CONFIG block and run before RayStation export.
+- `pipeline_simulate.m` — Runs Steps 1.5 / 2 / 3 (post-RayStation). Configure and run after field dose DICOM files are exported from RayStation.
+
 **Supporting files:**
-- `ethos_master_pipeline_pseudocode.m` — Orchestrator script with CONFIG and all helper functions
-- `ethos_kwave_simulation.m` — Original monolithic simulation script (being superseded by modular pipeline)
 - `run_standalone_simulation.m` — Self-contained single-run simulation for testing
 - `determine_sensor_mask.m` — Physics-based flat sensor placement algorithm
+- `create_acoustic_medium.m` — Builds k-Wave medium struct from CT HU values
+- `apply_element_averaging.m` — Post-processing averaging over sensor elements
+- `find_optimal_kwave_size.m` — Selects efficient grid dimensions for k-Wave FFT
+- `convert_dose.m` — Unit conversion utilities for dose arrays
+- `run_medium_comparison.m` — Compares reconstruction quality across Grüneisen methods
+- `test_time_dependence.m` — Time-dependence sensitivity testing
+- `plot_standalone_results.m` — Visualization helper for standalone runs
 - `CalcGamma.m` — Gamma index calculation (external dependency)
-- `load_processed_data.m` / `visualize_processed_data.m` — Utilities
+- `load_processed_data.m` — Loads previously processed dose/CT data
 
 ## Code Conventions
 
@@ -109,6 +122,14 @@ Step 0 matches files via: CT SeriesInstanceUID → RTSTRUCT ReferencedFrameOfRef
 ### MLC Gap Correction (Halcyon)
 Halcyon has a dual-layer MLC (proximal + distal). Step 0.5 enforces minimum gap of 0.5 mm with 0.4 mm expansion per side. Valid leaf range: [-140, 140] mm.
 
+### Beam Segment Explosion (Step 0.6)
+`step06_explode_segments` reads the MLC-corrected RTPLAN and writes one RTPLAN file per beam per segment (`RTPLAN_{patient}_{session}_{reference|adapted}_B<N>_S<M>.dcm`) into `Raystation_Input/`. These single-segment 2-CP plans are imported into RayStation for per-segment dose calculation. Output struct has fields: `.reference`, `.adapted`, `.all` (cell arrays of file paths).
+
+### Sensor Placement Methods (`sensor_placement_method`)
+- `'full_plane_anterior'` — Full YZ plane at `sensor_x_index` (default)
+- `'full_plane_lateral'` — Full XZ plane at `sensor_y_index`
+- `'spherical'` — Spherical shell geometry (PSF correction not applied)
+
 ## Visualization Preferences
 
 - **Subplots: Maximum 3 rows on screen.** 3–4 columns is fine.
@@ -128,9 +149,11 @@ Halcyon has a dual-layer MLC (proximal + distal). Step 0.5 enforces minimum gap 
 ```bash
 # Typical patient processing
 # 1. Place raw DICOM export in EthosExports/[PatientID]/Pancreas/[Session]/
-# 2. Run pipeline steps in order via ethos_master_pipeline_pseudocode.m
-# 3. After Step 0.5, manually export field doses from RayStation
-# 4. Re-run pipeline from Step 1.5 onward
+# 2. Set patient/session in pipeline_setup.m CONFIG, then run it (Steps 0/0.5/0.6)
+# 3. Import RTPLAN files from Raystation_Input/ into RayStation
+# 4. Recalculate dose for each exploded-segment plan in RayStation
+# 5. Export field doses as Plan_Field*_Beam*_B*_S*.dcm to RayStationFiles/[PatientID]/[Session]/
+# 6. Set patient/session in pipeline_simulate.m CONFIG, then run it (Steps 1.5/2/3)
 ```
 
 ```matlab
@@ -140,6 +163,9 @@ Halcyon has a dual-layer MLC (proximal + distal). Step 0.5 enforces minimum gap 
 % Load and inspect processed data
 load('sct_resampled.mat');  % Contains: sct_resampled struct
 load('total_rs_dose.mat');  % Contains: total_rs_dose 3D array (Gy)
+
+% Load total reconstruction result
+load('total_recon_dose.mat');  % Contains: total_recon, metadata
 ```
 
 ## Gotchas & Known Issues
