@@ -34,7 +34,7 @@ function [field_doses, sct_resampled, total_rs_dose, metadata] = load_processed_
 %       metadata        - Struct with combined geometry info
 %
 %   EXPECTED FILES (in processed/ directory):
-%       - field_dose_001.mat, field_dose_002.mat, ... (one per field)
+%       - dose_[id]_[session]_[adapted|reference]_B[n]_S[m].mat (one per field)
 %       - sct_resampled.mat
 %       - total_rs_dose.mat
 %       - metadata.mat
@@ -151,29 +151,32 @@ fprintf('    SCT density range: [%.0f, %.0f] kg/m³\n', ...
 
 fprintf('  Loading field doses...\n');
 
-% Find all field_dose_XXX.mat files
-field_files = dir(fullfile(processed_dir, 'field_dose_*.mat'));
+% Find all dose_*.mat files (new naming: dose_[id]_[session]_[adapted|reference]_B[n]_S[m].mat)
+field_files = dir(fullfile(processed_dir, 'dose_*.mat'));
 
 if isempty(field_files)
     error('load_processed_data:FileNotFound', ...
-        'No field_dose_*.mat files found in: %s', processed_dir);
+        'No dose_*.mat files found in: %s', processed_dir);
 end
 
 num_files = length(field_files);
 fprintf('    Found %d field dose files\n', num_files);
 
-% Sort files by index number to ensure correct order
-file_indices = zeros(num_files, 1);
+% Sort files by beam then segment number
+beam_nums = zeros(num_files, 1);
+seg_nums  = zeros(num_files, 1);
 for i = 1:num_files
-    tokens = regexp(field_files(i).name, 'field_dose_(\d+)\.mat', 'tokens');
+    tokens = regexp(field_files(i).name, '_B(\d+)_S(\d+)\.mat$', 'tokens');
     if ~isempty(tokens) && ~isempty(tokens{1})
-        file_indices(i) = str2double(tokens{1}{1});
+        beam_nums(i) = str2double(tokens{1}{1});
+        seg_nums(i)  = str2double(tokens{1}{2});
     else
-        file_indices(i) = i;
+        beam_nums(i) = i;
+        seg_nums(i)  = 0;
     end
 end
 
-[~, sort_order] = sort(file_indices);
+[~, sort_order] = sortrows([beam_nums, seg_nums]);
 
 % Initialize cell array
 field_doses = cell(num_files, 1);

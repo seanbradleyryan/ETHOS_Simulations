@@ -414,7 +414,17 @@ function [exists, num_files] = check_raystation_files(rs_dir)
     exists    = false;
     num_files = 0;
     if ~exist(rs_dir, 'dir'), return; end
-    % Preferred naming: dose_[id]_[session]_[adapted|reference]_B[n]_[seg].dcm
+    % Primary: processed .mat files with new naming: dose_[id]_[session]_[adapted|reference]_B[n]_S[m].mat
+    processed_dir = fullfile(rs_dir, 'processed');
+    if exist(processed_dir, 'dir')
+        rd_files = dir(fullfile(processed_dir, 'dose_*.mat'));
+        if ~isempty(rd_files)
+            num_files = numel(rd_files);
+            exists    = true;
+            return;
+        end
+    end
+    % Fallback: DICOM files in rs_dir
     rd_files = dir(fullfile(rs_dir, 'dose_*.dcm'));
     if isempty(rd_files)
         rd_files = dir(fullfile(rs_dir, 'Plan_Field*_Beam*_B*_S*.dcm'));
