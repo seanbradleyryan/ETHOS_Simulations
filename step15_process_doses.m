@@ -24,11 +24,12 @@ function [field_doses, sct_resampled, total_rs_dose, metadata] = step15_process_
 %           .origin        - [x, y, z] in mm
 %           .spacing       - [dx, dy, dz] in mm
 %           .dimensions    - [nx, ny, nz]
-%           .beam_num      - Beam number from filename (n in Beam[n])
-%           .seg_num       - Segment number from filename (m in Seg[m])
-%           .field_num     - Field number from filename (o in Field[o])
+%           .beam_num      - Beam number from filename (n in B[n])
+%           .seg_num       - Segment number from filename
+%           .field_num     - Field number (= beam_num, used to match RTPLAN)
+%           .plan_type     - 'adapted' or 'reference' (from filename)
 %           .gantry_angle  - Gantry angle in degrees (from RTPLAN)
-%           .meterset      - Monitor units (from RTPLAN, matched by field_num)
+%           .meterset      - Monitor units (from RTPLAN, matched by beam_num)
 %       sct_resampled   - Struct with CT resampled to dose grid:
 %           .cubeHU         - 3D HU array
 %           .cubeDensity    - 3D density array (kg/mÂ³)
@@ -51,10 +52,10 @@ function [field_doses, sct_resampled, total_rs_dose, metadata] = step15_process_
 %
 %   ALGORITHM:
 %   1. Create processed/ subdirectory if not exists
-%   2. Find all Beam*_Seg*_Field*.dcm files in Raystation directory
+%   2. Find all dose_*.dcm files in Raystation directory
 %   3. Load RTPLAN to extract beam metadata (gantry angles, metersets)
 %   4. Load first dose file to establish reference grid geometry
-%   5. Process each dose file, match field_num to RTPLAN beam, save individually
+%   5. Process each dose file, match beam_num to RTPLAN beam, save individually
 %   6. Load SCT images, sort by z-position
 %   7. Resample SCT to dose grid via 3D interpolation
 %   8. Convert HU to density
@@ -68,10 +69,13 @@ function [field_doses, sct_resampled, total_rs_dose, metadata] = step15_process_
 %   - Standard HU to density: Ï = 1000 + HU (approximate)
 %   - Dose zeroed where: outside body OR inside couch (unless disabled)
 %   - Set config.apply_dose_masking = false to skip dose zeroing (debugging)
-%   - Raystation files: Beam[n]_Seg[m]_Field [o].dcm pattern
+%   - RayStation files: dose_[patientid]_[session]_[adapted|reference]_B[n]_[seg].dcm
+%       e.g. dose_1885729_Session_4_adapted_B6_103.dcm
+%       beam_num = B[n], seg_num = [seg], field_num = beam_num (matches RTPLAN)
+%       plan_type = 'adapted' or 'reference'
 %   - RTPLAN files: RTPLAN*.dcm pattern
 %   - RTSTRUCT files: RTSTRUCT*.dcm pattern
-%   - Meterset matching: field_num (o) from filename matches beam_number in RTPLAN
+%   - Meterset matching: beam_num (n) from filename matches beam_number in RTPLAN
 %
 %   EXAMPLE:
 %       config.working_dir = '/mnt/weka/home/80030361/ETHOS_Simulations';
@@ -174,18 +178,22 @@ end
 
 fprintf('\n[1/8] Finding field dose files...\n');
 
-% --- PREFERRED format: Plan_Field [n]_Beam[m]_B[n]_S[m].dcm ---
+% --- PREFERRED format: dose_[patientid]_[session]_[adapted|reference]_B[n]_[seg].dcm ---
 % Produced by step06_explode_segments + RayStation export.
+% e.g. dose_1885729_Session_4_adapted_B6_103.dcm
 % If ANY files in this format exist, use ONLY those and skip all other patterns.
-rd_files_preferred = dir(fullfile(rs_dir, 'Plan_Field*_Beam*_B*_S*.dcm'));
+rd_files_preferred = dir(fullfile(rs_dir, 'dose_*.dcm'));
 
 if ~isempty(rd_files_preferred)
     rd_files = rd_files_preferred;
-    fprintf('  Using preferred format (Plan_Field*_Beam*_B*_S*.dcm): %d file(s) found\n', ...
-        numel(rd_files));
+    fprintf('  Using preferred format (dose_*.dcm): %d file(s) found\n', numel(rd_files));
 else
-    % --- Legacy fallback patterns (preserved from original implementation) ---
-    rd_files = dir(fullfile(rs_dir, 'Beam*_Seg*_Field*.dcm'));
+    % --- Legacy fallback patterns ---
+    rd_files = dir(fullfile(rs_dir, 'Plan_Field*_Beam*_B*_S*.dcm'));
+
+    if isempty(rd_files)
+        rd_files = dir(fullfile(rs_dir, 'Beam*_Seg*_Field*.dcm'));
+    end
 
     if isempty(rd_files)
         rd_files = dir(fullfile(rs_dir, 'Beam*.dcm'));
@@ -207,10 +215,11 @@ if isempty(rd_files)
     error('step15_process_doses:NoFieldDoses', ...
         ['No field dose files found in: %s\n' ...
          'Searched patterns (in priority order):\n' ...
-         '  1. Plan_Field*_Beam*_B*_S*.dcm  (preferred)\n' ...
-         '  2. Beam*_Seg*_Field*.dcm\n' ...
-         '  3. Beam*.dcm\n' ...
-         '  4. RD.*.dcm / RD*.dcm'], rs_dir);
+         '  1. dose_*.dcm  (preferred)\n' ...
+         '  2. Plan_Field*_Beam*_B*_S*.dcm\n' ...
+         '  3. Beam*_Seg*_Field*.dcm\n' ...
+         '  4. Beam*.dcm\n' ...
+         '  5. RD.*.dcm / RD*.dcm'], rs_dir);
 end
 
 num_files = length(rd_files);
@@ -317,50 +326,54 @@ for i = 1:num_files
             end
         end
         
-        % Extract beam info from filename (e.g., Beam1_Seg0_Field 1.dcm)
-        % field_num is used to match to RTPLAN beam metadata
-        [beam_num, seg_num, field_num] = extractBeamInfo(rd_files(i).name, i);
-        
+        % Extract beam info from filename
+        % e.g. dose_1885729_Session_4_adapted_B6_103.dcm
+        %   -> beam_num=6, seg_num=103, field_num=6, plan_type='adapted'
+        % field_num (= beam_num) is used to match to RTPLAN beam metadata
+        [beam_num, seg_num, field_num, plan_type] = extractBeamInfo(rd_files(i).name, i);
+
         % Get beam metadata by matching field_num to beam_number in RTPLAN
         [gantry_angle, meterset] = getBeamMetadata(beam_metadata, field_num);
-        
+
         % Create field dose structure
         field_dose = struct();
         field_dose.dose_Gy = dose_data;
         field_dose.origin = dose_origin;
         field_dose.spacing = dose_spacing;
         field_dose.dimensions = dose_dims;
-        field_dose.beam_num = beam_num;         % Beam number from filename
+        field_dose.beam_num = beam_num;         % Beam number from filename (B[n])
         field_dose.seg_num = seg_num;           % Segment number from filename
-        field_dose.field_num = field_num;       % Field number (matches RTPLAN beam)
+        field_dose.field_num = field_num;       % Field number (= beam_num, matches RTPLAN)
+        field_dose.plan_type = plan_type;       % 'adapted' or 'reference'
         field_dose.gantry_angle = gantry_angle;
         field_dose.meterset = meterset;
         field_dose.source_file = rd_files(i).name;
         field_dose.max_dose_Gy = max(dose_data(:));
         field_dose.mean_dose_Gy = mean(dose_data(dose_data > 0));
-        
+
         % Propagate isocenter and jaw data from beam_metadata
         [iso, jx, jy] = getBeamGeometry(beam_metadata, field_num);
         field_dose.isocenter = iso;
         field_dose.jaw_x = jx;
         field_dose.jaw_y = jy;
-        
+
         % Add to total dose
         total_rs_dose = total_rs_dose + dose_data;
-        
+
         % Save individual field dose file (MEMORY CONSTRAINT)
         field_filename = sprintf('field_dose_%03d.mat', i);
         field_filepath = fullfile(processed_dir, field_filename);
         save(field_filepath, 'field_dose', '-v7.3');
-        fprintf('    Saved: %s (field %d, max: %.4f Gy, gantry: %.1fÂ°, MU: %.1f)\n', ...
-            field_filename, field_num, field_dose.max_dose_Gy, gantry_angle, meterset);
-        
+        fprintf('    Saved: %s (B%d S%d [%s], max: %.4f Gy, gantry: %.1f deg, MU: %.1f)\n', ...
+            field_filename, beam_num, seg_num, plan_type, field_dose.max_dose_Gy, gantry_angle, meterset);
+
         % Store reference in output cell array (without full dose data for memory)
         field_doses{i} = struct();
         field_doses{i}.filepath = field_filepath;
         field_doses{i}.beam_num = beam_num;
         field_doses{i}.seg_num = seg_num;
         field_doses{i}.field_num = field_num;
+        field_doses{i}.plan_type = plan_type;
         field_doses{i}.gantry_angle = gantry_angle;
         field_doses{i}.meterset = meterset;
         field_doses{i}.max_dose_Gy = field_dose.max_dose_Gy;
@@ -872,41 +885,52 @@ function [match, msg] = validateGeometry(dose_origin, dose_spacing, dose_dims, .
 end
 
 
-function [beam_num, seg_num, field_num] = extractBeamInfo(filename, default_index)
-%EXTRACTBEAMINFO Extract beam, segment, and field numbers from dose filename
+function [beam_num, seg_num, field_num, plan_type] = extractBeamInfo(filename, default_index)
+%EXTRACTBEAMINFO Extract beam, segment, field numbers and plan type from dose filename
 %
 %   Supported patterns (checked in priority order):
-%     1. Plan_Field [n]_Beam[m]_B[n]_S[m].dcm  (preferred, from step06 explosion)
-%        e.g. Plan_Field 10_Beam162_B10_S162.dcm
-%        -> field_num = n (Field number = original beam number)
-%        -> beam_num  = n (B[n] value)
-%        -> seg_num   = m (S[m] value)
-%     2. Beam[n]_Seg[m]_Field [o].dcm  (legacy RayStation export)
-%     3. Beam[n]_Seg[m]_Field[o].dcm   (legacy, no space)
-%     4. RD.[n].dcm                    (legacy DICOM default)
+%     1. dose_[id]_[session]_(adapted|reference)_B[n]_[seg].dcm  (preferred)
+%        e.g. dose_1885729_Session_4_adapted_B6_103.dcm
+%        -> beam_num  = 6  (B[n])
+%        -> seg_num   = 103
+%        -> field_num = 6  (= beam_num, matches RTPLAN beam_number)
+%        -> plan_type = 'adapted'
+%     2. Plan_Field [n]_Beam[m]_B[n]_S[m].dcm  (legacy step06 format)
+%     3. Beam[n]_Seg[m]_Field [o].dcm           (legacy RayStation export)
+%     4. Beam[n]_Seg[m]_Field[o].dcm            (legacy, no space)
+%     5. RD.[n].dcm                              (legacy DICOM default)
 %
 %   OUTPUTS:
-%       beam_num  - Original beam number (B[n])
-%       seg_num   - Segment number within that beam (S[m])
-%       field_num - Field number used to match RTPLAN beam metadata
+%       beam_num  - Beam number (B[n] from filename)
+%       seg_num   - Segment number within that beam
+%       field_num - Field number used to match RTPLAN beam metadata (= beam_num)
+%       plan_type - 'adapted', 'reference', or 'unknown'
 
-    beam_num = default_index;
-    seg_num = 0;
+    beam_num  = default_index;
+    seg_num   = 0;
     field_num = default_index;
+    plan_type = 'unknown';
 
-    % --- Pattern 1 (preferred): Plan_Field [n]_Beam[m]_B[n]_S[m].dcm ---
-    tokens = regexp(filename, 'Plan_Field\s*(\d+)_Beam(\d+)_B(\d+)_S(\d+)', 'tokens');
+    % --- Pattern 1 (preferred): dose_*_(adapted|reference)_B[n]_[seg].dcm ---
+    tokens = regexp(filename, '_(adapted|reference)_B(\d+)_(\d+)\.dcm$', 'tokens', 'ignorecase');
     if ~isempty(tokens) && ~isempty(tokens{1})
-        % field_num  = the "Field n" / "B n" value (original beam number in plan)
-        % beam_num   = same n (B[n])
-        % seg_num    = the S[m] value (segment index within that beam)
-        field_num = str2double(tokens{1}{1});   % Field [n]
-        beam_num  = str2double(tokens{1}{3});   % B[n]  (should equal field_num)
-        seg_num   = str2double(tokens{1}{4});   % S[m]
+        plan_type = lower(tokens{1}{1});        % 'adapted' or 'reference'
+        beam_num  = str2double(tokens{1}{2});   % B[n]
+        seg_num   = str2double(tokens{1}{3});   % segment number
+        field_num = beam_num;                   % field_num matches RTPLAN beam_number
         return;
     end
 
-    % --- Pattern 2: Beam[n]_Seg[m]_Field [o].dcm ---
+    % --- Pattern 2: Plan_Field [n]_Beam[m]_B[n]_S[m].dcm ---
+    tokens = regexp(filename, 'Plan_Field\s*(\d+)_Beam(\d+)_B(\d+)_S(\d+)', 'tokens');
+    if ~isempty(tokens) && ~isempty(tokens{1})
+        field_num = str2double(tokens{1}{1});
+        beam_num  = str2double(tokens{1}{3});
+        seg_num   = str2double(tokens{1}{4});
+        return;
+    end
+
+    % --- Pattern 3: Beam[n]_Seg[m]_Field [o].dcm ---
     tokens = regexp(filename, 'Beam(\d+)_Seg(\d+)_Field\s*(\d+)', 'tokens');
     if ~isempty(tokens) && ~isempty(tokens{1})
         beam_num  = str2double(tokens{1}{1});
@@ -915,7 +939,7 @@ function [beam_num, seg_num, field_num] = extractBeamInfo(filename, default_inde
         return;
     end
 
-    % --- Pattern 3: Beam[n]_Seg[m]_Field[o].dcm (no space) ---
+    % --- Pattern 4: Beam[n]_Seg[m]_Field[o].dcm (no space) ---
     tokens = regexp(filename, 'Beam(\d+)_Seg(\d+)_Field(\d+)', 'tokens');
     if ~isempty(tokens) && ~isempty(tokens{1})
         beam_num  = str2double(tokens{1}{1});
@@ -924,7 +948,7 @@ function [beam_num, seg_num, field_num] = extractBeamInfo(filename, default_inde
         return;
     end
 
-    % --- Pattern 4 (legacy): RD.[n].dcm ---
+    % --- Pattern 5 (legacy): RD.[n].dcm ---
     tokens = regexp(filename, 'RD\.(\d+)', 'tokens');
     if ~isempty(tokens) && ~isempty(tokens{1})
         beam_num  = str2double(tokens{1}{1});

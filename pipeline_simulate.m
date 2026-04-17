@@ -12,7 +12,6 @@
 %       RayStationFiles/<PatientID>/<Session>/
 %
 %  STEPS EXECUTED:
-%    Step 1.5 — Process field doses and resample SCT to dose grid
 %    Step 2   — k-Wave photoacoustic simulation (forward + time-reversal)
 %    Step 3   — Gamma analysis, SSIM, and visualization
 %
@@ -22,7 +21,8 @@
 %    - Image Processing Toolbox
 %    - Parallel Computing Toolbox (optional, for CONFIG.use_parallel)
 %    - pipeline_setup.m must have been run successfully
-%    - RayStation field dose DICOM files present in RayStationFiles/
+%    - pipeline_compress.m must have been run on the Windows work laptop
+%      (processes field doses via Step 1.5 and uploads to cluster)
 %
 %  AUTHOR: ETHOS Pipeline Team
 %  DATE: March 2026
@@ -79,13 +79,8 @@ CONFIG.use_parallel          = true;
 CONFIG.num_parallel_workers  = 16;
 
 % --- Pipeline Control Flags ---
-CONFIG.run_step15  = false;   % Step 1.5: Process doses and resample CT
 CONFIG.run_step2   = true;    % Step 2  : k-Wave simulation
 CONFIG.run_step3   = true;    % Step 3  : Gamma analysis
-
-% --- Dose Masking (Step 1.5) ---
-% Set false to disable zeroing outside body / in couch (for debugging only)
-CONFIG.apply_dose_masking = true;
 
 % --- Define Tissue Property Tables ---
 CONFIG.tissue_tables = define_tissue_tables();
@@ -93,7 +88,7 @@ CONFIG.tissue_tables = define_tissue_tables();
 %% ========================= INITIALIZATION ================================
 
 fprintf('=========================================================\n');
-fprintf('  ETHOS Pipeline — Simulate & Analyse (Steps 1.5 / 2 / 3)\n');
+fprintf('  ETHOS Pipeline — Simulate & Analyse (Steps 2 / 3)\n');
 fprintf('=========================================================\n');
 fprintf('  Started: %s\n', datetime('now'));
 fprintf('  Working directory: %s\n', CONFIG.working_dir);
@@ -146,27 +141,12 @@ for p_idx = 1:length(CONFIG.patients)
             fprintf('[STEP 1] Found %d dose file(s) in %s\n', num_dose_files, rs_dir);
 
             %% ============================================================
-            %  STEP 1.5: Process Field Doses and Resample CT
+            %  STEP 1.5: Load Processed Field Doses (run pipeline_compress.m
+            %            on the Windows work laptop before this step)
             %% ============================================================
-            if CONFIG.run_step15
-                fprintf('\n[STEP 1.5] Processing field doses and resampling CT...\n');
-
-                [field_doses, sct_resampled, total_rs_dose, dose_metadata] = ...
-                    step15_process_doses(patient_id, session, CONFIG);
-
-                num_valid = sum(~cellfun(@isempty, field_doses));
-                RESULTS.patients.(result_key).num_fields        = num_valid;
-                RESULTS.patients.(result_key).dose_grid_size    = dose_metadata.dimensions;
-                RESULTS.patients.(result_key).total_rs_dose_max = max(total_rs_dose(:));
-
-                fprintf('[STEP 1.5] Complete. %d fields processed.\n', num_valid);
-                fprintf('           Dose grid: [%d x %d x %d]\n', dose_metadata.dimensions);
-                fprintf('           Max RS dose: %.4f Gy\n', max(total_rs_dose(:)));
-            else
-                fprintf('\n[STEP 1.5] Loading previously processed data...\n');
-                [field_doses, sct_resampled, total_rs_dose, dose_metadata] = ...
-                    load_processed_data(patient_id, session, CONFIG);
-            end
+            fprintf('\n[STEP 1.5] Loading previously processed data...\n');
+            [field_doses, sct_resampled, total_rs_dose, dose_metadata] = ...
+                load_processed_data(patient_id, session, CONFIG);
 
             % Extract beam metadata for sensor placement
             if isfield(dose_metadata, 'beam_metadata') && ~isempty(dose_metadata.beam_metadata)
@@ -434,8 +414,11 @@ function [exists, num_files] = check_raystation_files(rs_dir)
     exists    = false;
     num_files = 0;
     if ~exist(rs_dir, 'dir'), return; end
-    % Preferred naming from step06 explosion
-    rd_files = dir(fullfile(rs_dir, 'Plan_Field*_Beam*_B*_S*.dcm'));
+    % Preferred naming: dose_[id]_[session]_[adapted|reference]_B[n]_[seg].dcm
+    rd_files = dir(fullfile(rs_dir, 'dose_*.dcm'));
+    if isempty(rd_files)
+        rd_files = dir(fullfile(rs_dir, 'Plan_Field*_Beam*_B*_S*.dcm'));
+    end
     if isempty(rd_files)
         rd_files = dir(fullfile(rs_dir, 'RD.*.dcm'));
     end
