@@ -1,6 +1,6 @@
 %% =========================================================================
 %  PIPELINE_COMPRESS.m
-%  ETHOS Photoacoustic Pipeline  Dose Processing and Upload Preparation
+%  ETHOS Photoacoustic Pipeline — Dose Processing and Upload Preparation
 %  =========================================================================
 %
 %  PURPOSE:
@@ -11,8 +11,8 @@
 %  Run this BEFORE pipeline_simulate.m on the cluster.
 %
 %  STEPS EXECUTED:
-%    Step 1.5  Process field doses and resample SCT to dose grid
-%    Upload    prepare_uploads: package processed .mat files for transfer
+%    Step 1.5 — Process field doses and resample SCT to dose grid
+%    Upload   — prepare_uploads: package processed .mat files for transfer
 %
 %  PREREQUISITES:
 %    - MATLAB R2022a or later
@@ -38,7 +38,6 @@ CONFIG.sessions        = {'Session_1'};
 CONFIG.treatment_site  = 'Pancreas';
 
 % --- Directory Paths (Windows work laptop) ---
-
 CONFIG.working_dir  = 'C:/Users/80030361/Documents/ETHOS_Simulations';
 
 % --- Dose Masking (Step 1.5) ---
@@ -52,7 +51,7 @@ CONFIG.run_prepare      = true;   % Upload  : Prepare .mat files for cluster
 %% ========================= INITIALIZATION ================================
 
 fprintf('=========================================================\n');
-fprintf('  ETHOS Pipeline  Compress & Prepare (Steps 1.5 / Upload)\n');
+fprintf('  ETHOS Pipeline — Compress & Prepare (Steps 1.5 / Upload)\n');
 fprintf('=========================================================\n');
 fprintf('  Started: %s\n', datetime('now'));
 fprintf('  Working directory: %s\n', CONFIG.working_dir);
@@ -168,7 +167,7 @@ function [exists, num_files] = check_raystation_files(rs_dir)
     if ~exist(rs_dir, 'dir'), return; end
     rd_files = dir(fullfile(rs_dir, 'dose_*.dcm'));
     if isempty(rd_files)
-        rd_files = dir(fullfile(rs_dir, 'dose_*_Session_*.dcm'));
+        rd_files = dir(fullfile(rs_dir, 'Plan_Field*_Beam*_B*_S*.dcm'));
     end
     if isempty(rd_files)
         rd_files = dir(fullfile(rs_dir, 'RD.*.dcm'));
