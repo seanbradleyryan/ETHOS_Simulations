@@ -38,7 +38,7 @@ CONFIG.sessions        = {'Session_1'};
 CONFIG.treatment_site  = 'Pancreas';
 
 % --- Directory Paths (Windows work laptop) ---
-CONFIG.working_dir  = 'F:';
+CONFIG.working_dir  = 'C:/Users/80030361/Documents/ETHOS_Simulations';
 
 % --- Dose Masking (Step 1.5) ---
 % Set false to disable zeroing outside body / in couch (for debugging only)

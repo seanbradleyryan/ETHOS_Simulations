@@ -135,6 +135,11 @@ if ~config.apply_dose_masking
     fprintf('  [INFO] Dose masking DISABLED (debugging mode)\n');
 end
 
+% Set default batch size for field dose processing (memory management)
+if ~isfield(config, 'batch_size') || isempty(config.batch_size)
+    config.batch_size = 1000;
+end
+
 %% ======================== CONSTRUCT PATHS ========================
 
 fprintf('\n========================================\n');
@@ -284,120 +289,141 @@ metadata.beam_metadata = beam_metadata;  % Includes isocenter + jaw data for sen
 
 %% ======================== PROCESS EACH FIELD DOSE ========================
 
-fprintf('\n[4/8] Processing field doses (saving individually)...\n');
+fprintf('\n[4/8] Processing field doses (saving individually, batch_size=%d)...\n', config.batch_size);
 
 % Track which files were processed successfully
-field_doses = cell(num_files, 1);
+field_doses    = cell(num_files, 1);
 processed_count = 0;
 save_count      = 0;
 
-for i = 1:num_files
-    fprintf('  Processing field %d/%d: %s\n', i, num_files, rd_files(i).name);
-    
-    try
-        % Load DICOM dose file
-        dose_file = fullfile(rs_dir, rd_files(i).name);
-        dose_info = dicominfo(dose_file);
-        dose_data = double(squeeze(dicomread(dose_file)));
-        
-        % Apply dose grid scaling
-        if isfield(dose_info, 'DoseGridScaling')
-            dose_scaling = dose_info.DoseGridScaling;
-            dose_data = dose_data * dose_scaling;
-            fprintf('    Applied scaling: %e\n', dose_scaling);
-        end
-        
-        % Extract geometry and verify it matches reference
-        dose_origin = dose_info.ImagePositionPatient(:);
-        dose_spacing = extractDoseSpacing(dose_info);
-        dose_dims = size(dose_data);
-        
-        % Validate geometry matches reference
-        [geom_match, geom_msg] = validateGeometry(dose_origin, dose_spacing, dose_dims, ...
-            ref_origin, ref_spacing, ref_dims);
-        
-        if ~geom_match
-            warning('step15_process_doses:GeometryMismatch', ...
-                'Field %d geometry mismatch: %s', i, geom_msg);
-            % Attempt to resample if dimensions don't match
-            if ~isequal(dose_dims, ref_dims)
-                fprintf('    Resampling to reference grid...\n');
-                dose_data = resampleDoseToGrid(dose_data, dose_origin, dose_spacing, ...
-                    ref_origin, ref_spacing, ref_dims);
-                dose_dims = ref_dims;
+num_batches = ceil(num_files / config.batch_size);
+fprintf('  Total files: %d | Batches: %d\n', num_files, num_batches);
+
+for batch_idx = 1:num_batches
+    batch_start = (batch_idx - 1) * config.batch_size + 1;
+    batch_end   = min(batch_idx * config.batch_size, num_files);
+
+    fprintf('\n  --- Batch %d/%d (files %d-%d) ---\n', ...
+        batch_idx, num_batches, batch_start, batch_end);
+
+    % Accumulate dose contribution for this batch only, then fold into total
+    batch_total_dose = zeros(ref_dims);
+
+    for i = batch_start:batch_end
+        fprintf('  Processing field %d/%d: %s\n', i, num_files, rd_files(i).name);
+
+        try
+            % Load DICOM dose file
+            dose_file = fullfile(rs_dir, rd_files(i).name);
+            dose_info = dicominfo(dose_file);
+            dose_data = double(squeeze(dicomread(dose_file)));
+
+            % Apply dose grid scaling
+            if isfield(dose_info, 'DoseGridScaling')
+                dose_scaling = dose_info.DoseGridScaling;
+                dose_data = dose_data * dose_scaling;
+                fprintf('    Applied scaling: %e\n', dose_scaling);
             end
+
+            % Extract geometry and verify it matches reference
+            dose_origin = dose_info.ImagePositionPatient(:);
+            dose_spacing = extractDoseSpacing(dose_info);
+            dose_dims = size(dose_data);
+
+            % Validate geometry matches reference
+            [geom_match, geom_msg] = validateGeometry(dose_origin, dose_spacing, dose_dims, ...
+                ref_origin, ref_spacing, ref_dims);
+
+            if ~geom_match
+                warning('step15_process_doses:GeometryMismatch', ...
+                    'Field %d geometry mismatch: %s', i, geom_msg);
+                % Attempt to resample if dimensions don't match
+                if ~isequal(dose_dims, ref_dims)
+                    fprintf('    Resampling to reference grid...\n');
+                    dose_data = resampleDoseToGrid(dose_data, dose_origin, dose_spacing, ...
+                        ref_origin, ref_spacing, ref_dims);
+                    dose_dims = ref_dims;
+                end
+            end
+
+            % Extract beam info from filename
+            % e.g. dose_1885729_Session_4_adapted_B6_103.dcm
+            %   -> beam_num=6, seg_num=103, field_num=6, plan_type='adapted'
+            % field_num (= beam_num) is used to match to RTPLAN beam metadata
+            [beam_num, seg_num, field_num, plan_type] = extractBeamInfo(rd_files(i).name, i);
+
+            % Get beam metadata by matching field_num to beam_number in RTPLAN
+            [gantry_angle, meterset] = getBeamMetadata(beam_metadata, field_num);
+
+            % Create field dose structure
+            field_dose = struct();
+            field_dose.dose_Gy = dose_data;
+            field_dose.origin = dose_origin;
+            field_dose.spacing = dose_spacing;
+            field_dose.dimensions = dose_dims;
+            field_dose.beam_num = beam_num;         % Beam number from filename (B[n])
+            field_dose.seg_num = seg_num;           % Segment number from filename
+            field_dose.field_num = field_num;       % Field number (= beam_num, matches RTPLAN)
+            field_dose.plan_type = plan_type;       % 'adapted' or 'reference'
+            field_dose.gantry_angle = gantry_angle;
+            field_dose.meterset = meterset;
+            field_dose.source_file = rd_files(i).name;
+            field_dose.max_dose_Gy = max(dose_data(:));
+            field_dose.mean_dose_Gy = mean(dose_data(dose_data > 0));
+
+            % Propagate isocenter and jaw data from beam_metadata
+            [iso, jx, jy] = getBeamGeometry(beam_metadata, field_num);
+            field_dose.isocenter = iso;
+            field_dose.jaw_x = jx;
+            field_dose.jaw_y = jy;
+
+            % Accumulate into batch subtotal
+            batch_total_dose = batch_total_dose + dose_data;
+
+            % Save individual field dose file — name mirrors source DICOM
+            % Format: dose_[id]_[session]_[adapted|reference]_B[beam]_[seg].mat
+            field_filename = sprintf('dose_%s_%s_%s_B%d_%d.mat', ...
+                patient_id, session, plan_type, beam_num, seg_num);
+            field_filepath = fullfile(processed_dir, field_filename);
+            save(field_filepath, 'field_dose', '-v7.3');
+            save_count = save_count + 1;
+            fprintf('    [Save %d] %s (B%d S%d [%s], max: %.4f Gy, gantry: %.1f deg, MU: %.1f)\n', ...
+                save_count, field_filename, beam_num, seg_num, plan_type, ...
+                field_dose.max_dose_Gy, gantry_angle, meterset);
+
+            % Store reference in output cell array (without full dose data for memory)
+            field_doses{i} = struct();
+            field_doses{i}.filepath = field_filepath;
+            field_doses{i}.beam_num = beam_num;
+            field_doses{i}.seg_num = seg_num;
+            field_doses{i}.field_num = field_num;
+            field_doses{i}.plan_type = plan_type;
+            field_doses{i}.gantry_angle = gantry_angle;
+            field_doses{i}.meterset = meterset;
+            field_doses{i}.max_dose_Gy = field_dose.max_dose_Gy;
+            field_doses{i}.source_file = rd_files(i).name;
+            field_doses{i}.isocenter = iso;
+            field_doses{i}.jaw_x = jx;
+            field_doses{i}.jaw_y = jy;
+
+            processed_count = processed_count + 1;
+
+            % Clear per-file variables immediately to free memory
+            clear field_dose dose_data dose_info dose_origin dose_spacing dose_dims;
+
+        catch ME
+            warning('step15_process_doses:FieldProcessingError', ...
+                'Failed to process field %d (%s): %s', i, rd_files(i).name, ME.message);
         end
-        
-        % Extract beam info from filename
-        % e.g. dose_1885729_Session_4_adapted_B6_103.dcm
-        %   -> beam_num=6, seg_num=103, field_num=6, plan_type='adapted'
-        % field_num (= beam_num) is used to match to RTPLAN beam metadata
-        [beam_num, seg_num, field_num, plan_type] = extractBeamInfo(rd_files(i).name, i);
+    end  % inner file loop
 
-        % Get beam metadata by matching field_num to beam_number in RTPLAN
-        [gantry_angle, meterset] = getBeamMetadata(beam_metadata, field_num);
+    % Fold batch subtotal into running total, then clear batch arrays
+    total_rs_dose = total_rs_dose + batch_total_dose;
+    clear batch_total_dose;
 
-        % Create field dose structure
-        field_dose = struct();
-        field_dose.dose_Gy = dose_data;
-        field_dose.origin = dose_origin;
-        field_dose.spacing = dose_spacing;
-        field_dose.dimensions = dose_dims;
-        field_dose.beam_num = beam_num;         % Beam number from filename (B[n])
-        field_dose.seg_num = seg_num;           % Segment number from filename
-        field_dose.field_num = field_num;       % Field number (= beam_num, matches RTPLAN)
-        field_dose.plan_type = plan_type;       % 'adapted' or 'reference'
-        field_dose.gantry_angle = gantry_angle;
-        field_dose.meterset = meterset;
-        field_dose.source_file = rd_files(i).name;
-        field_dose.max_dose_Gy = max(dose_data(:));
-        field_dose.mean_dose_Gy = mean(dose_data(dose_data > 0));
-
-        % Propagate isocenter and jaw data from beam_metadata
-        [iso, jx, jy] = getBeamGeometry(beam_metadata, field_num);
-        field_dose.isocenter = iso;
-        field_dose.jaw_x = jx;
-        field_dose.jaw_y = jy;
-
-        % Add to total dose
-        total_rs_dose = total_rs_dose + dose_data;
-
-        % Save individual field dose file — name mirrors source DICOM
-        % Format: dose_[id]_[session]_[adapted|reference]_B[beam]_[seg].mat
-        field_filename = sprintf('dose_%s_%s_%s_B%d_%d.mat', ...
-            patient_id, session, plan_type, beam_num, seg_num);
-        field_filepath = fullfile(processed_dir, field_filename);
-        save(field_filepath, 'field_dose', '-v7.3');
-        save_count = save_count + 1;
-        fprintf('    [Save %d] %s (B%d S%d [%s], max: %.4f Gy, gantry: %.1f deg, MU: %.1f)\n', ...
-            save_count, field_filename, beam_num, seg_num, plan_type, ...
-            field_dose.max_dose_Gy, gantry_angle, meterset);
-
-        % Store reference in output cell array (without full dose data for memory)
-        field_doses{i} = struct();
-        field_doses{i}.filepath = field_filepath;
-        field_doses{i}.beam_num = beam_num;
-        field_doses{i}.seg_num = seg_num;
-        field_doses{i}.field_num = field_num;
-        field_doses{i}.plan_type = plan_type;
-        field_doses{i}.gantry_angle = gantry_angle;
-        field_doses{i}.meterset = meterset;
-        field_doses{i}.max_dose_Gy = field_dose.max_dose_Gy;
-        field_doses{i}.source_file = rd_files(i).name;
-        field_doses{i}.isocenter = iso;
-        field_doses{i}.jaw_x = jx;
-        field_doses{i}.jaw_y = jy;
-        
-        processed_count = processed_count + 1;
-        
-        % Clear field_dose to free memory
-        clear field_dose dose_data;
-        
-    catch ME
-        warning('step15_process_doses:FieldProcessingError', ...
-            'Failed to process field %d (%s): %s', i, rd_files(i).name, ME.message);
-    end
-end
+    fprintf('  [Batch %d/%d] Done. Running total max: %.4f Gy. Memory cleared.\n', ...
+        batch_idx, num_batches, max(total_rs_dose(:)));
+end  % batch loop
 
 fprintf('  Successfully processed %d/%d field doses\n', processed_count, num_files);
 fprintf('  Total dose max (before couch masking): %.4f Gy\n', max(total_rs_dose(:)));
