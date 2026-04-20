@@ -41,7 +41,7 @@ function output_paths = step06_explode_segments(patient_id, session, config)
 %                    .adapted    - cell array of char, full paths for adapted plan files
 %                    .all        - cell array of char, all written paths combined
 %
-%  STANDALONE USAGE (no arguments — uses built-in defaults):
+%  STANDALONE USAGE (no arguments  uses built-in defaults):
 %    step06_explode_segments();
 %
 %  PIPELINE USAGE (called by pipeline_setup.m):
@@ -58,7 +58,7 @@ if nargin == 0
         'treatment_site', 'Pancreas');
 end
 
-fprintf('=== Step 0.6: Segment Explosion — 1 Plan per Beam (Reference + Adapted) ===\n');
+fprintf('=== Step 0.6: Segment Explosion  1 Plan per Beam (Reference + Adapted) ===\n');
 fprintf('Patient: %s | Session: %s\n\n', patient_id, session);
 
 % -----------------------------------------------------------------------
@@ -86,7 +86,7 @@ fprintf('--- Copying supporting files to RayStation input directory ---\n');
 % sCT image slices
 copy_files_to_dir(sct_dir, 'CT*.dcm', output_dir, 'sCT images');
 
-% Sim CT image slices (entire directory — all .dcm files)
+% Sim CT image slices (entire directory  all .dcm files)
 if ~exist(sim_ct_dir, 'dir')
     warning('step06:noSimCtDir', ...
         'Sim CT directory not found, skipping:\n  %s', sim_ct_dir);
@@ -98,7 +98,7 @@ end
 copy_files_to_dir(sct_dir, 'RS_*.dcm', output_dir, 'RTSTRUCT');
 
 % RTDOSE files (reference + adapted)
-copy_files_to_dir(sct_dir, 'RD_*.dcm', output_dir, 'RTDOSE');
+% copy_files_to_dir(sct_dir, 'RD_*.dcm', output_dir, 'RTDOSE');
 
 fprintf('\n');
 
@@ -114,7 +114,7 @@ output_paths.reference = {};
 output_paths.adapted   = {};
 
 % -----------------------------------------------------------------------
-% Main loop — one pass per plan type
+% Main loop  one pass per plan type
 % -----------------------------------------------------------------------
 for pt = 1:numel(plan_types)
 
@@ -127,7 +127,7 @@ for pt = 1:numel(plan_types)
     if ~isfile(input_rtplan)
         warning('step06:fileNotFound', ...
             'Input file not found for %s plan, skipping:\n  %s', plan_type, input_rtplan);
-        fprintf('[SKIP] %s plan — file missing.\n\n', upper(plan_type));
+        fprintf('[SKIP] %s plan  file missing.\n\n', upper(plan_type));
         continue;
     end
 
@@ -180,7 +180,7 @@ for pt = 1:numel(plan_types)
     any_warn_global   = false;
 
     % -------------------------------------------------------------------
-    % Beam loop — each original beam produces ONE output RTPLAN file
+    % Beam loop  each original beam produces ONE output RTPLAN file
     %             containing all its segments promoted to beams
     % -------------------------------------------------------------------
     for b = 1:num_original_beams
@@ -208,7 +208,7 @@ for pt = 1:numel(plan_types)
 
         if N_seg < 1
             warning('step06:noSegments', ...
-                '[%s] Beam %d (%s) has only %d control points — skipping.', ...
+                '[%s] Beam %d (%s) has only %d control points  skipping.', ...
                 plan_type, original_beam_number, original_beam_name, N_cp);
             continue;
         end
@@ -235,7 +235,7 @@ for pt = 1:numel(plan_types)
         local_beam_idx   = 0;
 
         % -----------------------------------------------------------
-        % Segment loop — each segment becomes one beam in the output plan
+        % Segment loop  each segment becomes one beam in the output plan
         % -----------------------------------------------------------
         for s = 1:N_seg
 
@@ -405,7 +405,7 @@ for pt = 1:numel(plan_types)
             session, plan_type, original_beam_number, original_beam_name);
 
         % -----------------------------------------------------------
-        % Write output file  — one file per original beam
+        % Write output file   one file per original beam
         % -----------------------------------------------------------
         out_filename = sprintf('RTPLAN_%s_%s_%s_B%d.dcm', ...
             patient_id, session, plan_type, original_beam_number);
