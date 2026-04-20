@@ -44,7 +44,8 @@ function [field_doses, sct_resampled, total_rs_dose, metadata] = step15_process_
 %       metadata        - Struct with combined geometry info
 %
 %   FILES CREATED (in processed/ directory):
-%       - field_dose_001.mat, field_dose_002.mat, ... (one per field)
+%       - dose_[id]_[session]_[adapted|reference]_B[n]_[seg].mat (one per field)
+%         e.g. dose_1194203_Session_1_adapted_B6_103.mat
 %       - sct_resampled.mat (includes tissueMask and couchMask)
 %       - total_rs_dose.mat
 %       - tissue_masks.mat (individual ROI masks)
@@ -288,6 +289,7 @@ fprintf('\n[4/8] Processing field doses (saving individually)...\n');
 % Track which files were processed successfully
 field_doses = cell(num_files, 1);
 processed_count = 0;
+save_count      = 0;
 
 for i = 1:num_files
     fprintf('  Processing field %d/%d: %s\n', i, num_files, rd_files(i).name);
@@ -360,12 +362,16 @@ for i = 1:num_files
         % Add to total dose
         total_rs_dose = total_rs_dose + dose_data;
 
-        % Save individual field dose file (MEMORY CONSTRAINT)
-        field_filename = sprintf('field_dose_%03d.mat', i);
+        % Save individual field dose file — name mirrors source DICOM
+        % Format: dose_[id]_[session]_[adapted|reference]_B[beam]_[seg].mat
+        field_filename = sprintf('dose_%s_%s_%s_B%d_%d.mat', ...
+            patient_id, session, plan_type, beam_num, seg_num);
         field_filepath = fullfile(processed_dir, field_filename);
         save(field_filepath, 'field_dose', '-v7.3');
-        fprintf('    Saved: %s (B%d S%d [%s], max: %.4f Gy, gantry: %.1f deg, MU: %.1f)\n', ...
-            field_filename, beam_num, seg_num, plan_type, field_dose.max_dose_Gy, gantry_angle, meterset);
+        save_count = save_count + 1;
+        fprintf('    [Save %d] %s (B%d S%d [%s], max: %.4f Gy, gantry: %.1f deg, MU: %.1f)\n', ...
+            save_count, field_filename, beam_num, seg_num, plan_type, ...
+            field_dose.max_dose_Gy, gantry_angle, meterset);
 
         % Store reference in output cell array (without full dose data for memory)
         field_doses{i} = struct();
@@ -510,27 +516,43 @@ if config.apply_dose_masking
     
     % Also update individual field dose files to zero invalid regions
     fprintf('  Updating individual field doses to zero invalid regions...\n');
+    zero_count      = 0;   % number of fields that had voxels zeroed
+    resave_count    = 0;   % number of field files re-saved after masking
+    total_vox_zeroed_fields = 0;  % cumulative voxels zeroed across all fields
     for i = 1:num_files
         if ~isempty(field_doses{i}) && isfield(field_doses{i}, 'filepath')
             try
                 field_filepath = field_doses{i}.filepath;
                 loaded = load(field_filepath);
                 field_dose = loaded.field_dose;
-                
+
+                % Count voxels with non-zero dose that will be zeroed
+                field_vox_zeroed = sum(field_dose.dose_Gy(invalid_dose_mask) ~= 0);
+                total_vox_zeroed_fields = total_vox_zeroed_fields + field_vox_zeroed;
+                if field_vox_zeroed > 0
+                    zero_count = zero_count + 1;
+                end
+
                 % Zero out dose outside body and in couch
                 field_dose.dose_Gy(invalid_dose_mask) = 0;
                 field_dose.max_dose_Gy = max(field_dose.dose_Gy(:));
                 field_dose.body_masked = true;
                 field_dose.couch_masked = true;
-                
+
                 % Re-save
                 save(field_filepath, 'field_dose', '-v7.3');
-                
+                resave_count = resave_count + 1;
+
+                fprintf('    [Resave %d/%d] %s: %d voxels zeroed, new max=%.4f Gy\n', ...
+                    resave_count, processed_count, ...
+                    field_doses{i}.filepath(max(1,end-49):end), ...
+                    field_vox_zeroed, field_dose.max_dose_Gy);
+
                 % Update reference
                 field_doses{i}.max_dose_Gy = field_dose.max_dose_Gy;
                 field_doses{i}.body_masked = true;
                 field_doses{i}.couch_masked = true;
-                
+
                 clear field_dose;
             catch ME
                 warning('step15_process_doses:MaskError', ...
@@ -538,7 +560,9 @@ if config.apply_dose_masking
             end
         end
     end
-    fprintf('  Updated %d field dose files\n', num_files);
+    fprintf('  Zeroing summary: %d/%d fields had voxels zeroed (%d voxels total across all fields)\n', ...
+        zero_count, processed_count, total_vox_zeroed_fields);
+    fprintf('  Re-saved %d field dose files after masking\n', resave_count);
     
 else
     % Dose masking disabled (debugging mode)
@@ -623,6 +647,7 @@ fprintf('\n========================================\n');
 fprintf('  Step 1.5 Complete\n');
 fprintf('========================================\n');
 fprintf('  Processed %d field doses\n', processed_count);
+fprintf('  .mat files saved (initial): %d\n', save_count);
 fprintf('  Dose grid: [%d x %d x %d]\n', ref_dims(1), ref_dims(2), ref_dims(3));
 fprintf('  Spacing: [%.3f, %.3f, %.3f] mm\n', ref_spacing(1), ref_spacing(2), ref_spacing(3));
 fprintf('  Total dose max: %.4f Gy\n', max(total_rs_dose(:)));
@@ -630,7 +655,13 @@ fprintf('  Tissue ROIs: %d\n', length(roi_names));
 fprintf('  Body voxels: %d\n', sum(body_mask(:)));
 fprintf('  Couch voxels: %d\n', sum(couch_mask(:)));
 if config.apply_dose_masking
-    fprintf('  Dose masking: ENABLED (voxels zeroed: %d)\n', num_voxels_zeroed);
+    fprintf('  Dose masking: ENABLED\n');
+    fprintf('    Total voxels zeroed (total_rs_dose): %d\n', num_voxels_zeroed);
+    if exist('zero_count', 'var')
+        fprintf('    Fields with zeroed voxels: %d/%d\n', zero_count, processed_count);
+        fprintf('    Voxels zeroed across all field files: %d\n', total_vox_zeroed_fields);
+        fprintf('    Field files re-saved after masking: %d\n', resave_count);
+    end
 else
     fprintf('  Dose masking: DISABLED (debugging mode)\n');
 end

@@ -63,6 +63,13 @@ CONFIG.sensor_placement_method = 'full_plane_anterior';
 CONFIG.sensor_x_index = 1;   % Used by 'full_plane_anterior'
 CONFIG.sensor_y_index = 1;   % Used by 'full_plane_lateral'
 
+% --- Pulse Convolution / Noise / Deconvolution ---
+% Mimics a finite transducer impulse response applied to forward sensor data.
+% Set convolution_kernel to 0 to disable the entire block.
+CONFIG.convolution_kernel  = 4e-6;   % Gaussian sigma in seconds (4 us)
+CONFIG.conv_noise_level    = 0.01;   % Noise amplitude as fraction of peak sensor signal
+CONFIG.conv_deconv_lambda  = 1e-4;   % Wiener regularization for deconvolution
+
 % --- Gamma Analysis Parameters ---
 CONFIG.gamma_dose_pct        = 3.0;    % Dose difference threshold (%)
 CONFIG.gamma_dist_mm         = 3.0;    % Distance-to-agreement (mm)

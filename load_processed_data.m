@@ -163,10 +163,11 @@ num_files = length(field_files);
 fprintf('    Found %d field dose files\n', num_files);
 
 % Sort files by beam then segment number
+% Filename format: dose_[id]_[session]_[adapted|reference]_B[n]_[seg].mat
 beam_nums = zeros(num_files, 1);
 seg_nums  = zeros(num_files, 1);
 for i = 1:num_files
-    tokens = regexp(field_files(i).name, '_B(\d+)_S(\d+)\.mat$', 'tokens');
+    tokens = regexp(field_files(i).name, '_B(\d+)_(\d+)\.mat$', 'tokens');
     if ~isempty(tokens) && ~isempty(tokens{1})
         beam_nums(i) = str2double(tokens{1}{1});
         seg_nums(i)  = str2double(tokens{1}{2});
