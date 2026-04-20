@@ -30,13 +30,14 @@ MATLAB-based photoacoustic dose verification system for Varian ETHOS adaptive ra
 | 0.5 | `step05_fix_mlc_gaps.m` | `[path, n] = step05_fix_mlc_gaps(patient_id, session, config)` | Correct Halcyon dual-layer MLC minimum gaps |
 | 0.6 | `step06_explode_segments.m` | `exploded = step06_explode_segments(patient_id, session, config)` | Explode each beam's segments into individual 2-CP RTPLAN files |
 | 1 | *Manual* | — | Import exploded RTPLANs into RayStation, recalculate and export field doses |
-| 1.5 | `step15_process_doses.m` | `[fields, sct, total, meta] = step15_process_doses(...)` | Resample CT to dose grid, process per-field doses |
+| 1.5 | `step15_process_doses.m` | `[fields, sct, total, meta] = step15_process_doses(...)` | Resample CT to dose grid, process per-field doses (**Windows work laptop** via `pipeline_compress.m`) |
 | 2 | `run_single_field_simulation.m` | `[recon, results] = run_single_field_simulation(...)` | k-Wave forward + time-reversal for one field |
 | 3 | `step3_analysis.m` | `results = step3_analysis(patient_id, session, config)` | Gamma analysis (3%/3mm), SSIM, visualization |
 
 **Orchestrator scripts** (replace the former `ethos_master_pipeline_pseudocode.m`):
-- `pipeline_setup.m` — Runs Steps 0 / 0.5 / 0.6 (pre-RayStation). Configure patients/sessions in its CONFIG block and run before RayStation export.
-- `pipeline_simulate.m` — Runs Steps 1.5 / 2 / 3 (post-RayStation). Configure and run after field dose DICOM files are exported from RayStation.
+- `pipeline_setup.m` — Runs Steps 0 / 0.5 / 0.6 (pre-RayStation). Configure patients/sessions in its CONFIG block and run before RayStation export. Runs on **Linux cluster**.
+- `pipeline_compress.m` — Runs Step 1.5 and `prepare_uploads`. Configure and run on the **Windows work laptop** after field dose DICOMs are exported from RayStation. Working directory: `F:` (files at `F:\RayStationFiles\[PatientID]\[Session]\`).
+- `pipeline_simulate.m` — Runs Steps 2 / 3 (post-compress). Configure and run on the **Linux cluster** after `pipeline_compress.m` has completed and processed files have been transferred.
 
 **Supporting files:**
 - `run_standalone_simulation.m` — Self-contained single-run simulation for testing
@@ -148,12 +149,16 @@ Halcyon has a dual-layer MLC (proximal + distal). Step 0.5 enforces minimum gap 
 
 ```bash
 # Typical patient processing
-# 1. Place raw DICOM export in EthosExports/[PatientID]/Pancreas/[Session]/
-# 2. Set patient/session in pipeline_setup.m CONFIG, then run it (Steps 0/0.5/0.6)
-# 3. Import RTPLAN files from Raystation_Input/ into RayStation
-# 4. Recalculate dose for each exploded-segment plan in RayStation
-# 5. Export field doses as Plan_Field*_Beam*_B*_S*.dcm to RayStationFiles/[PatientID]/[Session]/
-# 6. Set patient/session in pipeline_simulate.m CONFIG, then run it (Steps 1.5/2/3)
+# 1. [CLUSTER]  Place raw DICOM export in EthosExports/[PatientID]/Pancreas/[Session]/
+# 2. [CLUSTER]  Set patient/session in pipeline_setup.m CONFIG, then run it (Steps 0/0.5/0.6)
+# 3. [MANUAL]   Import RTPLAN files from Raystation_Input/ into RayStation
+# 4. [MANUAL]   Recalculate dose for each exploded-segment plan in RayStation
+# 5. [MANUAL]   Export field doses as Plan_Field*_Beam*_B*_S*.dcm to
+#               F:\RayStationFiles\[PatientID]\[Session]\ (on Windows work laptop)
+# 6. [WINDOWS]  Set patient/session in pipeline_compress.m CONFIG, then run it
+#               (Step 1.5 + prepare_uploads — processes DICOMs, packages .mat files)
+# 7. [MANUAL]   Transfer processed .mat files from Windows laptop to cluster
+# 8. [CLUSTER]  Set patient/session in pipeline_simulate.m CONFIG, then run it (Steps 2/3)
 ```
 
 ```matlab
