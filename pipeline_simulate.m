@@ -59,14 +59,14 @@ CONFIG.regularization_lambda       = 0.01;   % Wiener regularization for PSF
 %   'full_plane_anterior' : Full YZ plane at x = sensor_x_index.
 %   'full_plane_lateral'  : Full XZ plane at y = sensor_y_index.
 %   'spherical'           : Spherical shell (no PSF correction applied).
-CONFIG.sensor_placement_method = 'full_plane_anterior';
-CONFIG.sensor_x_index = 1;   % Used by 'full_plane_anterior'
-CONFIG.sensor_y_index = 1;   % Used by 'full_plane_lateral'
+CONFIG.sensor_placement_method = 'full_plane_lateral';
+CONFIG.sensor_x_index = 20;   % Used by 'full_plane_anterior'
+CONFIG.sensor_y_index = 20;   % Used by 'full_plane_lateral'
 
 % --- Pulse Convolution / Noise / Deconvolution ---
 % Mimics a finite transducer impulse response applied to forward sensor data.
 % Set convolution_kernel to 0 to disable the entire block.
-CONFIG.convolution_kernel  = 4e-6;   % Gaussian sigma in seconds (4 us)
+CONFIG.convolution_kernel  = 0;   % Gaussian sigma in seconds (4 us)
 CONFIG.conv_noise_level    = 0.01;   % Noise amplitude as fraction of peak sensor signal
 CONFIG.conv_deconv_lambda  = 1e-4;   % Wiener regularization for deconvolution
 
@@ -83,11 +83,11 @@ CONFIG.sensor_mode           = CONFIG.sensor_placement_method;  % passed to step
 
 % --- Parallel Processing ---
 CONFIG.use_parallel          = true;
-CONFIG.num_parallel_workers  = 16;
+CONFIG.num_parallel_workers  = 8;
 
 % --- Pipeline Control Flags ---
 CONFIG.run_step2   = true;    % Step 2  : k-Wave simulation
-CONFIG.run_step3   = false;    % Step 3  : Gamma analysis
+CONFIG.run_step3   = true;    % Step 3  : Gamma analysis
 
 % --- Define Tissue Property Tables ---
 CONFIG.tissue_tables = define_tissue_tables();
@@ -132,7 +132,7 @@ for p_idx = 1:length(CONFIG.patients)
 
         % Open per-session log file (appends across runs)
         log_fid = open_simulation_log(patient_id, session, CONFIG);
-        log_msg(log_fid, 'Run started — patient %s, session %s', patient_id, session);
+        log_msg(log_fid, 'Run started  patient %s, session %s', patient_id, session);
 
         try
 
@@ -293,7 +293,7 @@ for p_idx = 1:length(CONFIG.patients)
                 RESULTS.patients.(result_key).simulation_time_sec  = sim_time;
                 RESULTS.patients.(result_key).total_recon_max_Gy   = max(total_recon(:));
 
-                log_msg(log_fid, 'Step 2 complete — %.1f s total, max recon dose %.4f Gy', ...
+                log_msg(log_fid, 'Step 2 complete  %.1f s total, max recon dose %.4f Gy', ...
                     sim_time, max(total_recon(:)));
                 fprintf('[STEP 2] Complete (%.1f s). Max recon dose: %.4f Gy\n', ...
                     sim_time, max(total_recon(:)));
