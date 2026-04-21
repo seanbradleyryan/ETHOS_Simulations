@@ -130,6 +130,10 @@ for p_idx = 1:length(CONFIG.patients)
         result_key = make_result_key(patient_id, session);
         RESULTS.patients.(result_key) = init_patient_result(patient_id, session);
 
+        % Open per-session log file (appends across runs)
+        log_fid = open_simulation_log(patient_id, session, CONFIG);
+        log_msg(log_fid, 'Run started — patient %s, session %s', patient_id, session);
+
         try
 
             %% ============================================================
@@ -191,37 +195,40 @@ for p_idx = 1:length(CONFIG.patients)
 
                 fprintf('         Processing %d field(s)...\n', num_fields);
 
-                % --- Simulation cache: skip already-completed fields ---
-                sim_dir_cache   = get_simulation_directory(patient_id, session, CONFIG);
-                existing_recon  = dir(fullfile(sim_dir_cache, 'field_recon_*.mat'));
-                completed_idxs  = [];
+                % --- Load cache manifest and cross-check against files on disk ---
+                sim_dir_cache  = get_simulation_directory(patient_id, session, CONFIG);
+                cache_manifest = load_cache_manifest(patient_id, session, CONFIG);
+                completed_idxs = get_completed_from_manifest(cache_manifest);
+
+                % Cross-check: also scan files in case manifest is missing entries
+                existing_recon = dir(fullfile(sim_dir_cache, 'field_recon_*.mat'));
+                file_idxs      = [];
                 for ef = 1:numel(existing_recon)
                     tok = regexp(existing_recon(ef).name, 'field_recon_(\d+)\.mat', 'tokens');
                     if ~isempty(tok) && ~isempty(tok{1})
-                        completed_idxs(end+1) = str2double(tok{1}{1}); %#ok<AGROW>
+                        file_idxs(end+1) = str2double(tok{1}{1}); %#ok<AGROW>
                     end
                 end
+                completed_idxs = union(completed_idxs, file_idxs);
+
                 pending_idxs = setdiff(valid_field_indices, completed_idxs);
                 cached_idxs  = intersect(valid_field_indices, completed_idxs);
                 num_pending  = numel(pending_idxs);
 
-                if ~isempty(cached_idxs)
-                    fprintf('         Cache: %d/%d already done, %d pending.\n', ...
-                        numel(cached_idxs), num_fields, num_pending);
-                else
-                    fprintf('         Cache: no existing results, computing all %d.\n', num_pending);
-                end
+                print_cache_status(cache_manifest, cached_idxs, pending_idxs, field_doses, log_fid);
 
                 total_recon = zeros(grid_dims);
 
                 if CONFIG.use_parallel && num_pending > 1
                     fprintf('         Using parallel processing (parfor)...\n');
+                    log_msg(log_fid, 'Parallel mode: %d fields pending', num_pending);
                     pool = gcp('nocreate');
                     if isempty(pool) || pool.NumWorkers ~= CONFIG.num_parallel_workers
                         if ~isempty(pool), delete(pool); end
                         parpool(CONFIG.num_parallel_workers);
                     end
-                    recon_doses = cell(num_pending, 1);
+                    recon_doses    = cell(num_pending, 1);
+                    t_parfor       = tic;
                     parfor f = 1:num_pending
                         fi = pending_idxs(f);
                         fprintf('           Field %d (gantry: %.1f deg)...\n', ...
@@ -233,20 +240,40 @@ for p_idx = 1:length(CONFIG.patients)
                         save_field_reconstruction(recon_doses{f}, fi, ...
                             patient_id, session, CONFIG);
                     end
-                    for f = 1:num_pending
-                        total_recon = total_recon + recon_doses{f};
-                    end
-                else
-                    fprintf('         Using serial processing...\n');
+                    elapsed_parfor   = toc(t_parfor);
+                    elapsed_per_field = elapsed_parfor / max(num_pending, 1);
                     for f = 1:num_pending
                         fi = pending_idxs(f);
+                        total_recon    = total_recon + recon_doses{f};
+                        cache_manifest = update_manifest_field(cache_manifest, fi, ...
+                            field_doses{fi}.gantry_angle, elapsed_per_field);
+                        log_msg(log_fid, 'Field %d complete (parallel, avg %.1f s/field)', ...
+                            fi, elapsed_per_field);
+                    end
+                    save_cache_manifest(cache_manifest, patient_id, session, CONFIG);
+                    fprintf('         Parallel block done in %.1f s (avg %.1f s/field).\n', ...
+                        elapsed_parfor, elapsed_per_field);
+                else
+                    fprintf('         Using serial processing...\n');
+                    log_msg(log_fid, 'Serial mode: %d fields pending', num_pending);
+                    for f = 1:num_pending
+                        fi       = pending_idxs(f);
+                        t_field  = tic;
                         fprintf('           Field %d/%d (gantry: %.1f deg)...\n', ...
                             f, num_pending, field_doses{fi}.gantry_angle);
+                        log_msg(log_fid, 'Field %d start (gantry %.1f deg)', ...
+                            fi, field_doses{fi}.gantry_angle);
                         [recon_dose, ~] = run_single_field_simulation(...
                             field_doses{fi}, sct_resampled, medium, ...
                             beam_metadata, CONFIG, psf_filter);
                         total_recon = total_recon + recon_dose;
                         save_field_reconstruction(recon_dose, fi, patient_id, session, CONFIG);
+                        elapsed_f  = toc(t_field);
+                        cache_manifest = update_manifest_field(cache_manifest, fi, ...
+                            field_doses{fi}.gantry_angle, elapsed_f);
+                        save_cache_manifest(cache_manifest, patient_id, session, CONFIG);
+                        log_msg(log_fid, 'Field %d complete (%.1f s)', fi, elapsed_f);
+                        fprintf('             Done in %.1f s\n', elapsed_f);
                     end
                 end
 
@@ -266,6 +293,8 @@ for p_idx = 1:length(CONFIG.patients)
                 RESULTS.patients.(result_key).simulation_time_sec  = sim_time;
                 RESULTS.patients.(result_key).total_recon_max_Gy   = max(total_recon(:));
 
+                log_msg(log_fid, 'Step 2 complete — %.1f s total, max recon dose %.4f Gy', ...
+                    sim_time, max(total_recon(:)));
                 fprintf('[STEP 2] Complete (%.1f s). Max recon dose: %.4f Gy\n', ...
                     sim_time, max(total_recon(:)));
             else
@@ -308,6 +337,8 @@ for p_idx = 1:length(CONFIG.patients)
             end
 
             RESULTS.patients.(result_key).status = 'complete';
+            log_msg(log_fid, 'Patient %s / %s: COMPLETE', patient_id, session);
+            close_simulation_log(log_fid);
             fprintf('\n=== %s/%s: SIMULATION COMPLETE ===\n', patient_id, session);
 
         catch ME
@@ -315,6 +346,11 @@ for p_idx = 1:length(CONFIG.patients)
             for k = 1:length(ME.stack)
                 fprintf('        In %s (line %d)\n', ME.stack(k).name, ME.stack(k).line);
             end
+            log_msg(log_fid, 'ERROR: %s', ME.message);
+            for k = 1:length(ME.stack)
+                log_msg(log_fid, '  at %s (line %d)', ME.stack(k).name, ME.stack(k).line);
+            end
+            close_simulation_log(log_fid);
             RESULTS.patients.(result_key).status        = 'error';
             RESULTS.patients.(result_key).error.message = ME.message;
             RESULTS.patients.(result_key).error.stack   = ME.stack;
@@ -457,6 +493,128 @@ function result = init_patient_result(patient_id, session)
     result.status     = 'started';
     result.start_time = datetime('now');
 end
+
+%% =========================================================================
+%  LOGGING HELPERS
+%% =========================================================================
+
+function log_fid = open_simulation_log(patient_id, session, config)
+    % Opens (or creates) a per-session append-mode log file.
+    log_dir  = get_simulation_directory(patient_id, session, config);
+    log_path = fullfile(log_dir, 'simulation_log.txt');
+    log_fid  = fopen(log_path, 'a');
+    if log_fid == -1
+        warning('pipeline_simulate:logOpen', 'Could not open log file: %s', log_path);
+        log_fid = -1;
+        return;
+    end
+    fprintf(log_fid, '\n========================================\n');
+    fprintf(log_fid, 'Run started : %s\n', datestr(now, 'yyyy-mm-dd HH:MM:SS'));
+    fprintf(log_fid, 'Patient     : %s\n', patient_id);
+    fprintf(log_fid, 'Session     : %s\n', session);
+    fprintf(log_fid, '========================================\n');
+end
+
+function log_msg(log_fid, fmt, varargin)
+    % Writes a timestamped line to the log file (and only the log file).
+    if log_fid < 1, return; end
+    msg = sprintf(fmt, varargin{:});
+    fprintf(log_fid, '[%s] %s\n', datestr(now, 'HH:MM:SS'), msg);
+end
+
+function close_simulation_log(log_fid)
+    if log_fid < 1, return; end
+    fprintf(log_fid, 'Run ended   : %s\n', datestr(now, 'yyyy-mm-dd HH:MM:SS'));
+    fprintf(log_fid, '========================================\n');
+    fclose(log_fid);
+end
+
+
+%% =========================================================================
+%  CACHE MANIFEST HELPERS
+%% =========================================================================
+
+function manifest = load_cache_manifest(patient_id, session, config)
+    % Loads the per-session cache manifest (or creates a fresh one).
+    sim_dir       = get_simulation_directory(patient_id, session, config);
+    manifest_path = fullfile(sim_dir, 'cache_manifest.mat');
+    if exist(manifest_path, 'file')
+        data     = load(manifest_path, 'manifest');
+        manifest = data.manifest;
+    else
+        manifest              = struct();
+        manifest.fields       = struct();   % sub-struct keyed by 'f_NNN'
+        manifest.created      = datetime('now');
+        manifest.last_updated = datetime('now');
+    end
+end
+
+function save_cache_manifest(manifest, patient_id, session, config)
+    sim_dir            = get_simulation_directory(patient_id, session, config);
+    manifest.last_updated = datetime('now');
+    save(fullfile(sim_dir, 'cache_manifest.mat'), 'manifest');
+end
+
+function manifest = update_manifest_field(manifest, field_idx, gantry_angle, elapsed_sec)
+    % Records a completed field in the manifest.
+    key                            = sprintf('f_%03d', field_idx);
+    manifest.fields.(key).field_idx    = field_idx;
+    manifest.fields.(key).gantry_angle = gantry_angle;
+    manifest.fields.(key).completed_at = datetime('now');
+    manifest.fields.(key).elapsed_sec  = elapsed_sec;
+end
+
+function completed = get_completed_from_manifest(manifest)
+    % Returns a numeric array of field indices recorded in the manifest.
+    completed = [];
+    if ~isfield(manifest, 'fields'), return; end
+    keys = fieldnames(manifest.fields);
+    for i = 1:numel(keys)
+        completed(end+1) = manifest.fields.(keys{i}).field_idx; %#ok<AGROW>
+    end
+end
+
+function print_cache_status(manifest, cached_idxs, pending_idxs, field_doses, log_fid)
+    % Prints a formatted table of cached vs pending fields.
+    fprintf('\n         --- Cache / Resume Status ---\n');
+    if ~isempty(cached_idxs)
+        fprintf('         Previously completed:\n');
+        for i = 1:numel(cached_idxs)
+            fi  = cached_idxs(i);
+            key = sprintf('f_%03d', fi);
+            if isfield(manifest.fields, key)
+                e = manifest.fields.(key);
+                fprintf('           [DONE] Field %3d  gantry %6.1f deg  completed %s  (%.0f s)\n', ...
+                    fi, e.gantry_angle, ...
+                    datestr(e.completed_at, 'yyyy-mm-dd HH:MM:SS'), e.elapsed_sec);
+                log_msg(log_fid, 'CACHE HIT  field %d (gantry %.1f deg), completed %s', ...
+                    fi, e.gantry_angle, datestr(e.completed_at, 'yyyy-mm-dd HH:MM:SS'));
+            else
+                fprintf('           [DONE] Field %3d  (file on disk, no manifest entry)\n', fi);
+                log_msg(log_fid, 'CACHE HIT  field %d (file present, no manifest entry)', fi);
+            end
+        end
+    end
+    if ~isempty(pending_idxs)
+        fprintf('         Pending:\n');
+        for i = 1:numel(pending_idxs)
+            fi = pending_idxs(i);
+            if ~isempty(field_doses) && numel(field_doses) >= fi && ~isempty(field_doses{fi})
+                fprintf('           [TODO] Field %3d  gantry %6.1f deg\n', ...
+                    fi, field_doses{fi}.gantry_angle);
+            else
+                fprintf('           [TODO] Field %3d\n', fi);
+            end
+        end
+    end
+    fprintf('         Total: %d done, %d pending\n', numel(cached_idxs), numel(pending_idxs));
+    fprintf('         ----------------------------\n\n');
+end
+
+
+%% =========================================================================
+%  SUMMARY
+%% =========================================================================
 
 function generate_simulation_summary(results)
     fprintf('\n--- Simulation Summary ---\n');
