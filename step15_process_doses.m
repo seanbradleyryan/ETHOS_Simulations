@@ -56,13 +56,10 @@ function [field_doses, sct_resampled, total_rs_dose, metadata] = step15_process_
 %   2. Find all dose_*.dcm files in Raystation directory
 %   3. Load RTPLAN to extract beam metadata (gantry angles, metersets)
 %   4. Load first dose file to establish reference grid geometry
-%   5. Process each dose file, match beam_num to RTPLAN beam, save individually
-%   6. Load SCT images, sort by z-position
-%   7. Resample SCT to dose grid via 3D interpolation
-%   8. Convert HU to density
-%   9. Load RTSTRUCT and create tissue classification masks
-%   10. Zero out dose in couch regions
-%   11. Save all outputs and return
+%   5. Load SCT images, sort by z-position, resample to dose grid, convert HU
+%   6. Load RTSTRUCT, create tissue classification masks, precompute invalid_dose_mask
+%   7. Process each dose file: scale -> validate -> zero invalid regions -> save
+%   8. Zero total dose in invalid regions for consistency, save all outputs
 %
 %   KEY TECHNICAL NOTES:
 %   - Z-resolution MUST come from GridFrameOffsetVector, NOT PixelSpacing
@@ -287,9 +284,88 @@ metadata.timestamp = datetime('now');
 metadata.reference_file = rd_files(1).name;
 metadata.beam_metadata = beam_metadata;  % Includes isocenter + jaw data for sensor placement
 
+%% ======================== LOAD AND RESAMPLE SCT ========================
+
+fprintf('\n[4/8] Loading and resampling SCT to dose grid...\n');
+
+% Load SCT images
+[sct_hu, sct_origin, sct_spacing, sct_dims] = loadSctImages(sct_dir);
+
+if isempty(sct_hu)
+    error('step15_process_doses:NoSCT', ...
+        'Failed to load SCT images from: %s', sct_dir);
+end
+
+fprintf('  Original SCT:\n');
+fprintf('    Dimensions: [%d, %d, %d]\n', sct_dims(1), sct_dims(2), sct_dims(3));
+fprintf('    Spacing (mm): [%.3f, %.3f, %.3f]\n', sct_spacing(1), sct_spacing(2), sct_spacing(3));
+fprintf('    Origin (mm): [%.3f, %.3f, %.3f]\n', sct_origin(1), sct_origin(2), sct_origin(3));
+fprintf('    HU range: [%.0f, %.0f]\n', min(sct_hu(:)), max(sct_hu(:)));
+
+% Resample SCT to dose grid
+fprintf('  Performing 3D interpolation (this may take a moment)...\n');
+
+sct_hu_resampled = resampleSctToDoseGrid(sct_hu, sct_origin, sct_spacing, sct_dims, ...
+    ref_origin, ref_spacing, ref_dims);
+
+fprintf('  Resampled SCT dimensions: [%d, %d, %d]\n', ...
+    size(sct_hu_resampled, 1), size(sct_hu_resampled, 2), size(sct_hu_resampled, 3));
+
+% Convert HU to density
+fprintf('  Converting HU to density...\n');
+sct_density = huToDensity(sct_hu_resampled);
+
+fprintf('  Density range: [%.0f, %.0f] kg/m^3\n', min(sct_density(:)), max(sct_density(:)));
+
+%% ======================== LOAD RTSTRUCT AND CREATE TISSUE MASKS ========================
+
+fprintf('\n[5/8] Loading RTSTRUCT and creating tissue classification masks...\n');
+
+% Load RTSTRUCT and convert contours to masks on the dose grid
+[tissue_mask, roi_names, roi_masks, body_mask, couch_mask] = loadRtstructAndCreateMasks(...
+    sct_dir, ref_origin, ref_spacing, ref_dims);
+
+if isempty(tissue_mask)
+    warning('step15_process_doses:NoRTSTRUCT', ...
+        'Could not create tissue masks from RTSTRUCT. Using empty masks.');
+    tissue_mask = zeros(ref_dims, 'uint8');
+    roi_names = {};
+    roi_masks = struct();
+    body_mask = false(ref_dims);
+    couch_mask = false(ref_dims);
+else
+    fprintf('  Created masks for %d ROIs\n', length(roi_names));
+    fprintf('  Body voxels identified: %d\n', sum(body_mask(:)));
+    fprintf('  Couch voxels identified: %d\n', sum(couch_mask(:)));
+
+    % List ROIs
+    for i = 1:length(roi_names)
+        if isfield(roi_masks, sprintf('ROI_%03d', i))
+            mask_field = sprintf('ROI_%03d', i);
+            num_voxels = sum(roi_masks.(mask_field)(:));
+            fprintf('    [%d] %s: %d voxels\n', i, roi_names{i}, num_voxels);
+        end
+    end
+end
+
+% Save tissue masks separately (can be large)
+fprintf('  Saving tissue_masks.mat...\n');
+tissue_masks_file = fullfile(processed_dir, 'tissue_masks.mat');
+save(tissue_masks_file, 'tissue_mask', 'roi_names', 'roi_masks', 'body_mask', 'couch_mask', '-v7.3');
+fprintf('  Saved: tissue_masks.mat\n');
+
+% Pre-compute invalid dose mask once — used across all fields in the batch loop
+if config.apply_dose_masking
+    invalid_dose_mask = ~(body_mask & ~couch_mask);
+    fprintf('  Invalid dose mask computed: %d voxels will be zeroed per field\n', sum(invalid_dose_mask(:)));
+else
+    invalid_dose_mask = false(ref_dims);
+    fprintf('  Dose masking DISABLED (debugging mode)\n');
+end
+
 %% ======================== PROCESS EACH FIELD DOSE ========================
 
-fprintf('\n[4/8] Processing field doses (saving individually, batch_size=%d)...\n', config.batch_size);
+fprintf('\n[6/8] Processing field doses (masking before export, batch_size=%d)...\n', config.batch_size);
 
 % Track which files were processed successfully
 field_doses    = cell(num_files, 1);
@@ -355,7 +431,15 @@ for batch_idx = 1:num_batches
             % Get beam metadata by matching field_num to beam_number in RTPLAN
             [gantry_angle, meterset] = getBeamMetadata(beam_metadata, field_num);
 
-            % Create field dose structure
+            % Propagate isocenter and jaw data from beam_metadata
+            [iso, jx, jy] = getBeamGeometry(beam_metadata, field_num);
+
+            % Zero out invalid regions (outside body or in couch) BEFORE saving
+            if config.apply_dose_masking
+                dose_data(invalid_dose_mask) = 0;
+            end
+
+            % Create field dose structure with masking already applied
             field_dose = struct();
             field_dose.dose_Gy = dose_data;
             field_dose.origin = dose_origin;
@@ -370,14 +454,13 @@ for batch_idx = 1:num_batches
             field_dose.source_file = rd_files(i).name;
             field_dose.max_dose_Gy = max(dose_data(:));
             field_dose.mean_dose_Gy = mean(dose_data(dose_data > 0));
-
-            % Propagate isocenter and jaw data from beam_metadata
-            [iso, jx, jy] = getBeamGeometry(beam_metadata, field_num);
             field_dose.isocenter = iso;
             field_dose.jaw_x = jx;
             field_dose.jaw_y = jy;
+            field_dose.body_masked = config.apply_dose_masking;
+            field_dose.couch_masked = config.apply_dose_masking;
 
-            % Accumulate into batch subtotal
+            % Accumulate into batch subtotal (masking already applied)
             batch_total_dose = batch_total_dose + dose_data;
 
             % Save individual field dose file — name mirrors source DICOM
@@ -405,6 +488,8 @@ for batch_idx = 1:num_batches
             field_doses{i}.isocenter = iso;
             field_doses{i}.jaw_x = jx;
             field_doses{i}.jaw_y = jy;
+            field_doses{i}.body_masked = config.apply_dose_masking;
+            field_doses{i}.couch_masked = config.apply_dose_masking;
 
             processed_count = processed_count + 1;
 
@@ -426,184 +511,46 @@ for batch_idx = 1:num_batches
 end  % batch loop
 
 fprintf('  Successfully processed %d/%d field doses\n', processed_count, num_files);
-fprintf('  Total dose max (before couch masking): %.4f Gy\n', max(total_rs_dose(:)));
+fprintf('  Total dose max: %.4f Gy\n', max(total_rs_dose(:)));
 
 % Update metadata
 metadata.processed_count = processed_count;
 metadata.total_dose_max_Gy_before_masking = max(total_rs_dose(:));
 
-%% ======================== LOAD AND RESAMPLE SCT ========================
-
-fprintf('\n[5/8] Loading and resampling SCT to dose grid...\n');
-
-% Load SCT images
-[sct_hu, sct_origin, sct_spacing, sct_dims] = loadSctImages(sct_dir);
-
-if isempty(sct_hu)
-    error('step15_process_doses:NoSCT', ...
-        'Failed to load SCT images from: %s', sct_dir);
-end
-
-fprintf('  Original SCT:\n');
-fprintf('    Dimensions: [%d, %d, %d]\n', sct_dims(1), sct_dims(2), sct_dims(3));
-fprintf('    Spacing (mm): [%.3f, %.3f, %.3f]\n', sct_spacing(1), sct_spacing(2), sct_spacing(3));
-fprintf('    Origin (mm): [%.3f, %.3f, %.3f]\n', sct_origin(1), sct_origin(2), sct_origin(3));
-fprintf('    HU range: [%.0f, %.0f]\n', min(sct_hu(:)), max(sct_hu(:)));
-
-% Resample SCT to dose grid
-fprintf('  Performing 3D interpolation (this may take a moment)...\n');
-
-sct_hu_resampled = resampleSctToDoseGrid(sct_hu, sct_origin, sct_spacing, sct_dims, ...
-    ref_origin, ref_spacing, ref_dims);
-
-fprintf('  Resampled SCT dimensions: [%d, %d, %d]\n', ...
-    size(sct_hu_resampled, 1), size(sct_hu_resampled, 2), size(sct_hu_resampled, 3));
-
-% Convert HU to density
-fprintf('  Converting HU to density...\n');
-sct_density = huToDensity(sct_hu_resampled);
-
-fprintf('  Density range: [%.0f, %.0f] kg/mÂ³\n', min(sct_density(:)), max(sct_density(:)));
-
-%% ======================== LOAD RTSTRUCT AND CREATE TISSUE MASKS ========================
-
-fprintf('\n[6/8] Loading RTSTRUCT and creating tissue classification masks...\n');
-
-% Load RTSTRUCT and convert contours to masks on the dose grid
-[tissue_mask, roi_names, roi_masks, body_mask, couch_mask] = loadRtstructAndCreateMasks(...
-    sct_dir, ref_origin, ref_spacing, ref_dims);
-
-if isempty(tissue_mask)
-    warning('step15_process_doses:NoRTSTRUCT', ...
-        'Could not create tissue masks from RTSTRUCT. Using empty masks.');
-    tissue_mask = zeros(ref_dims, 'uint8');
-    roi_names = {};
-    roi_masks = struct();
-    body_mask = false(ref_dims);
-    couch_mask = false(ref_dims);
-else
-    fprintf('  Created masks for %d ROIs\n', length(roi_names));
-    fprintf('  Body voxels identified: %d\n', sum(body_mask(:)));
-    fprintf('  Couch voxels identified: %d\n', sum(couch_mask(:)));
-    
-    % List ROIs
-    for i = 1:length(roi_names)
-        if isfield(roi_masks, sprintf('ROI_%03d', i))
-            mask_field = sprintf('ROI_%03d', i);
-            num_voxels = sum(roi_masks.(mask_field)(:));
-            fprintf('    [%d] %s: %d voxels\n', i, roi_names{i}, num_voxels);
-        end
-    end
-end
-
-% Save tissue masks separately (can be large)
-fprintf('  Saving tissue_masks.mat...\n');
-tissue_masks_file = fullfile(processed_dir, 'tissue_masks.mat');
-save(tissue_masks_file, 'tissue_mask', 'roi_names', 'roi_masks', 'body_mask', 'couch_mask', '-v7.3');
-fprintf('  Saved: tissue_masks.mat\n');
-
 %% ======================== ZERO OUT DOSE OUTSIDE BODY AND IN COUCH ========================
 
 if config.apply_dose_masking
-    fprintf('\n[7/8] Zeroing out dose outside body and in couch regions...\n');
-    
-    % Create mask for valid dose region: inside body AND not in couch
-    valid_dose_mask = body_mask & ~couch_mask;
-    invalid_dose_mask = ~valid_dose_mask;
-    
-    % Statistics before zeroing
-    dose_outside_body = sum(total_rs_dose(~body_mask));
-    dose_in_couch = sum(total_rs_dose(couch_mask));
-    dose_to_zero = sum(total_rs_dose(invalid_dose_mask));
-    
+    fprintf('\n[7/8] Applying final mask to total dose...\n');
+
+    % Masking already applied per-field during processing;
+    % apply to total dose to ensure consistency with accumulated result
     num_voxels_outside_body = sum(~body_mask(:));
-    num_voxels_in_couch = sum(couch_mask(:));
-    num_voxels_zeroed = sum(invalid_dose_mask(:));
-    
+    num_voxels_in_couch     = sum(couch_mask(:));
+    num_voxels_zeroed       = sum(invalid_dose_mask(:));
+
+    total_rs_dose(invalid_dose_mask) = 0;
+
     fprintf('  Voxels outside body: %d\n', num_voxels_outside_body);
     fprintf('  Voxels in couch: %d\n', num_voxels_in_couch);
-    fprintf('  Total voxels to zero (outside body OR in couch): %d\n', num_voxels_zeroed);
-    fprintf('  Dose outside body before zeroing: %.4f Gy (sum)\n', dose_outside_body);
-    fprintf('  Dose in couch before zeroing: %.4f Gy (sum)\n', dose_in_couch);
-    
-    % Zero out dose in invalid regions
-    total_rs_dose(invalid_dose_mask) = 0;
-    
+    fprintf('  Total voxels zeroed: %d\n', num_voxels_zeroed);
     fprintf('  Total dose max (after masking): %.4f Gy\n', max(total_rs_dose(:)));
-    
-    % Update metadata
+
     metadata.total_dose_max_Gy = max(total_rs_dose(:));
     metadata.body_voxels = sum(body_mask(:));
     metadata.couch_voxels = sum(couch_mask(:));
     metadata.voxels_zeroed = num_voxels_zeroed;
-    metadata.dose_outside_body_zeroed = dose_outside_body;
-    metadata.dose_in_couch_zeroed = dose_in_couch;
     metadata.dose_masking_applied = true;
-    
-    % Also update individual field dose files to zero invalid regions
-    fprintf('  Updating individual field doses to zero invalid regions...\n');
-    zero_count      = 0;   % number of fields that had voxels zeroed
-    resave_count    = 0;   % number of field files re-saved after masking
-    total_vox_zeroed_fields = 0;  % cumulative voxels zeroed across all fields
-    for i = 1:num_files
-        if ~isempty(field_doses{i}) && isfield(field_doses{i}, 'filepath')
-            try
-                field_filepath = field_doses{i}.filepath;
-                loaded = load(field_filepath);
-                field_dose = loaded.field_dose;
 
-                % Count voxels with non-zero dose that will be zeroed
-                field_vox_zeroed = sum(field_dose.dose_Gy(invalid_dose_mask) ~= 0);
-                total_vox_zeroed_fields = total_vox_zeroed_fields + field_vox_zeroed;
-                if field_vox_zeroed > 0
-                    zero_count = zero_count + 1;
-                end
-
-                % Zero out dose outside body and in couch
-                field_dose.dose_Gy(invalid_dose_mask) = 0;
-                field_dose.max_dose_Gy = max(field_dose.dose_Gy(:));
-                field_dose.body_masked = true;
-                field_dose.couch_masked = true;
-
-                % Re-save
-                save(field_filepath, 'field_dose', '-v7.3');
-                resave_count = resave_count + 1;
-
-                fprintf('    [Resave %d/%d] %s: %d voxels zeroed, new max=%.4f Gy\n', ...
-                    resave_count, processed_count, ...
-                    field_doses{i}.filepath(max(1,end-49):end), ...
-                    field_vox_zeroed, field_dose.max_dose_Gy);
-
-                % Update reference
-                field_doses{i}.max_dose_Gy = field_dose.max_dose_Gy;
-                field_doses{i}.body_masked = true;
-                field_doses{i}.couch_masked = true;
-
-                clear field_dose;
-            catch ME
-                warning('step15_process_doses:MaskError', ...
-                    'Failed to update masks for field %d: %s', i, ME.message);
-            end
-        end
-    end
-    fprintf('  Zeroing summary: %d/%d fields had voxels zeroed (%d voxels total across all fields)\n', ...
-        zero_count, processed_count, total_vox_zeroed_fields);
-    fprintf('  Re-saved %d field dose files after masking\n', resave_count);
-    
 else
-    % Dose masking disabled (debugging mode)
     fprintf('\n[7/8] Dose masking SKIPPED (config.apply_dose_masking = false)\n');
-    
-    % Still compute statistics for reference
+
     num_voxels_zeroed = 0;
     metadata.total_dose_max_Gy = max(total_rs_dose(:));
     metadata.body_voxels = sum(body_mask(:));
     metadata.couch_voxels = sum(couch_mask(:));
     metadata.voxels_zeroed = 0;
-    metadata.dose_outside_body_zeroed = 0;
-    metadata.dose_in_couch_zeroed = 0;
     metadata.dose_masking_applied = false;
-    
+
     fprintf('  Total dose max (unmasked): %.4f Gy\n', max(total_rs_dose(:)));
     fprintf('  Body voxels: %d\n', sum(body_mask(:)));
     fprintf('  Couch voxels: %d\n', sum(couch_mask(:)));
@@ -647,33 +594,13 @@ metadata_file = fullfile(processed_dir, 'metadata.mat');
 save(metadata_file, 'metadata', '-v7.3');
 fprintf('  Saved: metadata.mat\n');
 
-%% ======================== RELOAD FIELD DOSES FOR OUTPUT ========================
-
-% Optionally reload full field doses into cell array for return
-% (Only if memory permits - otherwise caller should load from files)
-fprintf('\n  Reloading field doses for output...\n');
-
-try
-    for i = 1:num_files
-        if ~isempty(field_doses{i}) && isfield(field_doses{i}, 'filepath')
-            loaded = load(field_doses{i}.filepath);
-            field_doses{i} = loaded.field_dose;
-        end
-    end
-    fprintf('  Field doses loaded into memory\n');
-catch ME
-    warning('step15_process_doses:MemoryWarning', ...
-        'Could not reload all field doses into memory: %s\nAccess them from individual files.', ...
-        ME.message);
-end
-
 %% ======================== SUMMARY ========================
 
 fprintf('\n========================================\n');
 fprintf('  Step 1.5 Complete\n');
 fprintf('========================================\n');
 fprintf('  Processed %d field doses\n', processed_count);
-fprintf('  .mat files saved (initial): %d\n', save_count);
+fprintf('  .mat files saved: %d\n', save_count);
 fprintf('  Dose grid: [%d x %d x %d]\n', ref_dims(1), ref_dims(2), ref_dims(3));
 fprintf('  Spacing: [%.3f, %.3f, %.3f] mm\n', ref_spacing(1), ref_spacing(2), ref_spacing(3));
 fprintf('  Total dose max: %.4f Gy\n', max(total_rs_dose(:)));
@@ -681,13 +608,8 @@ fprintf('  Tissue ROIs: %d\n', length(roi_names));
 fprintf('  Body voxels: %d\n', sum(body_mask(:)));
 fprintf('  Couch voxels: %d\n', sum(couch_mask(:)));
 if config.apply_dose_masking
-    fprintf('  Dose masking: ENABLED\n');
-    fprintf('    Total voxels zeroed (total_rs_dose): %d\n', num_voxels_zeroed);
-    if exist('zero_count', 'var')
-        fprintf('    Fields with zeroed voxels: %d/%d\n', zero_count, processed_count);
-        fprintf('    Voxels zeroed across all field files: %d\n', total_vox_zeroed_fields);
-        fprintf('    Field files re-saved after masking: %d\n', resave_count);
-    end
+    fprintf('  Dose masking: ENABLED (applied before export)\n');
+    fprintf('    Total voxels zeroed: %d\n', num_voxels_zeroed);
 else
     fprintf('  Dose masking: DISABLED (debugging mode)\n');
 end
