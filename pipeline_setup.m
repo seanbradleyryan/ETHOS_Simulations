@@ -24,6 +24,8 @@
 %    - Image Processing Toolbox (dicominfo, dicomwrite, dicomuid)
 %    - Raw ETHOS DICOM exports in EthosExports/<PatientID>/Pancreas/<Session>/
 %
+%  PLATFORM: Windows machine (C:/Users/80030361/Documents/ETHOS_Simulations)
+%
 %  AUTHOR: ETHOS Pipeline Team
 %  DATE: March 2026
 %  =========================================================================
@@ -39,8 +41,8 @@ CONFIG.sessions = {'Session_1','Session_2'};
 CONFIG.treatment_site  = 'Pancreas';
 
 % --- Directory Paths ---
-CONFIG.working_dir  = '/mnt/weka/home/80030361/ETHOS_Simulations';
-CONFIG.matrad_path  = '/mnt/weka/home/80030361/MATLAB/Addons/matRad';
+CONFIG.working_dir  = 'C:/Users/80030361/Documents/ETHOS_Simulations';
+CONFIG.matrad_path  = 'C:/Users/80030361/Documents/MATLAB/Addons/matRad';
 
 % --- MLC Gap Correction Parameters (Step 0.5) ---
 CONFIG.mlc_min_gap_mm       = 0.5*2;             % Minimum allowed leaf gap (mm)

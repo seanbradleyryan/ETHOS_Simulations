@@ -291,13 +291,38 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, sct
             sensor.mask = makeSphere(Nx, Ny, Nz, sph_radius);
             fprintf('        Sensor: spherical — radius %d voxels\n', sph_radius);
 
+        case 'fixed_anterior'
+            % Deterministic placement: anterior, inferior to beam field,
+            % centered on isocenter X. Requires sct_resampled.bodyMask and
+            % either beam_metadata (passed as 4th arg) or config.total_dose.
+            fixed_struct = struct();
+            if nargin >= 4 && ~isempty(beam_metadata)
+                fixed_struct.beam_metadata = beam_metadata;
+            end
+            if isfield(config, 'total_dose') && ~isempty(config.total_dose)
+                fixed_struct.total_dose = config.total_dose;
+            end
+            % sct_resampled is at original (unpadded) size — correct for placement
+            [sensor_mask_orig, sensor_info] = determine_sensor_placement_fixed( ...
+                config, sct_resampled, fixed_struct);
+            % Embed in current (possibly padded) grid
+            m1 = min(Nx, size(sensor_mask_orig, 1));
+            m2 = min(Ny, size(sensor_mask_orig, 2));
+            m3 = min(Nz, size(sensor_mask_orig, 3));
+            sensor.mask(1:m1, 1:m2, 1:m3) = double(sensor_mask_orig(1:m1, 1:m2, 1:m3));
+            fprintf('        Sensor: fixed_anterior — %d voxels (valid: %s)\n', ...
+                sum(sensor_mask_orig(:)), mat2str(sensor_info.placement_valid));
+
         otherwise
             error('run_single_field_simulation:UnknownSensorMethod', ...
-                'Unknown sensor_placement_method: "%s". Expected ''full_plane_anterior'', ''full_plane_lateral'', or ''spherical''.', ...
+                'Unknown sensor_placement_method: "%s". Expected ''full_plane_anterior'', ''full_plane_lateral'', ''spherical'', or ''fixed_anterior''.', ...
                 sensor_method);
     end
 
-    sensor_info = struct('element_map', [], 'num_elements', 0);
+    % sensor_info already set for fixed_anterior; initialise default for other methods
+    if ~exist('sensor_info', 'var')
+        sensor_info = struct('element_map', [], 'num_elements', 0);
+    end
     sim_results.sensor_info = sensor_info;
 
     numSensorPts = sum(sensor.mask(:));

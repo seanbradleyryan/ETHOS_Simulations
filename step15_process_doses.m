@@ -137,6 +137,17 @@ if ~isfield(config, 'batch_size') || isempty(config.batch_size)
     config.batch_size = 1000;
 end
 
+% Store dose/mask arrays as sparse 2D matrices for compressibility.
+% Dose grids are mostly zero after body/couch masking.
+% Reconstruct on load: reshape(full(var_sp), var_dims)
+if ~isfield(config, 'use_sparse_storage')
+    config.use_sparse_storage = true;
+end
+if config.use_sparse_storage
+    fprintf('  [INFO] Sparse storage ENABLED — dose/mask arrays saved as sparse 2D\n');
+    fprintf('         To reconstruct: reshape(full(var_sp), var_dims)\n');
+end
+
 %% ======================== CONSTRUCT PATHS ========================
 
 fprintf('\n========================================\n');
@@ -351,7 +362,23 @@ end
 % Save tissue masks separately (can be large)
 fprintf('  Saving tissue_masks.mat...\n');
 tissue_masks_file = fullfile(processed_dir, 'tissue_masks.mat');
-save(tissue_masks_file, 'tissue_mask', 'roi_names', 'roi_masks', 'body_mask', 'couch_mask', '-v7.3');
+if config.use_sparse_storage
+    % Reshape each 3D mask to 2D [nRows*nCols, nSlices] then sparsify.
+    % Masks are mostly false/zero after body/couch contours are applied.
+    tissue_mask_dims = size(tissue_mask);
+    body_mask_dims   = size(body_mask);
+    couch_mask_dims  = size(couch_mask);
+    tissue_mask_sp   = sparse(reshape(double(tissue_mask), [], tissue_mask_dims(end)));
+    body_mask_sp     = sparse(reshape(double(body_mask),   [], body_mask_dims(end)));
+    couch_mask_sp    = sparse(reshape(double(couch_mask),  [], couch_mask_dims(end)));
+    save(tissue_masks_file, ...
+        'tissue_mask_sp', 'tissue_mask_dims', ...
+        'body_mask_sp',   'body_mask_dims', ...
+        'couch_mask_sp',  'couch_mask_dims', ...
+        'roi_names', 'roi_masks', '-v7.3');
+else
+    save(tissue_masks_file, 'tissue_mask', 'roi_names', 'roi_masks', 'body_mask', 'couch_mask', '-v7.3');
+end
 fprintf('  Saved: tissue_masks.mat\n');
 
 % Pre-compute invalid dose mask once — used across all fields in the batch loop
@@ -468,6 +495,15 @@ for batch_idx = 1:num_batches
             field_filename = sprintf('dose_%s_%s_%s_B%d_%d.mat', ...
                 patient_id, session, plan_type, beam_num, seg_num);
             field_filepath = fullfile(processed_dir, field_filename);
+
+            % Convert 3D dose to sparse 2D [nRows*nCols, nSlices] before saving.
+            % Field doses are mostly zero outside the treated volume after masking.
+            % Reconstruct: reshape(full(field_dose.dose_Gy), field_dose.dose_dims)
+            if config.use_sparse_storage
+                field_dose.dose_dims = size(field_dose.dose_Gy);
+                field_dose.dose_Gy   = sparse(reshape(field_dose.dose_Gy, [], field_dose.dose_dims(end)));
+                field_dose.is_sparse = true;
+            end
             save(field_filepath, 'field_dose', '-v7.3');
             save_count = save_count + 1;
             fprintf('    [Save %d] %s (B%d S%d [%s], max: %.4f Gy, gantry: %.1f deg, MU: %.1f)\n', ...
@@ -560,7 +596,13 @@ end
 
 fprintf('\n  Saving total_rs_dose.mat...\n');
 total_dose_file = fullfile(processed_dir, 'total_rs_dose.mat');
-save(total_dose_file, 'total_rs_dose', '-v7.3');
+if config.use_sparse_storage
+    total_rs_dose_dims   = size(total_rs_dose);
+    total_rs_dose_sparse = sparse(reshape(total_rs_dose, [], total_rs_dose_dims(end)));
+    save(total_dose_file, 'total_rs_dose_sparse', 'total_rs_dose_dims', '-v7.3');
+else
+    save(total_dose_file, 'total_rs_dose', '-v7.3');
+end
 fprintf('  Saved: total_rs_dose.mat\n');
 
 %% ======================== CREATE SCT RESAMPLED STRUCTURE ========================

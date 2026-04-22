@@ -17,12 +17,12 @@
 %  PREREQUISITES:
 %    - MATLAB R2022a or later
 %    - Image Processing Toolbox
-%    - pipeline_setup.m must have been run successfully on the cluster
+%    - pipeline_setup.m must have been run successfully
 %    - RayStation field dose DICOMs exported to
-%      F:\RayStationFiles\[PatientID]\[Session]\
+%      C:\Users\80030361\Documents\ETHOS_Simulations\RayStationFiles\[PatientID]\[Session]\
 %
-%  PLATFORM: Windows work laptop only.
-%            pipeline_setup.m and pipeline_simulate.m run on the Linux cluster.
+%  PLATFORM: Windows machine (C:/Users/80030361/Documents/ETHOS_Simulations).
+%            pipeline_simulate.m runs on the Linux cluster after upload.
 %
 %  AUTHOR: ETHOS Pipeline Team
 %  DATE: April 2026
@@ -43,6 +43,12 @@ CONFIG.working_dir  = 'C:/Users/80030361/Documents/ETHOS_Simulations';
 % --- Dose Masking (Step 1.5) ---
 % Set false to disable zeroing outside body / in couch (for debugging only)
 CONFIG.apply_dose_masking = true;
+
+% --- Storage Format ---
+% Dose arrays are mostly zero after body/couch masking; sparse 2D format
+% greatly reduces file size. Set false only for debugging/compatibility.
+% Reconstruct 3D on load: reshape(full(dose_Gy), dose_dims)
+CONFIG.use_sparse_storage  = true;
 
 % --- Pipeline Control Flags ---
 CONFIG.run_step15       = true;   % Step 1.5: Process doses and resample CT

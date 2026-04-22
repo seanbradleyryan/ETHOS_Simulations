@@ -304,6 +304,25 @@ switch CONFIG.sensor_placement_method
         sph_radius  = floor(min([Nx, Ny, Nz]) / 2) - CONFIG.pml_size;
         sensor.mask = makeSphere(Nx, Ny, Nz, sph_radius);
         fprintf('       Sensor: spherical, radius %d voxels\n', sph_radius);
+    case 'fixed_anterior'
+        % Deterministic placement: anterior, inferior to beam field,
+        % laterally centered on isocenter X.
+        % Requires sct.bodyMask and either CONFIG.beam_metadata or the
+        % dose already loaded as CONFIG.total_dose / CONFIG.total_dose_file.
+        fixed_struct = struct();
+        if isfield(CONFIG, 'beam_metadata') && ~isempty(CONFIG.beam_metadata)
+            fixed_struct.beam_metadata = CONFIG.beam_metadata;
+        end
+        % Pass the pre-loaded dose (pre-padding, original grid size)
+        fixed_struct.total_dose = doseGrid;
+        % sct is at the current (downscaled if applicable, unpadded) grid
+        [sensor_mask_orig, ~] = determine_sensor_placement_fixed(CONFIG, sct, fixed_struct);
+        % Embed into the current (possibly padded) grid
+        m1 = min(Nx, size(sensor_mask_orig, 1));
+        m2 = min(Ny, size(sensor_mask_orig, 2));
+        m3 = min(Nz, size(sensor_mask_orig, 3));
+        sensor.mask(1:m1, 1:m2, 1:m3) = double(sensor_mask_orig(1:m1, 1:m2, 1:m3));
+        fprintf('       Sensor: fixed_anterior — %d active points\n', sum(sensor_mask_orig(:)));
     otherwise
         error('Unknown sensor_placement_method: "%s"', CONFIG.sensor_placement_method);
 end
