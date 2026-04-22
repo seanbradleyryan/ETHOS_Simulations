@@ -84,9 +84,7 @@ function [adjusted_paths, num_corrections] = step05_fix_mlc_gaps(patient_id, ses
 
 % Initialize outputs
 adjusted_paths.reference = '';
-adjusted_paths.adapted   = '';
 num_corrections.reference = 0;
-num_corrections.adapted   = 0;
 
 % Validate patient_id
 if ~ischar(patient_id) && ~isstring(patient_id)
@@ -175,7 +173,7 @@ end
 
 %% ======================== PROCESS EACH PLAN TYPE ========================
 
-plan_types = {'reference', 'adapted'};
+plan_types = {'reference'};
 
 for pt = 1:length(plan_types)
     plan_type = plan_types{pt};
@@ -444,13 +442,6 @@ fprintf('\n  REFERENCE plan:\n');
 if ~isempty(adjusted_paths.reference)
     fprintf('    Output      : %s\n', adjusted_paths.reference);
     fprintf('    Corrections : %d\n', num_corrections.reference);
-else
-    fprintf('    [SKIPPED or FAILED]\n');
-end
-fprintf('\n  ADAPTED plan:\n');
-if ~isempty(adjusted_paths.adapted)
-    fprintf('    Output      : %s\n', adjusted_paths.adapted);
-    fprintf('    Corrections : %d\n', num_corrections.adapted);
 else
     fprintf('    [SKIPPED or FAILED]\n');
 end

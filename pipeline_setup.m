@@ -151,10 +151,12 @@ for p_idx = 1:length(CONFIG.patients)
                 fprintf('\n--- RayStation Import Instructions ---\n');
                 rs_input_dir = fullfile(CONFIG.working_dir, 'Raystation_Input', ...
                     patient_id, session);
-                fprintf('  Import all RTPLAN files from:\n');
+                fprintf('  Import REFERENCE plan RTPLAN files from:
+');
                 fprintf('    %s\n', rs_input_dir);
                 fprintf('  Files follow the convention:\n');
-                fprintf('    RTPLAN_{patient}_{session}_{reference|adapted}_B<N>_S<M>.dcm\n');
+                fprintf('    RTPLAN_{patient}_{session}_reference_B<N>.dcm
+');
                 fprintf('  Then:\n');
                 fprintf('    1. Recalculate dose for each exploded-segment plan\n');
                 fprintf('    2. Export field doses as Plan_Field*_Beam*_B*_S*.dcm into:\n');

@@ -66,8 +66,6 @@ fprintf('Patient: %s | Session: %s\n\n', patient_id, session);
 % -----------------------------------------------------------------------
 sct_dir    = fullfile(config.working_dir, 'EthosExports', patient_id, ...
     config.treatment_site, session, 'sct');
-sim_ct_dir = fullfile(config.working_dir, 'EthosExports', patient_id, ...
-    config.treatment_site, session, 'sim_ct');
 
 output_dir = fullfile(config.working_dir, 'Raystation_Input', patient_id, session);
 if ~exist(output_dir, 'dir')
@@ -75,43 +73,30 @@ if ~exist(output_dir, 'dir')
 end
 
 fprintf('SCT dir:    %s\n', sct_dir);
-fprintf('Sim CT dir: %s\n', sim_ct_dir);
 fprintf('Output dir: %s\n\n', output_dir);
 
 % -----------------------------------------------------------------------
 % Copy supporting files from sct_dir and sim_ct_dir into output_dir
 % -----------------------------------------------------------------------
-fprintf('--- Copying supporting files to RayStation input directory ---\n');
+fprintf('--- Copying supporting files to RayStation input directory ---
+');
 
 % sCT image slices
 copy_files_to_dir(sct_dir, 'CT*.dcm', output_dir, 'sCT images');
 
-% Sim CT image slices (entire directory  all .dcm files)
-if ~exist(sim_ct_dir, 'dir')
-    warning('step06:noSimCtDir', ...
-        'Sim CT directory not found, skipping:\n  %s', sim_ct_dir);
-else
-    copy_files_to_dir(sim_ct_dir, '*.dcm', output_dir, 'Sim CT images');
-end
-
-% RTSTRUCT files (reference + adapted)
-copy_files_to_dir(sct_dir, 'RS_*.dcm', output_dir, 'RTSTRUCT');
-
-% RTDOSE files (reference + adapted)
-% copy_files_to_dir(sct_dir, 'RD_*.dcm', output_dir, 'RTDOSE');
+% Reference RTSTRUCT only
+copy_files_to_dir(sct_dir, 'RS_reference.dcm', output_dir, 'RTSTRUCT (reference)');
 
 fprintf('\n');
 
 % -----------------------------------------------------------------------
 % Plan types to process
 % -----------------------------------------------------------------------
-plan_types  = {'reference', 'adapted'};
+plan_types  = {'reference'};
 input_files = { ...
-    fullfile(sct_dir, 'RP_reference_adjusted_mlc.dcm'), ...
-    fullfile(sct_dir, 'RP_adapted_adjusted_mlc.dcm')};
+    fullfile(sct_dir, 'RP_reference_adjusted_mlc.dcm')};
 
 output_paths.reference = {};
-output_paths.adapted   = {};
 
 % -----------------------------------------------------------------------
 % Main loop  one pass per plan type
@@ -442,15 +427,16 @@ end  % plan type loop
 % -----------------------------------------------------------------------
 % Combine all paths for convenience
 % -----------------------------------------------------------------------
-output_paths.all = [output_paths.reference, output_paths.adapted];
+output_paths.all = output_paths.reference;
 
 total = numel(output_paths.all);
-fprintf('=== Step 0.6 complete ===\n');
-fprintf('Total beam files written: %d  (%d reference + %d adapted)\n', ...
-    total, ...
-    numel(output_paths.reference), ...
-    numel(output_paths.adapted));
-fprintf('Output directory: %s\n\n', output_dir);
+fprintf('=== Step 0.6 complete ===
+');
+fprintf('Total beam files written: %d (reference plan only)
+', total);
+fprintf('Output directory: %s
+
+', output_dir);
 
 end  % function step06_explode_segments
 

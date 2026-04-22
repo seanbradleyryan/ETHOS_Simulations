@@ -199,29 +199,39 @@ if ~hasRTPLANref
     warning('step0_sort_dicom:MissingFile', 'No RP_reference.dcm found in sct directory');
 end
 if ~hasRTPLANadp
-    warning('step0_sort_dicom:MissingFile', 'No RP_adapted.dcm found in sct directory');
+    fprintf('  [INFO] RP_adapted.dcm not found (not required for RayStation import).'
+');
 end
 if ~hasRTSTRUCTref
     warning('step0_sort_dicom:MissingFile', 'No RS_reference.dcm found in sct directory');
 end
 if ~hasRTSTRUCTadp
-    warning('step0_sort_dicom:MissingFile', 'No RS_adapted.dcm found in sct directory');
+    fprintf('  [INFO] RS_adapted.dcm not found (not required for RayStation import).'
+');
 end
 if ~hasRTDOSEref
     warning('step0_sort_dicom:MissingFile', 'No RD_reference.dcm found in sct directory');
 end
 if ~hasRTDOSEadp
-    warning('step0_sort_dicom:MissingFile', 'No RD_adapted.dcm found in sct directory');
+    fprintf('  [INFO] RD_adapted.dcm not found (not required for RayStation import).'
+');
 end
 
 fprintf('\n  --- Sorted file summary ---\n');
-fprintf('    CT slices      : %s\n',  tf2str(hasCT));
-fprintf('    RP_reference   : %s\n',  tf2str(hasRTPLANref));
-fprintf('    RP_adapted     : %s\n',  tf2str(hasRTPLANadp));
-fprintf('    RS_reference   : %s\n',  tf2str(hasRTSTRUCTref));
-fprintf('    RS_adapted     : %s\n',  tf2str(hasRTSTRUCTadp));
-fprintf('    RD_reference   : %s\n',  tf2str(hasRTDOSEref));
-fprintf('    RD_adapted     : %s\n',  tf2str(hasRTDOSEadp));
+fprintf('    CT slices            : %s
+',  tf2str(hasCT));
+fprintf('    RP_reference         : %s
+',  tf2str(hasRTPLANref));
+fprintf('    RS_reference         : %s
+',  tf2str(hasRTSTRUCTref));
+fprintf('    RD_reference         : %s
+',  tf2str(hasRTDOSEref));
+fprintf('    RP_adapted (optional): %s
+',  tf2str(hasRTPLANadp));
+fprintf('    RS_adapted (optional): %s
+',  tf2str(hasRTSTRUCTadp));
+fprintf('    RD_adapted (optional): %s
+',  tf2str(hasRTDOSEadp));
 fprintf('  ---------------------------\n');
 
 if ~isempty(sim_ct_dir)
