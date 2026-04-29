@@ -19,9 +19,9 @@
 %    - Image Processing Toolbox
 %    - pipeline_setup.m must have been run successfully
 %    - RayStation field dose DICOMs exported to
-%      C:\Users\80030361\Documents\ETHOS_Simulations\RayStationFiles\[PatientID]\[Session]\
+%      C:\Users\80030361\ETHOS_Simulations\RayStationFiles\[PatientID]\[Session]\
 %
-%  PLATFORM: Windows machine (C:/Users/80030361/Documents/ETHOS_Simulations).
+%  PLATFORM: Windows machine (C:/Users/80030361/ETHOS_Simulations).
 %            pipeline_simulate.m runs on the Linux cluster after upload.
 %
 %  AUTHOR: ETHOS Pipeline Team
@@ -38,7 +38,7 @@ CONFIG.sessions        = {'Session_1'};
 CONFIG.treatment_site  = 'Pancreas';
 
 % --- Directory Paths (Windows work laptop) ---
-CONFIG.working_dir  = 'C:/Users/80030361/Documents/ETHOS_Simulations';
+CONFIG.working_dir  = 'C:/Users/80030361/ETHOS_Simulations';
 
 % --- Dose Masking (Step 1.5) ---
 % Set false to disable zeroing outside body / in couch (for debugging only)
