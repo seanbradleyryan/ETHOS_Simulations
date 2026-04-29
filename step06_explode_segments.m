@@ -78,8 +78,7 @@ fprintf('Output dir: %s\n\n', output_dir);
 % -----------------------------------------------------------------------
 % Copy supporting files from sct_dir and sim_ct_dir into output_dir
 % -----------------------------------------------------------------------
-fprintf('--- Copying supporting files to RayStation input directory ---
-');
+fprintf('--- Copying supporting files to RayStation input directory ---\n');
 
 % sCT image slices
 copy_files_to_dir(sct_dir, 'CT*.dcm', output_dir, 'sCT images');
@@ -430,13 +429,9 @@ end  % plan type loop
 output_paths.all = output_paths.reference;
 
 total = numel(output_paths.all);
-fprintf('=== Step 0.6 complete ===
-');
-fprintf('Total beam files written: %d (reference plan only)
-', total);
-fprintf('Output directory: %s
-
-', output_dir);
+fprintf('=== Step 0.6 complete ===\n');
+fprintf('Total beam files written: %d (reference plan only)\n', total);
+fprintf('Output directory: %s\n\n', output_dir);
 
 end  % function step06_explode_segments
 
