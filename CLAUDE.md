@@ -1,15 +1,19 @@
 # CLAUDE.md — ETHOS Photoacoustic Dose Verification Pipeline
 
+## Project Abstract 
+
+Ionizing Radiation Acoustic Imaging (IRAI) is a new method of measuring dose *in vivo* during radiation therapy. Measurements are made by using a 2d ultrasound array on recieve mode to capture the sound waves produced by heat deposited by ionizing radiation on a pulse-by-pulse basis, then use reconstruction algorithms to visualize a 3d dose inside the patient. Most studies produce relative dose maps. Furthermore, it is still unknown if an absolute dose algorithm could respond to an error in treatment delivery. In this study, we propose multiple methods of labeling tissue properties from cone-beam CT scans. We then simulate a live IRAI system performing pulse-by-pulse reconstruction on a set of conebeam CT images from real patients using these algorithms. One dose is generated using the initial scan and one is generated using the verification scan after planning has taken place. Finally, we verify this study using measurements on a realistic human phantom. 
+
 ## Project Overview
 
-MATLAB-based photoacoustic dose verification system for Varian ETHOS adaptive radiotherapy (pancreatic cancer). Simulates acoustic wave propagation from radiation dose deposition and reconstructs dose via time-reversal using the k-Wave toolbox. The goal is real-time dose monitoring during IMRT delivery.
+MATLAB-based photoacoustic dose verification system for Varian ETHOS adaptive radiotherapy (pancreatic cancer). Simulates acoustic wave propagation from radiation dose deposition and reconstructs dose via time-reversal using the k-Wave toolbox. The goal is real-time dose monitoring during IMRT delivery. The relevant part of the abstract to this coding project is the simulation of a live IRAI system on multiple sets of images. 
 
 **Core physics chain:** Radiation dose → initial pressure (p0 = Dose × Grüneisen × density) → k-Wave forward simulation → sensor data → time-reversal reconstruction → recovered dose
 
 ## Directory Structure
 
 ```
-/mnt/weka/home/80030361/ETHOS_Simulations/       # Working root
+C:/Users/80030361/ETHOS_Simulations/   # Working root (Windows)
 ├── EthosExports/[PatientID]/Pancreas/[Session]/  # Raw DICOM exports
 │   └── sct/                                       # Sorted SCT + matched RT files (Step 0 output)
 ├── Raystation_Input/[PatientID]/[Session]/        # Exploded-segment RTPLAN files (Step 0.6 output)
@@ -35,8 +39,8 @@ MATLAB-based photoacoustic dose verification system for Varian ETHOS adaptive ra
 | 3 | `step3_analysis.m` | `results = step3_analysis(patient_id, session, config)` | Gamma analysis (3%/3mm), SSIM, visualization |
 
 **Orchestrator scripts** (replace the former `ethos_master_pipeline_pseudocode.m`):
-- `pipeline_setup.m` — Runs Steps 0 / 0.5 / 0.6 (pre-RayStation). Configure patients/sessions in its CONFIG block and run before RayStation export. Runs on **Linux cluster**.
-- `pipeline_compress.m` — Runs Step 1.5 and `prepare_uploads`. Configure and run on the **Windows work laptop** after field dose DICOMs are exported from RayStation. Working directory: `F:` (files at `F:\RayStationFiles\[PatientID]\[Session]\`).
+- `pipeline_setup.m` — Runs Steps 0 / 0.5 / 0.6 (pre-RayStation). Configure patients/sessions in its CONFIG block and run before RayStation export. Runs on **Windows** (`C:/Users/80030361/Documents/ETHOS_Simulations`).
+- `pipeline_compress.m` — Runs Step 1.5 and `prepare_uploads`. Configure and run on **Windows** after field dose DICOMs are exported from RayStation. Files at `C:\Users\80030361\Documents\ETHOS_Simulations\RayStationFiles\[PatientID]\[Session]\`.
 - `pipeline_simulate.m` — Runs Steps 2 / 3 (post-compress). Configure and run on the **Linux cluster** after `pipeline_compress.m` has completed and processed files have been transferred.
 
 **Supporting files:**
@@ -58,9 +62,9 @@ MATLAB-based photoacoustic dose verification system for Varian ETHOS adaptive ra
 - **CONFIG-driven:** All parameters flow through a `CONFIG` struct (or `config` argument). No hardcoded magic numbers in processing logic — put them in CONFIG sections at the top.
 - **Function signature:** Pipeline steps are `function output = stepN_name(patient_id, session, config)`. patient_id and session are always char arrays.
 - **Stateless functions:** Designed for `parfor` safety. No persistent variables, no globals, no shared state.
-- **Memory-conscious:** Field doses are processed and saved individually as `field_dose_XXX.mat` files, not held in a single large array. Use `-v7.3` for large .mat files.
+- **Memory-conscious:** Field doses are large and cannot be held in a single large array
 - **Only the first function in a .m file is externally visible.** All helper functions go below the main function in the same file.
-- **HIPPA Regulation:** Code must be executed on a remote device for testing, so do not bother testing. Additionally, commit all changes to the main branch so they can be easily pushed for remote testing.
+- **HIPPA Regulation:** Code must be executed on a remote device for testing, so do not bother testing.
 
 ### Input Validation
 Every pipeline function starts with input validation:
@@ -124,12 +128,12 @@ Step 0 matches files via: CT SeriesInstanceUID → RTSTRUCT ReferencedFrameOfRef
 Halcyon has a dual-layer MLC (proximal + distal). Step 0.5 enforces minimum gap of 0.5 mm with 0.4 mm expansion per side. Valid leaf range: [-140, 140] mm.
 
 ### Beam Segment Explosion (Step 0.6)
-`step06_explode_segments` reads the MLC-corrected RTPLAN and writes one RTPLAN file per beam per segment (`RTPLAN_{patient}_{session}_{reference|adapted}_B<N>_S<M>.dcm`) into `Raystation_Input/`. These single-segment 2-CP plans are imported into RayStation for per-segment dose calculation. Output struct has fields: `.reference`, `.adapted`, `.all` (cell arrays of file paths).
+`step06_explode_segments` reads the MLC-corrected RTPLAN and writes one RTPLAN file per beam (`RTPLAN_{patient}_{session}_{reference|adapted}_B<N>.dcm`) into `Raystation_Input/`. These single-segment 2-CP plans are imported into RayStation for per-segment dose calculation. Output struct has fields: `.reference`, `.adapted`, `.all` (cell arrays of file paths).
 
 ### Sensor Placement Methods (`sensor_placement_method`)
 - `'full_plane_anterior'` — Full YZ plane at `sensor_x_index` (default)
 - `'full_plane_lateral'` — Full XZ plane at `sensor_y_index`
-- `'spherical'` — Spherical shell geometry (PSF correction not applied)
+- `'spherical'` — Spherical shell geometry 
 
 ## Visualization Preferences
 
@@ -143,21 +147,20 @@ Halcyon has a dual-layer MLC (proximal + distal). Step 0.5 enforces minimum gap 
 - k-Wave Toolbox (http://www.k-wave.org)
 - Image Processing Toolbox
 - Parallel Computing Toolbox (optional)
-- matRad (at `/mnt/weka/home/80030361/MATLAB/Addons/matRad`)
 
 ## Common Operations
 
 ```bash
 # Typical patient processing
-# 1. [CLUSTER]  Place raw DICOM export in EthosExports/[PatientID]/Pancreas/[Session]/
-# 2. [CLUSTER]  Set patient/session in pipeline_setup.m CONFIG, then run it (Steps 0/0.5/0.6)
+# 1. [WINDOWS]  Place raw DICOM export in EthosExports/[PatientID]/Pancreas/[Session]/
+# 2. [WINDOWS]  Set patient/session in pipeline_setup.m CONFIG, then run it (Steps 0/0.5/0.6)
 # 3. [MANUAL]   Import RTPLAN files from Raystation_Input/ into RayStation
 # 4. [MANUAL]   Recalculate dose for each exploded-segment plan in RayStation
 # 5. [MANUAL]   Export field doses as Plan_Field*_Beam*_B*_S*.dcm to
-#               F:\RayStationFiles\[PatientID]\[Session]\ (on Windows work laptop)
+#               C:\Users\80030361\Documents\ETHOS_Simulations\RayStationFiles\[PatientID]\[Session]\
 # 6. [WINDOWS]  Set patient/session in pipeline_compress.m CONFIG, then run it
 #               (Step 1.5 + prepare_uploads — processes DICOMs, packages .mat files)
-# 7. [MANUAL]   Transfer processed .mat files from Windows laptop to cluster
+# 7. [MANUAL]   Transfer processed .mat files from Windows to Linux cluster
 # 8. [CLUSTER]  Set patient/session in pipeline_simulate.m CONFIG, then run it (Steps 2/3)
 ```
 
