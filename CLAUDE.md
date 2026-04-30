@@ -1,145 +1,99 @@
 # CLAUDE.md — ETHOS Photoacoustic Dose Verification Pipeline
 
-## Project Abstract 
+## Claude Code Context
 
-Ionizing Radiation Acoustic Imaging (IRAI) is a new method of measuring dose *in vivo* during radiation therapy. Measurements are made by using a 2d ultrasound array on recieve mode to capture the sound waves produced by heat deposited by ionizing radiation on a pulse-by-pulse basis, then use reconstruction algorithms to visualize a 3d dose inside the patient. Most studies produce relative dose maps. Furthermore, it is still unknown if an absolute dose algorithm could respond to an error in treatment delivery. In this study, we propose multiple methods of labeling tissue properties from cone-beam CT scans. We then simulate a live IRAI system performing pulse-by-pulse reconstruction on a set of conebeam CT images from real patients using these algorithms. One dose is generated using the initial scan and one is generated using the verification scan after planning has taken place. Finally, we verify this study using measurements on a realistic human phantom. 
+### Loading Rules
 
-## Project Overview
+When a user or file contents indicate a specific domain, load the relevant context based on the below description. 
+To load a context file, ask the user: "Should I load `claude-[domain].md` for better context?" 
+Or if it's obvious from the code/task, load it proactively and mention it.
+Then read and incorporate that file's guidelines into your responses.
 
-MATLAB-based photoacoustic dose verification system for Varian ETHOS adaptive radiotherapy (pancreatic cancer). Simulates acoustic wave propagation from radiation dose deposition and reconstructs dose via time-reversal using the k-Wave toolbox. The goal is real-time dose monitoring during IMRT delivery. The relevant part of the abstract to this coding project is the simulation of a live IRAI system on multiple sets of images. 
+### How to Trigger Loading
 
-**Core physics chain:** Radiation dose → initial pressure (p0 = Dose × Grüneisen × density) → k-Wave forward simulation → sensor data → time-reversal reconstruction → recovered dose
+You can:
+1. **Explicitly ask the user** ("Looks like Simulation work—should I load the simulation context?")
+2. **Load proactively** when you detect the domain (then say "I've loaded `claude-PIPELINE_CONTEXT.md` for context")
+3. **Have the user request it** ("Load the DICOM context")
+
+### Context Files
+
+> - `CLAUDE-PIPELINE_CONTEXT.md` — step table, orchestrators, supporting files, full workflow
+> - `CLAUDE-SIMULATION_CONTEXT.md` — k-Wave specifics, tissue models, sensor design (for simulation files)
+> - `CLAUDE-DICOM_CONTEXT.md` — DICOM reference chains, MLC correction, segment explosion (for DICOM steps)
+> - `CLAUDE-RayStation.md` — RayStation Scripting guidelines for step 1. 
+
+## Project Summary
+
+IRAI (Ionizing Radiation Acoustic Imaging) captures sound waves from radiation dose deposition using a 2D ultrasound array, then reconstructs 3D dose via time-reversal. This pipeline simulates a live IRAI system on real ETHOS CBCT patient data by detecting differences in signals between two dose distributions, and comparing that to their different truth distributions and phantom data. 
+
+**Core physics chain:** Radiation dose → initial pressure (`p0 = Dose × Grüneisen × density`) → k-Wave forward simulation → sensor data → time-reversal reconstruction → recovered dose
 
 ## Directory Structure
 
 ```
-C:/Users/80030361/ETHOS_Simulations/   # Working root (Windows)
-├── EthosExports/[PatientID]/Pancreas/[Session]/  # Raw DICOM exports
-│   └── sct/                                       # Sorted SCT + matched RT files (Step 0 output)
-├── Raystation_Input/[PatientID]/[Session]/        # Exploded-segment RTPLAN files (Step 0.6 output)
-│                                                  #   RTPLAN_{patient}_{session}_{ref|adapted}_B<N>_S<M>.dcm
-├── RayStationFiles/[PatientID]/[Session]/         # Field dose DICOMs exported from RayStation
-│   │                                              #   Plan_Field*_Beam*_B*_S*.dcm
-│   └── processed/                                  # Processed .mat files (Step 1.5 output)
-├── SimulationResults/[PatientID]/[Session]/[method]/ # k-Wave outputs (Step 2 output)
-├── AnalysisResults/[PatientID]/[Session]/          # Gamma/SSIM results (Step 3 output)
-└── PipelineScripts/                                # All pipeline .m files
+C:/Users/80030361/ETHOS_Simulations/
+├── EthosExports/[PatientID]/Pancreas/[Session]/   # Raw DICOM exports
+│   └── sct/                                        # Sorted SCT + matched RT files (Step 0 output)
+├── Raystation_Input/[PatientID]/[Session]/         # Exploded-segment RTPLAN files (Step 0.6 output)
+├── RayStationFiles/[PatientID]/[Session]/          # Field dose DICOMs from RayStation
+│   └── processed/                                   # Processed .mat files (Step 1.5 output)
+├── SimulationResults/[PatientID]/[Session]/[method]/ # k-Wave outputs (Step 2)
+├── AnalysisResults/[PatientID]/[Session]/           # Gamma/SSIM results (Step 3)
+└── PipelineScripts/                                 # All pipeline .m files
 ```
 
-## Pipeline Steps
+## Architecture Patterns
 
-| Step | File | Function Signature | Purpose |
-|------|------|--------------------|---------|
-| 0 | `step0_sort_dicom.m` | `sct_dir = step0_sort_dicom(patient_id, session, config)` | Sort DICOM by reference chains, extract SCT series |
-| 0.5 | `step05_fix_mlc_gaps.m` | `[path, n] = step05_fix_mlc_gaps(patient_id, session, config)` | Correct Halcyon dual-layer MLC minimum gaps |
-| 0.6 | `step06_explode_segments.m` | `exploded = step06_explode_segments(patient_id, session, config)` | Explode each beam's segments into individual 2-CP RTPLAN files |
-| 1 | *Manual* | — | Import exploded RTPLANs into RayStation, recalculate and export field doses |
-| 1.5 | `step15_process_doses.m` | `[fields, sct, total, meta] = step15_process_doses(...)` | Resample CT to dose grid, process per-field doses (**Windows work laptop** via `pipeline_compress.m`) |
-| 2 | `run_single_field_simulation.m` | `[recon, results] = run_single_field_simulation(...)` | k-Wave forward + time-reversal for one field |
-| 3 | `step3_analysis.m` | `results = step3_analysis(patient_id, session, config)` | Gamma analysis (3%/3mm), SSIM, visualization |
+- **CONFIG-driven:** All parameters in a `CONFIG` struct. No hardcoded magic numbers in logic.
+- **Function signature:** `function output = stepN_name(patient_id, session, config)` — `patient_id` and `session` are always `char`.
+- **Stateless functions:** `parfor`-safe. No persistent variables, no globals, no shared state.
+- **Memory-conscious:** Field doses are large; process one at a time, never load all simultaneously.
+- **MATLAB visibility:** Only the first function in a `.m` file is externally callable. Helpers go below main in the same file.
+- **HIPAA:** Code must be executed on a remote device; do not attempt local testing.
 
-**Orchestrator scripts** (replace the former `ethos_master_pipeline_pseudocode.m`):
-- `pipeline_setup.m` — Runs Steps 0 / 0.5 / 0.6 (pre-RayStation). Configure patients/sessions in its CONFIG block and run before RayStation export. Runs on **Windows** (`C:/Users/80030361/Documents/ETHOS_Simulations`).
-- `pipeline_compress.m` — Runs Step 1.5 and `prepare_uploads`. Configure and run on **Windows** after field dose DICOMs are exported from RayStation. Files at `C:\Users\80030361\Documents\ETHOS_Simulations\RayStationFiles\[PatientID]\[Session]\`.
-- `pipeline_simulate.m` — Runs Steps 2 / 3 (post-compress). Configure and run on the **Linux cluster** after `pipeline_compress.m` has completed and processed files have been transferred.
+## Naming Conventions
 
-**Supporting files:**
-- `run_standalone_simulation.m` — Self-contained single-run simulation for testing
-- `determine_sensor_mask.m` — Physics-based flat sensor placement algorithm
-- `create_acoustic_medium.m` — Builds k-Wave medium struct from CT HU values
-- `apply_element_averaging.m` — Post-processing averaging over sensor elements
-- `find_optimal_kwave_size.m` — Selects efficient grid dimensions for k-Wave FFT
-- `convert_dose.m` — Unit conversion utilities for dose arrays
-- `run_medium_comparison.m` — Compares reconstruction quality across Grüneisen methods
-- `test_time_dependence.m` — Time-dependence sensitivity testing
-- `plot_standalone_results.m` — Visualization helper for standalone runs
-- `CalcGamma.m` — Gamma index calculation (external dependency)
-- `load_processed_data.m` — Loads previously processed dose/CT data
+| Scope | Style | Example |
+|---|---|---|
+| Functions | `snake_case` | `step0_sort_dicom`, `determine_sensor_mask` |
+| Local variables | `camelCase` | `fieldDoseDir`, `patientID` |
+| Struct fields | `snake_case` | `.dose_Gy`, `.gantry_angle` |
+| Config fields | `snake_case` | `config.dose_per_pulse_cGy`, `config.use_gpu` |
+| CONFIG struct name | `UPPER_CASE` | `CONFIG` |
+
+## Coordinate System
+
+- **DICOM:** `(x, y, z)` in mm; origin from `ImagePositionPatient`.
+- **MATLAB arrays:** `(row, col, slice)` = `(Y, X, Z)`. **This mapping matters everywhere.**
+- **Grid dims stored as** `[ny, nx, nz]` — watch for transposition bugs.
+- **Spacing:** `[dx, dy, dz]` in mm; k-Wave requires meters: `dx_m = spacing(1) * 1e-3`.
 
 ## Code Conventions
 
-### Architecture Patterns
-- **CONFIG-driven:** All parameters flow through a `CONFIG` struct (or `config` argument). No hardcoded magic numbers in processing logic — put them in CONFIG sections at the top.
-- **Function signature:** Pipeline steps are `function output = stepN_name(patient_id, session, config)`. patient_id and session are always char arrays.
-- **Stateless functions:** Designed for `parfor` safety. No persistent variables, no globals, no shared state.
-- **Memory-conscious:** Field doses are large and cannot be held in a single large array
-- **Only the first function in a .m file is externally visible.** All helper functions go below the main function in the same file.
-- **HIPPA Regulation:** Code must be executed on a remote device for testing, so do not bother testing.
-
-### Input Validation
-Every pipeline function starts with input validation:
+**Input validation** (every pipeline function starts with this):
 ```matlab
 if ~ischar(patient_id) && ~isstring(patient_id)
     error('stepN_name:InvalidInput', 'patient_id must be a string...');
 end
 patient_id = char(patient_id);  % Normalize to char
 ```
-Validate config fields exist, set defaults for optional fields.
 
-### Error Handling
-Use qualified error IDs: `error('function_name:ErrorType', 'message', ...)`. Wrap major processing blocks in try/catch with informative messages.
+**Error IDs:** `error('function_name:ErrorType', 'message', ...)`
 
-### Documentation Style
-Every function gets a header block with: PURPOSE, INPUTS (with field descriptions), OUTPUTS, ALGORITHM steps, EXAMPLE usage, DEPENDENCIES, and See also references.
-
-### Naming
-- Functions: `snake_case` (e.g., `step0_sort_dicom`, `determine_sensor_mask`)
-- Variables: `camelCase` for local variables (e.g., `fieldDoseDir`, `patientID`), `snake_case` for struct fields (e.g., `.dose_Gy`, `.gantry_angle`)
-- Config fields: `snake_case` (e.g., `config.dose_per_pulse_cGy`, `config.use_gpu`)
-- Constants/CONFIG: `UPPER_CASE` struct name (`CONFIG`), lowercase fields
-
-### Logging
-Use `fprintf` with step/section prefixes:
+**Logging:**
 ```matlab
 fprintf('[STEP 1.5] Processing field %d/%d...\n', i, n);
 fprintf('  Grid dimensions: [%d x %d x %d]\n', dims);
 ```
 
-## Key Technical Details
-
-### Coordinate Systems
-- DICOM patient coordinates: (x, y, z) in mm. Origin from DICOM ImagePositionPatient.
-- MATLAB array indexing: (row, col, slice) = (Y, X, Z). **This mapping matters everywhere.**
-- Grid dimensions stored as `[ny, nx, nz]` (rows, cols, slices) — watch for transposition bugs.
-- Spacing: `[dx, dy, dz]` in mm. k-Wave needs meters: `dx_m = spacing(1) * 1e-3`.
-
-### Tissue Models (Grüneisen Methods)
-- `'uniform'` — Single property values everywhere (Γ=1.0, c=1540 m/s, ρ=1000 kg/m³)
-- `'threshold_1'` — 9 tissue types based on HU thresholds (air, lung, fat, water, blood, muscle, soft tissue, bone, metal)
-- `'threshold_2'` — 4 tissue types (water, fat, soft tissue, bone) — most commonly used
-
-### Sensor Design
-- **Flat rigid 10×10 cm planar array** — not curved. Real ultrasound arrays are rigid; tissue deforms, not the sensor.
-- Positioned on anterior abdomen, avoiding all beam field jaw projections on the surface.
-- Water fills gaps between sensor and body (no coupling concerns outside body).
-- Beam exclusion uses divergence geometry to project jaw openings from isocenter onto anterior surface.
-
-### k-Wave Specifics
-- PML size: 10 voxels (default)
-- CFL number: 0.3
-- Time reversal with Dirichlet boundary conditions
-- GPU acceleration via `use_gpu = true`
-- Typical runtime: ~23 min for 7 fields on 256×256×128 grid with GPU
-
-### DICOM Reference Chains
-Step 0 matches files via: CT SeriesInstanceUID → RTSTRUCT ReferencedFrameOfReferenceSequence → RTPLAN ReferencedStructureSetSequence → RTDOSE ReferencedRTPlanSequence
-
-### MLC Gap Correction (Halcyon)
-Halcyon has a dual-layer MLC (proximal + distal). Step 0.5 enforces minimum gap of 0.5 mm with 0.4 mm expansion per side. Valid leaf range: [-140, 140] mm.
-
-### Beam Segment Explosion (Step 0.6)
-`step06_explode_segments` reads the MLC-corrected RTPLAN and writes one RTPLAN file per beam (`RTPLAN_{patient}_{session}_{reference|adapted}_B<N>.dcm`) into `Raystation_Input/`. These single-segment 2-CP plans are imported into RayStation for per-segment dose calculation. Output struct has fields: `.reference`, `.adapted`, `.all` (cell arrays of file paths).
-
-### Sensor Placement Methods (`sensor_placement_method`)
-- `'full_plane_anterior'` — Full YZ plane at `sensor_x_index` (default)
-- `'full_plane_lateral'` — Full XZ plane at `sensor_y_index`
-- `'spherical'` — Spherical shell geometry 
+**Documentation header** (every function): PURPOSE, INPUTS (with field descriptions), OUTPUTS, ALGORITHM steps, EXAMPLE usage, DEPENDENCIES, See also.
 
 ## Visualization Preferences
 
-- **Subplots: Maximum 3 rows on screen.** 3–4 columns is fine.
-- Orthogonal views typically show sagittal, coronal, and transverse planes at the max dose location or dose centroid.
-- Body contour overlays on dose colormaps. Use consistent colorbars.
+- Subplots: **maximum 3 rows** on screen; 3–4 columns fine.
+- Orthogonal views at max dose location or dose centroid (sagittal, coronal, transverse).
+- Body contour overlays on dose colormaps; consistent colorbars.
 
 ## Prerequisites
 
@@ -147,40 +101,3 @@ Halcyon has a dual-layer MLC (proximal + distal). Step 0.5 enforces minimum gap 
 - k-Wave Toolbox (http://www.k-wave.org)
 - Image Processing Toolbox
 - Parallel Computing Toolbox (optional)
-
-## Common Operations
-
-```bash
-# Typical patient processing
-# 1. [WINDOWS]  Place raw DICOM export in EthosExports/[PatientID]/Pancreas/[Session]/
-# 2. [WINDOWS]  Set patient/session in pipeline_setup.m CONFIG, then run it (Steps 0/0.5/0.6)
-# 3. [MANUAL]   Import RTPLAN files from Raystation_Input/ into RayStation
-# 4. [MANUAL]   Recalculate dose for each exploded-segment plan in RayStation
-# 5. [MANUAL]   Export field doses as Plan_Field*_Beam*_B*_S*.dcm to
-#               C:\Users\80030361\Documents\ETHOS_Simulations\RayStationFiles\[PatientID]\[Session]\
-# 6. [WINDOWS]  Set patient/session in pipeline_compress.m CONFIG, then run it
-#               (Step 1.5 + prepare_uploads — processes DICOMs, packages .mat files)
-# 7. [MANUAL]   Transfer processed .mat files from Windows to Linux cluster
-# 8. [CLUSTER]  Set patient/session in pipeline_simulate.m CONFIG, then run it (Steps 2/3)
-```
-
-```matlab
-% Quick standalone test of a simulation
-% Set paths in run_standalone_simulation.m CONFIG section, then run it
-
-% Load and inspect processed data
-load('sct_resampled.mat');  % Contains: sct_resampled struct
-load('total_rs_dose.mat');  % Contains: total_rs_dose 3D array (Gy)
-
-% Load total reconstruction result
-load('total_recon_dose.mat');  % Contains: total_recon, metadata
-```
-
-## Gotchas & Known Issues
-
-1. **Slice alignment streaking:** Misaligned CT/dose grids cause horizontal streaking artifacts in body masks. Always verify grid alignment after resampling.
-2. **Memory limits:** Never load all field doses simultaneously for large grids. Process one field at a time, save individually.
-3. **MATLAB function visibility:** Only the first function in a `.m` file is callable from outside. If you need a helper externally, it must be its own file or the first function.
-4. **DICOM collection failures:** `dicomCollection()` can be fragile with malformed DICOM. Fall back to manual `dicominfo()` iteration if needed.
-5. **GPU memory:** 256³ grids with complex tissue models can exhaust GPU memory. Monitor with `gpuDevice` and fall back to CPU if needed.
-6. **Gamma analysis cutoff:** Default 10% low-dose cutoff excludes voxels below 10% of max dose. This is intentional — low-dose regions are clinically less relevant and noisy in reconstruction.
