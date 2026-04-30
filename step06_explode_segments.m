@@ -86,6 +86,12 @@ copy_files_to_dir(sct_dir, 'CT*.dcm', output_dir, 'sCT images');
 % Reference RTSTRUCT only
 copy_files_to_dir(sct_dir, 'RS_reference.dcm', output_dir, 'RTSTRUCT (reference)');
 
+% Image registration (REG) files
+copy_files_to_dir(sct_dir, 'REG_*.dcm', output_dir, 'Image registrations');
+
+% CBCT series (up to two, sorted by sort_CBCT)
+copy_files_to_dir(sct_dir, 'CBCT*.dcm', output_dir, 'CBCT series');
+
 fprintf('\n');
 
 % -----------------------------------------------------------------------

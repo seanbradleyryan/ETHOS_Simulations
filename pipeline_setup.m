@@ -14,7 +14,7 @@
 %    4. Run pipeline_simulate.m
 %
 %  STEPS EXECUTED:
-%    Step 0    Sort DICOM files (SCT + matched RT files)
+%    Step 0    Sort DICOM files (SCT + RT + REG + up to 2 CBCT)
 %    Step 0.5  Fix Halcyon dual-layer MLC minimum gaps in RTPLAN
 %    Step 0.6  Explode each beam's segments into individual 2-CP beams
 %               (one output RTPLAN file per original beam)

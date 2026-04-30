@@ -165,6 +165,21 @@ end
 fprintf('  Classifying RTPLAN files (REFERENCE / ADAPTED)...\n');
 sortRTFiles(ctInfo, rawwd, sct_dir, sctSeriesUID);
 
+%% ======================== SORT REG (IMAGE REGISTRATION) FILES ========================
+
+fprintf('  Sorting image registration (REG) files...\n');
+sortREGFiles(ctInfo, rawwd, sct_dir);
+
+%% ======================== SORT CBCT FILES ========================
+
+fprintf('  Sorting CBCT series...\n');
+try
+    sort_CBCT(patient_id, session, config);
+catch ME
+    warning('step0_sort_dicom:CBCTFailed', ...
+        'sort_CBCT failed: %s', ME.message);
+end
+
 %% ======================== SORT SIMULATION CT FILES ========================
 
 fprintf('  Searching for simulation CT series...\n');
@@ -191,6 +206,9 @@ hasRTPLANref   = isfile(fullfile(sct_dir, 'RP_reference.dcm'));
 hasRTPLANadp   = isfile(fullfile(sct_dir, 'RP_adapted.dcm'));
 hasRTDOSEref   = isfile(fullfile(sct_dir, 'RD_reference.dcm'));
 hasRTDOSEadp   = isfile(fullfile(sct_dir, 'RD_adapted.dcm'));
+hasREG         = ~isempty(dir(fullfile(sct_dir, 'REG_*.dcm')));
+nCBCTfiles     = length(dir(fullfile(sct_dir, 'CBCT*.dcm')));
+hasCBCT        = nCBCTfiles > 0;
 
 if ~hasCT
     warning('step0_sort_dicom:MissingFile', 'No CT files found in sct directory');
@@ -222,6 +240,8 @@ fprintf('    RD_reference         : %s\n', tf2str(hasRTDOSEref));
 fprintf('    RP_adapted (optional): %s\n', tf2str(hasRTPLANadp));
 fprintf('    RS_adapted (optional): %s\n', tf2str(hasRTSTRUCTadp));
 fprintf('    RD_adapted (optional): %s\n', tf2str(hasRTDOSEadp));
+fprintf('    REG (image reg.)     : %s\n', tf2str(hasREG));
+fprintf('    CBCT files           : %s (%d files)\n', tf2str(hasCBCT), nCBCTfiles);
 fprintf('  ---------------------------\n');
 
 if ~isempty(sim_ct_dir)
@@ -318,6 +338,56 @@ function sctSeriesUID = sortSctFiles(ctInfo, sourceDir, destDir) %#ok<INUSL>
     end
 
     fprintf('    SCT files: %d moved, %d already existed\n', numMoved, numSkipped);
+end
+
+
+function sortREGFiles(ctInfo, sourceDir, destDir) %#ok<INUSL>
+%SORTREGFILES Copy all REG (Spatial/Image Registration) DICOM files into
+%             the sct directory, with sequential REG_<n>.dcm filenames.
+
+    if ~ismember('Modality', ctInfo.Properties.VariableNames)
+        return;
+    end
+
+    regRows = strcmpi(ctInfo.Modality, 'REG');
+    if ~any(regRows)
+        fprintf('    No REG (image registration) files found.\n');
+        return;
+    end
+
+    regTable = ctInfo(regRows, :);
+    fprintf('    Found %d REG series\n', height(regTable));
+
+    nCopied  = 0;
+    nSkipped = 0;
+    regIdx   = 0;
+
+    for ri = 1:height(regTable)
+        fileCell = regTable.Filenames{ri};
+        if isempty(fileCell), continue; end
+        for k = 1:numel(fileCell)
+            srcFile = fileCell{k};
+            if isempty(srcFile) || ~isfile(srcFile), continue; end
+
+            regIdx   = regIdx + 1;
+            destFile = fullfile(destDir, sprintf('REG_%03d.dcm', regIdx));
+
+            if isfile(destFile)
+                nSkipped = nSkipped + 1;
+                continue;
+            end
+
+            try
+                copyfile(srcFile, destFile);
+                nCopied = nCopied + 1;
+            catch ME
+                warning('sortREGFiles:CopyError', ...
+                    'Failed to copy REG file %s: %s', srcFile, ME.message);
+            end
+        end
+    end
+
+    fprintf('    REG files: %d copied, %d already existed\n', nCopied, nSkipped);
 end
 
 
