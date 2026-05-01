@@ -23,7 +23,7 @@ function [adjusted_paths, num_corrections] = step05_fix_mlc_gaps(patient_id, ses
 %
 %   OUTPUTS:
 %       adjusted_paths   - Struct with fields:
-%                            .reference - Full path to corrected RP_reference_adjusted_mlc.dcm
+%                            .reference - Full path to corrected RTPLAN_reference_adjusted_mlc.dcm
 %                                         (empty string if processing failed or file missing)
 %                            .adapted   - Full path to corrected RP_adapted_adjusted_mlc.dcm
 %                                         (empty string if processing failed or file missing)
@@ -32,12 +32,12 @@ function [adjusted_paths, num_corrections] = step05_fix_mlc_gaps(patient_id, ses
 %                            .adapted   - Integer, MLC gap corrections in adapted plan
 %
 %   INPUT FILES (expected in sct_dir, produced by step0_sort_dicom):
-%       RP_reference.dcm   - Reference RTPLAN
-%       RP_adapted.dcm     - Adapted RTPLAN
+%       RTPLAN_reference.dcm   - Reference RTPLAN
+%       RTPLAN_adapted.dcm     - Adapted RTPLAN
 %
 %   OUTPUT FILES (written to same sct_dir):
-%       RP_reference_adjusted_mlc.dcm
-%       RP_adapted_adjusted_mlc.dcm
+%       RTPLAN_reference_adjusted_mlc.dcm
+%       RTPLAN_adapted_adjusted_mlc.dcm
 %
 %   ALGORITHM (applied identically to each plan):
 %   1. Locate RP_reference.dcm / RP_adapted.dcm in sct directory
@@ -184,8 +184,8 @@ for pt = 1:length(plan_types)
 
     %% ---- Resolve filenames for this plan type ----
 
-    input_filename    = sprintf('RP_%s.dcm', plan_type);
-    output_filename   = sprintf('RP_%s_adjusted_mlc.dcm', plan_type);
+    input_filename    = sprintf('RTPLAN_%s.dcm', plan_type);
+    output_filename   = sprintf('RTPLAN_%s_adjusted_mlc.dcm', plan_type);
     input_filepath    = fullfile(sct_dir, input_filename);
     output_filepath   = fullfile(sct_dir, output_filename);
 

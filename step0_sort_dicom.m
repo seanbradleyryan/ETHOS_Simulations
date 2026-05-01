@@ -20,12 +20,13 @@ function [sct_dir, sim_ct_dir] = step0_sort_dicom(patient_id, session, config)
 %   OUTPUTS:
 %       sct_dir     - String, path to directory containing sorted files:
 %                     - CT*.dcm files from SCT series
-%                     - RS_reference.dcm  (RTSTRUCT for reference plan)
-%                     - RS_adapted.dcm    (RTSTRUCT for adapted plan)
-%                     - RP_reference.dcm  (reference RTPLAN)
-%                     - RP_adapted.dcm    (adapted RTPLAN)
-%                     - RD_reference.dcm  (RTDOSE for reference plan)
-%                     - RD_adapted.dcm    (RTDOSE for adapted plan)
+%                     - RTSTRUCT_<CT>.dcm  (named by referenced CT:
+%                                           SCT, ICBCT, VCBCT, or sim;
+%                                           enumerated _2, _3 if multiple)
+%                     - RTPLAN_reference.dcm  (reference RTPLAN)
+%                     - RTPLAN_adapted.dcm    (adapted RTPLAN)
+%                     - RTDOSE_reference.dcm  (RTDOSE for reference plan)
+%                     - RTDOSE_adapted.dcm    (RTDOSE for adapted plan)
 %       sim_ct_dir  - String, path to sim_ct directory (original planning CT).
 %                     Returns '' if no simulation CT is found.
 %
@@ -36,15 +37,16 @@ function [sct_dir, sim_ct_dir] = step0_sort_dicom(patient_id, session, config)
 %      - Contains 'ADAPTED'     adapted plan
 %   3. For each classified plan:
 %      a. Trace ReferencedStructureSetSequence  find matching RTSTRUCT by SOPInstanceUID
-%      b. Confirm RTSTRUCT's referenced CT SeriesInstanceUID matches SCT
+%      b. Determine which CT the RTSTRUCT references; label accordingly
+%         (SCT, ICBCT, VCBCT, sim; enumerated with _2, _3 if multiple)
 %      c. Trace RTDOSE ReferencedRTPlanSequence  find RTDOSE referencing this plan
 %   4. Copy all files with standardized names into sct_dir
 %   5. Sort sim CT as usual
 %
 %   FILE NAMING CONVENTION:
-%       RP_reference.dcm   RP_adapted.dcm
-%       RS_reference.dcm   RS_adapted.dcm
-%       RD_reference.dcm   RD_adapted.dcm
+%       RTPLAN_reference.dcm   RTPLAN_adapted.dcm
+%       RTSTRUCT_<CT>.dcm      (CT label: SCT, ICBCT, VCBCT, sim)
+%       RTDOSE_reference.dcm   RTDOSE_adapted.dcm
 %
 %   EXAMPLE:
 %       config.working_dir = '/mnt/weka/home/80030361/ETHOS_Simulations';
@@ -163,7 +165,8 @@ end
 %% ======================== SORT RT FILES ========================
 
 fprintf('  Classifying RTPLAN files (REFERENCE / ADAPTED)...\n');
-sortRTFiles(ctInfo, rawwd, sct_dir, sctSeriesUID);
+cbctUIDs = extractCbctSeriesUIDs(ctInfo);
+sortRTFiles(ctInfo, rawwd, sct_dir, sctSeriesUID, cbctUIDs);
 
 %% ======================== SORT REG (IMAGE REGISTRATION) FILES ========================
 
@@ -200,12 +203,13 @@ sctFiles = dir(fullfile(sct_dir, '*.dcm'));
 fprintf('  Sorting complete. %d files in sct directory.\n', length(sctFiles));
 
 hasCT          = ~isempty(dir(fullfile(sct_dir, 'CT*.dcm')));
-hasRTSTRUCTref = isfile(fullfile(sct_dir, 'RS_reference.dcm'));
-hasRTSTRUCTadp = isfile(fullfile(sct_dir, 'RS_adapted.dcm'));
-hasRTPLANref   = isfile(fullfile(sct_dir, 'RP_reference.dcm'));
-hasRTPLANadp   = isfile(fullfile(sct_dir, 'RP_adapted.dcm'));
-hasRTDOSEref   = isfile(fullfile(sct_dir, 'RD_reference.dcm'));
-hasRTDOSEadp   = isfile(fullfile(sct_dir, 'RD_adapted.dcm'));
+rtstructFiles  = dir(fullfile(sct_dir, 'RTSTRUCT_*.dcm'));
+nRTSTRUCT      = numel(rtstructFiles);
+hasRTSTRUCT    = nRTSTRUCT > 0;
+hasRTPLANref   = isfile(fullfile(sct_dir, 'RTPLAN_reference.dcm'));
+hasRTPLANadp   = isfile(fullfile(sct_dir, 'RTPLAN_adapted.dcm'));
+hasRTDOSEref   = isfile(fullfile(sct_dir, 'RTDOSE_reference.dcm'));
+hasRTDOSEadp   = isfile(fullfile(sct_dir, 'RTDOSE_adapted.dcm'));
 hasREG         = ~isempty(dir(fullfile(sct_dir, 'REG_*.dcm')));
 nCBCTfiles     = length(dir(fullfile(sct_dir, 'CBCT*.dcm')));
 hasCBCT        = nCBCTfiles > 0;
@@ -214,32 +218,28 @@ if ~hasCT
     warning('step0_sort_dicom:MissingFile', 'No CT files found in sct directory');
 end
 if ~hasRTPLANref
-    warning('step0_sort_dicom:MissingFile', 'No RP_reference.dcm found in sct directory');
+    warning('step0_sort_dicom:MissingFile', 'No RTPLAN_reference.dcm found in sct directory');
 end
 if ~hasRTPLANadp
-    fprintf('  [INFO] RP_adapted.dcm not found (not required for RayStation import).\n');
+    fprintf('  [INFO] RTPLAN_adapted.dcm not found (not required for RayStation import).\n');
 end
-if ~hasRTSTRUCTref
-    warning('step0_sort_dicom:MissingFile', 'No RS_reference.dcm found in sct directory');
-end
-if ~hasRTSTRUCTadp
-    fprintf('  [INFO] RS_adapted.dcm not found (not required for RayStation import).\n');
+if ~hasRTSTRUCT
+    warning('step0_sort_dicom:MissingFile', 'No RTSTRUCT_*.dcm files found in sct directory');
 end
 if ~hasRTDOSEref
-    warning('step0_sort_dicom:MissingFile', 'No RD_reference.dcm found in sct directory');
+    warning('step0_sort_dicom:MissingFile', 'No RTDOSE_reference.dcm found in sct directory');
 end
 if ~hasRTDOSEadp
-    fprintf('  [INFO] RD_adapted.dcm not found (not required for RayStation import).\n');
+    fprintf('  [INFO] RTDOSE_adapted.dcm not found (not required for RayStation import).\n');
 end
 
 fprintf('\n  --- Sorted file summary ---\n');
 fprintf('    CT slices            : %s\n', tf2str(hasCT));
-fprintf('    RP_reference         : %s\n', tf2str(hasRTPLANref));
-fprintf('    RS_reference         : %s\n', tf2str(hasRTSTRUCTref));
-fprintf('    RD_reference         : %s\n', tf2str(hasRTDOSEref));
-fprintf('    RP_adapted (optional): %s\n', tf2str(hasRTPLANadp));
-fprintf('    RS_adapted (optional): %s\n', tf2str(hasRTSTRUCTadp));
-fprintf('    RD_adapted (optional): %s\n', tf2str(hasRTDOSEadp));
+fprintf('    RTPLAN_reference     : %s\n', tf2str(hasRTPLANref));
+fprintf('    RTSTRUCT_* files     : %s (%d found)\n', tf2str(hasRTSTRUCT), nRTSTRUCT);
+fprintf('    RTDOSE_reference     : %s\n', tf2str(hasRTDOSEref));
+fprintf('    RTPLAN_adapted(opt.) : %s\n', tf2str(hasRTPLANadp));
+fprintf('    RTDOSE_adapted(opt.) : %s\n', tf2str(hasRTDOSEadp));
 fprintf('    REG (image reg.)     : %s\n', tf2str(hasREG));
 fprintf('    CBCT files           : %s (%d files)\n', tf2str(hasCBCT), nCBCTfiles);
 fprintf('  ---------------------------\n');
@@ -327,17 +327,17 @@ function sctSeriesUID = sortSctFiles(ctInfo, sourceDir, destDir) %#ok<INUSL>
                 numSkipped = numSkipped + 1;
             else
                 try
-                    movefile(srcFile, destFile);
+                    copyfile(srcFile, destFile);
                     numMoved = numMoved + 1;
                 catch ME
-                    warning('sortSctFiles:MoveError', ...
-                        'Failed to move file %s: %s', name, ME.message);
+                    warning('sortSctFiles:CopyError', ...
+                        'Failed to copy file %s: %s', name, ME.message);
                 end
             end
         end
     end
 
-    fprintf('    SCT files: %d moved, %d already existed\n', numMoved, numSkipped);
+    fprintf('    SCT files: %d copied, %d already existed\n', numMoved, numSkipped);
 end
 
 
@@ -391,11 +391,11 @@ function sortREGFiles(ctInfo, sourceDir, destDir) %#ok<INUSL>
 end
 
 
-function sortRTFiles(ctInfo, sourceDir, destDir, sctSeriesUID) %#ok<INUSL>
+function sortRTFiles(ctInfo, sourceDir, destDir, sctSeriesUID, cbctUIDs) %#ok<INUSL>
 %SORTRTFILES Classify RTPLAN files as REFERENCE or ADAPTED, then trace and
 %            copy each plan's RTSTRUCT and RTDOSE.
 %
-%   sortRTFiles(ctInfo, sourceDir, destDir, sctSeriesUID)
+%   sortRTFiles(ctInfo, sourceDir, destDir, sctSeriesUID, cbctUIDs)
 %
 %   For each RTPLAN, the field
 %       metadata.ReferenceRTPlanSequence.Item_1.RTPlanRelationship
@@ -405,9 +405,11 @@ function sortRTFiles(ctInfo, sourceDir, destDir, sctSeriesUID) %#ok<INUSL>
 %
 %   For each classified plan the function:
 %     1. Traces the RTSTRUCT via ReferencedStructureSetSequence
-%     2. Confirms the RTSTRUCT's CT reference matches sctSeriesUID
+%     2. Determines which CT the RTSTRUCT references; labels the file
+%        RTSTRUCT_SCT.dcm, RTSTRUCT_ICBCT.dcm, RTSTRUCT_VCBCT.dcm, etc.
+%        (enumerated as _2, _3 when multiple RTSTRUCTs share the same CT)
 %     3. Traces the RTDOSE via its ReferencedRTPlanSequence
-%     4. Copies files with names  RP/RS/RD_reference.dcm  or  RP/RS/RD_adapted.dcm
+%     4. Copies files:  RTPLAN/RTDOSE_reference.dcm  or  ..._adapted.dcm
 
     % ---- collect all RTPLAN file paths --------------------------------
     if ~ismember('Modality', ctInfo.Properties.VariableNames)
@@ -482,25 +484,28 @@ function sortRTFiles(ctInfo, sourceDir, destDir, sctSeriesUID) %#ok<INUSL>
     planTypes  = {'reference',  'adapted'};
     planPaths  = {refPlanPath,  adpPlanPath};
 
+    % Track used RTSTRUCT CT labels across both plan types for enumeration
+    usedStructLabels = struct();
+
     for ti = 1:2
         label    = planTypes{ti};
         planPath = planPaths{ti};
 
         if isempty(planPath)
             warning('sortRTFiles:MissingPlan', ...
-                'No %s plan found; skipping RS/RP/RD for this type.', upper(label));
+                'No %s plan found; skipping RTSTRUCT/RTPLAN/RTDOSE for this type.', upper(label));
             continue;
         end
 
         fprintf('\n  --- Processing %s plan ---\n', upper(label));
 
         % Copy RTPLAN
-        destRP = fullfile(destDir, sprintf('RP_%s.dcm', label));
-        copyFileAs(planPath, destRP, sprintf('RP_%s', label));
+        destRP = fullfile(destDir, sprintf('RTPLAN_%s.dcm', label));
+        copyFileAs(planPath, destRP, sprintf('RTPLAN_%s', label));
 
         planMeta = dicominfo(planPath);
 
-        % ---- find RTSTRUCT ------------------------------------------
+        % ---- find and copy RTSTRUCT ---------------------------------
         structSOPUID = '';
         try
             refSSSeq = planMeta.ReferencedStructureSetSequence;
@@ -521,14 +526,14 @@ function sortRTFiles(ctInfo, sourceDir, destDir, sctSeriesUID) %#ok<INUSL>
                     'RTSTRUCT with SOPInstanceUID %s not found for %s plan.', ...
                     structSOPUID, upper(label));
             else
-                % Confirm RTSTRUCT references SCT
-                confirmStructReferencesSCT(structPath, sctSeriesUID, label);
-                destRS = fullfile(destDir, sprintf('RS_%s.dcm', label));
-                copyFileAs(structPath, destRS, sprintf('RS_%s', label));
+                [ctLabel, usedStructLabels] = labelRTSTRUCTByCT(...
+                    structPath, sctSeriesUID, cbctUIDs, usedStructLabels);
+                destRS = fullfile(destDir, sprintf('RTSTRUCT_%s.dcm', ctLabel));
+                copyFileAs(structPath, destRS, sprintf('RTSTRUCT_%s', ctLabel));
             end
         end
 
-        % ---- find RTDOSE --------------------------------------------
+        % ---- find and copy RTDOSE -----------------------------------
         planSOPUID = planMeta.SOPInstanceUID;
         dosePath   = findDoseForPlan(allDosePaths, planSOPUID);
 
@@ -537,8 +542,8 @@ function sortRTFiles(ctInfo, sourceDir, destDir, sctSeriesUID) %#ok<INUSL>
                 'No RTDOSE referencing %s plan (SOPInstanceUID %s).', ...
                 upper(label), planSOPUID);
         else
-            destRD = fullfile(destDir, sprintf('RD_%s.dcm', label));
-            copyFileAs(dosePath, destRD, sprintf('RD_%s', label));
+            destRD = fullfile(destDir, sprintf('RTDOSE_%s.dcm', label));
+            copyFileAs(dosePath, destRD, sprintf('RTDOSE_%s', label));
         end
     end
 end
@@ -630,18 +635,55 @@ function dosePath = findDoseForPlan(dosePaths, planSOPUID)
 end
 
 
-function confirmStructReferencesSCT(structPath, sctSeriesUID, label)
-%CONFIRMSTRUCTREFERENCESSCT Check RTSTRUCT's referenced CT series matches SCT.
 
-    if isempty(sctSeriesUID)
-        fprintf('    [WARN] SCT SeriesInstanceUID unknown; cannot confirm image match for %s plan.\n', upper(label));
-        return;
+function [ctLabel, usedLabels] = labelRTSTRUCTByCT(structPath, sctSeriesUID, cbctUIDs, usedLabels)
+%LABELRTSTRUCTBYCT Determine a CT-based label for an RTSTRUCT file.
+%
+%   [ctLabel, usedLabels] = labelRTSTRUCTByCT(structPath, sctSeriesUID, cbctUIDs, usedLabels)
+%
+%   Extracts the referenced CT SeriesInstanceUID from the RTSTRUCT and maps
+%   it to:  SCT, ICBCT (first CBCT by datetime), VCBCT (second CBCT), sim,
+%   or unknown.  When multiple RTSTRUCTs share a base label they are
+%   enumerated as <label>_2, <label>_3, etc.
+
+    referencedUID = extractReferencedCTUID(structPath);
+
+    if ~isempty(sctSeriesUID) && strcmp(referencedUID, sctSeriesUID)
+        baseLabel = 'SCT';
+        fprintf('    [OK]   RTSTRUCT references the SCT series.\n');
+    elseif numel(cbctUIDs) >= 1 && ~isempty(cbctUIDs{1}) && strcmp(referencedUID, cbctUIDs{1})
+        baseLabel = 'ICBCT';
+        fprintf('    [OK]   RTSTRUCT references the first CBCT series (ICBCT).\n');
+    elseif numel(cbctUIDs) >= 2 && ~isempty(cbctUIDs{2}) && strcmp(referencedUID, cbctUIDs{2})
+        baseLabel = 'VCBCT';
+        fprintf('    [OK]   RTSTRUCT references the second CBCT series (VCBCT).\n');
+    else
+        baseLabel = 'unknown';
+        if isempty(referencedUID)
+            fprintf('    [WARN] Could not extract referenced CT UID from RTSTRUCT.\n');
+        else
+            fprintf('    [WARN] RTSTRUCT references unrecognised CT series: %s\n', referencedUID);
+        end
     end
 
+    % Enumerate duplicate base labels (_2, _3, ...)
+    if ~isfield(usedLabels, baseLabel)
+        usedLabels.(baseLabel) = 1;
+        ctLabel = baseLabel;
+    else
+        count = usedLabels.(baseLabel) + 1;
+        usedLabels.(baseLabel) = count;
+        ctLabel = sprintf('%s_%d', baseLabel, count);
+    end
+end
+
+
+function referencedUID = extractReferencedCTUID(structPath)
+%EXTRACTREFERENCEDCTUID Extract the referenced CT SeriesInstanceUID from an RTSTRUCT.
+
+    referencedUID = '';
     try
         meta = dicominfo(structPath);
-        referencedUID = '';
-
         if isfield(meta, 'ReferencedFrameOfReferenceSequence')
             refFOR = meta.ReferencedFrameOfReferenceSequence;
             if isstruct(refFOR) && isfield(refFOR, 'Item_1')
@@ -661,79 +703,76 @@ function confirmStructReferencesSCT(structPath, sctSeriesUID, label)
                 end
             end
         end
-
-        if isempty(referencedUID)
-            fprintf('    [WARN] Could not extract referenced CT SeriesInstanceUID from RS_%s.\n', label);
-            return;
-        end
-
-        if strcmp(referencedUID, sctSeriesUID)
-            fprintf('    [OK]   RS_%s references the SCT series (UIDs match).\n', label);
-        else
-            warning('sortRTFiles:ImageSetMismatch', ...
-                'RS_%s references CT series\n      %s\n    but SCT is\n      %s\n     image sets do NOT match!', ...
-                label, referencedUID, sctSeriesUID);
-        end
-
     catch ME
-        warning('sortRTFiles:ConfirmError', ...
-            'Could not verify image set for RS_%s: %s', label, ME.message);
+        warning('extractReferencedCTUID:ReadError', ...
+            'Could not read CT reference from RTSTRUCT %s: %s', structPath, ME.message);
     end
 end
 
 
-function copyFileAs(srcPath, destPath, label)
-%COPYFILEAS Copy srcPath to destPath with logging.
-
-    if isempty(srcPath) || ~isfile(srcPath)
-        warning('copyFileAs:NotFound', 'Source not found for %s: %s', label, srcPath);
-        return;
-    end
-
-    if isfile(destPath)
-        fprintf('    %s already exists in destination (skipping)\n', label);
-        return;
-    end
-
-    try
-        copyfile(srcPath, destPath);
-        fprintf('    Copied %s  %s\n', label, destPath);
-    catch ME
-        warning('copyFileAs:CopyError', 'Failed to copy %s: %s', label, ME.message);
-    end
-end
-
-
-function sim_ct_dir = sortSimCtFiles(ctInfo, sourceDir, sim_ct_dir, sctSeriesUID) %#ok<INUSL>
-%SORTSIMCTFILES Find and move the most recent simulation CT to sim_ct folder.
+function cbctUIDs = extractCbctSeriesUIDs(ctInfo)
+%EXTRACTCBCTSERIESUIDS Extract SeriesInstanceUIDs for the two earliest CBCT series.
 %
-%   Three-tier selection priority:
-%     1. CT series with empty SeriesDate / SeriesTime (highest priority)
-%     2. CT series whose description contains 'sim'
-%     3. Oldest timestamp among remaining CT series
+%   cbctUIDs = extractCbctSeriesUIDs(ctInfo)
+%
+%   Returns a 1-2 element cell array: cbctUIDs{1} = first (ICBCT) UID,
+%   cbctUIDs{2} = second (VCBCT) UID, sorted by SeriesDate/SeriesTime.
+%   Returns {} if no CBCT series are found.
 
-    sim_ct_dir = '';
+    cbctUIDs = {};
 
     if ~ismember('Modality', ctInfo.Properties.VariableNames) || ...
        ~ismember('SeriesDescription', ctInfo.Properties.VariableNames)
-        warning('sortSimCtFiles:MissingColumns', ...
-            'Modality or SeriesDescription column not found in DICOM collection');
         return;
     end
 
-    isCT     = strcmpi(ctInfo.Modality, 'CT');
-    isSct    = strcmpi(ctInfo.SeriesDescription, 'sct');
-    eligible = isCT & ~isSct;
+    isCT      = strcmpi(ctInfo.Modality, 'CT');
+    descUpper = upper(string(ctInfo.SeriesDescription));
+    isCBCT    = contains(descUpper, 'CBCT');
+    matches   = isCT & isCBCT;
 
-    if ~any(eligible)
-        fprintf('    No non-SCT CT series found.\n');
-        return;
+    if ~any(matches), return; end
+
+    cbctTable = ctInfo(matches, :);
+    nFound    = height(cbctTable);
+
+    dtValues = NaN(nFound, 1);
+    for i = 1:nFound
+        fileCell = cbctTable.Filenames{i};
+        if isempty(fileCell) || isempty(fileCell{1}), continue; end
+        try
+            meta    = dicominfo(fileCell{1});
+            dateStr = '';
+            timeStr = '';
+            if isfield(meta, 'SeriesDate'), dateStr = strtrim(meta.SeriesDate); end
+            if isfield(meta, 'SeriesTime'), timeStr = strtrim(meta.SeriesTime); end
+            if ~isempty(dateStr) || ~isempty(timeStr)
+                dt = str2double([dateStr, timeStr]);
+                if ~isnan(dt) && dt > 0
+                    dtValues(i) = dt;
+                end
+            end
+        catch
+        end
     end
 
-    eligibleInfo = ctInfo(eligible, :);
-    fprintf('    Found %d non-SCT CT series\n', height(eligibleInfo));
+    [~, sortIdx] = sort(dtValues);
+    nKeep = min(2, nFound);
 
-    hasSim = contains(lower(eligibleInfo.SeriesDescription), 'sim');
+    for i = 1:nKeep
+        fileCell = cbctTable.Filenames{sortIdx(i)};
+        if isempty(fileCell) || isempty(fileCell{1}), continue; end
+        try
+            meta = dicominfo(fileCell{1});
+            if isfield(meta, 'SeriesInstanceUID')
+                cbctUIDs{end+1} = meta.SeriesInstanceUID; %#ok<AGROW>
+            end
+        catch
+            cbctUIDs{end+1} = ''; %#ok<AGROW>
+        end
+    end
+end
+
     if any(hasSim)
         candidateInfo = eligibleInfo(hasSim, :);
         fprintf('    Found %d series with ''sim'' in description\n', height(candidateInfo));
@@ -816,11 +855,11 @@ function sim_ct_dir = sortSimCtFiles(ctInfo, sourceDir, sim_ct_dir, sctSeriesUID
             numSkipped = numSkipped + 1;
         else
             try
-                movefile(srcFile, destFile);
+                copyfile(srcFile, destFile);
                 numMoved = numMoved + 1;
             catch ME
-                warning('sortSimCtFiles:MoveError', ...
-                    'Failed to move %s: %s', name, ME.message);
+                warning('sortSimCtFiles:CopyError', ...
+                    'Failed to copy %s: %s', name, ME.message);
             end
         end
     end

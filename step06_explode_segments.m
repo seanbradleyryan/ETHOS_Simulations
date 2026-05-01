@@ -83,14 +83,20 @@ fprintf('--- Copying supporting files to RayStation input directory ---\n');
 % sCT image slices
 copy_files_to_dir(sct_dir, 'CT*.dcm', output_dir, 'sCT images');
 
-% Reference RTSTRUCT only
-copy_files_to_dir(sct_dir, 'RS_reference.dcm', output_dir, 'RTSTRUCT (reference)');
+% RTSTRUCT files (all SCT-referenced structure sets)
+copy_files_to_dir(sct_dir, 'RTSTRUCT_SCT*.dcm', output_dir, 'RTSTRUCT (SCT)');
 
 % Image registration (REG) files
 copy_files_to_dir(sct_dir, 'REG_*.dcm', output_dir, 'Image registrations');
 
 % CBCT series (up to two, sorted by sort_CBCT)
 copy_files_to_dir(sct_dir, 'CBCT*.dcm', output_dir, 'CBCT series');
+
+% Reference dose
+copy_files_to_dir(sct_dir, 'RTDOSE_reference.dcm', output_dir, 'Reference dose');
+
+% Reference plan after MLC adjustment (before segment explosion)
+copy_files_to_dir(sct_dir, 'RTPLAN_reference_adjusted_mlc.dcm', output_dir, 'Reference plan (MLC adjusted)');
 
 fprintf('\n');
 
@@ -99,7 +105,7 @@ fprintf('\n');
 % -----------------------------------------------------------------------
 plan_types  = {'reference'};
 input_files = { ...
-    fullfile(sct_dir, 'RP_reference_adjusted_mlc.dcm')};
+    fullfile(sct_dir, 'RTPLAN_reference_adjusted_mlc.dcm')};
 
 output_paths.reference = {};
 
