@@ -773,6 +773,60 @@ function cbctUIDs = extractCbctSeriesUIDs(ctInfo)
     end
 end
 
+
+
+function copyFileAs(srcPath, destPath, label)
+%COPYFILEAS Copy srcPath to destPath with logging.
+
+    if isempty(srcPath) || ~isfile(srcPath)
+        warning('copyFileAs:NotFound', 'Source not found for %s: %s', label, srcPath);
+        return;
+    end
+
+    if isfile(destPath)
+        fprintf('    %s already exists in destination (skipping)\n', label);
+        return;
+    end
+
+    try
+        copyfile(srcPath, destPath);
+        fprintf('    Copied %s  %s\n', label, destPath);
+    catch ME
+        warning('copyFileAs:CopyError', 'Failed to copy %s: %s', label, ME.message);
+    end
+end
+
+
+function sim_ct_dir = sortSimCtFiles(ctInfo, sourceDir, sim_ct_dir, sctSeriesUID) %#ok<INUSL>
+%SORTSIMCTFILES Find and copy the simulation CT to sim_ct folder.
+%
+%   Three-tier selection priority:
+%     1. CT series with empty SeriesDate / SeriesTime (highest priority)
+%     2. CT series whose description contains 'sim'
+%     3. Oldest timestamp among remaining CT series
+
+    sim_ct_dir = '';
+
+    if ~ismember('Modality', ctInfo.Properties.VariableNames) || ...
+       ~ismember('SeriesDescription', ctInfo.Properties.VariableNames)
+        warning('sortSimCtFiles:MissingColumns', ...
+            'Modality or SeriesDescription column not found in DICOM collection');
+        return;
+    end
+
+    isCT     = strcmpi(ctInfo.Modality, 'CT');
+    isSct    = strcmpi(ctInfo.SeriesDescription, 'sct');
+    eligible = isCT & ~isSct;
+
+    if ~any(eligible)
+        fprintf('    No non-SCT CT series found.\n');
+        return;
+    end
+
+    eligibleInfo = ctInfo(eligible, :);
+    fprintf('    Found %d non-SCT CT series\n', height(eligibleInfo));
+
+    hasSim = contains(lower(eligibleInfo.SeriesDescription), 'sim');
     if any(hasSim)
         candidateInfo = eligibleInfo(hasSim, :);
         fprintf('    Found %d series with ''sim'' in description\n', height(candidateInfo));

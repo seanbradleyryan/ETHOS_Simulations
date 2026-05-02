@@ -23,12 +23,6 @@ You can:
 > - `CLAUDE-DICOM_CONTEXT.md` — DICOM reference chains, MLC correction, segment explosion (for DICOM steps)
 > - `CLAUDE-RayStation.md` — RayStation Scripting guidelines for step 1. 
 
-## MATLAB Editing Rules
-- Do NOT run Python scripts or bash commands to verify or analyze `.m` files
-- Do NOT attempt to lint or parse MATLAB using non-MATLAB tools
-- Make edits directly based on code reading; do not run verification scripts
-- If you cannot verify correctness without running MATLAB, state that explicitly instead
-
 ## Project Summary
 
 IRAI (Ionizing Radiation Acoustic Imaging) captures sound waves from radiation dose deposition using a 2D ultrasound array, then reconstructs 3D dose via time-reversal. This pipeline simulates a live IRAI system on real ETHOS CBCT patient data by detecting differences in signals between two dose distributions, and comparing that to their different truth distributions and phantom data. 
