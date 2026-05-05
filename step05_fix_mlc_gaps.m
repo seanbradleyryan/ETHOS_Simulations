@@ -50,9 +50,8 @@ function [adjusted_paths, num_corrections] = step05_fix_mlc_gaps(patient_id, ses
 %         - If gap < threshold: expand symmetrically
 %         - Handle boundary conditions (clamp to valid range)
 %   4. Generate new SOPInstanceUID
-%   5. Update RTPlanLabel with '_adj' suffix
-%   6. Set NumberOfFractionsPlanned = 1
-%   7. Write modified DICOM
+%   5. Set RTPlanLabel to 'Total Fraction'
+%   6. Write modified DICOM
 %
 %   EXAMPLE:
 %       config.working_dir = '/mnt/weka/home/80030361/ETHOS_Simulations';
@@ -367,43 +366,18 @@ for pt = 1:length(plan_types)
     rtplan.SOPInstanceUID              = dicomuid;
     rtplan.MediaStorageSOPInstanceUID  = rtplan.SOPInstanceUID;
 
-    % Set number of fractions to 1
-    if isfield(rtplan, 'FractionGroupSequence')
-        fg_fields = fieldnames(rtplan.FractionGroupSequence);
-        for fg_idx = 1:length(fg_fields)
-            fg_field = fg_fields{fg_idx};
-            if isfield(rtplan.FractionGroupSequence.(fg_field), 'NumberOfFractionsPlanned')
-                original_fractions = rtplan.FractionGroupSequence.(fg_field).NumberOfFractionsPlanned;
-                rtplan.FractionGroupSequence.(fg_field).NumberOfFractionsPlanned = 1;
-                fprintf('    NumberOfFractionsPlanned: %d -> 1 (FractionGroup %d)\n', ...
-                    original_fractions, fg_idx);
-            else
-                rtplan.FractionGroupSequence.(fg_field).NumberOfFractionsPlanned = 1;
-                fprintf('    NumberOfFractionsPlanned: (not set) -> 1 (FractionGroup %d)\n', fg_idx);
-            end
-        end
-    else
-        fprintf('    [WARN] No FractionGroupSequence found in RTPLAN\n');
-    end
-
-    % Update plan label to indicate modification
+    % Update plan label
     if isfield(rtplan, 'RTPlanLabel')
         original_label = rtplan.RTPlanLabel;
-        new_label = [original_label '_adj'];
-        if length(new_label) > 16
-            new_label = new_label(1:16);
-        end
-        rtplan.RTPlanLabel = new_label;
-        fprintf('    RTPlanLabel: %s -> %s\n', original_label, new_label);
-    else
-        rtplan.RTPlanLabel = 'adj_plan';
+        fprintf('    RTPlanLabel: %s -> Total Fraction\n', original_label);
     end
+    rtplan.RTPlanLabel = 'Total Fraction';
 
     % Update plan description
     if isfield(rtplan, 'RTPlanDescription')
-        rtplan.RTPlanDescription = [rtplan.RTPlanDescription ' - MLC gaps adjusted, 1 fraction'];
+        rtplan.RTPlanDescription = [rtplan.RTPlanDescription ' - MLC gaps adjusted'];
     else
-        rtplan.RTPlanDescription = 'MLC gaps adjusted, 1 fraction';
+        rtplan.RTPlanDescription = 'MLC gaps adjusted';
     end
 
     %% ---- Write modified DICOM ----
