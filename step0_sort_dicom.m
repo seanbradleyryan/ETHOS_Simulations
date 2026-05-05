@@ -183,6 +183,11 @@ catch ME
         'sort_CBCT failed: %s', ME.message);
 end
 
+%% ======================== SORT CBCT RTSTRUCT FILES ========================
+
+fprintf('  Sorting CBCT RTSTRUCT files...\n');
+sortCBCTStructFiles(ctInfo, sct_dir, cbctUIDs);
+
 %% ======================== SORT SIMULATION CT FILES ========================
 
 fprintf('  Searching for simulation CT series...\n');
@@ -202,17 +207,19 @@ sim_ct_dir = fullfile(rawwd, 'sim_ct');
 sctFiles = dir(fullfile(sct_dir, '*.dcm'));
 fprintf('  Sorting complete. %d files in sct directory.\n', length(sctFiles));
 
-hasCT          = ~isempty(dir(fullfile(sct_dir, 'CT*.dcm')));
-rtstructFiles  = dir(fullfile(sct_dir, 'RTSTRUCT_*.dcm'));
-nRTSTRUCT      = numel(rtstructFiles);
-hasRTSTRUCT    = nRTSTRUCT > 0;
-hasRTPLANref   = isfile(fullfile(sct_dir, 'RTPLAN_reference.dcm'));
-hasRTPLANadp   = isfile(fullfile(sct_dir, 'RTPLAN_adapted.dcm'));
-hasRTDOSEref   = isfile(fullfile(sct_dir, 'RTDOSE_reference.dcm'));
-hasRTDOSEadp   = isfile(fullfile(sct_dir, 'RTDOSE_adapted.dcm'));
-hasREG         = ~isempty(dir(fullfile(sct_dir, 'REG_*.dcm')));
-nCBCTfiles     = length(dir(fullfile(sct_dir, 'CBCT*.dcm')));
-hasCBCT        = nCBCTfiles > 0;
+hasCT              = ~isempty(dir(fullfile(sct_dir, 'CT*.dcm')));
+rtstructFiles      = dir(fullfile(sct_dir, 'RTSTRUCT_*.dcm'));
+nRTSTRUCT          = numel(rtstructFiles);
+hasRTSTRUCT        = nRTSTRUCT > 0;
+hasRTPLANref       = isfile(fullfile(sct_dir, 'RTPLAN_reference.dcm'));
+hasRTPLANadp       = isfile(fullfile(sct_dir, 'RTPLAN_adapted.dcm'));
+hasRTDOSEref       = isfile(fullfile(sct_dir, 'RTDOSE_reference.dcm'));
+hasRTDOSEadp       = isfile(fullfile(sct_dir, 'RTDOSE_adapted.dcm'));
+hasREG             = ~isempty(dir(fullfile(sct_dir, 'REG_*.dcm')));
+nCBCTfiles         = length(dir(fullfile(sct_dir, 'CBCT*.dcm')));
+hasCBCT            = nCBCTfiles > 0;
+hasRTSTRUCT_ICBCT  = isfile(fullfile(sct_dir, 'RTSTRUCT_ICBCT.dcm'));
+hasRTSTRUCT_VCBCT  = isfile(fullfile(sct_dir, 'RTSTRUCT_VCBCT.dcm'));
 
 if ~hasCT
     warning('step0_sort_dicom:MissingFile', 'No CT files found in sct directory');
@@ -232,6 +239,12 @@ end
 if ~hasRTDOSEadp
     fprintf('  [INFO] RTDOSE_adapted.dcm not found (not required for RayStation import).\n');
 end
+if hasCBCT && ~hasRTSTRUCT_ICBCT
+    fprintf('  [INFO] RTSTRUCT_ICBCT.dcm not found (no RTSTRUCT may reference the first CBCT).\n');
+end
+if hasCBCT && ~hasRTSTRUCT_VCBCT
+    fprintf('  [INFO] RTSTRUCT_VCBCT.dcm not found (no RTSTRUCT may reference the second CBCT).\n');
+end
 
 fprintf('\n  --- Sorted file summary ---\n');
 fprintf('    CT slices            : %s\n', tf2str(hasCT));
@@ -242,6 +255,8 @@ fprintf('    RTPLAN_adapted(opt.) : %s\n', tf2str(hasRTPLANadp));
 fprintf('    RTDOSE_adapted(opt.) : %s\n', tf2str(hasRTDOSEadp));
 fprintf('    REG (image reg.)     : %s\n', tf2str(hasREG));
 fprintf('    CBCT files           : %s (%d files)\n', tf2str(hasCBCT), nCBCTfiles);
+fprintf('    RTSTRUCT_ICBCT       : %s\n', tf2str(hasRTSTRUCT_ICBCT));
+fprintf('    RTSTRUCT_VCBCT       : %s\n', tf2str(hasRTSTRUCT_VCBCT));
 fprintf('  ---------------------------\n');
 
 if ~isempty(sim_ct_dir)
@@ -773,6 +788,59 @@ function cbctUIDs = extractCbctSeriesUIDs(ctInfo)
     end
 end
 
+
+
+function sortCBCTStructFiles(ctInfo, sct_dir, cbctUIDs)
+%SORTCBCTSTRUCTFILES Find RTSTRUCT files referencing CBCT series and copy to sct_dir.
+%
+%   Scans every RTSTRUCT in the DICOM collection, extracts its referenced
+%   CT SeriesInstanceUID via the standard DICOM chain, and copies files that
+%   match a known CBCT series UID into sct_dir as:
+%       RTSTRUCT_ICBCT.dcm  - references the first CBCT (earliest by datetime)
+%       RTSTRUCT_VCBCT.dcm  - references the second CBCT
+%
+%   Files already present in sct_dir are skipped.
+
+    if isempty(cbctUIDs)
+        fprintf('    No CBCT series UIDs available; skipping CBCT RTSTRUCT search.\n');
+        return;
+    end
+
+    allStructPaths = collectModalityPaths(ctInfo, 'RTSTRUCT');
+    if isempty(allStructPaths)
+        fprintf('    No RTSTRUCT files found in collection.\n');
+        return;
+    end
+
+    fprintf('    Scanning %d RTSTRUCT file(s) for CBCT references...\n', numel(allStructPaths));
+
+    cbctLabels = {'ICBCT', 'VCBCT'};
+    nMatched   = 0;
+
+    for fi = 1:numel(allStructPaths)
+        structPath    = allStructPaths{fi};
+        referencedUID = extractReferencedCTUID(structPath);
+
+        if isempty(referencedUID)
+            continue;
+        end
+
+        for ci = 1:min(2, numel(cbctUIDs))
+            if ~isempty(cbctUIDs{ci}) && strcmp(referencedUID, cbctUIDs{ci})
+                label    = cbctLabels{ci};
+                destFile = fullfile(sct_dir, sprintf('RTSTRUCT_%s.dcm', label));
+                copyFileAs(structPath, destFile, sprintf('RTSTRUCT_%s', label));
+                fprintf('    [OK]   Matched RTSTRUCT to %s series.\n', label);
+                nMatched = nMatched + 1;
+                break;
+            end
+        end
+    end
+
+    if nMatched == 0
+        fprintf('    [INFO] No RTSTRUCT files matched any CBCT series.\n');
+    end
+end
 
 
 function copyFileAs(srcPath, destPath, label)
