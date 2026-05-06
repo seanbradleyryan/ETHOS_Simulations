@@ -1,10 +1,10 @@
 function diagnostic_fix_registration_v2(inputFilePath)
 % PURPOSE:
-%   Diagnose and fix a DICOM Deformable Registration file where Item 2 of
+%   Diagnose and fix a DICOM Deformable Registration file where Item 1 of
 %   DeformableRegistrationSequence has an empty RegistrationTypeCodeSequence.
 %   RayStation requires every item in the sequence to have a fully populated
 %   RegistrationTypeCodeSequence (CodeValue, CodingSchemeDesignator, CodeMeaning).
-%   This script deep-copies the populated code sequence from Item 1 into Item 2.
+%   This script deep-copies the populated code sequence from Item 2 into Item 1.
 %
 % INPUTS:
 %   inputFilePath (optional, char) - Full path to the .dcm file to fix.
@@ -21,9 +21,9 @@ function diagnostic_fix_registration_v2(inputFilePath)
 %   2. Read DICOM metadata via dicominfo
 %   3. Check Modality / SOPClassUID confirms a Deformable Registration object
 %   4. Verify DeformableRegistrationSequence exists with >= 2 items
-%   5. Validate Item 1 RegistrationTypeCodeSequence is fully populated
-%   6. Inspect Item 2 RegistrationTypeCodeSequence for empty / missing items
-%   7. If defective: deep-copy the code item from Item 1 into Item 2
+%   5. Validate Item 2 RegistrationTypeCodeSequence is fully populated (copy source)
+%   6. Inspect Item 1 RegistrationTypeCodeSequence for empty / missing items (copy target)
+%   7. If defective: deep-copy the code item from Item 2 into Item 1
 %   8. Write corrected file with '_fixed' suffix using dicomwrite CreateMode copy
 %   9. Print a clear before/after summary
 %
@@ -131,42 +131,42 @@ function diagnostic_fix_registration_v2(inputFilePath)
     fprintf('  [OK] At least 2 items found.\n\n');
 
     % ------------------------------------------------------------------ %
-    %  5. Validate Item 1 RegistrationTypeCodeSequence                    %
+    %  5. Validate Item 2 RegistrationTypeCodeSequence (copy source)      %
     % ------------------------------------------------------------------ %
-    fprintf('[STEP 4] Validating Item 1 RegistrationTypeCodeSequence (copy source)...\n');
-
-    item1 = drs.Item_1;
-    [item1Valid, codeFromItem1, item1Msg] = inspectCodeSequence(item1, 'Item 1');
-
-    if ~item1Valid
-        fprintf('  [FAIL] %s\n', item1Msg);
-        error('diagnostic_fix_registration_v2:Item1Invalid', ...
-              ['Item 1 RegistrationTypeCodeSequence is missing or empty.\n' ...
-               'Cannot copy from Item 1. Manual inspection is required.\n' ...
-               'Details: %s'], item1Msg);
-    end
-
-    fprintf('  CodeValue:              "%s"\n', getFieldSafe(codeFromItem1, 'CodeValue',              ''));
-    fprintf('  CodingSchemeDesignator: "%s"\n', getFieldSafe(codeFromItem1, 'CodingSchemeDesignator', ''));
-    fprintf('  CodeMeaning:            "%s"\n', getFieldSafe(codeFromItem1, 'CodeMeaning',            ''));
-    fprintf('  [OK] Item 1 is fully populated and will serve as the copy source.\n\n');
-
-    % ------------------------------------------------------------------ %
-    %  6. Inspect Item 2 RegistrationTypeCodeSequence                     %
-    % ------------------------------------------------------------------ %
-    fprintf('[STEP 5] Inspecting Item 2 RegistrationTypeCodeSequence...\n');
+    fprintf('[STEP 4] Validating Item 2 RegistrationTypeCodeSequence (copy source)...\n');
 
     item2 = drs.Item_2;
-    [item2Valid, ~, item2Msg] = inspectCodeSequence(item2, 'Item 2');
+    [item2Valid, codeFromItem2, item2Msg] = inspectCodeSequence(item2, 'Item 2');
 
-    needsFix = ~item2Valid;
+    if ~item2Valid
+        fprintf('  [FAIL] %s\n', item2Msg);
+        error('diagnostic_fix_registration_v2:Item2Invalid', ...
+              ['Item 2 RegistrationTypeCodeSequence is missing or empty.\n' ...
+               'Cannot copy from Item 2. Manual inspection is required.\n' ...
+               'Details: %s'], item2Msg);
+    end
+
+    fprintf('  CodeValue:              "%s"\n', getFieldSafe(codeFromItem2, 'CodeValue',              ''));
+    fprintf('  CodingSchemeDesignator: "%s"\n', getFieldSafe(codeFromItem2, 'CodingSchemeDesignator', ''));
+    fprintf('  CodeMeaning:            "%s"\n', getFieldSafe(codeFromItem2, 'CodeMeaning',            ''));
+    fprintf('  [OK] Item 2 is fully populated and will serve as the copy source.\n\n');
+
+    % ------------------------------------------------------------------ %
+    %  6. Inspect Item 1 RegistrationTypeCodeSequence (copy target)       %
+    % ------------------------------------------------------------------ %
+    fprintf('[STEP 5] Inspecting Item 1 RegistrationTypeCodeSequence (copy target)...\n');
+
+    item1 = drs.Item_1;
+    [item1Valid, ~, item1Msg] = inspectCodeSequence(item1, 'Item 1');
+
+    needsFix = ~item1Valid;
 
     if needsFix
-        fprintf('  [ISSUE] %s\n', item2Msg);
+        fprintf('  [ISSUE] %s\n', item1Msg);
         fprintf('  --> This is the root cause of the RayStation import failure:\n');
         fprintf('      "Registration Type Code Sequence must contain exactly one item"\n\n');
     else
-        fprintf('  [OK] Item 2 RegistrationTypeCodeSequence is already populated.\n');
+        fprintf('  [OK] Item 1 RegistrationTypeCodeSequence is already populated.\n');
         fprintf('  No structural fix is required. File will be re-saved as-is.\n\n');
     end
 
@@ -174,16 +174,16 @@ function diagnostic_fix_registration_v2(inputFilePath)
     %  7. Apply fix in memory                                              %
     % ------------------------------------------------------------------ %
     if needsFix
-        fprintf('[STEP 6] Applying fix: copying RegistrationTypeCodeSequence from Item 1 to Item 2...\n');
+        fprintf('[STEP 6] Applying fix: copying RegistrationTypeCodeSequence from Item 2 to Item 1...\n');
 
-        % Build a fresh sequence struct with one item — a deep copy of Item 1's code
-        copiedSeq.Item_1 = codeFromItem1;
-        info.DeformableRegistrationSequence.Item_2.RegistrationTypeCodeSequence = copiedSeq;
+        % Build a fresh sequence struct with one item — a deep copy of Item 2's code
+        copiedSeq.Item_1 = codeFromItem2;
+        info.DeformableRegistrationSequence.Item_1.RegistrationTypeCodeSequence = copiedSeq;
 
-        fprintf('  Injected into Item 2:\n');
-        fprintf('    CodeValue:              "%s"\n', getFieldSafe(codeFromItem1, 'CodeValue',              ''));
-        fprintf('    CodingSchemeDesignator: "%s"\n', getFieldSafe(codeFromItem1, 'CodingSchemeDesignator', ''));
-        fprintf('    CodeMeaning:            "%s"\n', getFieldSafe(codeFromItem1, 'CodeMeaning',            ''));
+        fprintf('  Injected into Item 1:\n');
+        fprintf('    CodeValue:              "%s"\n', getFieldSafe(codeFromItem2, 'CodeValue',              ''));
+        fprintf('    CodingSchemeDesignator: "%s"\n', getFieldSafe(codeFromItem2, 'CodingSchemeDesignator', ''));
+        fprintf('    CodeMeaning:            "%s"\n', getFieldSafe(codeFromItem2, 'CodeMeaning',            ''));
         fprintf('  [OK] Fix applied in memory.\n\n');
     end
 
@@ -216,13 +216,13 @@ function diagnostic_fix_registration_v2(inputFilePath)
     fprintf('\n');
     if needsFix
         fprintf('  STATUS: FIX APPLIED\n');
-        fprintf('  Problem: Item 2 RegistrationTypeCodeSequence was empty / absent.\n');
-        fprintf('  Action:  Copied RegistrationTypeCodeSequence.Item_1 from Item 1 to Item 2.\n');
+        fprintf('  Problem: Item 1 RegistrationTypeCodeSequence was empty / absent.\n');
+        fprintf('  Action:  Copied RegistrationTypeCodeSequence.Item_1 from Item 2 to Item 1.\n');
         fprintf('\n');
         fprintf('  Copied values:\n');
-        fprintf('    CodeValue              = "%s"\n', getFieldSafe(codeFromItem1, 'CodeValue',              ''));
-        fprintf('    CodingSchemeDesignator = "%s"\n', getFieldSafe(codeFromItem1, 'CodingSchemeDesignator', ''));
-        fprintf('    CodeMeaning            = "%s"\n', getFieldSafe(codeFromItem1, 'CodeMeaning',            ''));
+        fprintf('    CodeValue              = "%s"\n', getFieldSafe(codeFromItem2, 'CodeValue',              ''));
+        fprintf('    CodingSchemeDesignator = "%s"\n', getFieldSafe(codeFromItem2, 'CodingSchemeDesignator', ''));
+        fprintf('    CodeMeaning            = "%s"\n', getFieldSafe(codeFromItem2, 'CodeMeaning',            ''));
     else
         fprintf('  STATUS: NO FIX REQUIRED\n');
         fprintf('  Both items already have valid RegistrationTypeCodeSequences.\n');
