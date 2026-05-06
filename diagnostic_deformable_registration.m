@@ -31,9 +31,12 @@ SOP_SPATIAL    = '1.2.840.10008.5.1.4.1.1.66.1';
 % ------------------------------------------------------------------ %
 %  CONFIG — diagnostic options                                         %
 % ------------------------------------------------------------------ %
-CONFIG.remove_duplicates = true;   % If true, remove items from
-    % DeformableRegistrationSequence that lack
-    % PreDeformationMatrixRegistrationSequence before inspection.
+CONFIG.remove_duplicates    = false;  % Remove DeformableRegistrationSequence items
+    % that lack PreDeformationMatrixRegistrationSequence before inspection.
+
+CONFIG.compare_registrations = true;  % Compare found deformable REG file(s) against
+    % RayStationTestRegistration.dcm in the path below.
+CONFIG.compare_ref_path = 'C:/Users/seanr/ETHOS_Simulations/Raystation_Input/1194203/Session_1/RayStationTestRegistration.dcm';
 
 if ~isfolder(search_root)
     error('diagnostic_deformable_registration:NotFound', ...
@@ -209,10 +212,163 @@ else
 end
 fprintf('%s\n\n', repmat('=', 1, 70));
 
+% ------------------------------------------------------------------ %
+%  STEP 5: COMPARE AGAINST RAYSTATION TEST REGISTRATION               %
+% ------------------------------------------------------------------ %
+if CONFIG.compare_registrations
+    fprintf('%s\n', repmat('=', 1, 70));
+    fprintf('  REGISTRATION COMPARISON\n');
+    fprintf('%s\n', repmat('=', 1, 70));
+    fprintf('  Reference file: %s\n\n', CONFIG.compare_ref_path);
+
+    if ~isfile(CONFIG.compare_ref_path)
+        fprintf('  [ERROR] Reference file not found: %s\n\n', CONFIG.compare_ref_path);
+    else
+        try
+            refInfo = dicominfo(CONFIG.compare_ref_path);
+        catch ME
+            fprintf('  [ERROR] Could not read reference file: %s\n\n', ME.message);
+            refInfo = [];
+        end
+
+        if ~isempty(refInfo)
+            for f = 1:numel(regFiles)
+                fprintf('%s\n', repmat('-', 1, 70));
+                fprintf('  Comparing FILE %d: %s\n', f, regFiles(f).path);
+                fprintf('%s\n\n', repmat('-', 1, 70));
+                compare_dicom_files(regFiles(f).info, refInfo);
+            end
+        end
+    end
+    fprintf('%s\n\n', repmat('=', 1, 70));
+end
+
 
 % ======================================================================= %
 %  LOCAL FUNCTIONS                                                         %
 % ======================================================================= %
+
+function compare_dicom_files(infoA, infoB)
+    % compare_dicom_files  Recursively compare two dicominfo structs and report
+    %   fields that are only in one, or present in both with different values.
+    %   infoA = source (found) file; infoB = reference (RayStation test) file.
+    fprintf('  Legend:  [A only]  field present only in source\n');
+    fprintf('           [B only]  field present only in reference\n');
+    fprintf('           [DIFF]    field present in both, values differ\n');
+    fprintf('           [MATCH]   field present in both, values identical\n\n');
+
+    nDiff   = 0;
+    nAonly  = 0;
+    nBonly  = 0;
+    nMatch  = 0;
+    compare_structs(infoA, infoB, '', nDiff, nAonly, nBonly, nMatch);
+end
+
+
+function compare_structs(A, B, prefix, ~, ~, ~, ~)
+    % compare_structs  Recurse into two structs and print differences.
+    %   Uses fprintf directly; counters are informational totals printed here.
+    fieldsA = fieldnames(A);
+    fieldsB = fieldnames(B);
+    allFields = union(fieldsA, fieldsB);
+
+    nDiff  = 0;
+    nAonly = 0;
+    nBonly = 0;
+    nMatch = 0;
+
+    for k = 1:numel(allFields)
+        fname  = allFields{k};
+        fqName = [prefix fname];
+        inA    = isfield(A, fname);
+        inB    = isfield(B, fname);
+
+        if inA && ~inB
+            nAonly = nAonly + 1;
+            fprintf('  [A only]  %s\n', fqName);
+
+        elseif ~inA && inB
+            nBonly = nBonly + 1;
+            fprintf('  [B only]  %s\n', fqName);
+
+        else
+            valA = A.(fname);
+            valB = B.(fname);
+
+            if isstruct(valA) && isstruct(valB)
+                % Recurse one level, labelling sub-fields with dot notation
+                compare_structs(valA, valB, [fqName '.'], 0, 0, 0, 0);
+
+            elseif isstruct(valA) || isstruct(valB)
+                % Type mismatch
+                nDiff = nDiff + 1;
+                fprintf('  [DIFF]    %s  (type mismatch: struct vs non-struct)\n', fqName);
+
+            elseif isnumeric(valA) && isnumeric(valB)
+                if isequal(size(valA), size(valB)) && all(abs(valA(:) - valB(:)) < 1e-9)
+                    nMatch = nMatch + 1;
+                    % Uncomment the line below to show matching numeric fields:
+                    % fprintf('  [MATCH]   %s\n', fqName);
+                else
+                    nDiff = nDiff + 1;
+                    szA = sprintf('%dx', size(valA)); szA(end) = [];
+                    szB = sprintf('%dx', size(valB)); szB(end) = [];
+                    if isscalar(valA) && isscalar(valB)
+                        fprintf('  [DIFF]    %-55s  A=%g  B=%g\n', fqName, valA, valB);
+                    elseif isequal(size(valA), size(valB))
+                        maxDiff = max(abs(valA(:) - valB(:)));
+                        fprintf('  [DIFF]    %-55s  [%s]  max|A-B|=%g\n', fqName, szA, maxDiff);
+                    else
+                        fprintf('  [DIFF]    %-55s  size A=[%s]  size B=[%s]\n', fqName, szA, szB);
+                    end
+                end
+
+            elseif ischar(valA) && ischar(valB)
+                if strcmp(valA, valB)
+                    nMatch = nMatch + 1;
+                    % Uncomment to show matching char fields:
+                    % fprintf('  [MATCH]   %s = "%s"\n', fqName, valA);
+                else
+                    nDiff = nDiff + 1;
+                    fprintf('  [DIFF]    %-55s  A="%s"  B="%s"\n', fqName, valA, valB);
+                end
+
+            elseif iscell(valA) && iscell(valB)
+                strA = strjoin(cellfun(@num2str, valA(:)', 'UniformOutput', false), ',');
+                strB = strjoin(cellfun(@num2str, valB(:)', 'UniformOutput', false), ',');
+                if strcmp(strA, strB)
+                    nMatch = nMatch + 1;
+                else
+                    nDiff = nDiff + 1;
+                    fprintf('  [DIFF]    %-55s  A={%s}  B={%s}\n', fqName, strA, strB);
+                end
+
+            else
+                % Fallback: convert to string and compare
+                try
+                    strA = num2str(valA);
+                    strB = num2str(valB);
+                    if strcmp(strA, strB)
+                        nMatch = nMatch + 1;
+                    else
+                        nDiff = nDiff + 1;
+                        fprintf('  [DIFF]    %-55s  A=%s  B=%s\n', fqName, strA, strB);
+                    end
+                catch
+                    nDiff = nDiff + 1;
+                    fprintf('  [DIFF]    %-55s  (could not compare type: %s)\n', fqName, class(valA));
+                end
+            end
+        end
+    end
+
+    % Print totals only at the top level (no prefix)
+    if isempty(prefix)
+        fprintf('\n  Comparison complete: %d differ, %d A-only, %d B-only, %d match.\n\n', ...
+            nDiff, nAonly, nBonly, nMatch);
+    end
+end
+
 
 function summarize_dicom_contents(info)
     % summarize_dicom_contents  Print a concise one-line-per-field summary of
