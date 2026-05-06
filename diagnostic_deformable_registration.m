@@ -23,7 +23,7 @@
 % ------------------------------------------------------------------ %
 %  CONFIGURATION — edit search_root before running                    %
 % ------------------------------------------------------------------ %
-search_root = 'C:/Users/seanr/ETHOS_Simulations/EthosExports';
+search_root = 'C:/Users/seanr/ETHOS_Simulations/Raystation_Input/1194203/Session_5';
 
 SOP_DEFORMABLE = '1.2.840.10008.5.1.4.1.1.66.3';
 SOP_SPATIAL    = '1.2.840.10008.5.1.4.1.1.66.1';
