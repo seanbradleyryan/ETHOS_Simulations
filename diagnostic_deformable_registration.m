@@ -28,6 +28,13 @@ search_root = 'C:/Users/seanr/ETHOS_Simulations/EthosExports';
 SOP_DEFORMABLE = '1.2.840.10008.5.1.4.1.1.66.3';
 SOP_SPATIAL    = '1.2.840.10008.5.1.4.1.1.66.1';
 
+% ------------------------------------------------------------------ %
+%  CONFIG — diagnostic options                                         %
+% ------------------------------------------------------------------ %
+CONFIG.remove_duplicates = true;   % If true, remove items from
+    % DeformableRegistrationSequence that lack
+    % PreDeformationMatrixRegistrationSequence before inspection.
+
 if ~isfolder(search_root)
     error('diagnostic_deformable_registration:NotFound', ...
           'Directory not found: %s', search_root);
@@ -50,7 +57,8 @@ fprintf('  Found %d files total.\n\n', numel(allFiles));
 % ------------------------------------------------------------------ %
 %  STEP 2: FILTER TO REGISTRATION DICOM FILES                         %
 % ------------------------------------------------------------------ %
-fprintf('[STEP 2] Filtering to REG / registration DICOM files...\n');
+fprintf('[STEP 2] Filtering to DEFORMABLE registration DICOM files...\n');
+fprintf('  (Files without DeformableRegistrationSequence are skipped.)\n');
 
 regFiles     = struct('path', {}, 'info', {}, 'sop_class', {});
 skippedCount = 0;
@@ -72,29 +80,24 @@ for k = 1:numel(allFiles)
         continue;
     end
 
+    % Only keep files that contain DeformableRegistrationSequence
+    if ~isfield(info, 'DeformableRegistrationSequence')
+        skippedCount = skippedCount + 1;
+        continue;
+    end
+
     sopClass = '';
     if isfield(info, 'SOPClassUID')
         sopClass = info.SOPClassUID;
     end
 
-    modality = '';
-    if isfield(info, 'Modality')
-        modality = info.Modality;
-    end
-
-    isRegFile = strcmpi(modality, 'REG') || ...
-                strcmp(sopClass, SOP_DEFORMABLE) || ...
-                strcmp(sopClass, SOP_SPATIAL);
-
-    if isRegFile
-        regFiles(end+1).path      = fpath;      %#ok<SAGROW>
-        regFiles(end).info        = info;
-        regFiles(end).sop_class   = sopClass;
-    end
+    regFiles(end+1).path      = fpath;      %#ok<SAGROW>
+    regFiles(end).info        = info;
+    regFiles(end).sop_class   = sopClass;
 end
 
-fprintf('  Skipped %d non-DICOM / unreadable files.\n', skippedCount);
-fprintf('  Found %d REG/registration DICOM file(s).\n\n', numel(regFiles));
+fprintf('  Skipped %d non-DICOM / non-deformable / unreadable files.\n', skippedCount);
+fprintf('  Found %d deformable registration DICOM file(s).\n\n', numel(regFiles));
 
 if isempty(regFiles)
     fprintf('[WARNING] No deformable or spatial registration DICOM files found.\n');
@@ -103,8 +106,7 @@ if isempty(regFiles)
     return;
 end
 
-diag_regFiles = regFiles;
-fprintf('  -> Variable ''diag_regFiles'' saved to workspace (%d entries).\n\n', numel(regFiles));
+% diag_regFiles is assigned after STEP 3 so it reflects any duplicate removal.
 
 % ------------------------------------------------------------------ %
 %  STEP 3: PER-FILE HEADER REPORT & DIAGNOSTICS                       %
@@ -121,7 +123,11 @@ for f = 1:numel(regFiles)
     fprintf('FILE %d/%d: %s\n', f, numel(regFiles), fpath);
     fprintf('%s\n', repmat('-', 1, 70));
 
-    % 3a. Header metadata
+    % 3a. DICOM content summary
+    fprintf('\n  [DICOM CONTENT SUMMARY]\n');
+    summarize_dicom_contents(info);
+
+    % 3b. Header metadata
     fprintf('\n  [HEADER METADATA]\n');
     print_field(info, 'SOPClassUID',           '  SOP Class UID      ');
     print_field(info, 'SOPInstanceUID',         '  SOP Instance UID   ');
@@ -146,28 +152,39 @@ for f = 1:numel(regFiles)
         fprintf('Other/Unknown: %s\n', sopUID);
     end
 
-    % 3b. DeformableRegistrationSequence inspection
-    if strcmp(sopUID, SOP_DEFORMABLE)
-        fprintf('\n  [DEFORMABLE REGISTRATION SEQUENCE INSPECTION]\n');
-        [nErr, nWarn] = inspect_deformable_sequence(info);
-        totalErrors   = totalErrors   + nErr;
-        totalWarnings = totalWarnings + nWarn;
+    % 3c. Remove duplicate items (items without PreDeformationMatrix) if configured
+    if CONFIG.remove_duplicates
+        [info, nRemoved] = remove_non_predeform_items(info);
+        if nRemoved > 0
+            fprintf('\n  [REMOVE_DUPLICATES] Removed %d item(s) lacking PreDeformationMatrixRegistrationSequence.\n', nRemoved);
+            regFiles(f).info = info;
+        end
+
+        % Save modified DICOM to same directory as source file
+        outPath = fullfile(fileparts(fpath), 'Registration_Deformable_RSimport.dcm');
+        try
+            dicomwrite([], outPath, info, 'CreateMode', 'copy');
+            fprintf('  [SAVED] %s\n', outPath);
+        catch ME
+            fprintf('  [ERROR] Could not save modified DICOM: %s\n', ME.message);
+        end
     end
 
-    % 3c. Spatial (rigid) RegistrationSequence inspection
-    if strcmp(sopUID, SOP_SPATIAL)
-        fprintf('\n  [SPATIAL REGISTRATION SEQUENCE INSPECTION]\n');
-        [nErr, nWarn] = inspect_spatial_sequence(info);
-        totalErrors   = totalErrors   + nErr;
-        totalWarnings = totalWarnings + nWarn;
-    end
+    % 3d. DeformableRegistrationSequence inspection
+    fprintf('\n  [DEFORMABLE REGISTRATION SEQUENCE INSPECTION]\n');
+    [nErr, nWarn] = inspect_deformable_sequence(info);
+    totalErrors   = totalErrors   + nErr;
+    totalWarnings = totalWarnings + nWarn;
 
-    % 3d. Referenced image series
+    % 3e. Referenced image series
     fprintf('\n  [REFERENCED IMAGE SERIES]\n');
     inspect_referenced_series(info);
 
     fprintf('\n');
 end
+
+diag_regFiles = regFiles;
+fprintf('  -> Variable ''diag_regFiles'' saved to workspace (%d entries).\n\n', numel(regFiles));
 
 % ------------------------------------------------------------------ %
 %  STEP 4: SUMMARY                                                     %
@@ -196,6 +213,84 @@ fprintf('%s\n\n', repmat('=', 1, 70));
 % ======================================================================= %
 %  LOCAL FUNCTIONS                                                         %
 % ======================================================================= %
+
+function summarize_dicom_contents(info)
+    % summarize_dicom_contents  Print a concise one-line-per-field summary of
+    %   all top-level fields in a dicominfo struct.
+    fields = fieldnames(info);
+    fprintf('  %d top-level fields:\n', numel(fields));
+    for k = 1:numel(fields)
+        fname = fields{k};
+        val   = info.(fname);
+        if isstruct(val)
+            subFields = fieldnames(val);
+            % Count Item_N fields as items
+            nItems = sum(~cellfun(@isempty, regexp(subFields, '^Item_\d+$')));
+            if nItems > 0
+                fprintf('    %-45s: struct sequence (%d item(s))\n', fname, nItems);
+            else
+                fprintf('    %-45s: struct (%d field(s))\n', fname, numel(subFields));
+            end
+        elseif ischar(val)
+            if numel(val) > 60
+                fprintf('    %-45s: char  "%s..."\n', fname, val(1:57));
+            else
+                fprintf('    %-45s: char  "%s"\n', fname, val);
+            end
+        elseif isnumeric(val)
+            sz = size(val);
+            szStr = sprintf('%dx', sz);
+            szStr(end) = [];  % remove trailing 'x'
+            if isscalar(val)
+                fprintf('    %-45s: %-10s = %g\n', fname, class(val), val);
+            else
+                fprintf('    %-45s: %-10s [%s]\n', fname, class(val), szStr);
+            end
+        elseif iscell(val)
+            fprintf('    %-45s: cell  {%s}\n', fname, strjoin(val, ', '));
+        else
+            fprintf('    %-45s: %s\n', fname, class(val));
+        end
+    end
+end
+
+
+function [info, nRemoved] = remove_non_predeform_items(info)
+    % remove_non_predeform_items  Remove items from DeformableRegistrationSequence
+    %   that do not have a PreDeformationMatrixRegistrationSequence field.
+    %
+    % Returns the modified info struct and the count of removed items.
+    nRemoved = 0;
+
+    if ~isfield(info, 'DeformableRegistrationSequence')
+        return;
+    end
+
+    seqData   = info.DeformableRegistrationSequence;
+    itemNames = fieldnames(seqData);
+    newSeq    = struct();
+    newIdx    = 0;
+
+    for i = 1:numel(itemNames)
+        iName = itemNames{i};
+        % Only process Item_N fields
+        if isempty(regexp(iName, '^Item_\d+$', 'once'))
+            newSeq.(iName) = seqData.(iName);
+            continue;
+        end
+        item = seqData.(iName);
+        if isfield(item, 'PreDeformationMatrixRegistrationSequence')
+            newIdx = newIdx + 1;
+            newSeq.(sprintf('Item_%d', newIdx)) = item;
+        else
+            nRemoved = nRemoved + 1;
+            fprintf('    Removing %s (no PreDeformationMatrixRegistrationSequence)\n', iName);
+        end
+    end
+
+    info.DeformableRegistrationSequence = newSeq;
+end
+
 
 function [nErrors, nWarnings] = inspect_deformable_sequence(info)
     % inspect_deformable_sequence  Validate DeformableRegistrationSequence
