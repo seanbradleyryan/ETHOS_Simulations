@@ -1086,38 +1086,28 @@ function [sct_hu, origin, spacing, dims] = loadSctImages(sct_dir)
     spacing = [];
     dims = [];
     
-    % Get all DICOM files that contain 'CT' in the name
+    % Get all DICOM files whose SeriesDescription is 'sct' (case-insensitive)
     all_files = dir(fullfile(sct_dir, '*.dcm'));
     sct_files = [];
-    
+    z_positions = [];
+
     for i = 1:length(all_files)
-        if contains(all_files(i).name, 'CT', 'IgnoreCase', true) && ...
-           ~contains(all_files(i).name, 'RTSTRUCT', 'IgnoreCase', true) && ...
-           ~contains(all_files(i).name, 'RTPLAN', 'IgnoreCase', true) && ...
-           ~contains(all_files(i).name, 'RTDOSE', 'IgnoreCase', true)
-            sct_files = [sct_files; all_files(i)]; %#ok<AGROW>
+        try
+            info = dicominfo(fullfile(sct_dir, all_files(i).name));
+            if isfield(info, 'SeriesDescription') && strcmpi(info.SeriesDescription, 'sct')
+                sct_files = [sct_files; all_files(i)]; %#ok<AGROW>
+                z_positions = [z_positions; info.ImagePositionPatient(3)]; %#ok<AGROW>
+            end
+        catch
+            % Skip unreadable files
         end
     end
-    
+
     if isempty(sct_files)
-        warning('loadSctImages:NoFiles', 'No CT DICOM files found in: %s', sct_dir);
+        warning('loadSctImages:NoFiles', 'No SCT DICOM files found in: %s', sct_dir);
         return;
     end
-    
-    fprintf('    Found %d CT image files\n', length(sct_files));
-    
-    % Get z-positions for sorting
-    z_positions = zeros(length(sct_files), 1);
-    
-    for i = 1:length(sct_files)
-        try
-            info = dicominfo(fullfile(sct_dir, sct_files(i).name));
-            z_positions(i) = info.ImagePositionPatient(3);
-        catch
-            z_positions(i) = i;  % Fallback
-        end
-    end
-    
+
     % Sort by z-position
     [~, sort_idx] = sort(z_positions);
     
