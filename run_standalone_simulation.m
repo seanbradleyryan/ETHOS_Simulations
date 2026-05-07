@@ -17,7 +17,7 @@ CONFIG.sct_filename  = 'sct_resampled.mat';
 CONFIG.dose_file_override = 'field1dose.mat';
 CONFIG.sct_file_override  = '';
 
-CONFIG.sensor_placement_method = 'full_plane_lateral';
+CONFIG.sensor_placement_method = 'determine_sensor_mask';
 CONFIG.sensor_x_index = 20;
 CONFIG.sensor_y_index = 40;
 
@@ -304,6 +304,39 @@ switch CONFIG.sensor_placement_method
         sph_radius  = floor(min([Nx, Ny, Nz]) / 2) - CONFIG.pml_size;
         sensor.mask = makeSphere(Nx, Ny, Nz, sph_radius);
         fprintf('       Sensor: spherical, radius %d voxels\n', sph_radius);
+    case 'determine_sensor_mask'
+        % Automatic placement via determine_sensor_mask: places a flat anterior
+        % sensor avoiding beam exclusion zones, closest to the dose centroid.
+        sct_for_sensor = sct;
+        if ~isfield(sct_for_sensor, 'couchMask')
+            sct_for_sensor.couchMask = false(size(sct_for_sensor.bodyMask));
+        end
+        if ~isfield(sct_for_sensor, 'origin')
+            sct_for_sensor.origin = [0, 0, 0];
+        end
+        sct_for_sensor.spacing = spacing_mm;
+
+        field_dose_for_sensor = struct();
+        field_dose_for_sensor.dose_Gy     = doseGrid;
+        field_dose_for_sensor.gantry_angle = 0;
+        field_dose_for_sensor.origin      = sct_for_sensor.origin;
+        field_dose_for_sensor.spacing     = spacing_mm;
+        field_dose_for_sensor.dimensions  = [Nx_orig, Ny_orig, Nz_orig];
+
+        beam_meta = [];
+        if isfield(CONFIG, 'beam_metadata') && ~isempty(CONFIG.beam_metadata)
+            beam_meta = CONFIG.beam_metadata;
+        end
+
+        [sensor_mask_orig, ~] = determine_sensor_mask( ...
+            sct_for_sensor, field_dose_for_sensor, beam_meta, CONFIG);
+
+        % Embed into the current (possibly padded) grid
+        m1 = min(Nx, size(sensor_mask_orig, 1));
+        m2 = min(Ny, size(sensor_mask_orig, 2));
+        m3 = min(Nz, size(sensor_mask_orig, 3));
+        sensor.mask(1:m1, 1:m2, 1:m3) = double(sensor_mask_orig(1:m1, 1:m2, 1:m3));
+        fprintf('       Sensor: determine_sensor_mask — %d active points\n', sum(sensor_mask_orig(:)));
     case 'fixed_anterior'
         % Deterministic placement: anterior, inferior to beam field,
         % laterally centered on isocenter X.
@@ -368,8 +401,8 @@ fprintf('       dt = %.2e s, Nt = %d, T_sim = %.2e s\n', dt, Nt, simTime);
 kmedium             = struct();
 kmedium.density     = medium.density;
 kmedium.sound_speed = medium.sound_speed;
-kmedium.alpha_coeff = 0 * medium.alpha_coeff;
-kmedium.alpha_power = 0 * medium.alpha_power;
+kmedium.alpha_coeff = medium.alpha_coeff;
+kmedium.alpha_power = 1.1;
 
 if CONFIG.use_gpu
     try
@@ -1199,7 +1232,7 @@ function medium = create_medium(sct, config)
             medium.density     = ones(gridSize) * config.uniform_density;
             medium.sound_speed = ones(gridSize) * config.uniform_sound_speed;
             medium.alpha_coeff = ones(gridSize) * config.uniform_alpha_coeff;
-            medium.alpha_power = config.uniform_alpha_power;
+            medium.alpha_power = 1.1;
             medium.gruneisen   = ones(gridSize) * config.uniform_gruneisen;
 
         case {'threshold_1', 'threshold_2'}
@@ -1210,7 +1243,7 @@ function medium = create_medium(sct, config)
             medium.density     = ones(gridSize) * 1000;
             medium.sound_speed = ones(gridSize) * 1540;
             medium.alpha_coeff = ones(gridSize) * 0.5;
-            medium.alpha_power = T.alpha_power(1);
+            medium.alpha_power = 1.1;
             medium.gruneisen   = ones(gridSize) * 0.11;
 
             for t = 1:nTissues
@@ -1219,11 +1252,6 @@ function medium = create_medium(sct, config)
                 medium.sound_speed(mask) = T.sound_speed(t);
                 medium.alpha_coeff(mask) = T.alpha_coeff(t);
                 medium.gruneisen(mask)   = T.gruneisen(t);
-            end
-
-            st_idx = find(contains(lower(T.tissue_names), 'soft'), 1);
-            if ~isempty(st_idx)
-                medium.alpha_power = T.alpha_power(st_idx);
             end
 
             fprintf('       Tissue model: %s (%d tissues)\n', config.gruneisen_method, nTissues);
@@ -1245,7 +1273,7 @@ function medium = create_medium(sct, config)
     end
     if config.force_uniform_attenuation
         medium.alpha_coeff = ones(gridSize) * config.uniform_alpha_coeff;
-        medium.alpha_power = config.uniform_alpha_power;
+        medium.alpha_power = 1.1;
     end
     if config.force_uniform_gruneisen
         medium.gruneisen = ones(gridSize) * config.uniform_gruneisen;
