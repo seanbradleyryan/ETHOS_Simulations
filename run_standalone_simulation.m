@@ -349,8 +349,8 @@ fprintf('       dt = %.2e s, Nt = %d, T_sim = %.2e s\n', dt, Nt, simTime);
 kmedium             = struct();
 kmedium.density     = medium.density;
 kmedium.sound_speed = medium.sound_speed;
-kmedium.alpha_coeff = 0 * medium.alpha_coeff;
-kmedium.alpha_power = 0 * medium.alpha_power;
+kmedium.alpha_coeff = medium.alpha_coeff;
+kmedium.alpha_power = 1.1;
 
 if CONFIG.use_gpu
     try
@@ -418,7 +418,7 @@ if CONFIG.convolution_kernel > 0
     fprintf('       Pulse model: sigma=%.1f us, noise=%.1f%%, lambda=%.1e\n', ...
         conv_kernel_sigma * 1e6, conv_noise_level * 100, conv_deconv_lambda);
 
-    % Build normalized Gaussian kernel in time (truncated at ±4 sigma)
+    % Build normalized Gaussian kernel in time (truncated at 4 sigma)
     sigma_samples = conv_kernel_sigma / dt;
     kernel_half   = ceil(4 * sigma_samples);
     t_kernel      = (-kernel_half : kernel_half)';
@@ -712,7 +712,7 @@ if exist('CalcGamma', 'file') == 2
     low_dose_cutoff = 0.10 * max(doseGrid(:));
     gamma_eval_mask = doseGrid >= low_dose_cutoff;
 
-    gamma_criteria = {10, 10, '10%/10mm'; 5, 5, '5%/5mm'; 3, 3, '3%/3mm'};
+    gamma_criteria = {5, 5, '5%/5mm'; 3, 3, '3%/3mm'};
     gamma_maps     = cell(size(gamma_criteria, 1), 1);
     pass_rates     = zeros(size(gamma_criteria, 1), 1);
 
@@ -819,7 +819,7 @@ function plot_sensor_dose_planes(dose_mask, sensor_mask, spacing_mm, config)
 %PLOT_SENSOR_DOSE_PLANES  1x3 anatomical view of sensor geometry vs dose mask.
 %  Shows three orthogonal projections (coronal, sagittal, axial).
 %  Dose mask (dose >= 10% max) drawn as a filled semi-transparent blue region.
-%  Sensor drawn as a solid red line/region — computed via max-projection so it
+%  Sensor drawn as a solid red line/region  computed via max-projection so it
 %  always appears regardless of which slice the dose centroid falls on.
 %  This replaces the interactive 3-D isosurface view.
 
