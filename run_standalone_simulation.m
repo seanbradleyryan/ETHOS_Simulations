@@ -11,10 +11,10 @@ CONFIG.working_dir    = '/mnt/weka/home/80030361/ETHOS_Simulations';
 CONFIG.patient_id     = '1194203';
 CONFIG.session        = 'Session_1';
 
-CONFIG.dose_filename = 'total_rs_dose.mat';
+CONFIG.dose_filename = 'dose_1194203_Session_1_reference_B9_96.mat';
 CONFIG.sct_filename  = 'sct_resampled.mat';
 
-CONFIG.dose_file_override = 'field1dose.mat';
+CONFIG.dose_file_override = '';
 CONFIG.sct_file_override  = '';
 
 CONFIG.sensor_placement_method = 'determine_sensor_mask';
@@ -108,7 +108,51 @@ end
 dose_data = load(dose_filepath);
 
 dose_fields = fieldnames(dose_data);
-if isfield(dose_data, 'total_rs_dose')
+
+% --- Auto-detect step15_process_doses output formats ---
+if isfield(dose_data, 'field_dose')
+    % Individual field dose file from step15_process_doses.
+    % dose_Gy may be stored as sparse 2D: reshape(full(dose_Gy), dose_dims)
+    fd = dose_data.field_dose;
+    if ~isfield(fd, 'dose_Gy')
+        error('field_dose struct missing dose_Gy field.');
+    end
+    if (isfield(fd, 'is_sparse') && fd.is_sparse) || issparse(fd.dose_Gy)
+        if ~isfield(fd, 'dose_dims')
+            error('field_dose.dose_dims missing — cannot reconstruct sparse dose.');
+        end
+        doseGrid = reshape(full(fd.dose_Gy), fd.dose_dims);
+        fprintf('       Loaded: field_dose.dose_Gy (sparse -> [%d x %d x %d])\n', fd.dose_dims);
+    else
+        doseGrid = double(fd.dose_Gy);
+        fprintf('       Loaded: field_dose.dose_Gy (dense)\n');
+    end
+    % Pull embedded metadata: override CONFIG only when value is non-trivial
+    if isfield(fd, 'spacing') && ~isempty(fd.spacing)
+        step15_spacing_mm = fd.spacing(:)';
+        fprintf('       Spacing from file:  [%.3f %.3f %.3f] mm\n', step15_spacing_mm);
+    end
+    if isfield(fd, 'meterset') && ~isempty(fd.meterset) && fd.meterset > 0
+        if CONFIG.meterset ~= fd.meterset
+            fprintf('       [INFO] Overriding CONFIG.meterset: %.2f -> %.2f MU\n', ...
+                CONFIG.meterset, fd.meterset);
+            CONFIG.meterset = fd.meterset;
+        end
+    end
+    if isfield(fd, 'gantry_angle')
+        fprintf('       Gantry angle: %.1f deg\n', fd.gantry_angle);
+    end
+
+elseif isfield(dose_data, 'total_rs_dose_sparse')
+    % Total dose file from step15_process_doses (sparse format).
+    if ~isfield(dose_data, 'total_rs_dose_dims')
+        error('total_rs_dose_dims missing — cannot reconstruct sparse total dose.');
+    end
+    doseGrid = reshape(full(dose_data.total_rs_dose_sparse), dose_data.total_rs_dose_dims);
+    fprintf('       Loaded: total_rs_dose_sparse (reconstructed [%d x %d x %d])\n', ...
+        dose_data.total_rs_dose_dims);
+
+elseif isfield(dose_data, 'total_rs_dose')
     doseGrid = dose_data.total_rs_dose;
     fprintf('       Loaded variable: total_rs_dose\n');
 elseif isfield(dose_data, 'dose_Gy')
@@ -118,8 +162,9 @@ elseif length(dose_fields) == 1
     doseGrid = dose_data.(dose_fields{1});
     fprintf('       Loaded variable: %s\n', dose_fields{1});
 else
-    error('Cannot auto-detect dose variable.');
+    error('Cannot auto-detect dose variable. Fields found: %s', strjoin(dose_fields, ', '));
 end
+doseGrid = double(doseGrid);
 
 if ~isnumeric(doseGrid) || ndims(doseGrid) ~= 3
     error('Dose data must be a 3D numeric array.');
@@ -141,21 +186,27 @@ else
     error('sct_resampled variable not found in %s', sct_filepath);
 end
 
-required_sct_fields = {'cubeHU', 'spacing'};
-for i = 1:length(required_sct_fields)
-    if ~isfield(sct, required_sct_fields{i})
-        error('sct_resampled missing required field: %s', required_sct_fields{i});
-    end
+if ~isfield(sct, 'cubeHU')
+    error('sct_resampled missing required field: cubeHU');
 end
 
-spacing_mm = sct.spacing(:)';
+% Spacing: prefer SCT field; fall back to spacing embedded in step15 field_dose
+if isfield(sct, 'spacing') && ~isempty(sct.spacing)
+    spacing_mm = sct.spacing(:)';
+elseif exist('step15_spacing_mm', 'var')
+    spacing_mm = step15_spacing_mm;
+    fprintf('       [INFO] Using spacing from field_dose file: [%.3f %.3f %.3f] mm\n', spacing_mm);
+else
+    error('sct_resampled missing required field: spacing');
+end
 dx = spacing_mm(1) / 1000;
 dy = spacing_mm(2) / 1000;
 dz = spacing_mm(3) / 1000;
 
 sctSize = size(sct.cubeHU);
 if ~isequal(gridSize, sctSize)
-    error('Dose grid [%d %d %d] does not match SCT grid [%d %d %d].', ...
+    error(['Dose grid [%d %d %d] does not match SCT grid [%d %d %d].\n' ...
+           'Ensure sct_resampled.mat was produced by the same step15 run as the dose file.'], ...
         Nx, Ny, Nz, sctSize(1), sctSize(2), sctSize(3));
 end
 
