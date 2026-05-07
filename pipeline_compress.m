@@ -45,7 +45,7 @@ CONFIG.working_dir  = 'C:/Users/80030361/ETHOS_Simulations';
 CONFIG.apply_dose_masking = true;
 
 % --- Storage Format ---
-% Dose arrays are mostly zero after body/couch masking; sparse 2D format
+% Dose arrays are mostly zero after body/couch masking;  2D format
 % greatly reduces file size. Set false only for debugging/compatibility.
 % Reconstruct 3D on load: reshape(full(dose_Gy), dose_dims)
 CONFIG.use_sparse_storage  = true;

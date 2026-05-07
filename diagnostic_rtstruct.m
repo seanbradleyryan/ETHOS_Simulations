@@ -18,7 +18,7 @@
 %  CONFIGURATION — edit before running                                %
 % ------------------------------------------------------------------ %
 patient_id    = '1194203';
-session       = 'Session_1';
+session       = 'Session_5';
 working_dir   = 'C:/Users/80030361/ETHOS_Simulations';
 treatment_site = 'Pancreas';
 

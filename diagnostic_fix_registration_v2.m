@@ -66,7 +66,7 @@ function diagnostic_fix_registration_v2(inputFilePath, populate_fixed)
     inputFilePath = char(strtrim(inputFilePath));
 
     if nargin < 2 || isempty(populate_fixed)
-        populate_fixed = false;
+        populate_fixed = true;
     end
     if ~islogical(populate_fixed) && ~isnumeric(populate_fixed)
         error('diagnostic_fix_registration_v2:InvalidInput', ...
