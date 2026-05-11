@@ -425,7 +425,7 @@ end
 if CONFIG.plot_results
     sensor_vis    = logical(sensor.mask(1:Nx_orig, 1:Ny_orig, 1:Nz_orig));
     dose_mask_vis = double(doseGrid) >= 0.10 * max(double(doseGrid(:)));
-    plot_sensor_dose_planes(dose_mask_vis, sensor_vis, spacing_mm, CONFIG);
+    plot_sensor_dose_planes(dose_mask_vis, sensor_vis, spacing_mm, medium_orig.density, CONFIG);
     fprintf('       [Sensor vs dose mask visualization displayed]\n');
     drawnow;
 end
@@ -918,9 +918,10 @@ fprintf('\nStandalone simulation complete.\n');
 %  LOCAL FUNCTIONS
 %% =========================================================================
 
-function plot_sensor_dose_planes(dose_mask, sensor_mask, spacing_mm, config)
+function plot_sensor_dose_planes(dose_mask, sensor_mask, spacing_mm, density, config)
 %PLOT_SENSOR_DOSE_PLANES  1x3 anatomical view of sensor geometry vs dose mask.
 %  Shows three orthogonal projections (coronal, sagittal, axial).
+%  CT density is rendered as a grayscale background (mean-projection).
 %  Dose mask (dose >= 10% max) drawn as a filled semi-transparent blue region.
 %  Sensor drawn as a solid red line/region — computed via max-projection so it
 %  always appears regardless of which slice the dose centroid falls on.
@@ -941,30 +942,49 @@ function plot_sensor_dose_planes(dose_mask, sensor_mask, spacing_mm, config)
     sens_sag  = squeeze(any(sensor_mask, 1));   % YZ
     sens_axi  = squeeze(any(sensor_mask, 3));   % XY
 
+    % CT density background: mean-projection (DRR-like anatomical context).
+    % Soft-tissue window/level (kg/m^3) matches plot_dose_panels.
+    have_density = ~isempty(density) && isequal(size(density), size(dose_mask));
+    wl_center = 1050; wl_width = 350;
+    wl_min    = wl_center - wl_width / 2;
+    if have_density
+        ct_projs = {
+            squeeze(mean(double(density), 2))',   % Coronal  XZ
+            squeeze(mean(double(density), 1))',   % Sagittal YZ
+            squeeze(mean(double(density), 3))'    % Axial    XY
+        };
+    end
+
     figure('Name', 'Sensor Placement vs Dose Mask', 'Color', 'w', ...
         'NumberTitle', 'off', 'Position', [80, 80, 1300, 420]);
     sgtitle(sprintf('Sensor Placement vs Dose Mask  (\\geq10%% max)   |   Sensor: %s', ...
         config.sensor_placement_method), 'FontWeight', 'bold', 'FontSize', 11);
 
     view_data = {
-        dose_cor', sens_cor', x_ax, z_ax, 'X (mm)', 'Z (mm)', 'Coronal  (max-proj along Y)';
-        dose_sag', sens_sag', y_ax, z_ax, 'Y (mm)', 'Z (mm)', 'Sagittal  (max-proj along X)';
-        dose_axi', sens_axi', x_ax, y_ax, 'X (mm)', 'Y (mm)', 'Axial  (max-proj along Z)';
+        dose_cor', sens_cor', x_ax, z_ax, 'X (mm)', 'Z (mm)', 'Coronal  (mean-proj along Y)';
+        dose_sag', sens_sag', y_ax, z_ax, 'Y (mm)', 'Z (mm)', 'Sagittal  (mean-proj along X)';
+        dose_axi', sens_axi', x_ax, y_ax, 'X (mm)', 'Y (mm)', 'Axial  (mean-proj along Z)';
     };
 
     dose_color   = [0.20, 0.50, 0.90];   % blue
     sensor_color = [0.90, 0.10, 0.10];   % red
 
     for col = 1:3
-        ax      = subplot(1, 3, col);
-        d2d     = double(view_data{col, 1});
-        s2d     = double(view_data{col, 2});
-        xv      = view_data{col, 3};
-        yv      = view_data{col, 4};
+        ax  = subplot(1, 3, col);
+        d2d = double(view_data{col, 1});
+        s2d = double(view_data{col, 2});
+        xv  = view_data{col, 3};
+        yv  = view_data{col, 4};
 
-        % Background: white
-        imagesc(ax, xv, yv, zeros(size(d2d)));
-        colormap(ax, 'gray'); caxis(ax, [0, 1]);
+        % Background: CT density as grayscale, or white if unavailable
+        if have_density
+            dn     = (ct_projs{col} - wl_min) / wl_width;
+            dn     = max(0, min(1, dn));
+            bg_rgb = repmat(dn, [1, 1, 3]);
+        else
+            bg_rgb = ones([size(d2d), 3]);   % white fallback
+        end
+        image(ax, xv, yv, bg_rgb);
         hold(ax, 'on');
 
         % Dose mask: filled blue region
