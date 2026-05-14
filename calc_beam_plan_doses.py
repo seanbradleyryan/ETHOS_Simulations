@@ -172,35 +172,6 @@ def init_log(log_path, patient_id, session):
         f.write(f"# dose_{{id}}_{{session}}_{{plan_type}}_{{ct_label}}_{{origbeam}}_{{segment}}.dcm\n")
 
 
-# ============================================================
-# Helper: extract beam-set configuration from a source beam set
-# ============================================================
-def get_beam_set_kwargs(src_beam_set):
-    """
-    Pull machine/modality/technique/etc. from an existing beam set so a new
-    beam set can be created with matching configuration. Missing attributes
-    are silently omitted (RayStation versions differ slightly).
-    """
-    kwargs = {}
-    try:
-        kwargs['MachineName'] = src_beam_set.MachineReference.MachineName
-    except Exception:
-        pass
-    for attr in ('Modality', 'TreatmentTechnique', 'PatientPosition'):
-        try:
-            val = getattr(src_beam_set, attr, None)
-            if val is not None:
-                kwargs[attr] = val
-        except Exception:
-            pass
-    try:
-        kwargs['NumberOfFractions'] = src_beam_set.FractionationPattern.NumberOfFractions
-    except Exception:
-        try:
-            kwargs['NumberOfFractions'] = src_beam_set.NumberOfFractions
-        except Exception:
-            pass
-    return kwargs
 
 
 # ============================================================
@@ -297,7 +268,7 @@ try:
             # --------------------------------------------------------
             for exam_label in EXAMINATION_LABELS:
                 new_plan_name     = f"{sess} {plan_type} {exam_label} {origbeam}"
-                new_beam_set_name = new_plan_name  # keep matched for clarity
+                new_beam_set_name = 'beamset'
 
                 if new_plan_name in completed_plans:
                     print(f"\n  SKIPPING '{new_plan_name}' (already exported)")
@@ -330,14 +301,16 @@ try:
                     new_bs = new_plan.BeamSets[0]
                     print(f"    Reusing existing beam set on '{new_plan_name}'.")
                 else:
-                    bs_kwargs = get_beam_set_kwargs(original_beam_set)
-                    print(f"    Adding beam set on '{exam_label}' "
-                          f"(kwargs={list(bs_kwargs.keys())}) ...")
+                    print(f"    Adding beam set on '{exam_label}' ...")
                     new_bs = new_plan.AddNewBeamSet(
                         Name=new_beam_set_name,
                         ExaminationName=exam_label,
-                        CreateSetupBeams=False,
-                        **bs_kwargs
+                        MachineName=original_beam_set.MachineReference.MachineName,
+                        Modality=original_beam_set.Modality,
+                        TreatmentTechnique=original_beam_set.TreatmentTechnique,
+                        PatientPosition=original_beam_set.PatientPosition,
+                        NumberOfFractions=original_beam_set.FractionationPattern.NumberOfFractions,
+                        CreateSetupBeams=False
                     )
 
                     # ---- Copy beams from the original beam set ------
