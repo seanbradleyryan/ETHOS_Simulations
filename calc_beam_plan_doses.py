@@ -275,14 +275,17 @@ try:
             print(f"    Primary dose computation complete.")
 
             # ---- Compute dose on additional examinations ------------
-            additional_exams = [e for e in EXAMINATION_LABELS if e != primary_exam]
-            if additional_exams:
-                print(f"    Computing dose on additional sets: {additional_exams} ...")
+            additional_exam_labels = [e for e in EXAMINATION_LABELS if e != primary_exam]
+            if additional_exam_labels:
+                print(f"    Computing dose on additional sets: {additional_exam_labels} ...")
+                additional_exam_objects = [
+                    e for e in case.Examinations
+                    if e.Name in additional_exam_labels
+                ]
                 beam_set.ComputeDoseOnAdditionalSets(
-                    OnlyOneDosePerImageSet=False,
+                    Examinations=additional_exam_objects,
+                    ComputeBeamDoses=True,
                     AllowGridExpansion=True,
-                    ExaminationNames=additional_exams,
-                    FractionNumbers=[0],
                 )
                 print(f"    Additional-set dose computation complete.")
 
