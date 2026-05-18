@@ -19,42 +19,22 @@ DOSE_VOXEL_SIZE = {'x': 0.25, 'y': 0.25, 'z': 0.25}
 # and on which dose is actually computed/exported.
 EXAMINATION_LABELS = ["CT 1", "CT 3"]
 
-# Plan name formats handled by this script:
-#   Original (template) plans:   "{session} {adapted|reference} {origbeam}"
-#       e.g.  "Session_1 adapted B13"
-#   New CT-specific plans:       "{session} {adapted|reference} {ct_label} {origbeam}"
-#       e.g.  "Session_1 adapted CT 1 B13"
-#
-# Group 1 (session)   – Session_<digits>
-# Group 2 (plan_type) – "adapted" or "reference"
-# Group 3 (ct_label)  – optional, "CT <digits>" (None for original plans)
-# Group 4 (origbeam)  – beam label, e.g. "B13"
+# Plan name format:  "{session} {adapted|reference} {origbeam}"
+#   e.g.  "Session_1 adapted B13" -> session="Session_1", plan_type="adapted", origbeam="B13"
 PLAN_NAME_RE = re.compile(
-    r'^(Session_\d+)\s+(adapted|reference)(?:\s+(CT\s+\d+))?\s+(.+)$',
+    r'^(Session_\d+)\s+(adapted|reference)\s+(.+)$',
     re.IGNORECASE
 )
 
 
 # ============================================================
-# Helper: parse a plan name into its components
+# Helper: parse a plan name into (session, plan_type, origbeam)
 # ============================================================
 def parse_plan_name(plan_name):
-    """
-    Parse a plan name. Returns (session, plan_type, ct_label, origbeam),
-    where ct_label is None for original template plans and a string
-    (e.g. "CT 1") for CT-specific plans. Returns None on no match.
-    """
     m = PLAN_NAME_RE.match(plan_name)
     if not m:
         return None
-    session   = m.group(1)
-    plan_type = m.group(2).lower()
-    ct_label  = m.group(3)  # may be None
-    origbeam  = m.group(4)
-    if ct_label is not None:
-        # Normalize internal whitespace: "CT   1" -> "CT 1"
-        ct_label = re.sub(r'\s+', ' ', ct_label).strip()
-    return session, plan_type, ct_label, origbeam
+    return m.group(1), m.group(2).lower(), m.group(3)
 
 
 # ============================================================
@@ -141,7 +121,7 @@ def rename_beam_exports(new_files, export_folder,
 
 
 # ============================================================
-# Resume helpers (key on NEW CT-specific plan names)
+# Resume helpers (log key is "{plan_name}|{ct_label}")
 # ============================================================
 def get_completed_plans(log_path):
     completed = set()
@@ -197,10 +177,7 @@ try:
         if parsed is None:
             skipped.append(plan.Name)
             continue
-        sess, plan_type, ct_label, origbeam = parsed
-        if ct_label is not None:
-            # CT-specific plan: not a template; skip silently.
-            continue
+        sess, plan_type, origbeam = parsed
         sessions[sess].append((plan_type, origbeam, plan))
 
     if skipped:
@@ -254,117 +231,114 @@ try:
         # INNER LOOP – template plans
         # ========================================================
         for plan_type, origbeam, plan in beam_plans:
-            orig_plan_name = plan.Name
+            plan_name = plan.Name
 
             if not plan.BeamSets:
-                print(f"  WARNING: '{orig_plan_name}' has no beam sets. Skipping.")
+                print(f"  WARNING: '{plan_name}' has no beam sets. Skipping.")
                 continue
 
-            original_beam_set = plan.BeamSets[0]
+            beam_set    = plan.BeamSets[0]
+            beam_set_id = beam_set.BeamSetIdentifier()
 
-            # --------------------------------------------------------
-            # For each target examination, create a CT-specific copy
-            # and compute/export dose on that copy.
-            # --------------------------------------------------------
-            for exam_label in EXAMINATION_LABELS:
-                new_plan_name     = f"{sess} {plan_type} {exam_label} {origbeam}"
-                new_beam_set_name = 'beamset'
+            print(f"\n  --- {plan_type}  origbeam='{origbeam}'  plan='{plan_name}' ---")
+            print(f"    BeamSet   : {beam_set_id}")
+            print(f"    Beams ({len(beam_set.Beams)}):")
+            for bi, b in enumerate(beam_set.Beams):
+                print(f"      [{bi:02d}] {b.Name}  MU={b.BeamMU:.4f}")
 
-                if new_plan_name in completed_plans:
-                    print(f"\n  SKIPPING '{new_plan_name}' (already exported)")
+            # ---- Determine primary examination ----------------------
+            # API name varies across RayStation versions; try the common
+            # accessors and fall back to None on failure.
+            primary_exam = None
+            try:
+                primary_exam = beam_set.GetPlanningExamination().Name
+            except Exception:
+                try:
+                    primary_exam = plan.GetStructureSet().OnExamination.Name
+                except Exception:
+                    pass
+            print(f"    Primary examination: {primary_exam!r}")
+
+            # ---- Set default dose grid (once) -----------------------
+            vx = DOSE_VOXEL_SIZE
+            print(f"    Setting dose grid: {vx['x']} x {vx['y']} x {vx['z']} cm ...")
+            beam_set.SetDefaultDoseGrid(VoxelSize=DOSE_VOXEL_SIZE)
+            beam_set.FractionDose.UpdateDoseGridStructures()
+
+            # ---- Compute primary dose (per-beam) --------------------
+            print(f"    Computing primary dose ({DOSE_ALGORITHM}) ...")
+            beam_set.ComputeDose(
+                ComputeBeamDoses=True,
+                DoseAlgorithm=DOSE_ALGORITHM,
+                ForceRecompute=True
+            )
+            print(f"    Primary dose computation complete.")
+
+            # ---- Compute dose on additional examinations ------------
+            additional_exams = [e for e in EXAMINATION_LABELS if e != primary_exam]
+            if additional_exams:
+                print(f"    Computing dose on additional sets: {additional_exams} ...")
+                beam_set.ComputeDoseOnAdditionalSets(
+                    OnlyOneDosePerImageSet=False,
+                    AllowGridExpansion=True,
+                    ExaminationNames=additional_exams,
+                    FractionNumbers=[0],
+                )
+                print(f"    Additional-set dose computation complete.")
+
+            patient.Save()
+            print(f"    Patient saved.")
+
+            # ---- Export per-beam dose for each CT in EXAMINATION_LABELS
+            for ct_label in EXAMINATION_LABELS:
+                log_key = f"{plan_name}|{ct_label}"
+
+                if log_key in completed_plans:
+                    print(f"    SKIPPING '{log_key}' (already exported)")
                     continue
 
-                print(f"\n  --- template='{orig_plan_name}'  ->  '{new_plan_name}' ---")
-
-                # ---- Create new plan on the target examination ------
-                existing_plan = None
-                for p in case.TreatmentPlans:
-                    if p.Name == new_plan_name:
-                        existing_plan = p
-                        break
-
-                if existing_plan is not None:
-                    print(f"    Reusing existing plan '{new_plan_name}'.")
-                    new_plan = existing_plan
-                else:
-                    print(f"    Creating plan on examination '{exam_label}' ...")
-                    new_plan = case.AddNewPlan(
-                        PlanName=new_plan_name,
-                        ExaminationName=exam_label,
-                        PlannedBy="",
-                        Comment=f"Auto-generated from '{orig_plan_name}'",
-                        AllowDuplicateNames=False
-                    )
-
-                # ---- Add beam set on the target examination ---------
-                if new_plan.BeamSets and len(list(new_plan.BeamSets)) > 0:
-                    new_bs = new_plan.BeamSets[0]
-                    print(f"    Reusing existing beam set on '{new_plan_name}'.")
-                else:
-                    print(f"    Adding beam set on '{exam_label}' ...")
-                    new_bs = new_plan.AddNewBeamSet(
-                        Name=new_beam_set_name,
-                        ExaminationName=exam_label,
-                        MachineName=original_beam_set.MachineReference.MachineName,
-                        Modality=original_beam_set.Modality,
-                        TreatmentTechnique=original_beam_set.TreatmentTechnique,
-                        PatientPosition=original_beam_set.PatientPosition,
-                        NumberOfFractions=original_beam_set.FractionationPattern.NumberOfFractions,
-                        CreateSetupBeams=False
-                    )
-
-                    # ---- Copy beams from the original beam set ------
-                    print(f"    Copying beams from original beam set ...")
-                    new_bs.CopyBeamsFromBeamSet(BeamSetToCopyFrom=original_beam_set)
-
-                examination = case.Examinations[exam_label]
-                # case.PatientModel.RegionsOfInterest['Body'].CreateExternalGeometry(Examination=examination, ThresholdLevel=-250)
-
-                # ---- Set default dose grid --------------------------
-                vx = DOSE_VOXEL_SIZE
-                print(f"    Setting dose grid: {vx['x']} x {vx['y']} x {vx['z']} cm ...")
-                new_bs.SetDefaultDoseGrid(VoxelSize=DOSE_VOXEL_SIZE)
-                new_bs.FractionDose.UpdateDoseGridStructures()
-
-                # ---- Compute dose (per-beam) ------------------------
-                print(f"    Computing dose ({DOSE_ALGORITHM}) ...")
-                new_bs.ComputeDose(
-                    ComputeBeamDoses=True,
-                    DoseAlgorithm=DOSE_ALGORITHM,
-                    ForceRecompute=True
-                )
-                print(f"    Dose computation complete.")
-
-                # ---- Save before export -----------------------------
-                patient.Save()
-                print(f"    Patient saved.")
-
-                # ---- Snapshot, export, rename -----------------------
-                beam_set_id  = new_bs.BeamSetIdentifier()
                 pre_snapshot = snapshot_rd_files(export_folder)
 
-                print(f"    Exporting per-beam doses ...")
-                case.ScriptableDicomExport(
-                    ExportFolderPath=export_folder,
-                    BeamSets=[beam_set_id],
-                    PhysicalBeamDosesForBeamSets=[beam_set_id],
-                    IgnorePreConditionWarnings=True
-                )
+                print(f"    Exporting per-beam doses for '{ct_label}' ...")
+                # TODO: exact kwarg for per-beam dose on an additional set
+                # varies by RayStation version. If ct_label == primary_exam,
+                # PhysicalBeamDosesForBeamSets works. Otherwise, the additional-
+                # set form is needed; common candidates:
+                #   PhysicalBeamDosesForBeamSetDoseOnAdditionalSet=
+                #       [{'BeamSetId': beam_set_id, 'ExaminationName': ct_label}]
+                #   AdditionalBeamSetDoseOnAdditionalSets=[...]
+                # Adjust below based on the live RayStation traceback.
+                if ct_label == primary_exam or primary_exam is None:
+                    case.ScriptableDicomExport(
+                        ExportFolderPath=export_folder,
+                        BeamSets=[beam_set_id],
+                        PhysicalBeamDosesForBeamSets=[beam_set_id],
+                        IgnorePreConditionWarnings=True
+                    )
+                else:
+                    case.ScriptableDicomExport(
+                        ExportFolderPath=export_folder,
+                        BeamSets=[beam_set_id],
+                        PhysicalBeamDosesForBeamSetDoseOnAdditionalSet=[
+                            {'BeamSetId': beam_set_id, 'ExaminationName': ct_label}
+                        ],
+                        IgnorePreConditionWarnings=True
+                    )
 
                 new_files = find_new_rd_files(export_folder, pre_snapshot)
                 print(f"    {len(new_files)} new RD file(s) detected.")
 
                 if not new_files:
-                    print("    WARNING: No new RD files found. Export may have failed.")
+                    print(f"    WARNING: No new RD files found for '{ct_label}'.")
                     continue
 
                 final_paths = rename_beam_exports(
                     new_files, export_folder,
-                    patient_id, sess, plan_type, exam_label, origbeam, new_bs
+                    patient_id, sess, plan_type, ct_label, origbeam, beam_set
                 )
 
-                log_plan_completion(progress_log, new_plan_name, final_paths)
-                print(f"    Logged completion for '{new_plan_name}'.")
+                log_plan_completion(progress_log, log_key, final_paths)
+                print(f"    Logged completion for '{log_key}'.")
 
     # --------------------------------------------------------
     print(f"\n{'='*60}")
