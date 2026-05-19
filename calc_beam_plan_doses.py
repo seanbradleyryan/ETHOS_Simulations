@@ -4,6 +4,7 @@ from datetime import datetime
 import glob
 import os
 import re
+import json
 import numpy as np
 
 
@@ -152,7 +153,7 @@ def init_log(log_path, patient_id, session):
     with open(log_path, 'w') as f:
         f.write(f"# Beam plan dose export log - started {datetime.now()}\n")
         f.write(f"# Patient: {patient_id}  |  Session: {session}\n")
-        f.write(f"# dose_{{id}}_{{session}}_{{plan_type}}_{{ct_label}}_{{origbeam}}_{{segment}}.npz\n")
+        f.write(f"# dose_{{id}}_{{session}}_{{plan_type}}_{{ct_label}}_{{origbeam}}_{{segment}}.npy  (+.json)\n")
 
 
 
@@ -390,22 +391,23 @@ try:
                     flat       = beam_doses[j].DoseValues.DoseData
                     dose_array = np.array(list(flat), dtype=np.float32).reshape(nz, ny, nx)
 
-                    desired_name = (
+                    base_name = (
                         f"dose_{safe_id}_{safe_session}_{safe_type}_{safe_ct}_"
-                        f"{safe_beam}_{j:02d}.npz"
+                        f"{safe_beam}_{j:02d}"
                     )
-                    save_path = os.path.join(export_folder, desired_name)
+                    npy_path  = os.path.join(export_folder, base_name + ".npy")
+                    json_path = os.path.join(export_folder, base_name + ".json")
 
-                    np.savez_compressed(
-                        save_path,
-                        dose=dose_array,
-                        voxel_size_cm=vx_array,
-                        corner_cm=corner_array,
-                        nx=np.int32(nx),
-                        ny=np.int32(ny),
-                        nz=np.int32(nz),
-                    )
-                    print(f"    Saved: {save_path}")
+                    np.save(npy_path, dose_array)
+                    with open(json_path, 'w') as jf:
+                        json.dump({
+                            'voxel_size_cm': list(vx_array.astype(float)),
+                            'corner_cm':     list(corner_array.astype(float)),
+                            'nx': nx, 'ny': ny, 'nz': nz,
+                            'shape_zyx': list(dose_array.shape),
+                        }, jf)
+                    print(f"    Saved: {npy_path}")
+                    save_path = npy_path
                     final_paths.append(save_path)
 
                 log_plan_completion(progress_log, log_key, final_paths)
