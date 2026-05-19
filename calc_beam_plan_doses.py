@@ -4,6 +4,8 @@ from datetime import datetime
 import glob
 import os
 import re
+import numpy as np
+import scipy.io
 
 
 # ============================================================
@@ -56,68 +58,70 @@ def build_export_dir(patient_id, session):
         return BASE_EXPORT_ROOT
 
 
-# ============================================================
-# Helper: snapshot / diff RD files for rename-after-export
-# ============================================================
-def snapshot_rd_files(folder):
-    return set(
-        os.path.basename(p)
-        for p in glob.glob(os.path.join(folder, "RD*.dcm"))
-    )
-
-
-def find_new_rd_files(folder, pre_snapshot):
-    current   = glob.glob(os.path.join(folder, "RD*.dcm"))
-    new_files = [p for p in current
-                 if os.path.basename(p) not in pre_snapshot]
-    new_files.sort(key=os.path.getmtime)
-    return new_files
-
-
-# ============================================================
-# Helper: rename exported RD files to the project naming scheme
-# ============================================================
-def rename_beam_exports(new_files, export_folder,
-                        patient_id, session, plan_type, ct_label,
-                        origbeam, beam_set):
-    """
-    Rename each newly-exported RD*.dcm to:
-        dose_{id}_{session}_{plan_type}_{ct_label}_{origbeam}_{segment}.dcm
-
-    {ct_label} has spaces replaced by underscores (e.g. "CT 1" -> "CT_1").
-    {segment} is the zero-based beam index within the plan's beam set,
-    zero-padded to two digits.
-    """
-    beams = list(beam_set.Beams)
-
-    if len(new_files) != len(beams):
-        print(f"  WARNING: Expected {len(beams)} beam dose file(s), "
-              f"found {len(new_files)}. Segment numbering may be mismatched.")
-
-    safe_id       = re.sub(r'[\\/:*?"<>| ]', '_', patient_id)
-    safe_session  = re.sub(r'[\\/:*?"<>| ]', '_', session)
-    safe_type     = re.sub(r'[\\/:*?"<>| ]', '_', plan_type)
-    safe_ct       = re.sub(r'[\\/:*?"<>| ]', '_', ct_label)
-    safe_beam     = re.sub(r'[\\/:*?"<>| ]', '_', origbeam)
-
-    final_paths = []
-    for segment_idx, src_path in enumerate(new_files):
-        desired_name = (
-            f"dose_{safe_id}_{safe_session}_{safe_type}_{safe_ct}_"
-            f"{safe_beam}_{segment_idx:02d}.dcm"
-        )
-        desired_path = os.path.join(export_folder, desired_name)
-
-        if os.path.exists(desired_path):
-            os.remove(desired_path)
-
-        os.rename(src_path, desired_path)
-
-        rs_beam = beams[segment_idx].Name if segment_idx < len(beams) else "unknown"
-        print(f"    segment {segment_idx:02d}  ({rs_beam})  ->  {desired_name}")
-        final_paths.append(desired_path)
-
-    return final_paths
+# --- DICOM export (disabled) ---
+# # ============================================================
+# # Helper: snapshot / diff RD files for rename-after-export
+# # ============================================================
+# def snapshot_rd_files(folder):
+#     return set(
+#         os.path.basename(p)
+#         for p in glob.glob(os.path.join(folder, "RD*.dcm"))
+#     )
+#
+#
+# def find_new_rd_files(folder, pre_snapshot):
+#     current   = glob.glob(os.path.join(folder, "RD*.dcm"))
+#     new_files = [p for p in current
+#                  if os.path.basename(p) not in pre_snapshot]
+#     new_files.sort(key=os.path.getmtime)
+#     return new_files
+#
+#
+# # ============================================================
+# # Helper: rename exported RD files to the project naming scheme
+# # ============================================================
+# def rename_beam_exports(new_files, export_folder,
+#                         patient_id, session, plan_type, ct_label,
+#                         origbeam, beam_set):
+#     """
+#     Rename each newly-exported RD*.dcm to:
+#         dose_{id}_{session}_{plan_type}_{ct_label}_{origbeam}_{segment}.dcm
+#
+#     {ct_label} has spaces replaced by underscores (e.g. "CT 1" -> "CT_1").
+#     {segment} is the zero-based beam index within the plan's beam set,
+#     zero-padded to two digits.
+#     """
+#     beams = list(beam_set.Beams)
+#
+#     if len(new_files) != len(beams):
+#         print(f"  WARNING: Expected {len(beams)} beam dose file(s), "
+#               f"found {len(new_files)}. Segment numbering may be mismatched.")
+#
+#     safe_id       = re.sub(r'[\\/:*?"<>| ]', '_', patient_id)
+#     safe_session  = re.sub(r'[\\/:*?"<>| ]', '_', session)
+#     safe_type     = re.sub(r'[\\/:*?"<>| ]', '_', plan_type)
+#     safe_ct       = re.sub(r'[\\/:*?"<>| ]', '_', ct_label)
+#     safe_beam     = re.sub(r'[\\/:*?"<>| ]', '_', origbeam)
+#
+#     final_paths = []
+#     for segment_idx, src_path in enumerate(new_files):
+#         desired_name = (
+#             f"dose_{safe_id}_{safe_session}_{safe_type}_{safe_ct}_"
+#             f"{safe_beam}_{segment_idx:02d}.dcm"
+#         )
+#         desired_path = os.path.join(export_folder, desired_name)
+#
+#         if os.path.exists(desired_path):
+#             os.remove(desired_path)
+#
+#         os.rename(src_path, desired_path)
+#
+#         rs_beam = beams[segment_idx].Name if segment_idx < len(beams) else "unknown"
+#         print(f"    segment {segment_idx:02d}  ({rs_beam})  ->  {desired_name}")
+#         final_paths.append(desired_path)
+#
+#     return final_paths
+# ---
 
 
 # ============================================================
@@ -149,7 +153,7 @@ def init_log(log_path, patient_id, session):
     with open(log_path, 'w') as f:
         f.write(f"# Beam plan dose export log - started {datetime.now()}\n")
         f.write(f"# Patient: {patient_id}  |  Session: {session}\n")
-        f.write(f"# dose_{{id}}_{{session}}_{{plan_type}}_{{ct_label}}_{{origbeam}}_{{segment}}.dcm\n")
+        f.write(f"# dose_{{id}}_{{session}}_{{plan_type}}_{{ct_label}}_{{origbeam}}_{{segment}}.mat\n")
 
 
 
@@ -300,45 +304,110 @@ try:
                     print(f"    SKIPPING '{log_key}' (already exported)")
                     continue
 
-                pre_snapshot = snapshot_rd_files(export_folder)
+                # --- DICOM export (disabled) ---
+                # pre_snapshot = snapshot_rd_files(export_folder)
+                #
+                # print(f"    Exporting per-beam doses for '{ct_label}' ...")
+                # # TODO: exact kwarg for per-beam dose on an additional set
+                # # varies by RayStation version. If ct_label == primary_exam,
+                # # PhysicalBeamDosesForBeamSets works. Otherwise, the additional-
+                # # set form is needed; common candidates:
+                # #   PhysicalBeamDosesForBeamSetDoseOnAdditionalSet=
+                # #       [{'BeamSetId': beam_set_id, 'ExaminationName': ct_label}]
+                # #   AdditionalBeamSetDoseOnAdditionalSets=[...]
+                # # Adjust below based on the live RayStation traceback.
+                # if ct_label == primary_exam or primary_exam is None:
+                #     case.ScriptableDicomExport(
+                #         ExportFolderPath=export_folder,
+                #         BeamSets=[beam_set_id],
+                #         PhysicalBeamDosesForBeamSets=[beam_set_id],
+                #         IgnorePreConditionWarnings=True
+                #     )
+                # else:
+                #     case.ScriptableDicomExport(
+                #         ExportFolderPath=export_folder,
+                #         BeamSets=[beam_set_id],
+                #         PhysicalBeamDosesForBeamSetDoseOnAdditionalSet=[
+                #             {'BeamSetId': beam_set_id, 'ExaminationName': ct_label}
+                #         ],
+                #         IgnorePreConditionWarnings=True
+                #     )
+                #
+                # new_files = find_new_rd_files(export_folder, pre_snapshot)
+                # print(f"    {len(new_files)} new RD file(s) detected.")
+                #
+                # if not new_files:
+                #     print(f"    WARNING: No new RD files found for '{ct_label}'.")
+                #     continue
+                #
+                # final_paths = rename_beam_exports(
+                #     new_files, export_folder,
+                #     patient_id, sess, plan_type, ct_label, origbeam, beam_set
+                # )
+                # ---
 
-                print(f"    Exporting per-beam doses for '{ct_label}' ...")
-                # TODO: exact kwarg for per-beam dose on an additional set
-                # varies by RayStation version. If ct_label == primary_exam,
-                # PhysicalBeamDosesForBeamSets works. Otherwise, the additional-
-                # set form is needed; common candidates:
-                #   PhysicalBeamDosesForBeamSetDoseOnAdditionalSet=
-                #       [{'BeamSetId': beam_set_id, 'ExaminationName': ct_label}]
-                #   AdditionalBeamSetDoseOnAdditionalSets=[...]
-                # Adjust below based on the live RayStation traceback.
-                if ct_label == primary_exam or primary_exam is None:
-                    case.ScriptableDicomExport(
-                        ExportFolderPath=export_folder,
-                        BeamSets=[beam_set_id],
-                        PhysicalBeamDosesForBeamSets=[beam_set_id],
-                        IgnorePreConditionWarnings=True
-                    )
-                else:
-                    case.ScriptableDicomExport(
-                        ExportFolderPath=export_folder,
-                        BeamSets=[beam_set_id],
-                        PhysicalBeamDosesForBeamSetDoseOnAdditionalSet=[
-                            {'BeamSetId': beam_set_id, 'ExaminationName': ct_label}
-                        ],
-                        IgnorePreConditionWarnings=True
-                    )
+                # Direct extraction: find FractionEvaluation whose DoseOnExamination
+                # matches ct_label, then pull per-beam doses directly.
+                print(f"    Extracting per-beam doses for '{ct_label}' ...")
+                fe_idx  = None
+                doe_idx = None
+                for fi, fe in enumerate(case.TreatmentDelivery.FractionEvaluations):
+                    for di, doe in enumerate(fe.DoseOnExaminations):
+                        if doe.OnExamination.Name == ct_label:
+                            fe_idx  = fi
+                            doe_idx = di
+                            break
+                    if fe_idx is not None:
+                        break
 
-                new_files = find_new_rd_files(export_folder, pre_snapshot)
-                print(f"    {len(new_files)} new RD file(s) detected.")
-
-                if not new_files:
-                    print(f"    WARNING: No new RD files found for '{ct_label}'.")
+                if fe_idx is None:
+                    print(f"    WARNING: No FractionEvaluation found for '{ct_label}'. Skipping.")
                     continue
 
-                final_paths = rename_beam_exports(
-                    new_files, export_folder,
-                    patient_id, sess, plan_type, ct_label, origbeam, beam_set
-                )
+                dose_on_exam = (case.TreatmentDelivery
+                                    .FractionEvaluations[fe_idx]
+                                    .DoseOnExaminations[doe_idx])
+                beam_doses = dose_on_exam.DoseEvaluations[0].BeamDoses
+
+                safe_id      = re.sub(r'[\\/:*?"<>| ]', '_', patient_id)
+                safe_session = re.sub(r'[\\/:*?"<>| ]', '_', sess)
+                safe_type    = re.sub(r'[\\/:*?"<>| ]', '_', plan_type)
+                safe_ct      = re.sub(r'[\\/:*?"<>| ]', '_', ct_label)
+                safe_beam    = re.sub(r'[\\/:*?"<>| ]', '_', origbeam)
+
+                final_paths = []
+                for j in range(len(beam_doses)):
+                    grid = beam_doses[j].InDoseGrid
+                    nx   = int(grid.NrVoxels.x)
+                    ny   = int(grid.NrVoxels.y)
+                    nz   = int(grid.NrVoxels.z)
+                    vx_array     = np.array([float(grid.VoxelSize.x),
+                                             float(grid.VoxelSize.y),
+                                             float(grid.VoxelSize.z)], dtype=np.float32)
+                    corner_array = np.array([float(grid.Corner.x),
+                                             float(grid.Corner.y),
+                                             float(grid.Corner.z)], dtype=np.float32)
+
+                    flat       = beam_doses[j].DoseValues.DoseData
+                    dose_array = np.fromiter(flat, dtype=np.float32,
+                                             count=nx * ny * nz).reshape(nz, ny, nx)
+
+                    desired_name = (
+                        f"dose_{safe_id}_{safe_session}_{safe_type}_{safe_ct}_"
+                        f"{safe_beam}_{j:02d}.mat"
+                    )
+                    save_path = os.path.join(export_folder, desired_name)
+
+                    scipy.io.savemat(save_path, {
+                        'dose':          dose_array,
+                        'voxel_size_cm': vx_array,
+                        'corner_cm':     corner_array,
+                        'nx':            nx,
+                        'ny':            ny,
+                        'nz':            nz,
+                    })
+                    print(f"    Saved: {save_path}")
+                    final_paths.append(save_path)
 
                 log_plan_completion(progress_log, log_key, final_paths)
                 print(f"    Logged completion for '{log_key}'.")
