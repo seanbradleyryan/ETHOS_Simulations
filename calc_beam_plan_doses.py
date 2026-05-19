@@ -5,7 +5,6 @@ import glob
 import os
 import re
 import numpy as np
-import scipy.io
 
 
 # ============================================================
@@ -153,7 +152,7 @@ def init_log(log_path, patient_id, session):
     with open(log_path, 'w') as f:
         f.write(f"# Beam plan dose export log - started {datetime.now()}\n")
         f.write(f"# Patient: {patient_id}  |  Session: {session}\n")
-        f.write(f"# dose_{{id}}_{{session}}_{{plan_type}}_{{ct_label}}_{{origbeam}}_{{segment}}.mat\n")
+        f.write(f"# dose_{{id}}_{{session}}_{{plan_type}}_{{ct_label}}_{{origbeam}}_{{segment}}.npz\n")
 
 
 
@@ -394,18 +393,19 @@ try:
 
                     desired_name = (
                         f"dose_{safe_id}_{safe_session}_{safe_type}_{safe_ct}_"
-                        f"{safe_beam}_{j:02d}.mat"
+                        f"{safe_beam}_{j:02d}.npz"
                     )
                     save_path = os.path.join(export_folder, desired_name)
 
-                    scipy.io.savemat(save_path, {
-                        'dose':          dose_array,
-                        'voxel_size_cm': vx_array,
-                        'corner_cm':     corner_array,
-                        'nx':            nx,
-                        'ny':            ny,
-                        'nz':            nz,
-                    })
+                    np.savez_compressed(
+                        save_path,
+                        dose=dose_array,
+                        voxel_size_cm=vx_array,
+                        corner_cm=corner_array,
+                        nx=np.int32(nx),
+                        ny=np.int32(ny),
+                        nz=np.int32(nz),
+                    )
                     print(f"    Saved: {save_path}")
                     final_paths.append(save_path)
 
