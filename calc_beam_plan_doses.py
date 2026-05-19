@@ -4,7 +4,6 @@ from datetime import datetime
 import glob
 import os
 import re
-import json
 import numpy as np
 
 
@@ -153,7 +152,7 @@ def init_log(log_path, patient_id, session):
     with open(log_path, 'w') as f:
         f.write(f"# Beam plan dose export log - started {datetime.now()}\n")
         f.write(f"# Patient: {patient_id}  |  Session: {session}\n")
-        f.write(f"# dose_{{id}}_{{session}}_{{plan_type}}_{{ct_label}}_{{origbeam}}_{{segment}}.npy  (+.json)\n")
+        f.write(f"# dose_{{id}}_{{session}}_{{plan_type}}_{{ct_label}}_{{origbeam}}.npz  (all beams batched)\n")
 
 
 
@@ -375,7 +374,7 @@ try:
                 safe_ct      = re.sub(r'[\\/:*?"<>| ]', '_', ct_label)
                 safe_beam    = re.sub(r'[\\/:*?"<>| ]', '_', origbeam)
 
-                final_paths = []
+                save_data = {}
                 for j in range(len(beam_doses)):
                     grid = beam_doses[j].InDoseGrid
                     nx   = int(grid.NrVoxels.x)
@@ -391,24 +390,22 @@ try:
                     flat       = beam_doses[j].DoseValues.DoseData
                     dose_array = np.array(list(flat), dtype=np.float32).reshape(nz, ny, nx)
 
-                    base_name = (
-                        f"dose_{safe_id}_{safe_session}_{safe_type}_{safe_ct}_"
-                        f"{safe_beam}_{j:02d}"
-                    )
-                    npy_path  = os.path.join(export_folder, base_name + ".npy")
-                    json_path = os.path.join(export_folder, base_name + ".json")
+                    save_data[f'dose_{j:02d}']          = dose_array
+                    save_data[f'voxel_size_cm_{j:02d}'] = vx_array
+                    save_data[f'corner_cm_{j:02d}']     = corner_array
+                    save_data[f'shape_zyx_{j:02d}']     = np.array(dose_array.shape, dtype=np.int32)
+                    print(f"      beam {j:02d}: shape={dose_array.shape}  voxel={list(vx_array)}")
 
-                    np.save(npy_path, dose_array)
-                    with open(json_path, 'w') as jf:
-                        json.dump({
-                            'voxel_size_cm': list(vx_array.astype(float)),
-                            'corner_cm':     list(corner_array.astype(float)),
-                            'nx': nx, 'ny': ny, 'nz': nz,
-                            'shape_zyx': list(dose_array.shape),
-                        }, jf)
-                    print(f"    Saved: {npy_path}")
-                    save_path = npy_path
-                    final_paths.append(save_path)
+                save_data['n_beams'] = np.int32(len(beam_doses))
+
+                npz_name = (
+                    f"dose_{safe_id}_{safe_session}_{safe_type}_{safe_ct}_"
+                    f"{safe_beam}.npz"
+                )
+                npz_path = os.path.join(export_folder, npz_name)
+                np.savez_compressed(npz_path, **save_data)
+                print(f"    Saved: {npz_path}  ({len(beam_doses)} beam(s))")
+                final_paths = [npz_path]
 
                 log_plan_completion(progress_log, log_key, final_paths)
                 print(f"    Logged completion for '{log_key}'.")
