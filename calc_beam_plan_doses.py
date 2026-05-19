@@ -388,8 +388,7 @@ try:
                                              float(grid.Corner.z)], dtype=np.float32)
 
                     flat       = beam_doses[j].DoseValues.DoseData
-                    dose_array = np.fromiter(flat, dtype=np.float32,
-                                             count=nx * ny * nz).reshape(nz, ny, nx)
+                    dose_array = np.array(list(flat), dtype=np.float32).reshape(nz, ny, nx)
 
                     desired_name = (
                         f"dose_{safe_id}_{safe_session}_{safe_type}_{safe_ct}_"
