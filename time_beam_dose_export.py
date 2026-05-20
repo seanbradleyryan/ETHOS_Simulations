@@ -1,6 +1,7 @@
 from connect import *
 from datetime import datetime
 import csv
+import itertools
 import math
 import os
 import statistics
@@ -154,41 +155,52 @@ def measure_m2_handle_only(bd, n):
     return times
 
 
-def measure_m3a_list(bd, nz, ny, nx, n):
+def _timed_readout(builder, n):
+    """Run builder() n times, catching failures.  Returns (times, note).
+    On failure: (None, error string).  builder() must return the dose array."""
     times = []
     for _ in range(n):
-        t0 = time.perf_counter()
+        try:
+            t0 = time.perf_counter()
+            arr = builder()
+            t1 = time.perf_counter()
+            times.append(t1 - t0)
+            del arr
+        except Exception as exc:
+            return (None, "failed: {}".format(exc))
+    return (times, "ok")
+
+
+def measure_m3a_list(bd, nz, ny, nx, n):
+    def build():
         flat = bd.DoseValues.DoseData
-        arr  = np.array(list(flat), dtype=np.float32).reshape(nz, ny, nx)
-        t1 = time.perf_counter()
-        times.append(t1 - t0)
-        del arr
-    return times
+        return np.array(list(flat), dtype=np.float32).reshape(nz, ny, nx)
+    return _timed_readout(build, n)
 
 
 def measure_m3b_fromiter(bd, nz, ny, nx, n):
-    times = []
     total = nz * ny * nx
-    for _ in range(n):
-        t0 = time.perf_counter()
+    def build():
         flat = bd.DoseValues.DoseData
-        arr  = np.fromiter(flat, dtype=np.float32, count=total).reshape(nz, ny, nx)
-        t1 = time.perf_counter()
-        times.append(t1 - t0)
-        del arr
-    return times
+        return np.fromiter(flat, dtype=np.float32, count=total).reshape(nz, ny, nx)
+    return _timed_readout(build, n)
+
+
+def measure_m3b2_fromiter_chained(bd, nz, ny, nx, n):
+    """fromiter on a chained flatten of the outer sequence-of-sequences."""
+    total = nz * ny * nx
+    def build():
+        flat = bd.DoseValues.DoseData
+        return np.fromiter(itertools.chain.from_iterable(flat),
+                           dtype=np.float32, count=total).reshape(nz, ny, nx)
+    return _timed_readout(build, n)
 
 
 def measure_m3c_tuple(bd, nz, ny, nx, n):
-    times = []
-    for _ in range(n):
-        t0 = time.perf_counter()
+    def build():
         flat = bd.DoseValues.DoseData
-        arr  = np.array(tuple(flat), dtype=np.float32).reshape(nz, ny, nx)
-        t1 = time.perf_counter()
-        times.append(t1 - t0)
-        del arr
-    return times
+        return np.array(tuple(flat), dtype=np.float32).reshape(nz, ny, nx)
+    return _timed_readout(build, n)
 
 
 def measure_m3d_bulk(bd, nz, ny, nx, n):
@@ -377,48 +389,70 @@ try:
 
     # ---- M3 --------------------------------------------------------
     print("[M3a] Readout via np.array(list(flat)) ...")
-    m3a_times = measure_m3a_list(bd, nz, ny, nx, N_REPEATS)
+    m3a_times, m3a_note = measure_m3a_list(bd, nz, ny, nx, N_REPEATS)
 
     print("[M3b] Readout via np.fromiter(flat, count=N) ...")
-    m3b_times = measure_m3b_fromiter(bd, nz, ny, nx, N_REPEATS)
+    m3b_times, m3b_note = measure_m3b_fromiter(bd, nz, ny, nx, N_REPEATS)
+
+    print("[M3b2] Readout via np.fromiter(chain.from_iterable(flat), count=N) ...")
+    m3b2_times, m3b2_note = measure_m3b2_fromiter_chained(bd, nz, ny, nx, N_REPEATS)
 
     print("[M3c] Readout via np.array(tuple(flat)) ...")
-    m3c_times = measure_m3c_tuple(bd, nz, ny, nx, N_REPEATS)
+    m3c_times, m3c_note = measure_m3c_tuple(bd, nz, ny, nx, N_REPEATS)
 
     print("[M3d] Readout via bulk accessors ...")
     m3d_results = measure_m3d_bulk(bd, nz, ny, nx, N_REPEATS)
 
     # ---- Determine fastest readout for downstream M4/M6 ------------
-    readout_candidates = {
-        "M3a list"     : m3a_times,
-        "M3b fromiter" : m3b_times,
-        "M3c tuple"    : m3c_times,
-    }
+    readout_candidates = {}
+    for name, times in (("M3a list",              m3a_times),
+                        ("M3b fromiter",          m3b_times),
+                        ("M3b2 fromiter-chained", m3b2_times),
+                        ("M3c tuple",             m3c_times)):
+        if times:
+            readout_candidates[name] = times
     for name, (times, note) in m3d_results.items():
-        if times is not None:
+        if times:
             readout_candidates["M3d " + name] = times
 
     best_readout_name = None
     best_readout_mean = float('inf')
     for name, times in readout_candidates.items():
         m, _ = stats(times)
-        if m == m or True:  # NaN guard not needed for non-empty lists
-            if m < best_readout_mean:
-                best_readout_mean = m
-                best_readout_name = name
+        if m == m and m < best_readout_mean:
+            best_readout_mean = m
+            best_readout_name = name
 
-    print("  Fastest readout: {} ({:.4f} s)".format(best_readout_name, best_readout_mean))
+    if best_readout_name is not None:
+        print("  Fastest readout: {} ({:.4f} s)".format(best_readout_name, best_readout_mean))
+    else:
+        print("  Fastest readout: NONE succeeded.")
 
-    # Use M3b (fromiter) array as the canonical save subject if available;
-    # otherwise fall back to a fresh M3a build.
+    # Build a canonical dose array for save tests.  Walk known-good
+    # builders in order and use the first one that works.
     print("  Building reference dose array for save tests ...")
-    flat = bd.DoseValues.DoseData
-    try:
-        dose_array = np.fromiter(flat, dtype=np.float32,
-                                 count=total_voxels).reshape(nz, ny, nx)
-    except Exception:
-        flat = bd.DoseValues.DoseData
-        dose_array = np.array(list(flat), dtype=np.float32).reshape(nz, ny, nx)
+    dose_array = None
+    builders = [
+        ("M3a list", lambda: np.array(list(bd.DoseValues.DoseData),
+                                      dtype=np.float32).reshape(nz, ny, nx)),
+        ("M3b2 fromiter-chained",
+            lambda: np.fromiter(itertools.chain.from_iterable(bd.DoseValues.DoseData),
+                                dtype=np.float32,
+                                count=total_voxels).reshape(nz, ny, nx)),
+        ("M3b fromiter",
+            lambda: np.fromiter(bd.DoseValues.DoseData,
+                                dtype=np.float32,
+                                count=total_voxels).reshape(nz, ny, nx)),
+    ]
+    for name, fn in builders:
+        try:
+            dose_array = fn()
+            print("    built via {}".format(name))
+            break
+        except Exception as exc:
+            print("    {} failed: {}".format(name, exc))
+    if dose_array is None:
+        raise RuntimeError("Could not build a reference dose array via any M3 variant.")
 
     # ---- M4 --------------------------------------------------------
     print("[M4] Save destinations (.npy durable + .npz compressed) ...")
@@ -497,9 +531,10 @@ try:
 
     row("M1  Grid metadata fetch",                 m1_times)
     row("M2  DoseData handle fetch (no iteration)", m2_times)
-    row("M3a Readout: np.array(list(flat))",       m3a_times)
-    row("M3b Readout: np.fromiter(flat, count)",   m3b_times)
-    row("M3c Readout: np.array(tuple(flat))",      m3c_times)
+    row("M3a Readout: np.array(list(flat))",       m3a_times,  m3a_note)
+    row("M3b Readout: np.fromiter(flat, count)",   m3b_times,  m3b_note)
+    row("M3b2 Readout: np.fromiter(chain, count)", m3b2_times, m3b2_note)
+    row("M3c Readout: np.array(tuple(flat))",      m3c_times,  m3c_note)
     for name, (times, note) in m3d_results.items():
         row("M3d Readout: " + name, times, note)
 
@@ -531,11 +566,16 @@ try:
     print("FOOTER")
     print("=" * 70)
 
-    m3a_mean, _ = stats(m3a_times)
-    if best_readout_name is not None and m3a_mean > 0:
+    m3a_mean = float('nan')
+    if m3a_times:
+        m3a_mean, _ = stats(m3a_times)
+    if best_readout_name is not None and m3a_mean == m3a_mean and m3a_mean > 0:
         speedup_readout = m3a_mean / best_readout_mean if best_readout_mean > 0 else float('inf')
         print("  Best readout      : {}  ({:.4f} s vs M3a {:.4f} s, {:.2f}x)"
               .format(best_readout_name, best_readout_mean, m3a_mean, speedup_readout))
+    elif best_readout_name is not None:
+        print("  Best readout      : {}  ({:.4f} s)  (M3a baseline unavailable)"
+              .format(best_readout_name, best_readout_mean))
     else:
         print("  Best readout      : unable to determine")
 
@@ -559,7 +599,7 @@ try:
 
     # Projected 6000-dose runs.  Current = M3a + Citrix .npz.
     current_per_dose = float('nan')
-    if m3a_times and citrix_mean == citrix_mean:
+    if m3a_mean == m3a_mean and citrix_mean == citrix_mean:
         current_per_dose = m3a_mean + citrix_mean
     optimized_per_dose = float('nan')
     if best_readout_mean < float('inf') and best_save_mean < float('inf'):
@@ -596,11 +636,12 @@ try:
         return rows
 
     all_rows = []
-    all_rows += csv_rows_for("M1_grid_metadata",   m1_times)
-    all_rows += csv_rows_for("M2_handle_only",     m2_times)
-    all_rows += csv_rows_for("M3a_list",           m3a_times)
-    all_rows += csv_rows_for("M3b_fromiter",       m3b_times)
-    all_rows += csv_rows_for("M3c_tuple",          m3c_times)
+    all_rows += csv_rows_for("M1_grid_metadata",     m1_times)
+    all_rows += csv_rows_for("M2_handle_only",       m2_times)
+    all_rows += csv_rows_for("M3a_list",             m3a_times,  m3a_note)
+    all_rows += csv_rows_for("M3b_fromiter",         m3b_times,  m3b_note)
+    all_rows += csv_rows_for("M3b2_fromiter_chain",  m3b2_times, m3b2_note)
+    all_rows += csv_rows_for("M3c_tuple",            m3c_times,  m3c_note)
     for name, (times, note) in m3d_results.items():
         all_rows += csv_rows_for("M3d_" + name.replace(" ", "_"), times, note)
     for label, info in m4_results.items():
