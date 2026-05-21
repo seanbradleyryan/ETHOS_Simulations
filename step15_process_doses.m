@@ -192,16 +192,29 @@ end
 
 fprintf('\n[1/8] Finding field dose files...\n');
 
-% --- PREFERRED format: dose_[patientid]_[session]_[adapted|reference]_B[n]_[seg].dcm ---
-% Produced by step06_explode_segments + RayStation export.
-% e.g. dose_1885729_Session_4_adapted_B6_103.dcm
-% If ANY files in this format exist, use ONLY those and skip all other patterns.
-rd_files_preferred = dir(fullfile(rs_dir, 'dose_*.dcm'));
+% --- Input format priority ---
+%   1. dose_*.mat   (preferred, written by step14_npz_to_mat from RayStation NPZ)
+%   2. dose_*.dcm   (legacy RayStation DICOM export)
+%   3. older legacy patterns (Plan_Field*, RD.*, ...)
+%
+% input_format selects the per-field loader branch later in this function.
+input_format       = '';
+rd_files_mat       = dir(fullfile(rs_dir, 'dose_*.mat'));
 
-if ~isempty(rd_files_preferred)
-    rd_files = rd_files_preferred;
-    fprintf('  Using preferred format (dose_*.dcm): %d file(s) found\n', numel(rd_files));
+if ~isempty(rd_files_mat)
+    rd_files = rd_files_mat;
+    input_format = 'mat';
+    fprintf('  Using converted .mat input (dose_*.mat): %d file(s) found\n', numel(rd_files));
 else
+    rd_files_preferred = dir(fullfile(rs_dir, 'dose_*.dcm'));
+end
+
+if isempty(input_format) && ~isempty(rd_files_preferred)
+    rd_files = rd_files_preferred;
+    input_format = 'dicom';
+    fprintf('  Using preferred format (dose_*.dcm): %d file(s) found\n', numel(rd_files));
+elseif isempty(input_format)
+    input_format = 'dicom';
     % --- Legacy fallback patterns ---
     rd_files = dir(fullfile(rs_dir, 'Plan_Field*_Beam*_B*_S*.dcm'));
 
@@ -229,11 +242,12 @@ if isempty(rd_files)
     error('step15_process_doses:NoFieldDoses', ...
         ['No field dose files found in: %s\n' ...
          'Searched patterns (in priority order):\n' ...
-         '  1. dose_*.dcm  (preferred)\n' ...
-         '  2. Plan_Field*_Beam*_B*_S*.dcm\n' ...
-         '  3. Beam*_Seg*_Field*.dcm\n' ...
-         '  4. Beam*.dcm\n' ...
-         '  5. RD.*.dcm / RD*.dcm'], rs_dir);
+         '  1. dose_*.mat  (preferred, from step14_npz_to_mat)\n' ...
+         '  2. dose_*.dcm  (legacy RayStation DICOM export)\n' ...
+         '  3. Plan_Field*_Beam*_B*_S*.dcm\n' ...
+         '  4. Beam*_Seg*_Field*.dcm\n' ...
+         '  5. Beam*.dcm\n' ...
+         '  6. RD.*.dcm / RD*.dcm'], rs_dir);
 end
 
 num_files = length(rd_files);
@@ -259,21 +273,30 @@ end
 
 fprintf('\n[3/8] Establishing reference dose grid geometry...\n');
 
-% Load first dose file to get reference geometry
+% Load first dose file to get reference geometry. Both .mat and DICOM
+% inputs are pre-converted to the same (origin_mm, spacing_mm, dimensions)
+% triple before the per-field loop runs.
 ref_file = fullfile(rs_dir, rd_files(1).name);
-ref_info = dicominfo(ref_file);
-ref_dose = double(squeeze(dicomread(ref_file)));
-
-% Apply dose grid scaling
-if isfield(ref_info, 'DoseGridScaling')
-    ref_dose = ref_dose * ref_info.DoseGridScaling;
+switch input_format
+    case 'mat'
+        ref_loaded  = load(ref_file, 'raw_field_dose');
+        ref_rf      = ref_loaded.raw_field_dose;
+        ref_dose    = ref_rf.dose_Gy;
+        ref_origin  = ref_rf.origin(:);                  % [x; y; z] in mm
+        ref_spacing = ref_rf.spacing(:);                 % [dx; dy; dz] in mm
+        ref_dims    = size(ref_dose);                    % [rows, cols, slices]
+    otherwise  % 'dicom'
+        ref_info = dicominfo(ref_file);
+        ref_dose = double(squeeze(dicomread(ref_file)));
+        % Apply dose grid scaling
+        if isfield(ref_info, 'DoseGridScaling')
+            ref_dose = ref_dose * ref_info.DoseGridScaling;
+        end
+        % CRITICAL: Z-resolution from GridFrameOffsetVector, NOT PixelSpacing
+        ref_origin  = ref_info.ImagePositionPatient(:);  % [x, y, z] in mm
+        ref_spacing = extractDoseSpacing(ref_info);      % [dx, dy, dz] in mm
+        ref_dims    = size(ref_dose);                    % [rows, cols, slices]
 end
-
-% Extract reference geometry
-% CRITICAL: Z-resolution from GridFrameOffsetVector, NOT PixelSpacing
-ref_origin = ref_info.ImagePositionPatient(:);  % [x, y, z] in mm
-ref_spacing = extractDoseSpacing(ref_info);      % [dx, dy, dz] in mm
-ref_dims = size(ref_dose);                       % [rows, cols, slices]
 
 fprintf('  Reference dose grid:\n');
 fprintf('    Dimensions: [%d, %d, %d]\n', ref_dims(1), ref_dims(2), ref_dims(3));
@@ -416,22 +439,35 @@ for batch_idx = 1:num_batches
         fprintf('  Processing field %d/%d: %s\n', i, num_files, rd_files(i).name);
 
         try
-            % Load DICOM dose file
             dose_file = fullfile(rs_dir, rd_files(i).name);
-            dose_info = dicominfo(dose_file);
-            dose_data = double(squeeze(dicomread(dose_file)));
+            switch input_format
+                case 'mat'
+                    % Load pre-converted .mat (from step14_npz_to_mat). Geometry
+                    % is already in mm and the dose array is already double in
+                    % MATLAB (row=Y, col=X, slice=Z) order.
+                    loaded       = load(dose_file, 'raw_field_dose');
+                    rf           = loaded.raw_field_dose;
+                    dose_data    = rf.dose_Gy;
+                    dose_origin  = rf.origin(:);
+                    dose_spacing = rf.spacing(:);
+                    dose_dims    = size(dose_data);
+                otherwise  % 'dicom'
+                    % Load DICOM dose file
+                    dose_info = dicominfo(dose_file);
+                    dose_data = double(squeeze(dicomread(dose_file)));
 
-            % Apply dose grid scaling
-            if isfield(dose_info, 'DoseGridScaling')
-                dose_scaling = dose_info.DoseGridScaling;
-                dose_data = dose_data * dose_scaling;
-                fprintf('    Applied scaling: %e\n', dose_scaling);
+                    % Apply dose grid scaling
+                    if isfield(dose_info, 'DoseGridScaling')
+                        dose_scaling = dose_info.DoseGridScaling;
+                        dose_data = dose_data * dose_scaling;
+                        fprintf('    Applied scaling: %e\n', dose_scaling);
+                    end
+
+                    % Extract geometry and verify it matches reference
+                    dose_origin  = dose_info.ImagePositionPatient(:);
+                    dose_spacing = extractDoseSpacing(dose_info);
+                    dose_dims    = size(dose_data);
             end
-
-            % Extract geometry and verify it matches reference
-            dose_origin = dose_info.ImagePositionPatient(:);
-            dose_spacing = extractDoseSpacing(dose_info);
-            dose_dims = size(dose_data);
 
             % Validate geometry matches reference
             [geom_match, geom_msg] = validateGeometry(dose_origin, dose_spacing, dose_dims, ...
@@ -455,6 +491,17 @@ for batch_idx = 1:num_batches
             % field_num (= beam_num) is used to match to RTPLAN beam metadata
             [beam_num, seg_num, field_num, plan_type] = extractBeamInfo(rd_files(i).name, i);
 
+            % Extract optional CT label (e.g. 'CT_1') so CT_1 vs CT_3 field
+            % doses for the same beam don't collide on output.
+            ct_tokens = regexp(rd_files(i).name, ...
+                '_(?:adapted|reference)_(CT_\d+)_B\d+_\d+\.(?:dcm|mat)$', ...
+                'tokens', 'once', 'ignorecase');
+            if ~isempty(ct_tokens)
+                ct_label = ct_tokens{1};
+            else
+                ct_label = '';
+            end
+
             % Get beam metadata by matching field_num to beam_number in RTPLAN
             [gantry_angle, meterset] = getBeamMetadata(beam_metadata, field_num);
 
@@ -476,6 +523,7 @@ for batch_idx = 1:num_batches
             field_dose.seg_num = seg_num;           % Segment number from filename
             field_dose.field_num = field_num;       % Field number (= beam_num, matches RTPLAN)
             field_dose.plan_type = plan_type;       % 'adapted' or 'reference'
+            field_dose.ct_label  = ct_label;        % '' for legacy DICOM, 'CT_n' for NPZ-derived
             field_dose.gantry_angle = gantry_angle;
             field_dose.meterset = meterset;
             field_dose.source_file = rd_files(i).name;
@@ -490,10 +538,16 @@ for batch_idx = 1:num_batches
             % Accumulate into batch subtotal (masking already applied)
             batch_total_dose = batch_total_dose + dose_data;
 
-            % Save individual field dose file — name mirrors source DICOM
-            % Format: dose_[id]_[session]_[adapted|reference]_B[beam]_[seg].mat
-            field_filename = sprintf('dose_%s_%s_%s_B%d_%d.mat', ...
-                patient_id, session, plan_type, beam_num, seg_num);
+            % Save individual field dose file — name mirrors source.
+            % Format (legacy DICOM):  dose_[id]_[session]_[plan_type]_B[beam]_[seg].mat
+            % Format (NPZ-derived):   dose_[id]_[session]_[plan_type]_[ct_label]_B[beam]_[seg].mat
+            if isempty(ct_label)
+                field_filename = sprintf('dose_%s_%s_%s_B%d_%d.mat', ...
+                    patient_id, session, plan_type, beam_num, seg_num);
+            else
+                field_filename = sprintf('dose_%s_%s_%s_%s_B%d_%d.mat', ...
+                    patient_id, session, plan_type, ct_label, beam_num, seg_num);
+            end
             field_filepath = fullfile(processed_dir, field_filename);
 
             % Convert 3D dose to sparse 2D [nRows*nCols, nSlices] before saving.
@@ -910,11 +964,12 @@ function [beam_num, seg_num, field_num, plan_type] = extractBeamInfo(filename, d
 %EXTRACTBEAMINFO Extract beam, segment, field numbers and plan type from dose filename
 %
 %   Supported patterns (checked in priority order):
-%     1. dose_[id]_[session]_(adapted|reference)_B[n]_[seg].dcm  (preferred)
-%        e.g. dose_1885729_Session_4_adapted_B6_103.dcm
-%        -> beam_num  = 6  (B[n])
-%        -> seg_num   = 103
-%        -> field_num = 6  (= beam_num, matches RTPLAN beam_number)
+%     1. dose_[id]_[session]_(adapted|reference)[_CT_k]_B[n]_[seg].(dcm|mat)
+%        e.g. dose_1885729_Session_4_adapted_B6_103.dcm        (legacy DICOM)
+%             dose_1194203_Session_1_adapted_CT_1_B13_00.mat   (RayStation NPZ -> mat)
+%        -> beam_num  = 6 or 13  (B[n])
+%        -> seg_num   = 103 or 0
+%        -> field_num = beam_num (matches RTPLAN beam_number)
 %        -> plan_type = 'adapted'
 %     2. Plan_Field [n]_Beam[m]_B[n]_S[m].dcm  (legacy step06 format)
 %     3. Beam[n]_Seg[m]_Field [o].dcm           (legacy RayStation export)
@@ -932,8 +987,10 @@ function [beam_num, seg_num, field_num, plan_type] = extractBeamInfo(filename, d
     field_num = default_index;
     plan_type = 'unknown';
 
-    % --- Pattern 1 (preferred): dose_*_(adapted|reference)_B[n]_[seg].dcm ---
-    tokens = regexp(filename, '_(adapted|reference)_B(\d+)_(\d+)\.dcm$', 'tokens', 'ignorecase');
+    % --- Pattern 1 (preferred): dose_*_(adapted|reference)[_CT_k]_B[n]_[seg].(dcm|mat) ---
+    tokens = regexp(filename, ...
+        '_(adapted|reference)(?:_CT_\d+)?_B(\d+)_(\d+)\.(?:dcm|mat)$', ...
+        'tokens', 'ignorecase');
     if ~isempty(tokens) && ~isempty(tokens{1})
         plan_type = lower(tokens{1}{1});        % 'adapted' or 'reference'
         beam_num  = str2double(tokens{1}{2});   % B[n]

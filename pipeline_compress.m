@@ -1,28 +1,30 @@
 %% =========================================================================
 %  PIPELINE_COMPRESS.m
-%  ETHOS Photoacoustic Pipeline — Dose Processing and Upload Preparation
+%  ETHOS Photoacoustic Pipeline — Dose Processing (Steps 1.4 / 1.5)
 %  =========================================================================
 %
 %  PURPOSE:
-%  Runs on the Windows work laptop after RayStation field dose export.
-%  Processes raw field dose DICOMs (Step 1.5) and prepares the processed
-%  .mat files for upload to the Linux cluster (prepare_uploads).
+%  Runs on the Linux cluster after RayStation field dose NPZ export.
+%  Converts NPZ field doses to .mat (Step 1.4) and processes them into
+%  per-field / total / SCT-resampled outputs (Step 1.5). The resulting
+%  .mat files in RayStationFiles/<id>/<session>/processed/ are the direct
+%  input to pipeline_simulate.m — no upload-packaging step is performed.
 %
-%  Run this BEFORE pipeline_simulate.m on the cluster.
+%  Run this BEFORE pipeline_simulate.m.
 %
 %  STEPS EXECUTED:
+%    Step 1.4 — Convert RayStation NPZ field doses to .mat
 %    Step 1.5 — Process field doses and resample SCT to dose grid
-%    Upload   — prepare_uploads: package processed .mat files for transfer
 %
 %  PREREQUISITES:
 %    - MATLAB R2022a or later
 %    - Image Processing Toolbox
 %    - pipeline_setup.m must have been run successfully
-%    - RayStation field dose DICOMs exported to
-%      C:\Users\80030361\ETHOS_Simulations\RayStationFiles\[PatientID]\[Session]\
+%    - RayStation field dose NPZ files placed under
+%      <working_dir>/RayStationFiles/[PatientID]/[Session]/
 %
-%  PLATFORM: Windows machine (C:/Users/80030361/ETHOS_Simulations).
-%            pipeline_simulate.m runs on the Linux cluster after upload.
+%  PLATFORM: Linux cluster. working_dir defaults to the directory this
+%            script lives in (fileparts(mfilename('fullpath'))).
 %
 %  AUTHOR: ETHOS Pipeline Team
 %  DATE: April 2026
@@ -37,8 +39,11 @@ CONFIG.patients        = {'1194203'};
 CONFIG.sessions        = {'Session_1'};
 CONFIG.treatment_site  = 'Pancreas';
 
-% --- Directory Paths (Windows work laptop) ---
-CONFIG.working_dir  = 'C:/Users/80030361/ETHOS_Simulations';
+% --- Directory Paths ---
+% Default working_dir = the directory this script lives in. Works on any
+% host (Linux cluster, Windows laptop) as long as the pipeline scripts and
+% the RayStationFiles/EthosExports trees are checked out side-by-side.
+CONFIG.working_dir  = fileparts(mfilename('fullpath'));
 
 % --- Dose Masking (Step 1.5) ---
 % Set false to disable zeroing outside body / in couch (for debugging only)
@@ -51,20 +56,20 @@ CONFIG.apply_dose_masking = true;
 CONFIG.use_sparse_storage  = true;
 
 % --- Pipeline Control Flags ---
+CONFIG.run_step14       = true;   % Step 1.4: Convert NPZ field doses to .mat
 CONFIG.run_step15       = true;   % Step 1.5: Process doses and resample CT
-CONFIG.run_prepare      = true;   % Upload  : Prepare .mat files for cluster
 
 %% ========================= INITIALIZATION ================================
 
 fprintf('=========================================================\n');
-fprintf('  ETHOS Pipeline — Compress & Prepare (Steps 1.5 / Upload)\n');
+fprintf('  ETHOS Pipeline — Step 1.4 / 1.5 Dose Processing\n');
 fprintf('=========================================================\n');
 fprintf('  Started: %s\n', datetime('now'));
 fprintf('  Working directory: %s\n', CONFIG.working_dir);
 fprintf('=========================================================\n\n');
 
-% Add pipeline scripts to path
-addpath(genpath(fullfile(CONFIG.working_dir, 'PipelineScripts')));
+% Add pipeline scripts to path (scripts live at the repo root next to this file)
+addpath(CONFIG.working_dir);
 
 % Initialize results structure
 RESULTS           = struct();
@@ -103,6 +108,18 @@ for p_idx = 1:length(CONFIG.patients)
             fprintf('[STEP 1] Found %d dose file(s) in %s\n', num_dose_files, rs_dir);
 
             %% ============================================================
+            %  STEP 1.4: Convert RayStation NPZ Field Doses to .mat
+            %% ============================================================
+            if CONFIG.run_step14
+                fprintf('\n[STEP 1.4] Converting NPZ field doses to .mat...\n');
+                n_converted = step14_npz_to_mat(patient_id, session, CONFIG);
+                RESULTS.patients.(result_key).num_npz_converted = n_converted;
+                fprintf('[STEP 1.4] Converted %d NPZ file(s).\n', n_converted);
+            else
+                fprintf('\n[STEP 1.4] Skipped (CONFIG.run_step14 = false).\n');
+            end
+
+            %% ============================================================
             %  STEP 1.5: Process Field Doses and Resample CT
             %% ============================================================
             if CONFIG.run_step15
@@ -123,21 +140,8 @@ for p_idx = 1:length(CONFIG.patients)
                 fprintf('\n[STEP 1.5] Skipped (CONFIG.run_step15 = false).\n');
             end
 
-            %% ============================================================
-            %  UPLOAD PREPARATION: Package processed files for cluster
-            %% ============================================================
-            if CONFIG.run_prepare
-                fprintf('\n[UPLOAD] Preparing files for cluster transfer...\n');
-
-                prepare_uploads(patient_id, session, CONFIG);
-
-                fprintf('[UPLOAD] Complete.\n');
-            else
-                fprintf('\n[UPLOAD] Skipped (CONFIG.run_prepare = false).\n');
-            end
-
             RESULTS.patients.(result_key).status = 'complete';
-            fprintf('\n=== %s/%s: COMPRESS COMPLETE ===\n', patient_id, session);
+            fprintf('\n=== %s/%s: PROCESSING COMPLETE ===\n', patient_id, session);
 
         catch ME
             fprintf('\n[ERROR] %s\n', ME.message);
@@ -147,7 +151,7 @@ for p_idx = 1:length(CONFIG.patients)
             RESULTS.patients.(result_key).status        = 'error';
             RESULTS.patients.(result_key).error.message = ME.message;
             RESULTS.patients.(result_key).error.stack   = ME.stack;
-            fprintf('\n=== %s/%s: COMPRESS FAILED ===\n', patient_id, session);
+            fprintf('\n=== %s/%s: PROCESSING FAILED ===\n', patient_id, session);
             continue;
         end
 
@@ -171,7 +175,11 @@ function [exists, num_files] = check_raystation_files(rs_dir)
     exists    = false;
     num_files = 0;
     if ~exist(rs_dir, 'dir'), return; end
-    rd_files = dir(fullfile(rs_dir, 'dose_*.dcm'));
+    % Preferred input format on Linux: NPZ from calc_beam_plan_doses.py
+    rd_files = dir(fullfile(rs_dir, 'dose_*.npz'));
+    if isempty(rd_files)
+        rd_files = dir(fullfile(rs_dir, 'dose_*.dcm'));
+    end
     if isempty(rd_files)
         rd_files = dir(fullfile(rs_dir, 'Plan_Field*_Beam*_B*_S*.dcm'));
     end
