@@ -96,11 +96,23 @@ fprintf('[STEP 1] Loading ETHOS truth dose...\n');
 
 sct_dir  = fullfile(CONFIG.working_dir, 'EthosExports', patient_id, ...
                     CONFIG.treatment_site, session, 'sct');
-rd_files = dir(fullfile(sct_dir, 'RTDOSE*.dcm'));
+% Original (legacy) scheme: search for any RTDOSE*.dcm in sct directory
+% rd_files = dir(fullfile(sct_dir, 'RTDOSE*.dcm'));
+%
+% if isempty(rd_files)
+%     error('test_RS_doses:FileNotFound', ...
+%         'No RTDOSE*.dcm file found in:\n  %s\nCheck CONFIG.treatment_site and that DICOM exports are present.', ...
+%         sct_dir);
+% end
+%
+% rd_path   = fullfile(sct_dir, rd_files(1).name);
+
+% Current scheme: use canonical RD_reference.dcm as the ETHOS truth sample
+rd_files = dir(fullfile(sct_dir, 'RD_reference.dcm'));
 
 if isempty(rd_files)
     error('test_RS_doses:FileNotFound', ...
-        'No RTDOSE*.dcm file found in:\n  %s\nCheck CONFIG.treatment_site and that DICOM exports are present.', ...
+        'RD_reference.dcm not found in:\n  %s\nCheck CONFIG.treatment_site and that the reference dose export is present.', ...
         sct_dir);
 end
 
