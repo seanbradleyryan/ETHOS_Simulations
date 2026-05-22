@@ -26,6 +26,11 @@ PLAN_NAME_RE = re.compile(
     re.IGNORECASE
 )
 
+# Match a beam number embedded in a beam set's Comment string. Accepts:
+#   "Field 13", "field13", "B13", "b 13"
+# The captured group is the integer beam number.
+BEAM_NUM_RE = re.compile(r'(?:Field\s*|B\s*)(\d+)', re.IGNORECASE)
+
 
 # ============================================================
 # Helper: parse a plan name into (session, plan_type, origbeam)
@@ -123,7 +128,7 @@ def build_export_dir(patient_id, session):
 
 
 # ============================================================
-# Resume helpers (log key is "{plan_name}|{ct_label}")
+# Resume helpers (log key is "{plan_name}|{ct_label}|B{n}")
 # ============================================================
 def get_completed_plans(log_path):
     completed = set()
@@ -151,9 +156,17 @@ def init_log(log_path, patient_id, session):
     with open(log_path, 'w') as f:
         f.write(f"# Beam plan dose export log - started {datetime.now()}\n")
         f.write(f"# Patient: {patient_id}  |  Session: {session}\n")
-        f.write(f"# dose_{{id}}_{{session}}_{{plan_type}}_{{ct_label}}_{{origbeam}}_{{segment}}.npz\n")
+        f.write(f"# dose_{{id}}_{{session}}_{{plan_type}}_{{ct_label}}_B{{n}}_{{segment}}.npz\n")
 
 
+# ============================================================
+# Helper: read ForBeamSet (case spellings vary across RS versions)
+# ============================================================
+def get_for_beam_set(eval_obj):
+    fbs = getattr(eval_obj, 'ForBeamSet', None)
+    if fbs is None:
+        fbs = getattr(eval_obj, 'ForBeamset', None)
+    return fbs
 
 
 # ============================================================
@@ -208,7 +221,18 @@ try:
             print(f"    {plan_type:<10s}  origbeam={origbeam:<10s}  plan='{plan.Name}'  beams={n_beams}")
 
     # ============================================================
-    # OUTER LOOP – sessions
+    # Build a beam-set identity map so the export pass can recover
+    # (session, plan_type, origbeam, plan_name) from a DoseEvaluation's
+    # ForBeamSet.
+    # ============================================================
+    # beam_set_map: beam_set_id (str) -> (sess, plan_type, origbeam, plan_name)
+    beam_set_map = {}
+    # session_info: sess -> {'export_folder', 'progress_log', 'completed'}
+    session_info = {}
+
+    # ============================================================
+    # COMPUTE PASS — per session, per template plan
+    # (No export here; export happens in a separate pass below.)
     # ============================================================
     for sess, beam_plans in sorted(sessions.items()):
 
@@ -223,14 +247,20 @@ try:
         completed_plans = get_completed_plans(progress_log)
 
         if completed_plans:
-            print(f"  Resuming – {len(completed_plans)} plan(s) already done: "
+            print(f"  Resuming – {len(completed_plans)} entry(ies) already done: "
                   + ", ".join(sorted(completed_plans)))
         else:
             init_log(progress_log, patient_id, sess)
             print("  No prior exports for this session. Starting fresh.")
 
+        session_info[sess] = {
+            'export_folder': export_folder,
+            'progress_log':  progress_log,
+            'completed':     completed_plans,
+        }
+
         # ========================================================
-        # INNER LOOP – template plans
+        # INNER LOOP – template plans (compute dose only)
         # ========================================================
         for plan_type, origbeam, plan in beam_plans:
             plan_name = plan.Name
@@ -241,6 +271,9 @@ try:
 
             beam_set    = plan.BeamSets[0]
             beam_set_id = beam_set.BeamSetIdentifier()
+
+            # Register beam set for later export-pass lookup.
+            beam_set_map[beam_set_id] = (sess, plan_type, origbeam, plan_name)
 
             print(f"\n  --- {plan_type}  origbeam='{origbeam}'  plan='{plan_name}' ---")
             print(f"    BeamSet   : {beam_set_id}")
@@ -294,121 +327,192 @@ try:
             patient.Save()
             print(f"    Patient saved.")
 
-            # ---- Export per-beam dose for each CT in EXAMINATION_LABELS
-            for ct_label in EXAMINATION_LABELS:
-                log_key = f"{plan_name}|{ct_label}"
+            # --- DICOM export (disabled) ---
+            # pre_snapshot = snapshot_rd_files(export_folder)
+            #
+            # print(f"    Exporting per-beam doses for '{ct_label}' ...")
+            # # TODO: exact kwarg for per-beam dose on an additional set
+            # # varies by RayStation version. If ct_label == primary_exam,
+            # # PhysicalBeamDosesForBeamSets works. Otherwise, the additional-
+            # # set form is needed; common candidates:
+            # #   PhysicalBeamDosesForBeamSetDoseOnAdditionalSet=
+            # #       [{'BeamSetId': beam_set_id, 'ExaminationName': ct_label}]
+            # #   AdditionalBeamSetDoseOnAdditionalSets=[...]
+            # # Adjust below based on the live RayStation traceback.
+            # if ct_label == primary_exam or primary_exam is None:
+            #     case.ScriptableDicomExport(
+            #         ExportFolderPath=export_folder,
+            #         BeamSets=[beam_set_id],
+            #         PhysicalBeamDosesForBeamSets=[beam_set_id],
+            #         IgnorePreConditionWarnings=True
+            #     )
+            # else:
+            #     case.ScriptableDicomExport(
+            #         ExportFolderPath=export_folder,
+            #         BeamSets=[beam_set_id],
+            #         PhysicalBeamDosesForBeamSetDoseOnAdditionalSet=[
+            #             {'BeamSetId': beam_set_id, 'ExaminationName': ct_label}
+            #         ],
+            #         IgnorePreConditionWarnings=True
+            #     )
+            #
+            # new_files = find_new_rd_files(export_folder, pre_snapshot)
+            # print(f"    {len(new_files)} new RD file(s) detected.")
+            #
+            # if not new_files:
+            #     print(f"    WARNING: No new RD files found for '{ct_label}'.")
+            #     continue
+            #
+            # final_paths = rename_beam_exports(
+            #     new_files, export_folder,
+            #     patient_id, sess, plan_type, ct_label, origbeam, beam_set
+            # )
+            # ---
 
-                if log_key in completed_plans:
-                    print(f"    SKIPPING '{log_key}' (already exported)")
+    # ============================================================
+    # EXPORT PASS — iterate FractionEvaluations / DoseOnExaminations /
+    # DoseEvaluations and write one NPZ per beam of every evaluation that
+    # maps back (via ForBeamSet) to one of our template beam sets.
+    # ============================================================
+    print(f"\n{'='*60}")
+    print("EXPORT PASS")
+    print(f"{'='*60}")
+
+    seen_keys = set()
+    no_eval_warned = set()
+
+    for ct_label in EXAMINATION_LABELS:
+        print(f"\n  Scanning FractionEvaluations for CT '{ct_label}' ...")
+
+        safe_ct = re.sub(r'[\\/:*?"<>| ]', '_', ct_label)
+
+        matched_doe = False
+        for fi, fe in enumerate(case.TreatmentDelivery.FractionEvaluations):
+            for di, doe in enumerate(fe.DoseOnExaminations):
+                if doe.OnExamination.Name != ct_label:
                     continue
 
-                # --- DICOM export (disabled) ---
-                # pre_snapshot = snapshot_rd_files(export_folder)
-                #
-                # print(f"    Exporting per-beam doses for '{ct_label}' ...")
-                # # TODO: exact kwarg for per-beam dose on an additional set
-                # # varies by RayStation version. If ct_label == primary_exam,
-                # # PhysicalBeamDosesForBeamSets works. Otherwise, the additional-
-                # # set form is needed; common candidates:
-                # #   PhysicalBeamDosesForBeamSetDoseOnAdditionalSet=
-                # #       [{'BeamSetId': beam_set_id, 'ExaminationName': ct_label}]
-                # #   AdditionalBeamSetDoseOnAdditionalSets=[...]
-                # # Adjust below based on the live RayStation traceback.
-                # if ct_label == primary_exam or primary_exam is None:
-                #     case.ScriptableDicomExport(
-                #         ExportFolderPath=export_folder,
-                #         BeamSets=[beam_set_id],
-                #         PhysicalBeamDosesForBeamSets=[beam_set_id],
-                #         IgnorePreConditionWarnings=True
-                #     )
-                # else:
-                #     case.ScriptableDicomExport(
-                #         ExportFolderPath=export_folder,
-                #         BeamSets=[beam_set_id],
-                #         PhysicalBeamDosesForBeamSetDoseOnAdditionalSet=[
-                #             {'BeamSetId': beam_set_id, 'ExaminationName': ct_label}
-                #         ],
-                #         IgnorePreConditionWarnings=True
-                #     )
-                #
-                # new_files = find_new_rd_files(export_folder, pre_snapshot)
-                # print(f"    {len(new_files)} new RD file(s) detected.")
-                #
-                # if not new_files:
-                #     print(f"    WARNING: No new RD files found for '{ct_label}'.")
-                #     continue
-                #
-                # final_paths = rename_beam_exports(
-                #     new_files, export_folder,
-                #     patient_id, sess, plan_type, ct_label, origbeam, beam_set
-                # )
-                # ---
+                matched_doe = True
+                evals = list(doe.DoseEvaluations)
+                print(f"    FE[{fi}] DoE[{di}] for '{ct_label}': "
+                      f"{len(evals)} DoseEvaluation(s)")
 
-                # Direct extraction: find FractionEvaluation whose DoseOnExamination
-                # matches ct_label, then pull per-beam doses directly.
-                print(f"    Extracting per-beam doses for '{ct_label}' ...")
-                fe_idx  = None
-                doe_idx = None
-                for fi, fe in enumerate(case.TreatmentDelivery.FractionEvaluations):
-                    for di, doe in enumerate(fe.DoseOnExaminations):
-                        if doe.OnExamination.Name == ct_label:
-                            fe_idx  = fi
-                            doe_idx = di
-                            break
-                    if fe_idx is not None:
-                        break
+                for ei, eval_obj in enumerate(evals):
+                    fbs = get_for_beam_set(eval_obj)
+                    if fbs is None:
+                        print(f"      WARNING: DoseEvaluation[{ei}] has no "
+                              f"ForBeamSet attribute; skipping.")
+                        continue
 
-                if fe_idx is None:
-                    print(f"    WARNING: No FractionEvaluation found for '{ct_label}'. Skipping.")
-                    continue
+                    try:
+                        bs_id = fbs.BeamSetIdentifier()
+                    except Exception as exc:
+                        print(f"      WARNING: DoseEvaluation[{ei}] ForBeamSet "
+                              f".BeamSetIdentifier() failed ({exc}); skipping.")
+                        continue
 
-                dose_on_exam = (case.TreatmentDelivery
-                                    .FractionEvaluations[fe_idx]
-                                    .DoseOnExaminations[doe_idx])
-                beam_doses = dose_on_exam.DoseEvaluations[0].BeamDoses
+                    if bs_id not in beam_set_map:
+                        # Not one of our template plans (could be the original
+                        # clinical plan or unrelated beam set). Quietly skip
+                        # but mention once per beam_set_id.
+                        if bs_id not in no_eval_warned:
+                            print(f"      INFO: DoseEvaluation[{ei}] belongs to "
+                                  f"beam set '{bs_id}' which is not a registered "
+                                  f"template; skipping.")
+                            no_eval_warned.add(bs_id)
+                        continue
 
-                safe_id      = re.sub(r'[\\/:*?"<>| ]', '_', patient_id)
-                safe_session = re.sub(r'[\\/:*?"<>| ]', '_', sess)
-                safe_type    = re.sub(r'[\\/:*?"<>| ]', '_', plan_type)
-                safe_ct      = re.sub(r'[\\/:*?"<>| ]', '_', ct_label)
-                safe_beam    = re.sub(r'[\\/:*?"<>| ]', '_', origbeam)
+                    sess, plan_type, origbeam, plan_name = beam_set_map[bs_id]
 
-                final_paths = []
-                for j in range(len(beam_doses)):
-                    grid = beam_doses[j].InDoseGrid
-                    nx   = int(grid.NrVoxels.x)
-                    ny   = int(grid.NrVoxels.y)
-                    nz   = int(grid.NrVoxels.z)
-                    vx_array     = np.array([float(grid.VoxelSize.x),
-                                             float(grid.VoxelSize.y),
-                                             float(grid.VoxelSize.z)], dtype=np.float32)
-                    corner_array = np.array([float(grid.Corner.x),
-                                             float(grid.Corner.y),
-                                             float(grid.Corner.z)], dtype=np.float32)
+                    comment = getattr(fbs, 'Comment', '') or ''
+                    m = BEAM_NUM_RE.search(comment)
+                    if not m:
+                        print(f"      WARNING: DoseEvaluation[{ei}] beam set "
+                              f"'{bs_id}' has Comment={comment!r}; no beam "
+                              f"number could be parsed. Skipping.")
+                        continue
+                    beam_n = int(m.group(1))
 
-                    flat       = beam_doses[j].DoseValues.DoseData
-                    dose_array = np.array(list(flat), dtype=np.float32).reshape(nz, ny, nx)
+                    info = session_info.get(sess)
+                    if info is None:
+                        # Should not happen — every entry in beam_set_map has
+                        # a matching session_info entry.
+                        print(f"      WARNING: No session_info for '{sess}'; skipping.")
+                        continue
 
-                    desired_name = (
-                        f"dose_{safe_id}_{safe_session}_{safe_type}_{safe_ct}_"
-                        f"{safe_beam}_{j:02d}.npz"
-                    )
-                    save_path = os.path.join(export_folder, desired_name)
+                    log_key = f"{plan_name}|{ct_label}|B{beam_n}"
 
-                    np.savez_compressed(
-                        save_path,
-                        dose=dose_array,
-                        voxel_size_cm=vx_array,
-                        corner_cm=corner_array,
-                        nx=np.int32(nx),
-                        ny=np.int32(ny),
-                        nz=np.int32(nz),
-                    )
-                    print(f"    Saved: {save_path}")
-                    final_paths.append(save_path)
+                    if log_key in info['completed']:
+                        print(f"      SKIPPING '{log_key}' (already exported per log)")
+                        continue
 
-                log_plan_completion(progress_log, log_key, final_paths)
-                print(f"    Logged completion for '{log_key}'.")
+                    if log_key in seen_keys:
+                        print(f"      WARNING: duplicate export key '{log_key}' "
+                              f"encountered; skipping this DoseEvaluation.")
+                        continue
+                    seen_keys.add(log_key)
+
+                    try:
+                        beam_doses = eval_obj.BeamDoses
+                    except Exception as exc:
+                        print(f"      WARNING: DoseEvaluation[{ei}] has no "
+                              f"BeamDoses ({exc}); skipping.")
+                        continue
+
+                    if not beam_doses or len(beam_doses) == 0:
+                        print(f"      WARNING: DoseEvaluation[{ei}] BeamDoses "
+                              f"is empty; skipping.")
+                        continue
+
+                    print(f"      Exporting '{plan_name}' / '{ct_label}' / "
+                          f"B{beam_n}  ({len(beam_doses)} segment(s)) ...")
+
+                    safe_id      = re.sub(r'[\\/:*?"<>| ]', '_', patient_id)
+                    safe_session = re.sub(r'[\\/:*?"<>| ]', '_', sess)
+                    safe_type    = re.sub(r'[\\/:*?"<>| ]', '_', plan_type)
+                    safe_beam    = f"B{beam_n}"
+
+                    final_paths = []
+                    for seg in range(len(beam_doses)):
+                        bd   = beam_doses[seg]
+                        grid = bd.InDoseGrid
+                        nx   = int(grid.NrVoxels.x)
+                        ny   = int(grid.NrVoxels.y)
+                        nz   = int(grid.NrVoxels.z)
+                        vx_array     = np.array([float(grid.VoxelSize.x),
+                                                 float(grid.VoxelSize.y),
+                                                 float(grid.VoxelSize.z)], dtype=np.float32)
+                        corner_array = np.array([float(grid.Corner.x),
+                                                 float(grid.Corner.y),
+                                                 float(grid.Corner.z)], dtype=np.float32)
+
+                        flat       = bd.DoseValues.DoseData
+                        dose_array = np.array(list(flat), dtype=np.float32).reshape(nz, ny, nx)
+
+                        desired_name = (
+                            f"dose_{safe_id}_{safe_session}_{safe_type}_{safe_ct}_"
+                            f"{safe_beam}_{seg:02d}.npz"
+                        )
+                        save_path = os.path.join(info['export_folder'], desired_name)
+
+                        np.savez_compressed(
+                            save_path,
+                            dose=dose_array,
+                            voxel_size_cm=vx_array,
+                            corner_cm=corner_array,
+                            nx=np.int32(nx),
+                            ny=np.int32(ny),
+                            nz=np.int32(nz),
+                        )
+                        print(f"        Saved: {save_path}")
+                        final_paths.append(save_path)
+
+                    log_plan_completion(info['progress_log'], log_key, final_paths)
+                    info['completed'].add(log_key)
+                    print(f"      Logged completion for '{log_key}'.")
+
+        if not matched_doe:
+            print(f"    WARNING: No DoseOnExamination found for '{ct_label}'.")
 
     # --------------------------------------------------------
     print(f"\n{'='*60}")
