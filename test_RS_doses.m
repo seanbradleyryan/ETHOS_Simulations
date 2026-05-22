@@ -135,8 +135,26 @@ fprintf('[STEP 2] Loading processed RayStation field doses...\n');
 [field_doses, sct_resampled, ~, dose_metadata] = ...
     load_processed_data(patient_id, session, CONFIG);
 
-rs_size = dose_metadata.dimensions;   % [ny, nx, nz]
-spacing = dose_metadata.spacing;      % [dx, dy, dz] mm
+% --- Explicit geometry extraction (do not assume any upstream state) -----
+if ~isstruct(dose_metadata)
+    error('test_RS_doses:BadMetadata', 'dose_metadata is not a struct.');
+end
+if ~isfield(dose_metadata, 'dimensions') || numel(dose_metadata.dimensions) ~= 3
+    error('test_RS_doses:BadMetadata', ...
+        'dose_metadata.dimensions must be a 3-element vector.');
+end
+if ~isfield(dose_metadata, 'spacing') || numel(dose_metadata.spacing) ~= 3
+    error('test_RS_doses:BadMetadata', ...
+        'dose_metadata.spacing must be a 3-element vector.');
+end
+
+rs_size = double(dose_metadata.dimensions(:)');   % row vector [ny, nx, nz]
+spacing = double(dose_metadata.spacing(:)');      % row vector [dx, dy, dz] mm
+
+if any(rs_size <= 0) || any(spacing <= 0)
+    error('test_RS_doses:BadMetadata', ...
+        'Grid dimensions or spacing contain non-positive values.');
+end
 
 fprintf('  RS dose grid: [%d x %d x %d], spacing [%.2f x %.2f x %.2f] mm\n\n', ...
     rs_size, spacing);
@@ -154,7 +172,37 @@ for i = 1:numel(field_doses)
     fd = field_doses{i};
     if isempty(fd), continue; end
 
-    label = upper(strtrim(fd.ct_label));
+    % --- Resolve ct_label explicitly within this script -------------------
+    % Do NOT rely on upstream step15 having stamped fd.ct_label; this script
+    % must be runnable standalone against the processed/ directory.
+    % Resolution order:
+    %   1. fd.ct_label field (if present and non-empty)
+    %   2. Parse from fd.source_file filename: ..._<plan_type>_<CT_n>_B<beam>_<seg>.mat
+    %   3. Empty -> treated as 'other'
+    raw_label = '';
+    if isfield(fd, 'ct_label') && ~isempty(fd.ct_label)
+        raw_label = fd.ct_label;
+    elseif isfield(fd, 'source_file') && ~isempty(fd.source_file)
+        ct_tokens = regexp(fd.source_file, '_(CT[_]?\d+)_B\d+', ...
+                           'tokens', 'once', 'ignorecase');
+        if ~isempty(ct_tokens)
+            raw_label = ct_tokens{1};
+        end
+    end
+    label = upper(strtrim(char(raw_label)));
+
+    % --- Validate dose volume size before accumulation --------------------
+    if ~isfield(fd, 'dose_Gy') || isempty(fd.dose_Gy)
+        warning('test_RS_doses:MissingDose', ...
+            'Field %d has no dose_Gy; skipping.', i);
+        continue;
+    end
+    if ~isequal(size(fd.dose_Gy), rs_size)
+        warning('test_RS_doses:DoseSizeMismatch', ...
+            'Field %d dose size [%s] differs from RS grid [%s]; skipping.', ...
+            i, mat2str(size(fd.dose_Gy)), mat2str(rs_size));
+        continue;
+    end
 
     switch label
         case 'CT_1'
@@ -168,7 +216,7 @@ for i = 1:numel(field_doses)
             if ~warned_other
                 warning('test_RS_doses:UnknownCTLabel', ...
                     'Field %d has ct_label ''%s'' (not CT_1 or CT_3); excluded from both sums.', ...
-                    i, fd.ct_label);
+                    i, label);
                 warned_other = true;
             end
     end
