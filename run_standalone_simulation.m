@@ -43,8 +43,9 @@ CONFIG.correction_factor           = 1.9;
 CONFIG.use_pressure_scale_correction = true;   % divide max(p0) / max(recon_pressure) before dose conversion
 
 % --- Reconstruction method ---
-%   'tr'  : iterative time-reversal (k-Wave back-propagation)
-%   'DAS' : Delay-And-Sum back-projection (homogeneous c, non-iterative)
+%   'tr'     : iterative time-reversal (k-Wave back-propagation)
+%   'DAS'    : Delay-And-Sum back-projection (homogeneous c, non-iterative)
+%   'hybrid' : DAS for iter 1, k-Wave TR with residual correction for iters 2..N
 CONFIG.reconstruction_method = 'tr';
 
 CONFIG.num_time_reversal_iter = 30;
@@ -728,56 +729,9 @@ fprintf('       Running Delay-And-Sum reconstruction...\n');
 
 try
     das_tic = tic;
-
-    % 1. Sensor positions in physical coords on the padded grid
-    sensor_lin = find(sensor.mask);
-    [sx_i, sy_i, sz_i] = ind2sub([Nx, Ny, Nz], sensor_lin);
-    sx_pos = (double(sx_i) - 1) * dx;
-    sy_pos = (double(sy_i) - 1) * dy;
-    sz_pos = (double(sz_i) - 1) * dz;
-    nSens  = numel(sensor_lin);
-
-    % 2. Voxel grid coords (padded grid)
-    [Xg, Yg, Zg] = ndgrid((0:Nx-1)*dx, (0:Ny-1)*dy, (0:Nz-1)*dz);
-    Xg = single(Xg);  Yg = single(Yg);  Zg = single(Zg);
-
-    % 3. Effective sound speed: mean of nonzero medium speeds (homogeneous assumption)
-    nonzero_c = medium.sound_speed(medium.sound_speed > 0);
-    c_das = double(mean(nonzero_c, 'all'));
-
-    % 4. Move sensor data to CPU single (avoids GPU memory blowup with full grid)
-    sd     = single(gather(sensorData));
-    Nt_sd  = size(sd, 2);
-
-    reconPressure = zeros(Nx, Ny, Nz, 'single');
-    dx_min        = single(min([dx, dy, dz]));
-
-    % 5. Loop over sensors (memory-bounded; Nx*Ny*Nz*Nsens would be huge)
-    for s = 1:nSens
-        d_s   = sqrt((Xg - single(sx_pos(s))).^2 + ...
-                     (Yg - single(sy_pos(s))).^2 + ...
-                     (Zg - single(sz_pos(s))).^2);
-        idx_f = d_s / single(c_das * dt) + 1;     % fractional sample index
-        idx0  = floor(idx_f);
-        frac  = idx_f - idx0;
-        valid = idx0 >= 1 & idx0 < Nt_sd;
-
-        samp = zeros(size(idx0), 'single');
-        i0   = idx0(valid);
-        v0   = sd(s, i0);
-        v1   = sd(s, i0 + 1);
-        samp(valid) = (1 - frac(valid)) .* v0(:) + frac(valid) .* v1(:);
-
-        % 1/r weighting compensates spherical spreading
-        w = single(1) ./ max(d_s, dx_min);
-        reconPressure = reconPressure + w .* samp;
-
-        if mod(s, max(1, round(nSens/10))) == 0
-            fprintf('         DAS sensor %d/%d\n', s, nSens);
-        end
-    end
-
-    reconPressure = max(double(reconPressure), 0) * CONFIG.correction_factor;
+    reconPressure = run_das_recon(sensorData, sensor, medium, ...
+                                  Nx, Ny, Nz, dx, dy, dz, dt);
+    reconPressure = reconPressure * CONFIG.correction_factor;
 
     % Synthesize TR-style outputs so downstream plot/save code is reused
     conv_max_pressure = max(reconPressure(:));
@@ -786,7 +740,6 @@ try
     tr_time           = toc(das_tic);
 
     fprintf('       DAS complete (%.1f s).\n', tr_time);
-    fprintf('       c_DAS = %.1f m/s, sensors used: %d\n', c_das, nSens);
     fprintf('       Reconstructed pressure: [%.2e, %.2e] Pa\n', ...
         min(reconPressure(:)), max(reconPressure(:)));
 
@@ -795,8 +748,151 @@ catch ME
     return;
 end
 
+case 'hybrid'
+
+fprintf('       Running HYBRID reconstruction (DAS seed + up to %d-1 TR iterations)...\n', ...
+    CONFIG.num_time_reversal_iter);
+
+try
+    hybrid_tic = tic;
+
+    N_iter = CONFIG.num_time_reversal_iter;
+
+    % ---- Iteration 1: DAS seed ----
+    fprintf('       --- Iter 1/%d: DAS seed ---\n', N_iter);
+    reconPressure = run_das_recon(sensorData, sensor, medium, ...
+                                  Nx, Ny, Nz, dx, dy, dz, dt);
+
+    % Initialize convergence tracking (same shape as TR branch)
+    conv_max_pressure    = zeros(N_iter, 1);
+    conv_rel_change      = nan(N_iter, 1);
+    conv_max_pressure(1) = max(reconPressure(:));
+    num_iters_done       = 1;
+    reconPressure_prev   = reconPressure;
+
+    fprintf('       Max pressure (DAS seed): %.4e\n', conv_max_pressure(1));
+
+    % ---- Live recon figure setup ----
+    [~, dose_max_idx] = max(doseGrid(:));
+    [cx_live, cy_live, cz_live] = ind2sub([Nx_orig, Ny_orig, Nz_orig], dose_max_idx);
+
+    fig_live = []; hImg_recon = []; ax_recon = []; hLine_max = [];
+    if CONFIG.plot_results
+        [fig_live, ax_recon, hImg_recon, hLine_max] = ...
+            setup_live_recon_figure(p0, Nx_orig, Ny_orig, cz_live, N_iter, CONFIG);
+
+        % Show DAS recon as the iter-1 frame
+        recon_slice_crop = squeeze(reconPressure(1:Nx_orig, 1:Ny_orig, cz_live))';
+        recon_slice_crop = gather(recon_slice_crop);
+        set(hImg_recon, 'CData', recon_slice_crop);
+        caxis(ax_recon, [0, max(recon_slice_crop(:)) + eps]);
+        title(ax_recon, sprintf('Reconstructed p_0   (iter 1  DAS seed)'), ...
+            'FontWeight', 'bold');
+        set(hLine_max, 'XData', 1, 'YData', conv_max_pressure(1));
+        drawnow;
+    end
+
+    % ---- Residual update from DAS seed (only if more iterations remain) ----
+    if N_iter > 1
+        source_resid    = struct();
+        source_resid.p0 = reconPressure;
+        sensorDataRecon = kspaceFirstOrder3D(kgrid, kmedium, source_resid, sensor, inputArgs{:});
+        sensorData      = sensorData + (sensorData_measured - sensorDataRecon);
+    end
+
+    % ---- TR iterations 2..N (mirror the 'tr' loop body) ----
+    for tr_iter = 2:N_iter
+
+        fprintf('       --- TR Iteration %d/%d ---\n', tr_iter, N_iter);
+
+        source_tr        = struct();
+        source_tr.p_mask = sensor.mask;
+        source_tr.p      = fliplr(sensorData);
+        source_tr.p_mode = 'dirichlet';
+
+        sensor_tr        = struct();
+        sensor_tr.mask   = ones(Nx, Ny, Nz);
+        sensor_tr.record = {'p_final'};
+
+        p0_recon = kspaceFirstOrder3D(kgrid, kmedium, source_tr, sensor_tr, inputArgs{:});
+
+        if isstruct(p0_recon) && isfield(p0_recon, 'p_final')
+            reconPressure = reshape(p0_recon.p_final, [Nx, Ny, Nz]);
+        else
+            reconPressure = reshape(p0_recon, [Nx, Ny, Nz]);
+        end
+
+        reconPressure = max(reconPressure, 0);
+
+        conv_max_pressure(tr_iter) = max(reconPressure(:));
+        num_iters_done = tr_iter;
+
+        fprintf('       Max pressure: %.4e Pa\n', conv_max_pressure(tr_iter));
+
+        % Convergence check vs previous iteration
+        converged = false;
+        norm_prev = norm(reconPressure_prev(:));
+        if norm_prev > 0
+            rel_change = norm(reconPressure(:) - reconPressure_prev(:)) / norm_prev;
+        else
+            rel_change = Inf;
+        end
+        conv_rel_change(tr_iter) = rel_change;
+        fprintf('       Rel change: %.4e\n', rel_change);
+        if rel_change < CONFIG.convergence_tol
+            fprintf('       *** Converged at iteration %d ***\n', tr_iter);
+            converged = true;
+        end
+
+        reconPressure_prev = reconPressure;
+
+        % ---- Update live figure ----
+        if CONFIG.plot_results && ~isempty(fig_live) && ishandle(fig_live)
+            recon_slice_crop = squeeze( ...
+                reconPressure(1:Nx_orig, 1:Ny_orig, cz_live))';
+            recon_slice_crop = gather(recon_slice_crop);
+            set(hImg_recon, 'CData', recon_slice_crop);
+            caxis(ax_recon, [0, max(recon_slice_crop(:)) + eps]);
+            if converged
+                title(ax_recon, ...
+                    sprintf('Reconstructed p_0   (iter %d  CONVERGED)', tr_iter), ...
+                    'FontWeight', 'bold', 'Color', [0, 0.55, 0]);
+            else
+                title(ax_recon, ...
+                    sprintf('Reconstructed p_0   (iter %d / %d)', tr_iter, N_iter), ...
+                    'FontWeight', 'bold');
+            end
+            set(hLine_max, 'XData', 1:tr_iter, 'YData', conv_max_pressure(1:tr_iter));
+            drawnow;
+        end
+
+        if converged
+            break;
+        end
+
+        % Residual correction for next iteration
+        if tr_iter < N_iter
+            source_resid    = struct();
+            source_resid.p0 = reconPressure;
+            sensorDataRecon = kspaceFirstOrder3D(kgrid, kmedium, source_resid, sensor, inputArgs{:});
+            sensorData      = sensorData + (sensorData_measured - sensorDataRecon);
+        end
+    end
+
+    reconPressure = gather(reconPressure) * CONFIG.correction_factor;
+    tr_time = toc(hybrid_tic);
+
+    fprintf('       Hybrid complete (%.1f s, %d iterations).\n', tr_time, num_iters_done);
+    fprintf('       Reconstructed pressure: [%.2e, %.2e] Pa\n', ...
+        min(reconPressure(:)), max(reconPressure(:)));
+
+catch ME
+    fprintf('[ERROR] Hybrid reconstruction failed: %s\n', ME.message);
+    return;
+end
+
 otherwise
-    error('Unknown reconstruction_method: "%s" (use ''tr'' or ''DAS'')', ...
+    error('Unknown reconstruction_method: "%s" (use ''tr'', ''DAS'', or ''hybrid'')', ...
         CONFIG.reconstruction_method);
 end
 
@@ -984,8 +1080,8 @@ if CONFIG.plot_results
     plot_dose_panels(doseGrid, recon_dose, sensor.mask, medium_orig.density, spacing_mm, ...
         'Dose Comparison: Original vs Reconstructed');
 
-    % Figure 2  p0 convergence (max pressure + relative change) — TR only
-    if strcmpi(CONFIG.reconstruction_method, 'tr')
+    % Figure 2  p0 convergence (max pressure + relative change) — TR & hybrid only
+    if any(strcmpi(CONFIG.reconstruction_method, {'tr', 'hybrid'}))
         p0_max_for_plot = max(p0(:));
         plot_convergence_history(conv_max_pressure, conv_rel_change, ...
             num_iters_done, CONFIG.convergence_tol, p0_max_for_plot);
@@ -1378,6 +1474,119 @@ function cmap = gamma_colormap_gyr()
     g = [linspace(0.85, 1, half)'; linspace(1, 0, rest)'];
     b = zeros(n, 1);
     cmap = [r, g, b];
+end
+
+
+function reconPressure = run_das_recon(sensorData, sensor, medium, ...
+                                       Nx, Ny, Nz, dx, dy, dz, dt)
+%RUN_DAS_RECON Delay-And-Sum back-projection at homogeneous sound speed.
+%  Returns reconPressure on the padded grid, max(.,0)-clipped, in DAS units.
+%  No correction_factor scaling applied — the caller decides when to apply it.
+%
+%  Algorithm:
+%    1. Sensor positions from sensor.mask
+%    2. Effective sound speed = mean of nonzero medium.sound_speed
+%    3. For each sensor: voxel-to-sensor distance, fractional sample index,
+%       linear time interpolation, 1/r spherical-spreading weighting
+%    4. Accumulate over sensors
+
+    % 1. Sensor positions in physical coords on the padded grid
+    sensor_lin = find(sensor.mask);
+    [sx_i, sy_i, sz_i] = ind2sub([Nx, Ny, Nz], sensor_lin);
+    sx_pos = (double(sx_i) - 1) * dx;
+    sy_pos = (double(sy_i) - 1) * dy;
+    sz_pos = (double(sz_i) - 1) * dz;
+    nSens  = numel(sensor_lin);
+
+    % 2. Voxel grid coords (padded grid)
+    [Xg, Yg, Zg] = ndgrid((0:Nx-1)*dx, (0:Ny-1)*dy, (0:Nz-1)*dz);
+    Xg = single(Xg);  Yg = single(Yg);  Zg = single(Zg);
+
+    % 3. Effective sound speed (homogeneous assumption)
+    nonzero_c = medium.sound_speed(medium.sound_speed > 0);
+    c_das = double(mean(nonzero_c, 'all'));
+
+    % 4. Move sensor data to CPU single (avoids GPU mem blowup with full grid)
+    sd     = single(gather(sensorData));
+    Nt_sd  = size(sd, 2);
+
+    reconPressure = zeros(Nx, Ny, Nz, 'single');
+    dx_min        = single(min([dx, dy, dz]));
+
+    fprintf('         DAS: %d sensors, c = %.1f m/s\n', nSens, c_das);
+
+    % 5. Loop over sensors (memory-bounded)
+    for s = 1:nSens
+        d_s   = sqrt((Xg - single(sx_pos(s))).^2 + ...
+                     (Yg - single(sy_pos(s))).^2 + ...
+                     (Zg - single(sz_pos(s))).^2);
+        idx_f = d_s / single(c_das * dt) + 1;     % fractional sample index
+        idx0  = floor(idx_f);
+        frac  = idx_f - idx0;
+        valid = idx0 >= 1 & idx0 < Nt_sd;
+
+        samp = zeros(size(idx0), 'single');
+        i0   = idx0(valid);
+        v0   = sd(s, i0);
+        v1   = sd(s, i0 + 1);
+        samp(valid) = (1 - frac(valid)) .* v0(:) + frac(valid) .* v1(:);
+
+        % 1/r weighting compensates spherical spreading
+        w = single(1) ./ max(d_s, dx_min);
+        reconPressure = reconPressure + w .* samp;
+
+        if mod(s, max(1, round(nSens/10))) == 0
+            fprintf('         DAS sensor %d/%d\n', s, nSens);
+        end
+    end
+
+    reconPressure = max(double(reconPressure), 0);
+end
+
+
+function [fig_live, ax_recon, hImg_recon, hLine_max] = ...
+        setup_live_recon_figure(p0, Nx_orig, Ny_orig, cz_live, N_iter, CONFIG)
+%SETUP_LIVE_RECON_FIGURE  Build the 1x3 live reconstruction figure used by
+%  both the 'tr' and 'hybrid' branches.
+%  Panels: (1) initial p0 axial slice, (2) current recon p0, (3) live max-p convergence.
+
+    fig_live = figure('Name', 'Live Reconstruction', 'Color', 'w', ...
+        'NumberTitle', 'off', 'Position', [100, 100, 1060, 440]);
+
+    % Panel 1 — initial p0 (axial slice, fixed reference)
+    ax_p0 = subplot(1, 3, 1);
+    p0_orig_slice = squeeze(p0(1:Nx_orig, 1:Ny_orig, cz_live))';
+    imagesc(ax_p0, p0_orig_slice);
+    axis(ax_p0, 'xy'); axis(ax_p0, 'image');
+    colormap(ax_p0, 'hot'); colorbar(ax_p0);
+    clim_p0 = [0, max(p0_orig_slice(:)) + eps];
+    caxis(ax_p0, clim_p0);
+    xlabel(ax_p0, 'X (voxel)'); ylabel(ax_p0, 'Y (voxel)');
+    title(ax_p0, sprintf('Initial p_0   (Z=%d)', cz_live), 'FontWeight', 'bold');
+
+    % Panel 2 — current reconstructed p0 (updates each iteration)
+    ax_recon = subplot(1, 3, 2);
+    hImg_recon = imagesc(ax_recon, zeros(Ny_orig, Nx_orig));
+    axis(ax_recon, 'xy'); axis(ax_recon, 'image');
+    colormap(ax_recon, 'hot'); colorbar(ax_recon);
+    xlabel(ax_recon, 'X (voxel)'); ylabel(ax_recon, 'Y (voxel)');
+    title(ax_recon, 'Reconstructed p_0   (iter 0)', 'FontWeight', 'bold');
+
+    % Panel 3 — live max-pressure convergence
+    ax_conv = subplot(1, 3, 3);
+    hLine_max = plot(ax_conv, NaN, NaN, 'b-o', 'LineWidth', 1.6, ...
+        'MarkerSize', 4, 'MarkerFaceColor', [0.2, 0.4, 1.0]);
+    xlabel(ax_conv, 'Iteration');
+    ylabel(ax_conv, 'Max Reconstructed p_0 (Pa)');
+    title(ax_conv, 'Convergence (live)', 'FontWeight', 'bold');
+    grid(ax_conv, 'on');
+    xlim(ax_conv, [0.5, N_iter + 0.5]);
+
+    sgtitle(fig_live, sprintf( ...
+        'Live Reconstruction (%s)   Axial Z=%d   |   Patient %s', ...
+        CONFIG.reconstruction_method, cz_live, CONFIG.patient_id), ...
+        'FontWeight', 'bold', 'FontSize', 11);
+    drawnow;
 end
 
 
