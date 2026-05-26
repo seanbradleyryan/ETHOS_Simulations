@@ -11,13 +11,13 @@ CONFIG.working_dir    = '/mnt/weka/home/80030361/ETHOS_Simulations';
 CONFIG.patient_id     = '1194203';
 CONFIG.session        = 'Session_1';
 
-CONFIG.dose_filename = 'total_rs_dose.mat';
+CONFIG.dose_filename = 'dose_1194203_Session_1_reference_B9_96.mat';
 CONFIG.sct_filename  = 'sct_resampled.mat';
 
-CONFIG.dose_file_override = 'field1dose.mat';
+CONFIG.dose_file_override = '';
 CONFIG.sct_file_override  = '';
 
-CONFIG.sensor_placement_method = 'full_plane_lateral';
+CONFIG.sensor_placement_method = 'determine_sensor_mask';
 CONFIG.sensor_x_index = 20;
 CONFIG.sensor_y_index = 40;
 
@@ -44,6 +44,13 @@ CONFIG.use_pressure_scale_correction = true;   % divide max(p0) / max(recon_pres
 
 CONFIG.num_time_reversal_iter = 30;
 CONFIG.convergence_tol        = 1e-3;
+
+% --- Pulse Convolution / Noise / Deconvolution ---
+% Mimics a finite transducer impulse response applied to forward sensor data.
+% Set convolution_kernel to 0 to disable the entire block.
+CONFIG.convolution_kernel  = 4e-6;   % Gaussian sigma in seconds (4 us)
+CONFIG.conv_noise_level    = 0.01;   % Noise amplitude as fraction of peak sensor signal
+CONFIG.conv_deconv_lambda  = 1e-4;   % Wiener regularization for deconvolution
 
 CONFIG.use_psf_correction      = false;
 CONFIG.regularization_lambda   = 0.05;
@@ -101,7 +108,51 @@ end
 dose_data = load(dose_filepath);
 
 dose_fields = fieldnames(dose_data);
-if isfield(dose_data, 'total_rs_dose')
+
+% --- Auto-detect step15_process_doses output formats ---
+if isfield(dose_data, 'field_dose')
+    % Individual field dose file from step15_process_doses.
+    % dose_Gy may be stored as sparse 2D: reshape(full(dose_Gy), dose_dims)
+    fd = dose_data.field_dose;
+    if ~isfield(fd, 'dose_Gy')
+        error('field_dose struct missing dose_Gy field.');
+    end
+    if (isfield(fd, 'is_sparse') && fd.is_sparse) || issparse(fd.dose_Gy)
+        if ~isfield(fd, 'dose_dims')
+            error('field_dose.dose_dims missing — cannot reconstruct sparse dose.');
+        end
+        doseGrid = reshape(full(fd.dose_Gy), fd.dose_dims);
+        fprintf('       Loaded: field_dose.dose_Gy (sparse -> [%d x %d x %d])\n', fd.dose_dims);
+    else
+        doseGrid = double(fd.dose_Gy);
+        fprintf('       Loaded: field_dose.dose_Gy (dense)\n');
+    end
+    % Pull embedded metadata: override CONFIG only when value is non-trivial
+    if isfield(fd, 'spacing') && ~isempty(fd.spacing)
+        step15_spacing_mm = fd.spacing(:)';
+        fprintf('       Spacing from file:  [%.3f %.3f %.3f] mm\n', step15_spacing_mm);
+    end
+    if isfield(fd, 'meterset') && ~isempty(fd.meterset) && fd.meterset > 0
+        if CONFIG.meterset ~= fd.meterset
+            fprintf('       [INFO] Overriding CONFIG.meterset: %.2f -> %.2f MU\n', ...
+                CONFIG.meterset, fd.meterset);
+            CONFIG.meterset = fd.meterset;
+        end
+    end
+    if isfield(fd, 'gantry_angle')
+        fprintf('       Gantry angle: %.1f deg\n', fd.gantry_angle);
+    end
+
+elseif isfield(dose_data, 'total_rs_dose_sparse')
+    % Total dose file from step15_process_doses (sparse format).
+    if ~isfield(dose_data, 'total_rs_dose_dims')
+        error('total_rs_dose_dims missing — cannot reconstruct sparse total dose.');
+    end
+    doseGrid = reshape(full(dose_data.total_rs_dose_sparse), dose_data.total_rs_dose_dims);
+    fprintf('       Loaded: total_rs_dose_sparse (reconstructed [%d x %d x %d])\n', ...
+        dose_data.total_rs_dose_dims);
+
+elseif isfield(dose_data, 'total_rs_dose')
     doseGrid = dose_data.total_rs_dose;
     fprintf('       Loaded variable: total_rs_dose\n');
 elseif isfield(dose_data, 'dose_Gy')
@@ -111,8 +162,9 @@ elseif length(dose_fields) == 1
     doseGrid = dose_data.(dose_fields{1});
     fprintf('       Loaded variable: %s\n', dose_fields{1});
 else
-    error('Cannot auto-detect dose variable.');
+    error('Cannot auto-detect dose variable. Fields found: %s', strjoin(dose_fields, ', '));
 end
+doseGrid = double(doseGrid);
 
 if ~isnumeric(doseGrid) || ndims(doseGrid) ~= 3
     error('Dose data must be a 3D numeric array.');
@@ -134,21 +186,27 @@ else
     error('sct_resampled variable not found in %s', sct_filepath);
 end
 
-required_sct_fields = {'cubeHU', 'spacing'};
-for i = 1:length(required_sct_fields)
-    if ~isfield(sct, required_sct_fields{i})
-        error('sct_resampled missing required field: %s', required_sct_fields{i});
-    end
+if ~isfield(sct, 'cubeHU')
+    error('sct_resampled missing required field: cubeHU');
 end
 
-spacing_mm = sct.spacing(:)';
+% Spacing: prefer SCT field; fall back to spacing embedded in step15 field_dose
+if isfield(sct, 'spacing') && ~isempty(sct.spacing)
+    spacing_mm = sct.spacing(:)';
+elseif exist('step15_spacing_mm', 'var')
+    spacing_mm = step15_spacing_mm;
+    fprintf('       [INFO] Using spacing from field_dose file: [%.3f %.3f %.3f] mm\n', spacing_mm);
+else
+    error('sct_resampled missing required field: spacing');
+end
 dx = spacing_mm(1) / 1000;
 dy = spacing_mm(2) / 1000;
 dz = spacing_mm(3) / 1000;
 
 sctSize = size(sct.cubeHU);
 if ~isequal(gridSize, sctSize)
-    error('Dose grid [%d %d %d] does not match SCT grid [%d %d %d].', ...
+    error(['Dose grid [%d %d %d] does not match SCT grid [%d %d %d].\n' ...
+           'Ensure sct_resampled.mat was produced by the same step15 run as the dose file.'], ...
         Nx, Ny, Nz, sctSize(1), sctSize(2), sctSize(3));
 end
 
@@ -297,6 +355,58 @@ switch CONFIG.sensor_placement_method
         sph_radius  = floor(min([Nx, Ny, Nz]) / 2) - CONFIG.pml_size;
         sensor.mask = makeSphere(Nx, Ny, Nz, sph_radius);
         fprintf('       Sensor: spherical, radius %d voxels\n', sph_radius);
+    case 'determine_sensor_mask'
+        % Automatic placement via determine_sensor_mask: places a flat anterior
+        % sensor avoiding beam exclusion zones, closest to the dose centroid.
+        sct_for_sensor = sct;
+        if ~isfield(sct_for_sensor, 'couchMask')
+            sct_for_sensor.couchMask = false(size(sct_for_sensor.bodyMask));
+        end
+        if ~isfield(sct_for_sensor, 'origin')
+            sct_for_sensor.origin = [0, 0, 0];
+        end
+        sct_for_sensor.spacing = spacing_mm;
+
+        field_dose_for_sensor = struct();
+        field_dose_for_sensor.dose_Gy     = doseGrid;
+        field_dose_for_sensor.gantry_angle = 0;
+        field_dose_for_sensor.origin      = sct_for_sensor.origin;
+        field_dose_for_sensor.spacing     = spacing_mm;
+        field_dose_for_sensor.dimensions  = [Nx_orig, Ny_orig, Nz_orig];
+
+        beam_meta = [];
+        if isfield(CONFIG, 'beam_metadata') && ~isempty(CONFIG.beam_metadata)
+            beam_meta = CONFIG.beam_metadata;
+        end
+
+        [sensor_mask_orig, ~] = determine_sensor_mask( ...
+            sct_for_sensor, field_dose_for_sensor, beam_meta, CONFIG);
+
+        % Embed into the current (possibly padded) grid
+        m1 = min(Nx, size(sensor_mask_orig, 1));
+        m2 = min(Ny, size(sensor_mask_orig, 2));
+        m3 = min(Nz, size(sensor_mask_orig, 3));
+        sensor.mask(1:m1, 1:m2, 1:m3) = double(sensor_mask_orig(1:m1, 1:m2, 1:m3));
+        fprintf('       Sensor: determine_sensor_mask — %d active points\n', sum(sensor_mask_orig(:)));
+    case 'fixed_anterior'
+        % Deterministic placement: anterior, inferior to beam field,
+        % laterally centered on isocenter X.
+        % Requires sct.bodyMask and either CONFIG.beam_metadata or the
+        % dose already loaded as CONFIG.total_dose / CONFIG.total_dose_file.
+        fixed_struct = struct();
+        if isfield(CONFIG, 'beam_metadata') && ~isempty(CONFIG.beam_metadata)
+            fixed_struct.beam_metadata = CONFIG.beam_metadata;
+        end
+        % Pass the pre-loaded dose (pre-padding, original grid size)
+        fixed_struct.total_dose = doseGrid;
+        % sct is at the current (downscaled if applicable, unpadded) grid
+        [sensor_mask_orig, ~] = determine_sensor_placement_fixed(CONFIG, sct, fixed_struct);
+        % Embed into the current (possibly padded) grid
+        m1 = min(Nx, size(sensor_mask_orig, 1));
+        m2 = min(Ny, size(sensor_mask_orig, 2));
+        m3 = min(Nz, size(sensor_mask_orig, 3));
+        sensor.mask(1:m1, 1:m2, 1:m3) = double(sensor_mask_orig(1:m1, 1:m2, 1:m3));
+        fprintf('       Sensor: fixed_anterior — %d active points\n', sum(sensor_mask_orig(:)));
     otherwise
         error('Unknown sensor_placement_method: "%s"', CONFIG.sensor_placement_method);
 end
@@ -315,7 +425,7 @@ end
 if CONFIG.plot_results
     sensor_vis    = logical(sensor.mask(1:Nx_orig, 1:Ny_orig, 1:Nz_orig));
     dose_mask_vis = double(doseGrid) >= 0.10 * max(double(doseGrid(:)));
-    plot_sensor_dose_planes(dose_mask_vis, sensor_vis, spacing_mm, CONFIG);
+    plot_sensor_dose_planes(dose_mask_vis, sensor_vis, spacing_mm, medium_orig.density, CONFIG);
     fprintf('       [Sensor vs dose mask visualization displayed]\n');
     drawnow;
 end
@@ -342,8 +452,8 @@ fprintf('       dt = %.2e s, Nt = %d, T_sim = %.2e s\n', dt, Nt, simTime);
 kmedium             = struct();
 kmedium.density     = medium.density;
 kmedium.sound_speed = medium.sound_speed;
-kmedium.alpha_coeff = 0 * medium.alpha_coeff;
-kmedium.alpha_power = 0 * medium.alpha_power;
+kmedium.alpha_coeff = medium.alpha_coeff;
+kmedium.alpha_power = 1.1;
 
 if CONFIG.use_gpu
     try
@@ -395,6 +505,58 @@ catch ME
 end
 
 sensorData_measured = sensorData;
+
+%% ========================= PULSE CONVOLUTION / NOISE / DECONVOLUTION =====
+%  Mimics a finite transducer impulse response:
+%    1. Convolve each sensor time series with a Gaussian pulse kernel
+%    2. Add white Gaussian noise at the specified level
+%    3. Wiener-deconvolve with the same kernel to recover the broadband signal
+%  Time reversal then proceeds on the deconvolved data as normal.
+
+if CONFIG.convolution_kernel > 0
+    conv_kernel_sigma  = CONFIG.convolution_kernel;
+    conv_noise_level   = CONFIG.conv_noise_level;
+    conv_deconv_lambda = CONFIG.conv_deconv_lambda;
+
+    fprintf('       Pulse model: sigma=%.1f us, noise=%.1f%%, lambda=%.1e\n', ...
+        conv_kernel_sigma * 1e6, conv_noise_level * 100, conv_deconv_lambda);
+
+    % Build normalized Gaussian kernel in time (truncated at ±4 sigma)
+    sigma_samples = conv_kernel_sigma / dt;
+    kernel_half   = ceil(4 * sigma_samples);
+    t_kernel      = (-kernel_half : kernel_half)';
+    gauss_kernel  = exp(-t_kernel.^2 / (2 * sigma_samples^2));
+    gauss_kernel  = gauss_kernel / sum(gauss_kernel);   % unit-sum normalization
+
+    % Move to CPU for FFT operations
+    sensorData_cpu = double(gather(sensorData));
+    Nt_data        = size(sensorData_cpu, 2);
+
+    % Kernel transfer function (zero-padded to signal length)
+    H       = fft(gauss_kernel, Nt_data).';   % row vector [1 x Nt_data]
+    H_conj  = conj(H);
+    H_power = abs(H).^2;
+
+    % 1. Convolve
+    sensorData_conv = real(ifft(fft(sensorData_cpu, [], 2) .* H, [], 2));
+
+    % 2. Add noise
+    noise_amp        = conv_noise_level * max(abs(sensorData_conv(:)));
+    sensorData_noisy = sensorData_conv + noise_amp * randn(size(sensorData_conv));
+
+    % 3. Wiener deconvolution
+    sensorData_deconv = real(ifft( ...
+        fft(sensorData_noisy, [], 2) .* H_conj ./ (H_power + conv_deconv_lambda), ...
+        [], 2));
+
+    % Replace both working and reference sensor data with processed result
+    sensorData          = single(sensorData_deconv);
+    sensorData_measured = single(sensorData_deconv);
+
+    fprintf('       Pulse model complete. Noise amp: %.3e Pa\n', noise_amp);
+else
+    fprintf('       Pulse convolution disabled.\n');
+end
 
 %% ========================= ITERATIVE TIME-REVERSAL RECONSTRUCTION ========
 
@@ -756,9 +918,10 @@ fprintf('\nStandalone simulation complete.\n');
 %  LOCAL FUNCTIONS
 %% =========================================================================
 
-function plot_sensor_dose_planes(dose_mask, sensor_mask, spacing_mm, config)
+function plot_sensor_dose_planes(dose_mask, sensor_mask, spacing_mm, density, config)
 %PLOT_SENSOR_DOSE_PLANES  1x3 anatomical view of sensor geometry vs dose mask.
 %  Shows three orthogonal projections (coronal, sagittal, axial).
+%  CT density is rendered as a grayscale background (mean-projection).
 %  Dose mask (dose >= 10% max) drawn as a filled semi-transparent blue region.
 %  Sensor drawn as a solid red line/region — computed via max-projection so it
 %  always appears regardless of which slice the dose centroid falls on.
@@ -779,30 +942,49 @@ function plot_sensor_dose_planes(dose_mask, sensor_mask, spacing_mm, config)
     sens_sag  = squeeze(any(sensor_mask, 1));   % YZ
     sens_axi  = squeeze(any(sensor_mask, 3));   % XY
 
+    % CT density background: mean-projection (DRR-like anatomical context).
+    % Soft-tissue window/level (kg/m^3) matches plot_dose_panels.
+    have_density = ~isempty(density) && isequal(size(density), size(dose_mask));
+    wl_center = 1050; wl_width = 350;
+    wl_min    = wl_center - wl_width / 2;
+    if have_density
+        ct_projs = {
+            squeeze(mean(double(density), 2))',   % Coronal  XZ
+            squeeze(mean(double(density), 1))',   % Sagittal YZ
+            squeeze(mean(double(density), 3))'    % Axial    XY
+        };
+    end
+
     figure('Name', 'Sensor Placement vs Dose Mask', 'Color', 'w', ...
         'NumberTitle', 'off', 'Position', [80, 80, 1300, 420]);
     sgtitle(sprintf('Sensor Placement vs Dose Mask  (\\geq10%% max)   |   Sensor: %s', ...
         config.sensor_placement_method), 'FontWeight', 'bold', 'FontSize', 11);
 
     view_data = {
-        dose_cor', sens_cor', x_ax, z_ax, 'X (mm)', 'Z (mm)', 'Coronal  (max-proj along Y)';
-        dose_sag', sens_sag', y_ax, z_ax, 'Y (mm)', 'Z (mm)', 'Sagittal  (max-proj along X)';
-        dose_axi', sens_axi', x_ax, y_ax, 'X (mm)', 'Y (mm)', 'Axial  (max-proj along Z)';
+        dose_cor', sens_cor', x_ax, z_ax, 'X (mm)', 'Z (mm)', 'Coronal  (mean-proj along Y)';
+        dose_sag', sens_sag', y_ax, z_ax, 'Y (mm)', 'Z (mm)', 'Sagittal  (mean-proj along X)';
+        dose_axi', sens_axi', x_ax, y_ax, 'X (mm)', 'Y (mm)', 'Axial  (mean-proj along Z)';
     };
 
     dose_color   = [0.20, 0.50, 0.90];   % blue
     sensor_color = [0.90, 0.10, 0.10];   % red
 
     for col = 1:3
-        ax      = subplot(1, 3, col);
-        d2d     = double(view_data{col, 1});
-        s2d     = double(view_data{col, 2});
-        xv      = view_data{col, 3};
-        yv      = view_data{col, 4};
+        ax  = subplot(1, 3, col);
+        d2d = double(view_data{col, 1});
+        s2d = double(view_data{col, 2});
+        xv  = view_data{col, 3};
+        yv  = view_data{col, 4};
 
-        % Background: white
-        imagesc(ax, xv, yv, zeros(size(d2d)));
-        colormap(ax, 'gray'); caxis(ax, [0, 1]);
+        % Background: CT density as grayscale, or white if unavailable
+        if have_density
+            dn     = (ct_projs{col} - wl_min) / wl_width;
+            dn     = max(0, min(1, dn));
+            bg_rgb = repmat(dn, [1, 1, 3]);
+        else
+            bg_rgb = ones([size(d2d), 3]);   % white fallback
+        end
+        image(ax, xv, yv, bg_rgb);
         hold(ax, 'on');
 
         % Dose mask: filled blue region
@@ -1121,7 +1303,7 @@ function medium = create_medium(sct, config)
             medium.density     = ones(gridSize) * config.uniform_density;
             medium.sound_speed = ones(gridSize) * config.uniform_sound_speed;
             medium.alpha_coeff = ones(gridSize) * config.uniform_alpha_coeff;
-            medium.alpha_power = config.uniform_alpha_power;
+            medium.alpha_power = 1.1;
             medium.gruneisen   = ones(gridSize) * config.uniform_gruneisen;
 
         case {'threshold_1', 'threshold_2'}
@@ -1132,7 +1314,7 @@ function medium = create_medium(sct, config)
             medium.density     = ones(gridSize) * 1000;
             medium.sound_speed = ones(gridSize) * 1540;
             medium.alpha_coeff = ones(gridSize) * 0.5;
-            medium.alpha_power = T.alpha_power(1);
+            medium.alpha_power = 1.1;
             medium.gruneisen   = ones(gridSize) * 0.11;
 
             for t = 1:nTissues
@@ -1141,11 +1323,6 @@ function medium = create_medium(sct, config)
                 medium.sound_speed(mask) = T.sound_speed(t);
                 medium.alpha_coeff(mask) = T.alpha_coeff(t);
                 medium.gruneisen(mask)   = T.gruneisen(t);
-            end
-
-            st_idx = find(contains(lower(T.tissue_names), 'soft'), 1);
-            if ~isempty(st_idx)
-                medium.alpha_power = T.alpha_power(st_idx);
             end
 
             fprintf('       Tissue model: %s (%d tissues)\n', config.gruneisen_method, nTissues);
@@ -1167,7 +1344,7 @@ function medium = create_medium(sct, config)
     end
     if config.force_uniform_attenuation
         medium.alpha_coeff = ones(gridSize) * config.uniform_alpha_coeff;
-        medium.alpha_power = config.uniform_alpha_power;
+        medium.alpha_power = 1.1;
     end
     if config.force_uniform_gruneisen
         medium.gruneisen = ones(gridSize) * config.uniform_gruneisen;

@@ -39,6 +39,12 @@ function [field_doses, sct_resampled, total_rs_dose, metadata] = load_processed_
 %       - total_rs_dose.mat
 %       - metadata.mat
 %
+%   SPARSE STORAGE FORMAT (produced when config.use_sparse_storage = true in pipeline_compress.m):
+%       Field dose files: field_dose.dose_Gy is sparse 2D [nRows*nCols x nSlices],
+%           field_dose.dose_dims holds original [nRows, nCols, nSlices] for reconstruction.
+%       total_rs_dose.mat: contains total_rs_dose_sparse (sparse 2D) + total_rs_dose_dims.
+%       This function reconstructs all arrays to their original 3D dense form transparently.
+%
 %   EXAMPLE:
 %       config.working_dir = '/mnt/weka/home/80030361/ETHOS_Simulations';
 %       [field_doses, sct, total_dose, meta] = load_processed_data('1194203', 'Session_1', config);
@@ -48,7 +54,7 @@ function [field_doses, sct_resampled, total_rs_dose, metadata] = load_processed_
 %
 %   AUTHOR: ETHOS Pipeline Team
 %   DATE: February 2026
-%   VERSION: 1.0
+%   VERSION: 1.1 (Transparent sparse reconstruction)
 %
 %   See also: step15_process_doses, step2_kwave_simulation
 
@@ -124,7 +130,14 @@ if ~isfile(total_dose_file)
 end
 
 loaded = load(total_dose_file);
-total_rs_dose = loaded.total_rs_dose;
+
+if isfield(loaded, 'total_rs_dose_sparse')
+    % Sparse format: reconstruct 3D dense array from [nRows*nCols x nSlices] sparse matrix
+    total_rs_dose = reshape(full(loaded.total_rs_dose_sparse), loaded.total_rs_dose_dims);
+else
+    % Legacy dense format
+    total_rs_dose = loaded.total_rs_dose;
+end
 
 fprintf('    Total dose max: %.4f Gy\n', max(total_rs_dose(:)));
 
@@ -163,10 +176,11 @@ num_files = length(field_files);
 fprintf('    Found %d field dose files\n', num_files);
 
 % Sort files by beam then segment number
+% Filename format: dose_[id]_[session]_[adapted|reference]_B[n]_[seg].mat
 beam_nums = zeros(num_files, 1);
 seg_nums  = zeros(num_files, 1);
 for i = 1:num_files
-    tokens = regexp(field_files(i).name, '_B(\d+)_S(\d+)\.mat$', 'tokens');
+    tokens = regexp(field_files(i).name, '_B(\d+)_(\d+)\.mat$', 'tokens');
     if ~isempty(tokens) && ~isempty(tokens{1})
         beam_nums(i) = str2double(tokens{1}{1});
         seg_nums(i)  = str2double(tokens{1}{2});
@@ -189,13 +203,20 @@ for i = 1:num_files
     
     try
         loaded = load(field_filepath);
-        field_doses{i} = loaded.field_dose;
+        fd = loaded.field_dose;
+
+        % Reconstruct dense 3D dose_Gy if it was saved in sparse 2D format
+        if isfield(fd, 'is_sparse') && fd.is_sparse
+            fd.dose_Gy = reshape(full(fd.dose_Gy), fd.dose_dims);
+        end
+
+        field_doses{i} = fd;
         loaded_count = loaded_count + 1;
-        
+
         fprintf('    [%d] %s (gantry: %.1f°, max: %.4f Gy)\n', ...
             i, field_files(idx).name, ...
             field_doses{i}.gantry_angle, field_doses{i}.max_dose_Gy);
-        
+
     catch ME
         warning('load_processed_data:LoadError', ...
             'Failed to load %s: %s', field_files(idx).name, ME.message);

@@ -14,7 +14,7 @@
 %    4. Run pipeline_simulate.m
 %
 %  STEPS EXECUTED:
-%    Step 0    Sort DICOM files (SCT + matched RT files)
+%    Step 0    Sort DICOM files (SCT + RT + REG + up to 2 CBCT)
 %    Step 0.5  Fix Halcyon dual-layer MLC minimum gaps in RTPLAN
 %    Step 0.6  Explode each beam's segments into individual 2-CP beams
 %               (one output RTPLAN file per original beam)
@@ -23,6 +23,8 @@
 %    - MATLAB R2022a or later
 %    - Image Processing Toolbox (dicominfo, dicomwrite, dicomuid)
 %    - Raw ETHOS DICOM exports in EthosExports/<PatientID>/Pancreas/<Session>/
+%
+%  PLATFORM: Windows machine (C:/Users/80030361/ETHOS_Simulations)
 %
 %  AUTHOR: ETHOS Pipeline Team
 %  DATE: March 2026
@@ -39,8 +41,8 @@ CONFIG.sessions = {'Session_1','Session_2'};
 CONFIG.treatment_site  = 'Pancreas';
 
 % --- Directory Paths ---
-CONFIG.working_dir  = '/mnt/weka/home/80030361/ETHOS_Simulations';
-CONFIG.matrad_path  = '/mnt/weka/home/80030361/MATLAB/Addons/matRad';
+CONFIG.working_dir  = 'C:/Users/80030361/ETHOS_Simulations';
+CONFIG.matrad_path  = 'C:/Users/80030361/Documents/MATLAB/Addons/matRad';
 
 % --- MLC Gap Correction Parameters (Step 0.5) ---
 CONFIG.mlc_min_gap_mm       = 0.5*2;             % Minimum allowed leaf gap (mm)
@@ -138,21 +140,18 @@ for p_idx = 1:length(CONFIG.patients)
 
                 RESULTS.patients.(result_key).exploded_plans          = exploded;
                 RESULTS.patients.(result_key).num_exploded_reference  = numel(exploded.reference);
-                RESULTS.patients.(result_key).num_exploded_adapted    = numel(exploded.adapted);
                 RESULTS.patients.(result_key).num_exploded_total      = numel(exploded.all);
 
-                fprintf('[STEP 0.6] Complete. %d total segment RTPLAN file(s) written ', ...
+                fprintf('[STEP 0.6] Complete. %d segment RTPLAN file(s) written (reference plan).\n', ...
                     numel(exploded.all));
-                fprintf('(%d reference + %d adapted).\n', ...
-                    numel(exploded.reference), numel(exploded.adapted));
 
                 fprintf('\n--- RayStation Import Instructions ---\n');
                 rs_input_dir = fullfile(CONFIG.working_dir, 'Raystation_Input', ...
                     patient_id, session);
-                fprintf('  Import all RTPLAN files from:\n');
+                fprintf('  Import REFERENCE plan RTPLAN files from:\n');
                 fprintf('    %s\n', rs_input_dir);
                 fprintf('  Files follow the convention:\n');
-                fprintf('    RTPLAN_{patient}_{session}_{reference|adapted}_B<N>_S<M>.dcm\n');
+                fprintf('    RTPLAN_{patient}_{session}_reference_B<N>.dcm\n');
                 fprintf('  Then:\n');
                 fprintf('    1. Recalculate dose for each exploded-segment plan\n');
                 fprintf('    2. Export field doses as Plan_Field*_Beam*_B*_S*.dcm into:\n');
@@ -236,10 +235,8 @@ function generate_setup_summary(results)
 %                 fprintf('  MLC corrections: %d\n', p.mlc_corrections);
             end
             if isfield(p, 'num_exploded_total')
-                fprintf('  Exploded plans written: %d  (%d reference + %d adapted)\n', ...
-                    p.num_exploded_total, ...
-                    p.num_exploded_reference, ...
-                    p.num_exploded_adapted);
+                fprintf('  Exploded plans written: %d (reference plan)\n', ...
+                    p.num_exploded_total);
             end
         elseif strcmp(p.status, 'error')
             fprintf('  Error: %s\n', p.error.message);

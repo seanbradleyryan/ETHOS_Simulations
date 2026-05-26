@@ -1,0 +1,85 @@
+measurement,repeat_index,seconds,notes
+#plan,,,IMRT Pancreas RT Intent Revision 16
+#beam_set_id,,,IMRT Pancreas RT Intent Revision 16:Total Fraction
+#test_beam,,,0
+#grid_nx_ny_nz,,,141x96x141
+#total_voxels,,,1908576
+#voxel_cm,,,"0.25,0.25,0.25"
+#n_repeats,,,5
+#rs_version,,,unknown
+#bd_source,,,FractionDose.BeamDoses[0]
+M1_grid_metadata,0,0.004679,
+M1_grid_metadata,1,0.004943,
+M1_grid_metadata,2,0.005155,
+M1_grid_metadata,3,0.005194,
+M1_grid_metadata,4,0.004724,
+M2_handle_only,0,0.348177,
+M2_handle_only,1,0.351272,
+M2_handle_only,2,0.321774,
+M2_handle_only,3,0.318965,
+M2_handle_only,4,0.327375,
+M3a_list,0,0.346223,ok
+M3a_list,1,0.324562,ok
+M3a_list,2,0.337774,ok
+M3a_list,3,0.324527,ok
+M3a_list,4,0.335778,ok
+M3b_fromiter,n/a,n/a,failed: setting an array element with a sequence.
+M3b2_fromiter_chain,n/a,n/a,failed: setting an array element with a sequence.
+M3c_tuple,0,0.319105,ok
+M3c_tuple,1,0.338927,ok
+M3c_tuple,2,0.360216,ok
+M3c_tuple,3,0.637421,ok
+M3c_tuple,4,0.320851,ok
+M3d_DoseValues.DoseDataAsArray,n/a,n/a,not available in this build (Object has no member 'DoseDataAsArray'.)
+M3d_DoseValues.GetDoseValues(),n/a,n/a,not available in this build (Object has no member 'GetDoseValues'.)
+M3d_GetDoseValues(),n/a,n/a,not available in this build (Object has no member 'GetDoseValues'.)
+M4_M4a_cwd.npy,0,0.055450,size_bytes=7634432
+M4_M4a_cwd.npy,1,0.079882,size_bytes=7634432
+M4_M4a_cwd.npy,2,0.055726,size_bytes=7634432
+M4_M4a_cwd.npy,3,0.035979,size_bytes=7634432
+M4_M4a_cwd.npy,4,0.036208,size_bytes=7634432
+M4_M4a_cwd.npz,0,0.197492,size_bytes=4326726
+M4_M4a_cwd.npz,1,0.204726,size_bytes=4326726
+M4_M4a_cwd.npz,2,0.199577,size_bytes=4326726
+M4_M4a_cwd.npz,3,0.201076,size_bytes=4326726
+M4_M4a_cwd.npz,4,0.192378,size_bytes=4326726
+M4_M4b_server_F.npy,0,0.035312,size_bytes=7634432
+M4_M4b_server_F.npy,1,0.036855,size_bytes=7634432
+M4_M4b_server_F.npy,2,0.036024,size_bytes=7634432
+M4_M4b_server_F.npy,3,0.036553,size_bytes=7634432
+M4_M4b_server_F.npy,4,0.036205,size_bytes=7634432
+M4_M4b_server_F.npz,0,0.198941,size_bytes=4326726
+M4_M4b_server_F.npz,1,0.203814,size_bytes=4326726
+M4_M4b_server_F.npz,2,0.199058,size_bytes=4326726
+M4_M4b_server_F.npz,3,0.197642,size_bytes=4326726
+M4_M4b_server_F.npz,4,0.194465,size_bytes=4326726
+M4_M4c_citrix_C.npy,0,23.335288,size_bytes=7634432
+M4_M4c_citrix_C.npy,1,23.847195,size_bytes=7634432
+M4_M4c_citrix_C.npy,2,22.875316,size_bytes=7634432
+M4_M4c_citrix_C.npy,3,24.399098,size_bytes=7634432
+M4_M4c_citrix_C.npy,4,22.633834,size_bytes=7634432
+M4_M4c_citrix_C.npz,0,19.751188,size_bytes=4326726
+M4_M4c_citrix_C.npz,1,20.248912,size_bytes=4326726
+M4_M4c_citrix_C.npz,2,19.322830,size_bytes=4326726
+M4_M4c_citrix_C.npz,3,21.370940,size_bytes=4326726
+M4_M4c_citrix_C.npz,4,20.437623,size_bytes=4326726
+M4_M4d_server_C.npy,0,0.017607,size_bytes=7634432
+M4_M4d_server_C.npy,1,0.018277,size_bytes=7634432
+M4_M4d_server_C.npy,2,0.015204,size_bytes=7634432
+M4_M4d_server_C.npy,3,0.015467,size_bytes=7634432
+M4_M4d_server_C.npy,4,0.013948,size_bytes=7634432
+M4_M4d_server_C.npz,0,0.170514,size_bytes=4326726
+M4_M4d_server_C.npz,1,0.171541,size_bytes=4326726
+M4_M4d_server_C.npz,2,0.172155,size_bytes=4326726
+M4_M4d_server_C.npz,3,0.173571,size_bytes=4326726
+M4_M4d_server_C.npz,4,0.174436,size_bytes=4326726
+M5_patient_save,0,0.115822,
+M5_patient_save,1,0.090742,
+M5_patient_save,2,0.065868,
+M5_patient_save,3,0.062098,
+M5_patient_save,4,0.062200,
+M6_scriptable_export,0,3.776347,ok
+M6_scriptable_export,1,3.630735,ok
+M6_scriptable_export,2,3.437096,ok
+M6_scriptable_export,3,3.492448,ok
+M6_scriptable_export,4,3.420934,ok

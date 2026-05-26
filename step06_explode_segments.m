@@ -41,7 +41,7 @@ function output_paths = step06_explode_segments(patient_id, session, config)
 %                    .adapted    - cell array of char, full paths for adapted plan files
 %                    .all        - cell array of char, all written paths combined
 %
-%  STANDALONE USAGE (no arguments — uses built-in defaults):
+%  STANDALONE USAGE (no arguments  uses built-in defaults):
 %    step06_explode_segments();
 %
 %  PIPELINE USAGE (called by pipeline_setup.m):
@@ -58,7 +58,7 @@ if nargin == 0
         'treatment_site', 'Pancreas');
 end
 
-fprintf('=== Step 0.6: Segment Explosion — 1 Plan per Beam (Reference + Adapted) ===\n');
+fprintf('=== Step 0.6: Segment Explosion  1 Plan per Beam (Reference + Adapted) ===\n');
 fprintf('Patient: %s | Session: %s\n\n', patient_id, session);
 
 % -----------------------------------------------------------------------
@@ -66,8 +66,6 @@ fprintf('Patient: %s | Session: %s\n\n', patient_id, session);
 % -----------------------------------------------------------------------
 sct_dir    = fullfile(config.working_dir, 'EthosExports', patient_id, ...
     config.treatment_site, session, 'sct');
-sim_ct_dir = fullfile(config.working_dir, 'EthosExports', patient_id, ...
-    config.treatment_site, session, 'sim_ct');
 
 output_dir = fullfile(config.working_dir, 'Raystation_Input', patient_id, session);
 if ~exist(output_dir, 'dir')
@@ -75,7 +73,6 @@ if ~exist(output_dir, 'dir')
 end
 
 fprintf('SCT dir:    %s\n', sct_dir);
-fprintf('Sim CT dir: %s\n', sim_ct_dir);
 fprintf('Output dir: %s\n\n', output_dir);
 
 % -----------------------------------------------------------------------
@@ -86,35 +83,39 @@ fprintf('--- Copying supporting files to RayStation input directory ---\n');
 % sCT image slices
 copy_files_to_dir(sct_dir, 'CT*.dcm', output_dir, 'sCT images');
 
-% Sim CT image slices (entire directory — all .dcm files)
-if ~exist(sim_ct_dir, 'dir')
-    warning('step06:noSimCtDir', ...
-        'Sim CT directory not found, skipping:\n  %s', sim_ct_dir);
-else
-    copy_files_to_dir(sim_ct_dir, '*.dcm', output_dir, 'Sim CT images');
-end
+% RTSTRUCT files (all SCT-referenced structure sets)
+copy_files_to_dir(sct_dir, 'RTSTRUCT_SCT*.dcm', output_dir, 'RTSTRUCT (SCT)');
 
-% RTSTRUCT files (reference + adapted)
-copy_files_to_dir(sct_dir, 'RS_*.dcm', output_dir, 'RTSTRUCT');
+% Image registration (REG) files
+copy_files_to_dir(sct_dir, 'REG_*.dcm', output_dir, 'Image registrations');
 
-% RTDOSE files (reference + adapted)
-copy_files_to_dir(sct_dir, 'RD_*.dcm', output_dir, 'RTDOSE');
+% CBCT series (up to two, sorted by sort_CBCT)
+copy_files_to_dir(sct_dir, 'CBCT*.dcm', output_dir, 'CBCT series');
+
+% RTSTRUCT files associated with each CBCT series
+% RTSTRUCT_ICBCT.dcm references the first CBCT (CBCT1_*); VCBCT references the second (CBCT2_*)
+copy_file_as(sct_dir, 'RTSTRUCT_ICBCT.dcm', output_dir, 'RTSTRUCT_CBCT1.dcm', 'RTSTRUCT (CBCT1)');
+copy_file_as(sct_dir, 'RTSTRUCT_VCBCT.dcm', output_dir, 'RTSTRUCT_CBCT2.dcm', 'RTSTRUCT (CBCT2)');
+
+% Reference dose
+copy_files_to_dir(sct_dir, 'RTDOSE_reference.dcm', output_dir, 'Reference dose');
+
+% Reference plan after MLC adjustment (before segment explosion)
+copy_files_to_dir(sct_dir, 'RTPLAN_reference_adjusted_mlc.dcm', output_dir, 'Reference plan (MLC adjusted)');
 
 fprintf('\n');
 
 % -----------------------------------------------------------------------
 % Plan types to process
 % -----------------------------------------------------------------------
-plan_types  = {'reference', 'adapted'};
+plan_types  = {'reference'};
 input_files = { ...
-    fullfile(sct_dir, 'RP_reference_adjusted_mlc.dcm'), ...
-    fullfile(sct_dir, 'RP_adapted_adjusted_mlc.dcm')};
+    fullfile(sct_dir, 'RTPLAN_reference_adjusted_mlc.dcm')};
 
 output_paths.reference = {};
-output_paths.adapted   = {};
 
 % -----------------------------------------------------------------------
-% Main loop — one pass per plan type
+% Main loop  one pass per plan type
 % -----------------------------------------------------------------------
 for pt = 1:numel(plan_types)
 
@@ -127,7 +128,7 @@ for pt = 1:numel(plan_types)
     if ~isfile(input_rtplan)
         warning('step06:fileNotFound', ...
             'Input file not found for %s plan, skipping:\n  %s', plan_type, input_rtplan);
-        fprintf('[SKIP] %s plan — file missing.\n\n', upper(plan_type));
+        fprintf('[SKIP] %s plan  file missing.\n\n', upper(plan_type));
         continue;
     end
 
@@ -180,7 +181,7 @@ for pt = 1:numel(plan_types)
     any_warn_global   = false;
 
     % -------------------------------------------------------------------
-    % Beam loop — each original beam produces ONE output RTPLAN file
+    % Beam loop  each original beam produces ONE output RTPLAN file
     %             containing all its segments promoted to beams
     % -------------------------------------------------------------------
     for b = 1:num_original_beams
@@ -208,7 +209,7 @@ for pt = 1:numel(plan_types)
 
         if N_seg < 1
             warning('step06:noSegments', ...
-                '[%s] Beam %d (%s) has only %d control points — skipping.', ...
+                '[%s] Beam %d (%s) has only %d control points  skipping.', ...
                 plan_type, original_beam_number, original_beam_name, N_cp);
             continue;
         end
@@ -235,7 +236,7 @@ for pt = 1:numel(plan_types)
         local_beam_idx   = 0;
 
         % -----------------------------------------------------------
-        % Segment loop — each segment becomes one beam in the output plan
+        % Segment loop  each segment becomes one beam in the output plan
         % -----------------------------------------------------------
         for s = 1:N_seg
 
@@ -405,7 +406,7 @@ for pt = 1:numel(plan_types)
             session, plan_type, original_beam_number, original_beam_name);
 
         % -----------------------------------------------------------
-        % Write output file  — one file per original beam
+        % Write output file   one file per original beam
         % -----------------------------------------------------------
         out_filename = sprintf('RTPLAN_%s_%s_%s_B%d.dcm', ...
             patient_id, session, plan_type, original_beam_number);
@@ -442,14 +443,11 @@ end  % plan type loop
 % -----------------------------------------------------------------------
 % Combine all paths for convenience
 % -----------------------------------------------------------------------
-output_paths.all = [output_paths.reference, output_paths.adapted];
+output_paths.all = output_paths.reference;
 
 total = numel(output_paths.all);
 fprintf('=== Step 0.6 complete ===\n');
-fprintf('Total beam files written: %d  (%d reference + %d adapted)\n', ...
-    total, ...
-    numel(output_paths.reference), ...
-    numel(output_paths.adapted));
+fprintf('Total beam files written: %d (reference plan only)\n', total);
 fprintf('Output directory: %s\n\n', output_dir);
 
 end  % function step06_explode_segments
@@ -482,6 +480,24 @@ function copy_files_to_dir(src_dir, pattern, dst_dir, label)
     end
     fprintf('  %-20s %3d copied, %3d already present.\n', ...
         [label ':'], n_copied, n_skipped);
+end
+
+
+function copy_file_as(src_dir, src_name, dst_dir, dst_name, label)
+%COPY_FILE_AS Copy a single named file from src_dir to dst_dir under a new name.
+%   Issues a warning if the source is missing (e.g. no RTSTRUCT for that CBCT).
+    src = fullfile(src_dir, src_name);
+    dst = fullfile(dst_dir, dst_name);
+    if ~isfile(src)
+        warning('step06:noFile', 'No %s file (%s) found in:\n  %s', label, src_name, src_dir);
+        return;
+    end
+    if isfile(dst)
+        fprintf('  %-20s already present.\n', [label ':']);
+        return;
+    end
+    copyfile(src, dst);
+    fprintf('  %-20s 1 copied.\n', [label ':']);
 end
 
 

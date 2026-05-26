@@ -48,6 +48,13 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, sct
 %           .use_grid_padding        - Pad grid to FFT-optimal dims (default: true)
 %           .sensor_x_index          - X voxel index for anterior sensor plane (default: 1)
 %           .sensor_y_index          - Y voxel index for lateral sensor plane (default: 1)
+%           .convolution_kernel      - Gaussian pulse sigma in seconds (default: 4e-6).
+%                                      Applied to forward sensor data before time reversal
+%                                      to mimic finite transducer impulse response.
+%                                      Set to 0 to disable.
+%           .conv_noise_level        - Noise amplitude as fraction of peak sensor signal
+%                                      (default: 0.01). Applied after convolution.
+%           .conv_deconv_lambda      - Wiener regularization for deconvolution (default: 1e-4).
 %       psf_filter - (OPTIONAL, 6th arg) Pre-computed PSF correction from get_psf():
 %           .F              - 3D complex Wiener filter in Fourier domain
 %           If provided and non-empty, applied to the planar reconstruction
@@ -84,14 +91,17 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, sct
 
     %% ======================== CONFIG DEFAULTS ========================
 
-    dose_per_pulse_cGy = safe_config(config, 'dose_per_pulse_cGy', 0.16);
-    pml_size           = safe_config(config, 'pml_size', 10);
-    cfl                = safe_config(config, 'cfl_number', 0.3);
-    use_gpu            = safe_config(config, 'use_gpu', true);
-    num_tr_iter        = safe_config(config, 'num_time_reversal_iter', 30);
-    convergence_tol    = safe_config(config, 'convergence_tol', 1e-3);
-    correction_factor  = safe_config(config, 'correction_factor', 1.9);
-    use_grid_padding   = safe_config(config, 'use_grid_padding', true);
+    dose_per_pulse_cGy  = safe_config(config, 'dose_per_pulse_cGy', 0.16);
+    pml_size            = safe_config(config, 'pml_size', 10);
+    cfl                 = safe_config(config, 'cfl_number', 0.3);
+    use_gpu             = safe_config(config, 'use_gpu', true);
+    num_tr_iter         = safe_config(config, 'num_time_reversal_iter', 30);
+    convergence_tol     = safe_config(config, 'convergence_tol', 1e-3);
+    correction_factor   = safe_config(config, 'correction_factor', 1.9);
+    use_grid_padding    = safe_config(config, 'use_grid_padding', true);
+    conv_kernel_sigma   = safe_config(config, 'convolution_kernel', 4e-6);   % Gaussian sigma (s)
+    conv_noise_level    = safe_config(config, 'conv_noise_level', 0.01);     % fraction of peak
+    conv_deconv_lambda  = safe_config(config, 'conv_deconv_lambda', 1e-4);   % Wiener regularization
 
     if nargin < 6, psf_filter = []; end
 
@@ -281,13 +291,38 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, sct
             sensor.mask = makeSphere(Nx, Ny, Nz, sph_radius);
             fprintf('        Sensor: spherical — radius %d voxels\n', sph_radius);
 
+        case 'fixed_anterior'
+            % Deterministic placement: anterior, inferior to beam field,
+            % centered on isocenter X. Requires sct_resampled.bodyMask and
+            % either beam_metadata (passed as 4th arg) or config.total_dose.
+            fixed_struct = struct();
+            if nargin >= 4 && ~isempty(beam_metadata)
+                fixed_struct.beam_metadata = beam_metadata;
+            end
+            if isfield(config, 'total_dose') && ~isempty(config.total_dose)
+                fixed_struct.total_dose = config.total_dose;
+            end
+            % sct_resampled is at original (unpadded) size — correct for placement
+            [sensor_mask_orig, sensor_info] = determine_sensor_placement_fixed( ...
+                config, sct_resampled, fixed_struct);
+            % Embed in current (possibly padded) grid
+            m1 = min(Nx, size(sensor_mask_orig, 1));
+            m2 = min(Ny, size(sensor_mask_orig, 2));
+            m3 = min(Nz, size(sensor_mask_orig, 3));
+            sensor.mask(1:m1, 1:m2, 1:m3) = double(sensor_mask_orig(1:m1, 1:m2, 1:m3));
+            fprintf('        Sensor: fixed_anterior — %d voxels (valid: %s)\n', ...
+                sum(sensor_mask_orig(:)), mat2str(sensor_info.placement_valid));
+
         otherwise
             error('run_single_field_simulation:UnknownSensorMethod', ...
-                'Unknown sensor_placement_method: "%s". Expected ''full_plane_anterior'', ''full_plane_lateral'', or ''spherical''.', ...
+                'Unknown sensor_placement_method: "%s". Expected ''full_plane_anterior'', ''full_plane_lateral'', ''spherical'', or ''fixed_anterior''.', ...
                 sensor_method);
     end
 
-    sensor_info = struct('element_map', [], 'num_elements', 0);
+    % sensor_info already set for fixed_anterior; initialise default for other methods
+    if ~exist('sensor_info', 'var')
+        sensor_info = struct('element_map', [], 'num_elements', 0);
+    end
     sim_results.sensor_info = sensor_info;
 
     numSensorPts = sum(sensor.mask(:));
@@ -344,6 +379,54 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, sct
     end
 
     sensorData_measured = sensorData;
+
+    %% ======================== PULSE CONVOLUTION / NOISE / DECONVOLUTION ========================
+    %  Mimics a finite transducer impulse response:
+    %    1. Convolve each sensor time series with a Gaussian pulse kernel
+    %    2. Add white Gaussian noise at the specified level
+    %    3. Wiener-deconvolve with the same kernel to recover the broadband signal
+    %  Time reversal then proceeds on the deconvolved data as normal.
+
+    if conv_kernel_sigma > 0
+        fprintf('        Pulse model: sigma=%.1f us, noise=%.1f%%, lambda=%.1e\n', ...
+            conv_kernel_sigma * 1e6, conv_noise_level * 100, conv_deconv_lambda);
+
+        % Build normalized Gaussian kernel in time (truncated at ±4 sigma)
+        sigma_samples = conv_kernel_sigma / dt;
+        kernel_half   = ceil(4 * sigma_samples);
+        t_kernel      = (-kernel_half : kernel_half)';
+        gauss_kernel  = exp(-t_kernel.^2 / (2 * sigma_samples^2));
+        gauss_kernel  = gauss_kernel / sum(gauss_kernel);   % unit-sum normalization
+
+        % Move to CPU for FFT operations
+        sensorData_cpu = double(gather(sensorData));
+        Nt_data        = size(sensorData_cpu, 2);
+
+        % Kernel transfer function (zero-padded to signal length for circular convolution)
+        H       = fft(gauss_kernel, Nt_data).';   % row vector [1 x Nt_data]
+        H_conj  = conj(H);
+        H_power = abs(H).^2;
+
+        % 1. Convolve
+        sensorData_conv = real(ifft(fft(sensorData_cpu, [], 2) .* H, [], 2));
+
+        % 2. Add noise
+        noise_amp        = conv_noise_level * max(abs(sensorData_conv(:)));
+        sensorData_noisy = sensorData_conv + noise_amp * randn(size(sensorData_conv));
+
+        % 3. Wiener deconvolution
+        sensorData_deconv = real(ifft( ...
+            fft(sensorData_noisy, [], 2) .* H_conj ./ (H_power + conv_deconv_lambda), ...
+            [], 2));
+
+        % Replace both working and reference sensor data with processed result
+        sensorData          = single(sensorData_deconv);
+        sensorData_measured = single(sensorData_deconv);
+
+        fprintf('        Pulse model complete. Noise amp: %.3e Pa\n', noise_amp);
+    else
+        fprintf('        Pulse convolution disabled.\n');
+    end
 
     %% ======================== TIME REVERSAL RECONSTRUCTION ========================
 

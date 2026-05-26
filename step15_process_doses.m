@@ -44,7 +44,8 @@ function [field_doses, sct_resampled, total_rs_dose, metadata] = step15_process_
 %       metadata        - Struct with combined geometry info
 %
 %   FILES CREATED (in processed/ directory):
-%       - field_dose_001.mat, field_dose_002.mat, ... (one per field)
+%       - dose_[id]_[session]_[adapted|reference]_B[n]_[seg].mat (one per field)
+%         e.g. dose_1194203_Session_1_adapted_B6_103.mat
 %       - sct_resampled.mat (includes tissueMask and couchMask)
 %       - total_rs_dose.mat
 %       - tissue_masks.mat (individual ROI masks)
@@ -55,13 +56,10 @@ function [field_doses, sct_resampled, total_rs_dose, metadata] = step15_process_
 %   2. Find all dose_*.dcm files in Raystation directory
 %   3. Load RTPLAN to extract beam metadata (gantry angles, metersets)
 %   4. Load first dose file to establish reference grid geometry
-%   5. Process each dose file, match beam_num to RTPLAN beam, save individually
-%   6. Load SCT images, sort by z-position
-%   7. Resample SCT to dose grid via 3D interpolation
-%   8. Convert HU to density
-%   9. Load RTSTRUCT and create tissue classification masks
-%   10. Zero out dose in couch regions
-%   11. Save all outputs and return
+%   5. Load SCT images, sort by z-position, resample to dose grid, convert HU
+%   6. Load RTSTRUCT, create tissue classification masks, precompute invalid_dose_mask
+%   7. Process each dose file: scale -> validate -> zero invalid regions -> save
+%   8. Zero total dose in invalid regions for consistency, save all outputs
 %
 %   KEY TECHNICAL NOTES:
 %   - Z-resolution MUST come from GridFrameOffsetVector, NOT PixelSpacing
@@ -134,6 +132,22 @@ if ~config.apply_dose_masking
     fprintf('  [INFO] Dose masking DISABLED (debugging mode)\n');
 end
 
+% Set default batch size for field dose processing (memory management)
+if ~isfield(config, 'batch_size') || isempty(config.batch_size)
+    config.batch_size = 1000;
+end
+
+% Store dose/mask arrays as sparse 2D matrices for compressibility.
+% Dose grids are mostly zero after body/couch masking.
+% Reconstruct on load: reshape(full(var_sp), var_dims)
+if ~isfield(config, 'use_sparse_storage')
+    config.use_sparse_storage = true;
+end
+if config.use_sparse_storage
+    fprintf('  [INFO] Sparse storage ENABLED — dose/mask arrays saved as sparse 2D\n');
+    fprintf('         To reconstruct: reshape(full(var_sp), var_dims)\n');
+end
+
 %% ======================== CONSTRUCT PATHS ========================
 
 fprintf('\n========================================\n');
@@ -178,16 +192,29 @@ end
 
 fprintf('\n[1/8] Finding field dose files...\n');
 
-% --- PREFERRED format: dose_[patientid]_[session]_[adapted|reference]_B[n]_[seg].dcm ---
-% Produced by step06_explode_segments + RayStation export.
-% e.g. dose_1885729_Session_4_adapted_B6_103.dcm
-% If ANY files in this format exist, use ONLY those and skip all other patterns.
-rd_files_preferred = dir(fullfile(rs_dir, 'dose_*.dcm'));
+% --- Input format priority ---
+%   1. dose_*.mat   (preferred, written by step14_npz_to_mat from RayStation NPZ)
+%   2. dose_*.dcm   (legacy RayStation DICOM export)
+%   3. older legacy patterns (Plan_Field*, RD.*, ...)
+%
+% input_format selects the per-field loader branch later in this function.
+input_format       = '';
+rd_files_mat       = dir(fullfile(rs_dir, 'dose_*.mat'));
 
-if ~isempty(rd_files_preferred)
-    rd_files = rd_files_preferred;
-    fprintf('  Using preferred format (dose_*.dcm): %d file(s) found\n', numel(rd_files));
+if ~isempty(rd_files_mat)
+    rd_files = rd_files_mat;
+    input_format = 'mat';
+    fprintf('  Using converted .mat input (dose_*.mat): %d file(s) found\n', numel(rd_files));
 else
+    rd_files_preferred = dir(fullfile(rs_dir, 'dose_*.dcm'));
+end
+
+if isempty(input_format) && ~isempty(rd_files_preferred)
+    rd_files = rd_files_preferred;
+    input_format = 'dicom';
+    fprintf('  Using preferred format (dose_*.dcm): %d file(s) found\n', numel(rd_files));
+elseif isempty(input_format)
+    input_format = 'dicom';
     % --- Legacy fallback patterns ---
     rd_files = dir(fullfile(rs_dir, 'Plan_Field*_Beam*_B*_S*.dcm'));
 
@@ -215,11 +242,12 @@ if isempty(rd_files)
     error('step15_process_doses:NoFieldDoses', ...
         ['No field dose files found in: %s\n' ...
          'Searched patterns (in priority order):\n' ...
-         '  1. dose_*.dcm  (preferred)\n' ...
-         '  2. Plan_Field*_Beam*_B*_S*.dcm\n' ...
-         '  3. Beam*_Seg*_Field*.dcm\n' ...
-         '  4. Beam*.dcm\n' ...
-         '  5. RD.*.dcm / RD*.dcm'], rs_dir);
+         '  1. dose_*.mat  (preferred, from step14_npz_to_mat)\n' ...
+         '  2. dose_*.dcm  (legacy RayStation DICOM export)\n' ...
+         '  3. Plan_Field*_Beam*_B*_S*.dcm\n' ...
+         '  4. Beam*_Seg*_Field*.dcm\n' ...
+         '  5. Beam*.dcm\n' ...
+         '  6. RD.*.dcm / RD*.dcm'], rs_dir);
 end
 
 num_files = length(rd_files);
@@ -245,21 +273,30 @@ end
 
 fprintf('\n[3/8] Establishing reference dose grid geometry...\n');
 
-% Load first dose file to get reference geometry
+% Load first dose file to get reference geometry. Both .mat and DICOM
+% inputs are pre-converted to the same (origin_mm, spacing_mm, dimensions)
+% triple before the per-field loop runs.
 ref_file = fullfile(rs_dir, rd_files(1).name);
-ref_info = dicominfo(ref_file);
-ref_dose = double(squeeze(dicomread(ref_file)));
-
-% Apply dose grid scaling
-if isfield(ref_info, 'DoseGridScaling')
-    ref_dose = ref_dose * ref_info.DoseGridScaling;
+switch input_format
+    case 'mat'
+        ref_loaded  = load(ref_file, 'raw_field_dose');
+        ref_rf      = ref_loaded.raw_field_dose;
+        ref_dose    = ref_rf.dose_Gy;
+        ref_origin  = ref_rf.origin(:);                  % [x; y; z] in mm
+        ref_spacing = ref_rf.spacing(:);                 % [dx; dy; dz] in mm
+        ref_dims    = size(ref_dose);                    % [rows, cols, slices]
+    otherwise  % 'dicom'
+        ref_info = dicominfo(ref_file);
+        ref_dose = double(squeeze(dicomread(ref_file)));
+        % Apply dose grid scaling
+        if isfield(ref_info, 'DoseGridScaling')
+            ref_dose = ref_dose * ref_info.DoseGridScaling;
+        end
+        % CRITICAL: Z-resolution from GridFrameOffsetVector, NOT PixelSpacing
+        ref_origin  = ref_info.ImagePositionPatient(:);  % [x, y, z] in mm
+        ref_spacing = extractDoseSpacing(ref_info);      % [dx, dy, dz] in mm
+        ref_dims    = size(ref_dose);                    % [rows, cols, slices]
 end
-
-% Extract reference geometry
-% CRITICAL: Z-resolution from GridFrameOffsetVector, NOT PixelSpacing
-ref_origin = ref_info.ImagePositionPatient(:);  % [x, y, z] in mm
-ref_spacing = extractDoseSpacing(ref_info);      % [dx, dy, dz] in mm
-ref_dims = size(ref_dose);                       % [rows, cols, slices]
 
 fprintf('  Reference dose grid:\n');
 fprintf('    Dimensions: [%d, %d, %d]\n', ref_dims(1), ref_dims(2), ref_dims(3));
@@ -281,128 +318,9 @@ metadata.timestamp = datetime('now');
 metadata.reference_file = rd_files(1).name;
 metadata.beam_metadata = beam_metadata;  % Includes isocenter + jaw data for sensor placement
 
-%% ======================== PROCESS EACH FIELD DOSE ========================
-
-fprintf('\n[4/8] Processing field doses (saving individually)...\n');
-
-% Track which files were processed successfully
-field_doses = cell(num_files, 1);
-processed_count = 0;
-
-for i = 1:num_files
-    fprintf('  Processing field %d/%d: %s\n', i, num_files, rd_files(i).name);
-    
-    try
-        % Load DICOM dose file
-        dose_file = fullfile(rs_dir, rd_files(i).name);
-        dose_info = dicominfo(dose_file);
-        dose_data = double(squeeze(dicomread(dose_file)));
-        
-        % Apply dose grid scaling
-        if isfield(dose_info, 'DoseGridScaling')
-            dose_scaling = dose_info.DoseGridScaling;
-            dose_data = dose_data * dose_scaling;
-            fprintf('    Applied scaling: %e\n', dose_scaling);
-        end
-        
-        % Extract geometry and verify it matches reference
-        dose_origin = dose_info.ImagePositionPatient(:);
-        dose_spacing = extractDoseSpacing(dose_info);
-        dose_dims = size(dose_data);
-        
-        % Validate geometry matches reference
-        [geom_match, geom_msg] = validateGeometry(dose_origin, dose_spacing, dose_dims, ...
-            ref_origin, ref_spacing, ref_dims);
-        
-        if ~geom_match
-            warning('step15_process_doses:GeometryMismatch', ...
-                'Field %d geometry mismatch: %s', i, geom_msg);
-            % Attempt to resample if dimensions don't match
-            if ~isequal(dose_dims, ref_dims)
-                fprintf('    Resampling to reference grid...\n');
-                dose_data = resampleDoseToGrid(dose_data, dose_origin, dose_spacing, ...
-                    ref_origin, ref_spacing, ref_dims);
-                dose_dims = ref_dims;
-            end
-        end
-        
-        % Extract beam info from filename
-        % e.g. dose_1885729_Session_4_adapted_B6_103.dcm
-        %   -> beam_num=6, seg_num=103, field_num=6, plan_type='adapted'
-        % field_num (= beam_num) is used to match to RTPLAN beam metadata
-        [beam_num, seg_num, field_num, plan_type] = extractBeamInfo(rd_files(i).name, i);
-
-        % Get beam metadata by matching field_num to beam_number in RTPLAN
-        [gantry_angle, meterset] = getBeamMetadata(beam_metadata, field_num);
-
-        % Create field dose structure
-        field_dose = struct();
-        field_dose.dose_Gy = dose_data;
-        field_dose.origin = dose_origin;
-        field_dose.spacing = dose_spacing;
-        field_dose.dimensions = dose_dims;
-        field_dose.beam_num = beam_num;         % Beam number from filename (B[n])
-        field_dose.seg_num = seg_num;           % Segment number from filename
-        field_dose.field_num = field_num;       % Field number (= beam_num, matches RTPLAN)
-        field_dose.plan_type = plan_type;       % 'adapted' or 'reference'
-        field_dose.gantry_angle = gantry_angle;
-        field_dose.meterset = meterset;
-        field_dose.source_file = rd_files(i).name;
-        field_dose.max_dose_Gy = max(dose_data(:));
-        field_dose.mean_dose_Gy = mean(dose_data(dose_data > 0));
-
-        % Propagate isocenter and jaw data from beam_metadata
-        [iso, jx, jy] = getBeamGeometry(beam_metadata, field_num);
-        field_dose.isocenter = iso;
-        field_dose.jaw_x = jx;
-        field_dose.jaw_y = jy;
-
-        % Add to total dose
-        total_rs_dose = total_rs_dose + dose_data;
-
-        % Save individual field dose file (MEMORY CONSTRAINT)
-        field_filename = sprintf('field_dose_%03d.mat', i);
-        field_filepath = fullfile(processed_dir, field_filename);
-        save(field_filepath, 'field_dose', '-v7.3');
-        fprintf('    Saved: %s (B%d S%d [%s], max: %.4f Gy, gantry: %.1f deg, MU: %.1f)\n', ...
-            field_filename, beam_num, seg_num, plan_type, field_dose.max_dose_Gy, gantry_angle, meterset);
-
-        % Store reference in output cell array (without full dose data for memory)
-        field_doses{i} = struct();
-        field_doses{i}.filepath = field_filepath;
-        field_doses{i}.beam_num = beam_num;
-        field_doses{i}.seg_num = seg_num;
-        field_doses{i}.field_num = field_num;
-        field_doses{i}.plan_type = plan_type;
-        field_doses{i}.gantry_angle = gantry_angle;
-        field_doses{i}.meterset = meterset;
-        field_doses{i}.max_dose_Gy = field_dose.max_dose_Gy;
-        field_doses{i}.source_file = rd_files(i).name;
-        field_doses{i}.isocenter = iso;
-        field_doses{i}.jaw_x = jx;
-        field_doses{i}.jaw_y = jy;
-        
-        processed_count = processed_count + 1;
-        
-        % Clear field_dose to free memory
-        clear field_dose dose_data;
-        
-    catch ME
-        warning('step15_process_doses:FieldProcessingError', ...
-            'Failed to process field %d (%s): %s', i, rd_files(i).name, ME.message);
-    end
-end
-
-fprintf('  Successfully processed %d/%d field doses\n', processed_count, num_files);
-fprintf('  Total dose max (before couch masking): %.4f Gy\n', max(total_rs_dose(:)));
-
-% Update metadata
-metadata.processed_count = processed_count;
-metadata.total_dose_max_Gy_before_masking = max(total_rs_dose(:));
-
 %% ======================== LOAD AND RESAMPLE SCT ========================
 
-fprintf('\n[5/8] Loading and resampling SCT to dose grid...\n');
+fprintf('\n[4/8] Loading and resampling SCT to dose grid...\n');
 
 % Load SCT images
 [sct_hu, sct_origin, sct_spacing, sct_dims] = loadSctImages(sct_dir);
@@ -431,11 +349,11 @@ fprintf('  Resampled SCT dimensions: [%d, %d, %d]\n', ...
 fprintf('  Converting HU to density...\n');
 sct_density = huToDensity(sct_hu_resampled);
 
-fprintf('  Density range: [%.0f, %.0f] kg/mÂ³\n', min(sct_density(:)), max(sct_density(:)));
+fprintf('  Density range: [%.0f, %.0f] kg/m^3\n', min(sct_density(:)), max(sct_density(:)));
 
 %% ======================== LOAD RTSTRUCT AND CREATE TISSUE MASKS ========================
 
-fprintf('\n[6/8] Loading RTSTRUCT and creating tissue classification masks...\n');
+fprintf('\n[5/8] Loading RTSTRUCT and creating tissue classification masks...\n');
 
 % Load RTSTRUCT and convert contours to masks on the dose grid
 [tissue_mask, roi_names, roi_masks, body_mask, couch_mask] = loadRtstructAndCreateMasks(...
@@ -453,7 +371,7 @@ else
     fprintf('  Created masks for %d ROIs\n', length(roi_names));
     fprintf('  Body voxels identified: %d\n', sum(body_mask(:)));
     fprintf('  Couch voxels identified: %d\n', sum(couch_mask(:)));
-    
+
     % List ROIs
     for i = 1:length(roi_names)
         if isfield(roi_masks, sprintf('ROI_%03d', i))
@@ -467,93 +385,262 @@ end
 % Save tissue masks separately (can be large)
 fprintf('  Saving tissue_masks.mat...\n');
 tissue_masks_file = fullfile(processed_dir, 'tissue_masks.mat');
-save(tissue_masks_file, 'tissue_mask', 'roi_names', 'roi_masks', 'body_mask', 'couch_mask', '-v7.3');
+if config.use_sparse_storage
+    % Reshape each 3D mask to 2D [nRows*nCols, nSlices] then sparsify.
+    % Masks are mostly false/zero after body/couch contours are applied.
+    tissue_mask_dims = size(tissue_mask);
+    body_mask_dims   = size(body_mask);
+    couch_mask_dims  = size(couch_mask);
+    tissue_mask_sp   = sparse(reshape(double(tissue_mask), [], tissue_mask_dims(end)));
+    body_mask_sp     = sparse(reshape(double(body_mask),   [], body_mask_dims(end)));
+    couch_mask_sp    = sparse(reshape(double(couch_mask),  [], couch_mask_dims(end)));
+    save(tissue_masks_file, ...
+        'tissue_mask_sp', 'tissue_mask_dims', ...
+        'body_mask_sp',   'body_mask_dims', ...
+        'couch_mask_sp',  'couch_mask_dims', ...
+        'roi_names', 'roi_masks', '-v7.3');
+else
+    save(tissue_masks_file, 'tissue_mask', 'roi_names', 'roi_masks', 'body_mask', 'couch_mask', '-v7.3');
+end
 fprintf('  Saved: tissue_masks.mat\n');
+
+% Pre-compute invalid dose mask once — used across all fields in the batch loop
+if config.apply_dose_masking
+    invalid_dose_mask = ~(body_mask & ~couch_mask);
+    fprintf('  Invalid dose mask computed: %d voxels will be zeroed per field\n', sum(invalid_dose_mask(:)));
+else
+    invalid_dose_mask = false(ref_dims);
+    fprintf('  Dose masking DISABLED (debugging mode)\n');
+end
+
+%% ======================== PROCESS EACH FIELD DOSE ========================
+
+fprintf('\n[6/8] Processing field doses (masking before export, batch_size=%d)...\n', config.batch_size);
+
+% Track which files were processed successfully
+field_doses    = cell(num_files, 1);
+processed_count = 0;
+save_count      = 0;
+
+num_batches = ceil(num_files / config.batch_size);
+fprintf('  Total files: %d | Batches: %d\n', num_files, num_batches);
+
+for batch_idx = 1:num_batches
+    batch_start = (batch_idx - 1) * config.batch_size + 1;
+    batch_end   = min(batch_idx * config.batch_size, num_files);
+
+    fprintf('\n  --- Batch %d/%d (files %d-%d) ---\n', ...
+        batch_idx, num_batches, batch_start, batch_end);
+
+    % Accumulate dose contribution for this batch only, then fold into total
+    batch_total_dose = zeros(ref_dims);
+
+    for i = batch_start:batch_end
+        fprintf('  Processing field %d/%d: %s\n', i, num_files, rd_files(i).name);
+
+        try
+            dose_file = fullfile(rs_dir, rd_files(i).name);
+            switch input_format
+                case 'mat'
+                    % Load pre-converted .mat (from step14_npz_to_mat). Geometry
+                    % is already in mm and the dose array is already double in
+                    % MATLAB (row=Y, col=X, slice=Z) order.
+                    loaded       = load(dose_file, 'raw_field_dose');
+                    rf           = loaded.raw_field_dose;
+                    dose_data    = rf.dose_Gy;
+                    dose_origin  = rf.origin(:);
+                    dose_spacing = rf.spacing(:);
+                    dose_dims    = size(dose_data);
+                otherwise  % 'dicom'
+                    % Load DICOM dose file
+                    dose_info = dicominfo(dose_file);
+                    dose_data = double(squeeze(dicomread(dose_file)));
+
+                    % Apply dose grid scaling
+                    if isfield(dose_info, 'DoseGridScaling')
+                        dose_scaling = dose_info.DoseGridScaling;
+                        dose_data = dose_data * dose_scaling;
+                        fprintf('    Applied scaling: %e\n', dose_scaling);
+                    end
+
+                    % Extract geometry and verify it matches reference
+                    dose_origin  = dose_info.ImagePositionPatient(:);
+                    dose_spacing = extractDoseSpacing(dose_info);
+                    dose_dims    = size(dose_data);
+            end
+
+            % Validate geometry matches reference
+            [geom_match, geom_msg] = validateGeometry(dose_origin, dose_spacing, dose_dims, ...
+                ref_origin, ref_spacing, ref_dims);
+
+            if ~geom_match
+                warning('step15_process_doses:GeometryMismatch', ...
+                    'Field %d geometry mismatch: %s', i, geom_msg);
+                % Attempt to resample if dimensions don't match
+                if ~isequal(dose_dims, ref_dims)
+                    fprintf('    Resampling to reference grid...\n');
+                    dose_data = resampleDoseToGrid(dose_data, dose_origin, dose_spacing, ...
+                        ref_origin, ref_spacing, ref_dims);
+                    dose_dims = ref_dims;
+                end
+            end
+
+            % Extract beam info from filename
+            % e.g. dose_1885729_Session_4_adapted_B6_103.dcm
+            %   -> beam_num=6, seg_num=103, field_num=6, plan_type='adapted'
+            % field_num (= beam_num) is used to match to RTPLAN beam metadata
+            [beam_num, seg_num, field_num, plan_type] = extractBeamInfo(rd_files(i).name, i);
+
+            % Extract optional CT label (e.g. 'CT_1') so CT_1 vs CT_3 field
+            % doses for the same beam don't collide on output.
+            ct_tokens = regexp(rd_files(i).name, ...
+                '_(?:adapted|reference)_(CT_\d+)_B\d+_\d+\.(?:dcm|mat)$', ...
+                'tokens', 'once', 'ignorecase');
+            if ~isempty(ct_tokens)
+                ct_label = ct_tokens{1};
+            else
+                ct_label = '';
+            end
+
+            % Get beam metadata by matching field_num to beam_number in RTPLAN
+            [gantry_angle, meterset] = getBeamMetadata(beam_metadata, field_num);
+
+            % Propagate isocenter and jaw data from beam_metadata
+            [iso, jx, jy] = getBeamGeometry(beam_metadata, field_num);
+
+            % Zero out invalid regions (outside body or in couch) BEFORE saving
+            if config.apply_dose_masking
+                dose_data(invalid_dose_mask) = 0;
+            end
+
+            % Create field dose structure with masking already applied
+            field_dose = struct();
+            field_dose.dose_Gy = dose_data;
+            field_dose.origin = dose_origin;
+            field_dose.spacing = dose_spacing;
+            field_dose.dimensions = dose_dims;
+            field_dose.beam_num = beam_num;         % Beam number from filename (B[n])
+            field_dose.seg_num = seg_num;           % Segment number from filename
+            field_dose.field_num = field_num;       % Field number (= beam_num, matches RTPLAN)
+            field_dose.plan_type = plan_type;       % 'adapted' or 'reference'
+            field_dose.ct_label  = ct_label;        % '' for legacy DICOM, 'CT_n' for NPZ-derived
+            field_dose.gantry_angle = gantry_angle;
+            field_dose.meterset = meterset;
+            field_dose.source_file = rd_files(i).name;
+            field_dose.max_dose_Gy = max(dose_data(:));
+            field_dose.mean_dose_Gy = mean(dose_data(dose_data > 0));
+            field_dose.isocenter = iso;
+            field_dose.jaw_x = jx;
+            field_dose.jaw_y = jy;
+            field_dose.body_masked = config.apply_dose_masking;
+            field_dose.couch_masked = config.apply_dose_masking;
+
+            % Accumulate into batch subtotal (masking already applied)
+            batch_total_dose = batch_total_dose + dose_data;
+
+            % Save individual field dose file — name mirrors source.
+            % Format (legacy DICOM):  dose_[id]_[session]_[plan_type]_B[beam]_[seg].mat
+            % Format (NPZ-derived):   dose_[id]_[session]_[plan_type]_[ct_label]_B[beam]_[seg].mat
+            if isempty(ct_label)
+                field_filename = sprintf('dose_%s_%s_%s_B%d_%d.mat', ...
+                    patient_id, session, plan_type, beam_num, seg_num);
+            else
+                field_filename = sprintf('dose_%s_%s_%s_%s_B%d_%d.mat', ...
+                    patient_id, session, plan_type, ct_label, beam_num, seg_num);
+            end
+            field_filepath = fullfile(processed_dir, field_filename);
+
+            % Convert 3D dose to sparse 2D [nRows*nCols, nSlices] before saving.
+            % Field doses are mostly zero outside the treated volume after masking.
+            % Reconstruct: reshape(full(field_dose.dose_Gy), field_dose.dose_dims)
+            if config.use_sparse_storage
+                field_dose.dose_dims = size(field_dose.dose_Gy);
+                field_dose.dose_Gy   = sparse(reshape(field_dose.dose_Gy, [], field_dose.dose_dims(end)));
+                field_dose.is_sparse = true;
+            end
+            save(field_filepath, 'field_dose', '-v7.3');
+            save_count = save_count + 1;
+            fprintf('    [Save %d] %s (B%d S%d [%s], max: %.4f Gy, gantry: %.1f deg, MU: %.1f)\n', ...
+                save_count, field_filename, beam_num, seg_num, plan_type, ...
+                field_dose.max_dose_Gy, gantry_angle, meterset);
+
+            % Store reference in output cell array (without full dose data for memory)
+            field_doses{i} = struct();
+            field_doses{i}.filepath = field_filepath;
+            field_doses{i}.beam_num = beam_num;
+            field_doses{i}.seg_num = seg_num;
+            field_doses{i}.field_num = field_num;
+            field_doses{i}.plan_type = plan_type;
+            field_doses{i}.gantry_angle = gantry_angle;
+            field_doses{i}.meterset = meterset;
+            field_doses{i}.max_dose_Gy = field_dose.max_dose_Gy;
+            field_doses{i}.source_file = rd_files(i).name;
+            field_doses{i}.isocenter = iso;
+            field_doses{i}.jaw_x = jx;
+            field_doses{i}.jaw_y = jy;
+            field_doses{i}.body_masked = config.apply_dose_masking;
+            field_doses{i}.couch_masked = config.apply_dose_masking;
+
+            processed_count = processed_count + 1;
+
+            % Clear per-file variables immediately to free memory
+            clear field_dose dose_data dose_info dose_origin dose_spacing dose_dims;
+
+        catch ME
+            warning('step15_process_doses:FieldProcessingError', ...
+                'Failed to process field %d (%s): %s', i, rd_files(i).name, ME.message);
+        end
+    end  % inner file loop
+
+    % Fold batch subtotal into running total, then clear batch arrays
+    total_rs_dose = total_rs_dose + batch_total_dose;
+    clear batch_total_dose;
+
+    fprintf('  [Batch %d/%d] Done. Running total max: %.4f Gy. Memory cleared.\n', ...
+        batch_idx, num_batches, max(total_rs_dose(:)));
+end  % batch loop
+
+fprintf('  Successfully processed %d/%d field doses\n', processed_count, num_files);
+fprintf('  Total dose max: %.4f Gy\n', max(total_rs_dose(:)));
+
+% Update metadata
+metadata.processed_count = processed_count;
+metadata.total_dose_max_Gy_before_masking = max(total_rs_dose(:));
 
 %% ======================== ZERO OUT DOSE OUTSIDE BODY AND IN COUCH ========================
 
 if config.apply_dose_masking
-    fprintf('\n[7/8] Zeroing out dose outside body and in couch regions...\n');
-    
-    % Create mask for valid dose region: inside body AND not in couch
-    valid_dose_mask = body_mask & ~couch_mask;
-    invalid_dose_mask = ~valid_dose_mask;
-    
-    % Statistics before zeroing
-    dose_outside_body = sum(total_rs_dose(~body_mask));
-    dose_in_couch = sum(total_rs_dose(couch_mask));
-    dose_to_zero = sum(total_rs_dose(invalid_dose_mask));
-    
+    fprintf('\n[7/8] Applying final mask to total dose...\n');
+
+    % Masking already applied per-field during processing;
+    % apply to total dose to ensure consistency with accumulated result
     num_voxels_outside_body = sum(~body_mask(:));
-    num_voxels_in_couch = sum(couch_mask(:));
-    num_voxels_zeroed = sum(invalid_dose_mask(:));
-    
+    num_voxels_in_couch     = sum(couch_mask(:));
+    num_voxels_zeroed       = sum(invalid_dose_mask(:));
+
+    total_rs_dose(invalid_dose_mask) = 0;
+
     fprintf('  Voxels outside body: %d\n', num_voxels_outside_body);
     fprintf('  Voxels in couch: %d\n', num_voxels_in_couch);
-    fprintf('  Total voxels to zero (outside body OR in couch): %d\n', num_voxels_zeroed);
-    fprintf('  Dose outside body before zeroing: %.4f Gy (sum)\n', dose_outside_body);
-    fprintf('  Dose in couch before zeroing: %.4f Gy (sum)\n', dose_in_couch);
-    
-    % Zero out dose in invalid regions
-    total_rs_dose(invalid_dose_mask) = 0;
-    
+    fprintf('  Total voxels zeroed: %d\n', num_voxels_zeroed);
     fprintf('  Total dose max (after masking): %.4f Gy\n', max(total_rs_dose(:)));
-    
-    % Update metadata
+
     metadata.total_dose_max_Gy = max(total_rs_dose(:));
     metadata.body_voxels = sum(body_mask(:));
     metadata.couch_voxels = sum(couch_mask(:));
     metadata.voxels_zeroed = num_voxels_zeroed;
-    metadata.dose_outside_body_zeroed = dose_outside_body;
-    metadata.dose_in_couch_zeroed = dose_in_couch;
     metadata.dose_masking_applied = true;
-    
-    % Also update individual field dose files to zero invalid regions
-    fprintf('  Updating individual field doses to zero invalid regions...\n');
-    for i = 1:num_files
-        if ~isempty(field_doses{i}) && isfield(field_doses{i}, 'filepath')
-            try
-                field_filepath = field_doses{i}.filepath;
-                loaded = load(field_filepath);
-                field_dose = loaded.field_dose;
-                
-                % Zero out dose outside body and in couch
-                field_dose.dose_Gy(invalid_dose_mask) = 0;
-                field_dose.max_dose_Gy = max(field_dose.dose_Gy(:));
-                field_dose.body_masked = true;
-                field_dose.couch_masked = true;
-                
-                % Re-save
-                save(field_filepath, 'field_dose', '-v7.3');
-                
-                % Update reference
-                field_doses{i}.max_dose_Gy = field_dose.max_dose_Gy;
-                field_doses{i}.body_masked = true;
-                field_doses{i}.couch_masked = true;
-                
-                clear field_dose;
-            catch ME
-                warning('step15_process_doses:MaskError', ...
-                    'Failed to update masks for field %d: %s', i, ME.message);
-            end
-        end
-    end
-    fprintf('  Updated %d field dose files\n', num_files);
-    
+
 else
-    % Dose masking disabled (debugging mode)
     fprintf('\n[7/8] Dose masking SKIPPED (config.apply_dose_masking = false)\n');
-    
-    % Still compute statistics for reference
+
     num_voxels_zeroed = 0;
     metadata.total_dose_max_Gy = max(total_rs_dose(:));
     metadata.body_voxels = sum(body_mask(:));
     metadata.couch_voxels = sum(couch_mask(:));
     metadata.voxels_zeroed = 0;
-    metadata.dose_outside_body_zeroed = 0;
-    metadata.dose_in_couch_zeroed = 0;
     metadata.dose_masking_applied = false;
-    
+
     fprintf('  Total dose max (unmasked): %.4f Gy\n', max(total_rs_dose(:)));
     fprintf('  Body voxels: %d\n', sum(body_mask(:)));
     fprintf('  Couch voxels: %d\n', sum(couch_mask(:)));
@@ -563,7 +650,13 @@ end
 
 fprintf('\n  Saving total_rs_dose.mat...\n');
 total_dose_file = fullfile(processed_dir, 'total_rs_dose.mat');
-save(total_dose_file, 'total_rs_dose', '-v7.3');
+if config.use_sparse_storage
+    total_rs_dose_dims   = size(total_rs_dose);
+    total_rs_dose_sparse = sparse(reshape(total_rs_dose, [], total_rs_dose_dims(end)));
+    save(total_dose_file, 'total_rs_dose_sparse', 'total_rs_dose_dims', '-v7.3');
+else
+    save(total_dose_file, 'total_rs_dose', '-v7.3');
+end
 fprintf('  Saved: total_rs_dose.mat\n');
 
 %% ======================== CREATE SCT RESAMPLED STRUCTURE ========================
@@ -597,32 +690,13 @@ metadata_file = fullfile(processed_dir, 'metadata.mat');
 save(metadata_file, 'metadata', '-v7.3');
 fprintf('  Saved: metadata.mat\n');
 
-%% ======================== RELOAD FIELD DOSES FOR OUTPUT ========================
-
-% Optionally reload full field doses into cell array for return
-% (Only if memory permits - otherwise caller should load from files)
-fprintf('\n  Reloading field doses for output...\n');
-
-try
-    for i = 1:num_files
-        if ~isempty(field_doses{i}) && isfield(field_doses{i}, 'filepath')
-            loaded = load(field_doses{i}.filepath);
-            field_doses{i} = loaded.field_dose;
-        end
-    end
-    fprintf('  Field doses loaded into memory\n');
-catch ME
-    warning('step15_process_doses:MemoryWarning', ...
-        'Could not reload all field doses into memory: %s\nAccess them from individual files.', ...
-        ME.message);
-end
-
 %% ======================== SUMMARY ========================
 
 fprintf('\n========================================\n');
 fprintf('  Step 1.5 Complete\n');
 fprintf('========================================\n');
 fprintf('  Processed %d field doses\n', processed_count);
+fprintf('  .mat files saved: %d\n', save_count);
 fprintf('  Dose grid: [%d x %d x %d]\n', ref_dims(1), ref_dims(2), ref_dims(3));
 fprintf('  Spacing: [%.3f, %.3f, %.3f] mm\n', ref_spacing(1), ref_spacing(2), ref_spacing(3));
 fprintf('  Total dose max: %.4f Gy\n', max(total_rs_dose(:)));
@@ -630,7 +704,8 @@ fprintf('  Tissue ROIs: %d\n', length(roi_names));
 fprintf('  Body voxels: %d\n', sum(body_mask(:)));
 fprintf('  Couch voxels: %d\n', sum(couch_mask(:)));
 if config.apply_dose_masking
-    fprintf('  Dose masking: ENABLED (voxels zeroed: %d)\n', num_voxels_zeroed);
+    fprintf('  Dose masking: ENABLED (applied before export)\n');
+    fprintf('    Total voxels zeroed: %d\n', num_voxels_zeroed);
 else
     fprintf('  Dose masking: DISABLED (debugging mode)\n');
 end
@@ -889,11 +964,12 @@ function [beam_num, seg_num, field_num, plan_type] = extractBeamInfo(filename, d
 %EXTRACTBEAMINFO Extract beam, segment, field numbers and plan type from dose filename
 %
 %   Supported patterns (checked in priority order):
-%     1. dose_[id]_[session]_(adapted|reference)_B[n]_[seg].dcm  (preferred)
-%        e.g. dose_1885729_Session_4_adapted_B6_103.dcm
-%        -> beam_num  = 6  (B[n])
-%        -> seg_num   = 103
-%        -> field_num = 6  (= beam_num, matches RTPLAN beam_number)
+%     1. dose_[id]_[session]_(adapted|reference)[_CT_k]_B[n]_[seg].(dcm|mat)
+%        e.g. dose_1885729_Session_4_adapted_B6_103.dcm        (legacy DICOM)
+%             dose_1194203_Session_1_adapted_CT_1_B13_00.mat   (RayStation NPZ -> mat)
+%        -> beam_num  = 6 or 13  (B[n])
+%        -> seg_num   = 103 or 0
+%        -> field_num = beam_num (matches RTPLAN beam_number)
 %        -> plan_type = 'adapted'
 %     2. Plan_Field [n]_Beam[m]_B[n]_S[m].dcm  (legacy step06 format)
 %     3. Beam[n]_Seg[m]_Field [o].dcm           (legacy RayStation export)
@@ -911,8 +987,10 @@ function [beam_num, seg_num, field_num, plan_type] = extractBeamInfo(filename, d
     field_num = default_index;
     plan_type = 'unknown';
 
-    % --- Pattern 1 (preferred): dose_*_(adapted|reference)_B[n]_[seg].dcm ---
-    tokens = regexp(filename, '_(adapted|reference)_B(\d+)_(\d+)\.dcm$', 'tokens', 'ignorecase');
+    % --- Pattern 1 (preferred): dose_*_(adapted|reference)[_CT_k]_B[n]_[seg].(dcm|mat) ---
+    tokens = regexp(filename, ...
+        '_(adapted|reference)(?:_CT_\d+)?_B(\d+)_(\d+)\.(?:dcm|mat)$', ...
+        'tokens', 'ignorecase');
     if ~isempty(tokens) && ~isempty(tokens{1})
         plan_type = lower(tokens{1}{1});        % 'adapted' or 'reference'
         beam_num  = str2double(tokens{1}{2});   % B[n]
@@ -1065,38 +1143,28 @@ function [sct_hu, origin, spacing, dims] = loadSctImages(sct_dir)
     spacing = [];
     dims = [];
     
-    % Get all DICOM files that contain 'CT' in the name
+    % Get all DICOM files whose SeriesDescription is 'sct' (case-insensitive)
     all_files = dir(fullfile(sct_dir, '*.dcm'));
     sct_files = [];
-    
+    z_positions = [];
+
     for i = 1:length(all_files)
-        if contains(all_files(i).name, 'CT', 'IgnoreCase', true) && ...
-           ~contains(all_files(i).name, 'RTSTRUCT', 'IgnoreCase', true) && ...
-           ~contains(all_files(i).name, 'RTPLAN', 'IgnoreCase', true) && ...
-           ~contains(all_files(i).name, 'RTDOSE', 'IgnoreCase', true)
-            sct_files = [sct_files; all_files(i)]; %#ok<AGROW>
+        try
+            info = dicominfo(fullfile(sct_dir, all_files(i).name));
+            if isfield(info, 'SeriesDescription') && strcmpi(info.SeriesDescription, 'sct')
+                sct_files = [sct_files; all_files(i)]; %#ok<AGROW>
+                z_positions = [z_positions; info.ImagePositionPatient(3)]; %#ok<AGROW>
+            end
+        catch
+            % Skip unreadable files
         end
     end
-    
+
     if isempty(sct_files)
-        warning('loadSctImages:NoFiles', 'No CT DICOM files found in: %s', sct_dir);
+        warning('loadSctImages:NoFiles', 'No SCT DICOM files found in: %s', sct_dir);
         return;
     end
-    
-    fprintf('    Found %d CT image files\n', length(sct_files));
-    
-    % Get z-positions for sorting
-    z_positions = zeros(length(sct_files), 1);
-    
-    for i = 1:length(sct_files)
-        try
-            info = dicominfo(fullfile(sct_dir, sct_files(i).name));
-            z_positions(i) = info.ImagePositionPatient(3);
-        catch
-            z_positions(i) = i;  % Fallback
-        end
-    end
-    
+
     % Sort by z-position
     [~, sort_idx] = sort(z_positions);
     
