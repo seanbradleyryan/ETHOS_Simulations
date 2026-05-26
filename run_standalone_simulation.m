@@ -42,6 +42,11 @@ CONFIG.use_gpu                = true;
 CONFIG.correction_factor           = 1.9;
 CONFIG.use_pressure_scale_correction = true;   % divide max(p0) / max(recon_pressure) before dose conversion
 
+% --- Reconstruction method ---
+%   'tr'  : iterative time-reversal (k-Wave back-propagation)
+%   'DAS' : Delay-And-Sum back-projection (homogeneous c, non-iterative)
+CONFIG.reconstruction_method = 'tr';
+
 CONFIG.num_time_reversal_iter = 30;
 CONFIG.convergence_tol        = 1e-3;
 
@@ -92,6 +97,7 @@ fprintf('  Dose file:       %s\n', dose_filepath);
 fprintf('  SCT file:        %s\n', sct_filepath);
 fprintf('  Sensor:          %s\n', CONFIG.sensor_placement_method);
 fprintf('  Tissue model:    %s\n', CONFIG.gruneisen_method);
+fprintf('  Recon method:    %s\n', CONFIG.reconstruction_method);
 fprintf('  TR iterations:   %d (tol: %.1e)\n', CONFIG.num_time_reversal_iter, CONFIG.convergence_tol);
 fprintf('  GPU:             %s\n', mat2str(CONFIG.use_gpu));
 if CONFIG.downscale_factor ~= 1
@@ -558,7 +564,10 @@ else
     fprintf('       Pulse convolution disabled.\n');
 end
 
-%% ========================= ITERATIVE TIME-REVERSAL RECONSTRUCTION ========
+%% ========================= RECONSTRUCTION ================================
+
+switch lower(CONFIG.reconstruction_method)
+case 'tr'
 
 fprintf('       Running iterative time reversal (%d iterations, tol=%.1e)...\n', ...
     CONFIG.num_time_reversal_iter, CONFIG.convergence_tol);
@@ -713,6 +722,84 @@ catch ME
     return;
 end
 
+case 'das'
+
+fprintf('       Running Delay-And-Sum reconstruction...\n');
+
+try
+    das_tic = tic;
+
+    % 1. Sensor positions in physical coords on the padded grid
+    sensor_lin = find(sensor.mask);
+    [sx_i, sy_i, sz_i] = ind2sub([Nx, Ny, Nz], sensor_lin);
+    sx_pos = (double(sx_i) - 1) * dx;
+    sy_pos = (double(sy_i) - 1) * dy;
+    sz_pos = (double(sz_i) - 1) * dz;
+    nSens  = numel(sensor_lin);
+
+    % 2. Voxel grid coords (padded grid)
+    [Xg, Yg, Zg] = ndgrid((0:Nx-1)*dx, (0:Ny-1)*dy, (0:Nz-1)*dz);
+    Xg = single(Xg);  Yg = single(Yg);  Zg = single(Zg);
+
+    % 3. Effective sound speed: mean of nonzero medium speeds (homogeneous assumption)
+    nonzero_c = medium.sound_speed(medium.sound_speed > 0);
+    c_das = double(mean(nonzero_c, 'all'));
+
+    % 4. Move sensor data to CPU single (avoids GPU memory blowup with full grid)
+    sd     = single(gather(sensorData));
+    Nt_sd  = size(sd, 2);
+
+    reconPressure = zeros(Nx, Ny, Nz, 'single');
+    dx_min        = single(min([dx, dy, dz]));
+
+    % 5. Loop over sensors (memory-bounded; Nx*Ny*Nz*Nsens would be huge)
+    for s = 1:nSens
+        d_s   = sqrt((Xg - single(sx_pos(s))).^2 + ...
+                     (Yg - single(sy_pos(s))).^2 + ...
+                     (Zg - single(sz_pos(s))).^2);
+        idx_f = d_s / single(c_das * dt) + 1;     % fractional sample index
+        idx0  = floor(idx_f);
+        frac  = idx_f - idx0;
+        valid = idx0 >= 1 & idx0 < Nt_sd;
+
+        samp = zeros(size(idx0), 'single');
+        i0   = idx0(valid);
+        v0   = sd(s, i0);
+        v1   = sd(s, i0 + 1);
+        samp(valid) = (1 - frac(valid)) .* v0(:) + frac(valid) .* v1(:);
+
+        % 1/r weighting compensates spherical spreading
+        w = single(1) ./ max(d_s, dx_min);
+        reconPressure = reconPressure + w .* samp;
+
+        if mod(s, max(1, round(nSens/10))) == 0
+            fprintf('         DAS sensor %d/%d\n', s, nSens);
+        end
+    end
+
+    reconPressure = max(double(reconPressure), 0) * CONFIG.correction_factor;
+
+    % Synthesize TR-style outputs so downstream plot/save code is reused
+    conv_max_pressure = max(reconPressure(:));
+    conv_rel_change   = NaN;
+    num_iters_done    = 1;
+    tr_time           = toc(das_tic);
+
+    fprintf('       DAS complete (%.1f s).\n', tr_time);
+    fprintf('       c_DAS = %.1f m/s, sensors used: %d\n', c_das, nSens);
+    fprintf('       Reconstructed pressure: [%.2e, %.2e] Pa\n', ...
+        min(reconPressure(:)), max(reconPressure(:)));
+
+catch ME
+    fprintf('[ERROR] DAS reconstruction failed: %s\n', ME.message);
+    return;
+end
+
+otherwise
+    error('Unknown reconstruction_method: "%s" (use ''tr'' or ''DAS'')', ...
+        CONFIG.reconstruction_method);
+end
+
 %% ========================= CROP TO ORIGINAL SIZE =========================
 
 if did_pad
@@ -864,7 +951,8 @@ end
 
 if CONFIG.save_results
     % Build filename from configuration parameters
-    output_fname = sprintf('standalone_results_%s_%s_%d.mat', ...
+    output_fname = sprintf('standalone_results_%s_%s_%s_%d.mat', ...
+        CONFIG.reconstruction_method, ...
         CONFIG.sensor_placement_method, CONFIG.gruneisen_method, ...
         CONFIG.num_time_reversal_iter);
 
@@ -896,10 +984,12 @@ if CONFIG.plot_results
     plot_dose_panels(doseGrid, recon_dose, sensor.mask, medium_orig.density, spacing_mm, ...
         'Dose Comparison: Original vs Reconstructed');
 
-    % Figure 2  p0 convergence (max pressure + relative change)
-    p0_max_for_plot = max(p0(:));
-    plot_convergence_history(conv_max_pressure, conv_rel_change, ...
-        num_iters_done, CONFIG.convergence_tol, p0_max_for_plot);
+    % Figure 2  p0 convergence (max pressure + relative change) — TR only
+    if strcmpi(CONFIG.reconstruction_method, 'tr')
+        p0_max_for_plot = max(p0(:));
+        plot_convergence_history(conv_max_pressure, conv_rel_change, ...
+            num_iters_done, CONFIG.convergence_tol, p0_max_for_plot);
+    end
 
     % Figure 3  Axial gamma (3 criteria) + absolute error
     if ~isempty(gamma_results) && isfield(gamma_results, 'maps')
