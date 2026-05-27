@@ -1,13 +1,19 @@
-function [field_doses, sct_resampled, total_rs_dose, metadata] = step15_process_doses(patient_id, session, config)
-%% STEP15_PROCESS_DOSES - Process field doses and resample CT
+function [field_doses, cbct_resampled, total_rs_dose, metadata] = step15_process_doses(patient_id, session, config)
+%% STEP15_PROCESS_DOSES - Process field doses and resample per-CBCT geometry
 %
-%   [field_doses, sct_resampled, total_rs_dose, metadata] = step15_process_doses(patient_id, session, config)
+%   [field_doses, cbct_resampled, total_rs_dose, metadata] = step15_process_doses(patient_id, session, config)
 %
 %   PURPOSE:
-%   Load all Raystation field dose DICOM files, extract dose grids with geometry
-%   metadata, resample SCT to match dose grid, extract tissue classifications
-%   from RTSTRUCT, zero out couch regions, and save processed data. Each
-%   field dose is saved as a separate file due to memory constraints.
+%   Load all Raystation field dose files, extract dose grids with geometry
+%   metadata, resample BOTH CBCTs (CT_1 and CT_3) found in the RayStation
+%   directory to the dose grid, build per-CBCT tissue/body/couch masks from
+%   each CBCT's own RTSTRUCT, zero out couch regions per field, and save
+%   processed data. Each field dose is saved as a separate file due to
+%   memory constraints.
+%
+%   The earlier-acquired CBCT (by SeriesDate+SeriesTime) becomes CT_1, the
+%   later becomes CT_3. Field doses without a CT_1/CT_3 label in their
+%   filename are rejected — per-CBCT masking has no sensible default.
 %
 %   INPUTS:
 %       patient_id  - String, patient identifier (e.g., '1194203')
@@ -30,38 +36,45 @@ function [field_doses, sct_resampled, total_rs_dose, metadata] = step15_process_
 %           .plan_type     - 'adapted' or 'reference' (from filename)
 %           .gantry_angle  - Gantry angle in degrees (from RTPLAN)
 %           .meterset      - Monitor units (from RTPLAN, matched by beam_num)
-%       sct_resampled   - Struct with CT resampled to dose grid:
-%           .cubeHU         - 3D HU array
-%           .cubeDensity    - 3D density array (kg/mÂ³)
-%           .tissueMask     - 3D uint8 array with ROI labels (0 = unassigned)
-%           .roiNames       - Cell array of ROI names (index matches label)
-%           .bodyMask       - 3D logical array (true = inside body region)
-%           .couchMask      - 3D logical array (true = couch region)
-%           .origin         - [x, y, z] in mm
-%           .spacing        - [dx, dy, dz] in mm
-%           .dimensions     - [nx, ny, nz]
-%       total_rs_dose   - Sum of all field doses (3D array in Gy), zeroed outside body and in couch
+%       cbct_resampled  - Struct with two fields, CT_1 and CT_3, each a
+%                         per-CBCT resampled struct with:
+%           .cubeHU              - 3D HU array
+%           .cubeDensity         - 3D density array (kg/mÂ³)
+%           .tissueMask          - 3D uint8 array with ROI labels (0 = unassigned)
+%           .roiNames            - Cell array of ROI names (index matches label)
+%           .bodyMask            - 3D logical array (true = inside body region)
+%           .couchMask           - 3D logical array (true = couch region)
+%           .origin/.spacing     - dose-grid geometry (mm)
+%           .dimensions          - [nx, ny, nz]
+%           .series_uid          - source CBCT SeriesInstanceUID
+%           .series_datetime     - numeric SeriesDate+SeriesTime
+%           .ct_label            - 'CT_1' or 'CT_3'
+%       total_rs_dose   - Sum of all field doses (3D array in Gy), zeroed via
+%                         the union of CT_1/CT_3 body masks
 %       metadata        - Struct with combined geometry info
 %
 %   FILES CREATED (in processed/ directory):
-%       - dose_[id]_[session]_[adapted|reference]_B[n]_[seg].mat (one per field)
-%         e.g. dose_1194203_Session_1_adapted_B6_103.mat
-%       - sct_resampled.mat (includes tissueMask and couchMask)
+%       - dose_[id]_[session]_[adapted|reference]_{CT_n}_B[n]_[seg].mat (per field)
+%       - CBCT1_resampled.mat  (variable: CBCT1_resampled)
+%       - CBCT3_resampled.mat  (variable: CBCT3_resampled)
 %       - total_rs_dose.mat
 %       - total_dose_[CT_label].mat (per-CT-image total; e.g. total_dose_CT_1.mat, total_dose_CT_3.mat)
-%         Only written for NPZ-derived inputs that carry a CT label in their filename.
-%       - tissue_masks.mat (individual ROI masks)
+%       - tissue_masks.mat (per-CBCT masks: *_ct1 and *_ct3 variables)
 %       - metadata.mat
 %
 %   ALGORITHM:
 %   1. Create processed/ subdirectory if not exists
-%   2. Find all dose_*.dcm files in Raystation directory
+%   2. Find all dose_*.{mat,dcm} files in Raystation directory
 %   3. Load RTPLAN to extract beam metadata (gantry angles, metersets)
 %   4. Load first dose file to establish reference grid geometry
-%   5. Load SCT images, sort by z-position, resample to dose grid, convert HU
-%   6. Load RTSTRUCT, create tissue classification masks, precompute invalid_dose_mask
-%   7. Process each dose file: scale -> validate -> zero invalid regions -> save
-%   8. Zero total dose in invalid regions for consistency, save all outputs
+%   5. Discover the two CBCT series + their RTSTRUCTs in RayStationFiles,
+%      pair by SeriesInstanceUID, sort by datetime -> CT_1 / CT_3
+%   6. Resample each CBCT to the dose grid; build per-CBCT body/couch/tissue
+%      masks from the matching RTSTRUCT; precompute per-CBCT invalid masks
+%   7. Process each dose file: scale -> validate -> zero invalid regions
+%      (per the field's ct_label) -> save
+%   8. Zero combined total_rs_dose using union-body / intersection-couch;
+%      zero each per-CT total with its own mask; save all outputs
 %
 %   KEY TECHNICAL NOTES:
 %   - Z-resolution MUST come from GridFrameOffsetVector, NOT PixelSpacing
@@ -323,98 +336,112 @@ metadata.timestamp = datetime('now');
 metadata.reference_file = rd_files(1).name;
 metadata.beam_metadata = beam_metadata;  % Includes isocenter + jaw data for sensor placement
 
-%% ======================== LOAD AND RESAMPLE SCT ========================
+%% ======================== DISCOVER, LOAD, AND RESAMPLE CBCT1 / CBCT3 ========================
 
-fprintf('\n[4/8] Loading and resampling SCT to dose grid...\n');
+fprintf('\n[4/8] Discovering CBCTs and RTSTRUCTs in RayStation directory...\n');
 
-% Load SCT images
-[sct_hu, sct_origin, sct_spacing, sct_dims] = loadSctImages(sct_dir);
+[cbct_ct1_meta, cbct_ct3_meta] = discoverCbctSeries(rs_dir);
 
-if isempty(sct_hu)
-    error('step15_process_doses:NoSCT', ...
-        'Failed to load SCT images from: %s', sct_dir);
+fprintf('\n  Loading and resampling CBCT1 (CT_1, earlier) to dose grid...\n');
+[ct1_hu, ct1_origin, ct1_spacing, ct1_dims] = loadCbctImagesFromFiles(cbct_ct1_meta.files);
+if isempty(ct1_hu)
+    error('step15_process_doses:NoCBCT', 'Failed to load CBCT1 slices.');
 end
-
-fprintf('  Original SCT:\n');
-fprintf('    Dimensions: [%d, %d, %d]\n', sct_dims(1), sct_dims(2), sct_dims(3));
-fprintf('    Spacing (mm): [%.3f, %.3f, %.3f]\n', sct_spacing(1), sct_spacing(2), sct_spacing(3));
-fprintf('    Origin (mm): [%.3f, %.3f, %.3f]\n', sct_origin(1), sct_origin(2), sct_origin(3));
-fprintf('    HU range: [%.0f, %.0f]\n', min(sct_hu(:)), max(sct_hu(:)));
-
-% Resample SCT to dose grid
-fprintf('  Performing 3D interpolation (this may take a moment)...\n');
-
-sct_hu_resampled = resampleSctToDoseGrid(sct_hu, sct_origin, sct_spacing, sct_dims, ...
+fprintf('    Original CT_1: dims=[%d %d %d]  spacing=[%.3f %.3f %.3f]  origin=[%.3f %.3f %.3f]  HU=[%.0f %.0f]\n', ...
+    ct1_dims(1), ct1_dims(2), ct1_dims(3), ct1_spacing(1), ct1_spacing(2), ct1_spacing(3), ...
+    ct1_origin(1), ct1_origin(2), ct1_origin(3), min(ct1_hu(:)), max(ct1_hu(:)));
+ct1_hu_resampled = resampleSctToDoseGrid(ct1_hu, ct1_origin, ct1_spacing, ct1_dims, ...
     ref_origin, ref_spacing, ref_dims);
+ct1_density = huToDensity(ct1_hu_resampled);
+fprintf('    CT_1 resampled HU range: [%.0f, %.0f]  density range: [%.0f, %.0f] kg/m^3\n', ...
+    min(ct1_hu_resampled(:)), max(ct1_hu_resampled(:)), min(ct1_density(:)), max(ct1_density(:)));
 
-fprintf('  Resampled SCT dimensions: [%d, %d, %d]\n', ...
-    size(sct_hu_resampled, 1), size(sct_hu_resampled, 2), size(sct_hu_resampled, 3));
-
-% Convert HU to density
-fprintf('  Converting HU to density...\n');
-sct_density = huToDensity(sct_hu_resampled);
-
-fprintf('  Density range: [%.0f, %.0f] kg/m^3\n', min(sct_density(:)), max(sct_density(:)));
-
-%% ======================== LOAD RTSTRUCT AND CREATE TISSUE MASKS ========================
-
-fprintf('\n[5/8] Loading RTSTRUCT and creating tissue classification masks...\n');
-
-% Load RTSTRUCT and convert contours to masks on the dose grid
-[tissue_mask, roi_names, roi_masks, body_mask, couch_mask] = loadRtstructAndCreateMasks(...
-    sct_dir, ref_origin, ref_spacing, ref_dims);
-
-if isempty(tissue_mask)
-    warning('step15_process_doses:NoRTSTRUCT', ...
-        'Could not create tissue masks from RTSTRUCT. Using empty masks.');
-    tissue_mask = zeros(ref_dims, 'uint8');
-    roi_names = {};
-    roi_masks = struct();
-    body_mask = false(ref_dims);
-    couch_mask = false(ref_dims);
-else
-    fprintf('  Created masks for %d ROIs\n', length(roi_names));
-    fprintf('  Body voxels identified: %d\n', sum(body_mask(:)));
-    fprintf('  Couch voxels identified: %d\n', sum(couch_mask(:)));
-
-    % List ROIs
-    for i = 1:length(roi_names)
-        if isfield(roi_masks, sprintf('ROI_%03d', i))
-            mask_field = sprintf('ROI_%03d', i);
-            num_voxels = sum(roi_masks.(mask_field)(:));
-            fprintf('    [%d] %s: %d voxels\n', i, roi_names{i}, num_voxels);
-        end
-    end
+fprintf('\n  Loading and resampling CBCT3 (CT_3, later) to dose grid...\n');
+[ct3_hu, ct3_origin, ct3_spacing, ct3_dims] = loadCbctImagesFromFiles(cbct_ct3_meta.files);
+if isempty(ct3_hu)
+    error('step15_process_doses:NoCBCT', 'Failed to load CBCT3 slices.');
 end
+fprintf('    Original CT_3: dims=[%d %d %d]  spacing=[%.3f %.3f %.3f]  origin=[%.3f %.3f %.3f]  HU=[%.0f %.0f]\n', ...
+    ct3_dims(1), ct3_dims(2), ct3_dims(3), ct3_spacing(1), ct3_spacing(2), ct3_spacing(3), ...
+    ct3_origin(1), ct3_origin(2), ct3_origin(3), min(ct3_hu(:)), max(ct3_hu(:)));
+ct3_hu_resampled = resampleSctToDoseGrid(ct3_hu, ct3_origin, ct3_spacing, ct3_dims, ...
+    ref_origin, ref_spacing, ref_dims);
+ct3_density = huToDensity(ct3_hu_resampled);
+fprintf('    CT_3 resampled HU range: [%.0f, %.0f]  density range: [%.0f, %.0f] kg/m^3\n', ...
+    min(ct3_hu_resampled(:)), max(ct3_hu_resampled(:)), min(ct3_density(:)), max(ct3_density(:)));
 
-% Save tissue masks separately (can be large)
-fprintf('  Saving tissue_masks.mat...\n');
+% Free raw CBCT volumes; we only need the dose-grid-resampled cubes from here on.
+clear ct1_hu ct3_hu;
+
+%% ======================== LOAD RTSTRUCTS AND CREATE PER-CBCT MASKS ========================
+
+fprintf('\n[5/8] Loading per-CBCT RTSTRUCTs and creating tissue classification masks...\n');
+
+fprintf('  CT_1 RTSTRUCT...\n');
+[tissue_mask_ct1, roi_names_ct1, roi_masks_ct1, body_mask_ct1, couch_mask_ct1] = ...
+    loadRtstructAndCreateMasksFromFile(cbct_ct1_meta.rtstruct, ref_origin, ref_spacing, ref_dims);
+if isempty(tissue_mask_ct1)
+    error('step15_process_doses:NoRTSTRUCT', ...
+        'Could not create CT_1 masks from RTSTRUCT: %s', cbct_ct1_meta.rtstruct);
+end
+fprintf('    CT_1 ROIs=%d  body voxels=%d  couch voxels=%d\n', ...
+    length(roi_names_ct1), sum(body_mask_ct1(:)), sum(couch_mask_ct1(:)));
+
+fprintf('  CT_3 RTSTRUCT...\n');
+[tissue_mask_ct3, roi_names_ct3, roi_masks_ct3, body_mask_ct3, couch_mask_ct3] = ...
+    loadRtstructAndCreateMasksFromFile(cbct_ct3_meta.rtstruct, ref_origin, ref_spacing, ref_dims);
+if isempty(tissue_mask_ct3)
+    error('step15_process_doses:NoRTSTRUCT', ...
+        'Could not create CT_3 masks from RTSTRUCT: %s', cbct_ct3_meta.rtstruct);
+end
+fprintf('    CT_3 ROIs=%d  body voxels=%d  couch voxels=%d\n', ...
+    length(roi_names_ct3), sum(body_mask_ct3(:)), sum(couch_mask_ct3(:)));
+
+% Save both mask sets in a single tissue_masks.mat
+fprintf('  Saving tissue_masks.mat (both CT_1 and CT_3)...\n');
 tissue_masks_file = fullfile(processed_dir, 'tissue_masks.mat');
 if config.use_sparse_storage
-    % Reshape each 3D mask to 2D [nRows*nCols, nSlices] then sparsify.
-    % Masks are mostly false/zero after body/couch contours are applied.
-    tissue_mask_dims = size(tissue_mask);
-    body_mask_dims   = size(body_mask);
-    couch_mask_dims  = size(couch_mask);
-    tissue_mask_sp   = sparse(reshape(double(tissue_mask), [], tissue_mask_dims(end)));
-    body_mask_sp     = sparse(reshape(double(body_mask),   [], body_mask_dims(end)));
-    couch_mask_sp    = sparse(reshape(double(couch_mask),  [], couch_mask_dims(end)));
+    tissue_mask_ct1_dims = size(tissue_mask_ct1);
+    body_mask_ct1_dims   = size(body_mask_ct1);
+    couch_mask_ct1_dims  = size(couch_mask_ct1);
+    tissue_mask_ct1_sp   = sparse(reshape(double(tissue_mask_ct1), [], tissue_mask_ct1_dims(end)));
+    body_mask_ct1_sp     = sparse(reshape(double(body_mask_ct1),   [], body_mask_ct1_dims(end)));
+    couch_mask_ct1_sp    = sparse(reshape(double(couch_mask_ct1),  [], couch_mask_ct1_dims(end)));
+
+    tissue_mask_ct3_dims = size(tissue_mask_ct3);
+    body_mask_ct3_dims   = size(body_mask_ct3);
+    couch_mask_ct3_dims  = size(couch_mask_ct3);
+    tissue_mask_ct3_sp   = sparse(reshape(double(tissue_mask_ct3), [], tissue_mask_ct3_dims(end)));
+    body_mask_ct3_sp     = sparse(reshape(double(body_mask_ct3),   [], body_mask_ct3_dims(end)));
+    couch_mask_ct3_sp    = sparse(reshape(double(couch_mask_ct3),  [], couch_mask_ct3_dims(end)));
+
     save(tissue_masks_file, ...
-        'tissue_mask_sp', 'tissue_mask_dims', ...
-        'body_mask_sp',   'body_mask_dims', ...
-        'couch_mask_sp',  'couch_mask_dims', ...
-        'roi_names', 'roi_masks', '-v7.3');
+        'tissue_mask_ct1_sp', 'tissue_mask_ct1_dims', ...
+        'body_mask_ct1_sp',   'body_mask_ct1_dims', ...
+        'couch_mask_ct1_sp',  'couch_mask_ct1_dims', ...
+        'roi_names_ct1', 'roi_masks_ct1', ...
+        'tissue_mask_ct3_sp', 'tissue_mask_ct3_dims', ...
+        'body_mask_ct3_sp',   'body_mask_ct3_dims', ...
+        'couch_mask_ct3_sp',  'couch_mask_ct3_dims', ...
+        'roi_names_ct3', 'roi_masks_ct3', ...
+        '-v7.3');
 else
-    save(tissue_masks_file, 'tissue_mask', 'roi_names', 'roi_masks', 'body_mask', 'couch_mask', '-v7.3');
+    save(tissue_masks_file, ...
+        'tissue_mask_ct1', 'roi_names_ct1', 'roi_masks_ct1', 'body_mask_ct1', 'couch_mask_ct1', ...
+        'tissue_mask_ct3', 'roi_names_ct3', 'roi_masks_ct3', 'body_mask_ct3', 'couch_mask_ct3', ...
+        '-v7.3');
 end
 fprintf('  Saved: tissue_masks.mat\n');
 
-% Pre-compute invalid dose mask once — used across all fields in the batch loop
+% Pre-compute invalid dose mask PER CBCT (selected per field via ct_label)
 if config.apply_dose_masking
-    invalid_dose_mask = ~(body_mask & ~couch_mask);
-    fprintf('  Invalid dose mask computed: %d voxels will be zeroed per field\n', sum(invalid_dose_mask(:)));
+    invalid_dose_mask_ct1 = ~(body_mask_ct1 & ~couch_mask_ct1);
+    invalid_dose_mask_ct3 = ~(body_mask_ct3 & ~couch_mask_ct3);
+    fprintf('  Invalid-dose masks: CT_1 zeros %d voxels, CT_3 zeros %d voxels\n', ...
+        sum(invalid_dose_mask_ct1(:)), sum(invalid_dose_mask_ct3(:)));
 else
-    invalid_dose_mask = false(ref_dims);
+    invalid_dose_mask_ct1 = false(ref_dims);
+    invalid_dose_mask_ct3 = false(ref_dims);
     fprintf('  Dose masking DISABLED (debugging mode)\n');
 end
 
@@ -496,8 +523,9 @@ for batch_idx = 1:num_batches
             % field_num (= beam_num) is used to match to RTPLAN beam metadata
             [beam_num, seg_num, field_num, plan_type] = extractBeamInfo(rd_files(i).name, i);
 
-            % Extract optional CT label (e.g. 'CT_1') so CT_1 vs CT_3 field
-            % doses for the same beam don't collide on output.
+            % Extract CT label (e.g. 'CT_1' / 'CT_3'). Required: every field
+            % dose must carry a CT label so we can pick the matching CBCT
+            % geometry + mask for simulation and masking.
             ct_tokens = regexp(rd_files(i).name, ...
                 '_(?:adapted|reference)_(CT_\d+)_B\d+_\d+\.(?:dcm|mat)$', ...
                 'tokens', 'once', 'ignorecase');
@@ -505,6 +533,20 @@ for batch_idx = 1:num_batches
                 ct_label = ct_tokens{1};
             else
                 ct_label = '';
+            end
+
+            % Select per-CBCT invalid-dose mask. Reject anything that doesn't
+            % map to a supported CBCT — there is no sensible default now that
+            % masks are per-CT.
+            switch ct_label
+                case 'CT_1'
+                    invalid_for_field = invalid_dose_mask_ct1;
+                case 'CT_3'
+                    invalid_for_field = invalid_dose_mask_ct3;
+                otherwise
+                    error('step15_process_doses:UnsupportedCtLabel', ...
+                        'Field %s has ct_label="%s"; only CT_1 and CT_3 are supported.', ...
+                        rd_files(i).name, ct_label);
             end
 
             % Get beam metadata by matching field_num to beam_number in RTPLAN
@@ -515,7 +557,7 @@ for batch_idx = 1:num_batches
 
             % Zero out invalid regions (outside body or in couch) BEFORE saving
             if config.apply_dose_masking
-                dose_data(invalid_dose_mask) = 0;
+                dose_data(invalid_for_field) = 0;
             end
 
             % Create field dose structure with masking already applied
@@ -623,47 +665,63 @@ metadata.total_dose_max_Gy_before_masking = max(total_rs_dose(:));
 
 %% ======================== ZERO OUT DOSE OUTSIDE BODY AND IN COUCH ========================
 
+% Combined-anatomy masks for the cross-CBCT total dose: keep a voxel that
+% is body in EITHER CBCT and not couch in BOTH.
+body_mask_union  = body_mask_ct1  | body_mask_ct3;
+couch_mask_inter = couch_mask_ct1 & couch_mask_ct3;
+invalid_dose_mask_union = ~(body_mask_union & ~couch_mask_inter);
+
 if config.apply_dose_masking
     fprintf('\n[7/8] Applying final mask to total dose...\n');
 
-    % Masking already applied per-field during processing;
-    % apply to total dose to ensure consistency with accumulated result
-    num_voxels_outside_body = sum(~body_mask(:));
-    num_voxels_in_couch     = sum(couch_mask(:));
-    num_voxels_zeroed       = sum(invalid_dose_mask(:));
+    % Apply union mask to total_rs_dose (aggregates both CBCTs)
+    num_voxels_outside_body = sum(~body_mask_union(:));
+    num_voxels_in_couch     = sum(couch_mask_inter(:));
+    num_voxels_zeroed       = sum(invalid_dose_mask_union(:));
 
-    total_rs_dose(invalid_dose_mask) = 0;
+    total_rs_dose(invalid_dose_mask_union) = 0;
 
-    % Apply same mask to each per-CT-label accumulator
+    % Apply per-CT mask to each per-CT-label accumulator
     ct_keys = fieldnames(ct_dose_accum);
     for k = 1:numel(ct_keys)
-        ct_dose_accum.(ct_keys{k})(invalid_dose_mask) = 0;
+        switch ct_keys{k}
+            case 'CT_1'
+                ct_dose_accum.(ct_keys{k})(invalid_dose_mask_ct1) = 0;
+            case 'CT_3'
+                ct_dose_accum.(ct_keys{k})(invalid_dose_mask_ct3) = 0;
+            otherwise
+                error('step15_process_doses:UnsupportedCtLabel', ...
+                    'Accumulator key "%s" is not CT_1 or CT_3.', ct_keys{k});
+        end
     end
 
-    fprintf('  Voxels outside body: %d\n', num_voxels_outside_body);
-    fprintf('  Voxels in couch: %d\n', num_voxels_in_couch);
+    fprintf('  Voxels outside body (union): %d\n', num_voxels_outside_body);
+    fprintf('  Voxels in couch (intersection): %d\n', num_voxels_in_couch);
     fprintf('  Total voxels zeroed: %d\n', num_voxels_zeroed);
     fprintf('  Total dose max (after masking): %.4f Gy\n', max(total_rs_dose(:)));
 
     metadata.total_dose_max_Gy = max(total_rs_dose(:));
-    metadata.body_voxels = sum(body_mask(:));
-    metadata.couch_voxels = sum(couch_mask(:));
-    metadata.voxels_zeroed = num_voxels_zeroed;
+    metadata.body_voxels_ct1   = sum(body_mask_ct1(:));
+    metadata.body_voxels_ct3   = sum(body_mask_ct3(:));
+    metadata.couch_voxels_ct1  = sum(couch_mask_ct1(:));
+    metadata.couch_voxels_ct3  = sum(couch_mask_ct3(:));
+    metadata.voxels_zeroed     = num_voxels_zeroed;
     metadata.dose_masking_applied = true;
 
 else
     fprintf('\n[7/8] Dose masking SKIPPED (config.apply_dose_masking = false)\n');
 
-    num_voxels_zeroed = 0;
     metadata.total_dose_max_Gy = max(total_rs_dose(:));
-    metadata.body_voxels = sum(body_mask(:));
-    metadata.couch_voxels = sum(couch_mask(:));
-    metadata.voxels_zeroed = 0;
+    metadata.body_voxels_ct1   = sum(body_mask_ct1(:));
+    metadata.body_voxels_ct3   = sum(body_mask_ct3(:));
+    metadata.couch_voxels_ct1  = sum(couch_mask_ct1(:));
+    metadata.couch_voxels_ct3  = sum(couch_mask_ct3(:));
+    metadata.voxels_zeroed     = 0;
     metadata.dose_masking_applied = false;
 
     fprintf('  Total dose max (unmasked): %.4f Gy\n', max(total_rs_dose(:)));
-    fprintf('  Body voxels: %d\n', sum(body_mask(:)));
-    fprintf('  Couch voxels: %d\n', sum(couch_mask(:)));
+    fprintf('  Body voxels CT_1: %d   CT_3: %d\n', sum(body_mask_ct1(:)), sum(body_mask_ct3(:)));
+    fprintf('  Couch voxels CT_1: %d   CT_3: %d\n', sum(couch_mask_ct1(:)), sum(couch_mask_ct3(:)));
 end
 
 %% ======================== SAVE TOTAL DOSE ========================
@@ -698,31 +756,60 @@ if ~isempty(ct_keys)
     end
 end
 
-%% ======================== CREATE SCT RESAMPLED STRUCTURE ========================
+%% ======================== CREATE PER-CBCT RESAMPLED STRUCTS ========================
 
-sct_resampled = struct();
-sct_resampled.cubeHU = sct_hu_resampled;
-sct_resampled.cubeDensity = sct_density;
-sct_resampled.tissueMask = tissue_mask;
-sct_resampled.roiNames = roi_names;
-sct_resampled.bodyMask = body_mask;
-sct_resampled.couchMask = couch_mask;
-sct_resampled.origin = ref_origin;
-sct_resampled.spacing = ref_spacing;
-sct_resampled.dimensions = ref_dims;
-sct_resampled.patient_id = patient_id;
-sct_resampled.session = session;
-sct_resampled.original_sct_dims = sct_dims;
-sct_resampled.original_sct_spacing = sct_spacing;
-sct_resampled.timestamp = datetime('now');
+CBCT1_resampled = struct();
+CBCT1_resampled.cubeHU                = ct1_hu_resampled;
+CBCT1_resampled.cubeDensity           = ct1_density;
+CBCT1_resampled.tissueMask            = tissue_mask_ct1;
+CBCT1_resampled.roiNames              = roi_names_ct1;
+CBCT1_resampled.bodyMask              = body_mask_ct1;
+CBCT1_resampled.couchMask             = couch_mask_ct1;
+CBCT1_resampled.origin                = ref_origin;
+CBCT1_resampled.spacing               = ref_spacing;
+CBCT1_resampled.dimensions            = ref_dims;
+CBCT1_resampled.patient_id            = patient_id;
+CBCT1_resampled.session               = session;
+CBCT1_resampled.original_cbct_dims    = ct1_dims;
+CBCT1_resampled.original_cbct_spacing = ct1_spacing;
+CBCT1_resampled.series_uid            = cbct_ct1_meta.series_uid;
+CBCT1_resampled.series_datetime       = cbct_ct1_meta.datetime;
+CBCT1_resampled.ct_label              = 'CT_1';
+CBCT1_resampled.timestamp             = datetime('now');
 
-%% ======================== SAVE SCT RESAMPLED ========================
+CBCT3_resampled = struct();
+CBCT3_resampled.cubeHU                = ct3_hu_resampled;
+CBCT3_resampled.cubeDensity           = ct3_density;
+CBCT3_resampled.tissueMask            = tissue_mask_ct3;
+CBCT3_resampled.roiNames              = roi_names_ct3;
+CBCT3_resampled.bodyMask              = body_mask_ct3;
+CBCT3_resampled.couchMask             = couch_mask_ct3;
+CBCT3_resampled.origin                = ref_origin;
+CBCT3_resampled.spacing               = ref_spacing;
+CBCT3_resampled.dimensions            = ref_dims;
+CBCT3_resampled.patient_id            = patient_id;
+CBCT3_resampled.session               = session;
+CBCT3_resampled.original_cbct_dims    = ct3_dims;
+CBCT3_resampled.original_cbct_spacing = ct3_spacing;
+CBCT3_resampled.series_uid            = cbct_ct3_meta.series_uid;
+CBCT3_resampled.series_datetime       = cbct_ct3_meta.datetime;
+CBCT3_resampled.ct_label              = 'CT_3';
+CBCT3_resampled.timestamp             = datetime('now');
+
+% Return bundle (kept in the 2nd output slot in place of the old sct_resampled)
+cbct_resampled = struct('CT_1', CBCT1_resampled, 'CT_3', CBCT3_resampled);
+
+%% ======================== SAVE PER-CBCT RESAMPLED FILES ========================
 
 fprintf('\n[8/8] Saving processed data...\n');
 
-sct_resampled_file = fullfile(processed_dir, 'sct_resampled.mat');
-save(sct_resampled_file, 'sct_resampled', '-v7.3');
-fprintf('  Saved: sct_resampled.mat\n');
+cbct1_file = fullfile(processed_dir, 'CBCT1_resampled.mat');
+save(cbct1_file, 'CBCT1_resampled', '-v7.3');
+fprintf('  Saved: CBCT1_resampled.mat\n');
+
+cbct3_file = fullfile(processed_dir, 'CBCT3_resampled.mat');
+save(cbct3_file, 'CBCT3_resampled', '-v7.3');
+fprintf('  Saved: CBCT3_resampled.mat\n');
 
 % Save metadata
 metadata_file = fullfile(processed_dir, 'metadata.mat');
@@ -743,9 +830,10 @@ end
 fprintf('  Dose grid: [%d x %d x %d]\n', ref_dims(1), ref_dims(2), ref_dims(3));
 fprintf('  Spacing: [%.3f, %.3f, %.3f] mm\n', ref_spacing(1), ref_spacing(2), ref_spacing(3));
 fprintf('  Total dose max: %.4f Gy\n', max(total_rs_dose(:)));
-fprintf('  Tissue ROIs: %d\n', length(roi_names));
-fprintf('  Body voxels: %d\n', sum(body_mask(:)));
-fprintf('  Couch voxels: %d\n', sum(couch_mask(:)));
+fprintf('  CT_1 tissue ROIs: %d   body voxels: %d   couch voxels: %d\n', ...
+    length(roi_names_ct1), sum(body_mask_ct1(:)), sum(couch_mask_ct1(:)));
+fprintf('  CT_3 tissue ROIs: %d   body voxels: %d   couch voxels: %d\n', ...
+    length(roi_names_ct3), sum(body_mask_ct3(:)), sum(couch_mask_ct3(:)));
 if config.apply_dose_masking
     fprintf('  Dose masking: ENABLED (applied before export)\n');
     fprintf('    Total voxels zeroed: %d\n', num_voxels_zeroed);
@@ -1185,7 +1273,7 @@ function [sct_hu, origin, spacing, dims] = loadSctImages(sct_dir)
     origin = [];
     spacing = [];
     dims = [];
-    
+
     % Get all DICOM files whose SeriesDescription is 'sct' (case-insensitive)
     all_files = dir(fullfile(sct_dir, '*.dcm'));
     sct_files = [];
@@ -1210,31 +1298,31 @@ function [sct_hu, origin, spacing, dims] = loadSctImages(sct_dir)
 
     % Sort by z-position
     [~, sort_idx] = sort(z_positions);
-    
+
     % Load first slice for dimensions and metadata
     first_info = dicominfo(fullfile(sct_dir, sct_files(sort_idx(1)).name));
     first_img = dicomread(fullfile(sct_dir, sct_files(sort_idx(1)).name));
-    
+
     % Initialize 3D array
     num_slices = length(sct_files);
     sct_data = zeros([size(first_img), num_slices], 'int16');
-    
+
     % Load all slices in sorted order
     fprintf('    Loading %d SCT slices...\n', num_slices);
-    
+
     for i = 1:num_slices
         idx = sort_idx(i);
         img = dicomread(fullfile(sct_dir, sct_files(idx).name));
         sct_data(:, :, i) = img;
     end
-    
+
     % Extract geometry
     origin = first_info.ImagePositionPatient(:);
-    
+
     % Get spacing
     dx = first_info.PixelSpacing(1);
     dy = first_info.PixelSpacing(2);
-    
+
     % Z spacing from slice positions or SliceThickness
     if num_slices >= 2
         second_info = dicominfo(fullfile(sct_dir, sct_files(sort_idx(2)).name));
@@ -1244,16 +1332,238 @@ function [sct_hu, origin, spacing, dims] = loadSctImages(sct_dir)
     else
         dz = dx;  % Assume isotropic
     end
-    
+
     spacing = [dx; dy; dz];
     dims = size(sct_data);
-    
+
     % Convert to Hounsfield Units
     if isfield(first_info, 'RescaleSlope') && isfield(first_info, 'RescaleIntercept')
         sct_hu = double(sct_data) * first_info.RescaleSlope + first_info.RescaleIntercept;
     else
         sct_hu = double(sct_data);
     end
+end
+
+
+function [cbct_hu, origin, spacing, dims] = loadCbctImagesFromFiles(file_list)
+%LOADCBCTIMAGESFROMFILES Load DICOM CT slices from an explicit file list
+%
+%   Same return contract as loadSctImages but operates on an explicit cell
+%   array of DICOM filepaths (e.g. dicomCollection().Filenames{i}) instead
+%   of globbing a directory by SeriesDescription.
+
+    cbct_hu = [];
+    origin  = [];
+    spacing = [];
+    dims    = [];
+
+    if iscell(file_list) && ~isempty(file_list) && iscell(file_list{1})
+        % Some dicomCollection variants nest filenames in a single cell
+        file_list = file_list{1};
+    end
+
+    n = numel(file_list);
+    if n == 0
+        warning('loadCbctImagesFromFiles:NoFiles', 'Empty CBCT file list.');
+        return;
+    end
+
+    z_positions = nan(n, 1);
+    for i = 1:n
+        try
+            info = dicominfo(file_list{i});
+            z_positions(i) = info.ImagePositionPatient(3);
+        catch
+            % leave NaN; will sort to end
+        end
+    end
+
+    [~, sort_idx] = sort(z_positions);
+
+    first_info = dicominfo(file_list{sort_idx(1)});
+    first_img  = dicomread(file_list{sort_idx(1)});
+
+    cbct_data = zeros([size(first_img), n], 'int16');
+    fprintf('    Loading %d CBCT slices...\n', n);
+    for i = 1:n
+        idx = sort_idx(i);
+        cbct_data(:, :, i) = dicomread(file_list{idx});
+    end
+
+    origin = first_info.ImagePositionPatient(:);
+    dx = first_info.PixelSpacing(1);
+    dy = first_info.PixelSpacing(2);
+
+    if n >= 2
+        second_info = dicominfo(file_list{sort_idx(2)});
+        dz = abs(second_info.ImagePositionPatient(3) - first_info.ImagePositionPatient(3));
+    elseif isfield(first_info, 'SliceThickness')
+        dz = first_info.SliceThickness;
+    else
+        dz = dx;
+    end
+
+    spacing = [dx; dy; dz];
+    dims    = size(cbct_data);
+
+    if isfield(first_info, 'RescaleSlope') && isfield(first_info, 'RescaleIntercept')
+        cbct_hu = double(cbct_data) * first_info.RescaleSlope + first_info.RescaleIntercept;
+    else
+        cbct_hu = double(cbct_data);
+    end
+end
+
+
+function [cbct_ct1, cbct_ct3] = discoverCbctSeries(rs_dir)
+%DISCOVERCBCTSERIES Find both CBCT image series + RTSTRUCTs in a RayStation dir
+%
+%   Scans rs_dir with dicomCollection, picks out the two CT series (the
+%   CBCTs), pairs each with its RTSTRUCT by SeriesInstanceUID, sorts the
+%   pair by SeriesDate+SeriesTime, and returns:
+%       cbct_ct1 - earlier-acquired CBCT (treated as CT_1)
+%       cbct_ct3 - later-acquired CBCT  (treated as CT_3)
+%   Each struct has fields:
+%       .files      - cell array of DICOM file paths for the CT series
+%       .rtstruct   - filepath to the paired RTSTRUCT
+%       .series_uid - SeriesInstanceUID of the CT series
+%       .datetime   - numeric SeriesDate+SeriesTime
+%       .label      - 'CT_1' or 'CT_3'
+
+    cbct_ct1 = [];
+    cbct_ct3 = [];
+
+    try
+        info = dicomCollection(rs_dir);
+    catch ME
+        error('step15_process_doses:CBCTDiscoveryFailed', ...
+            'dicomCollection failed on %s: %s', rs_dir, ME.message);
+    end
+
+    if isempty(info) || height(info) == 0
+        error('step15_process_doses:CBCTDiscoveryFailed', ...
+            'No DICOM series found in: %s', rs_dir);
+    end
+
+    if ~ismember('Modality', info.Properties.VariableNames)
+        error('step15_process_doses:CBCTDiscoveryFailed', ...
+            'dicomCollection missing Modality column for: %s', rs_dir);
+    end
+
+    ct_rows     = strcmpi(info.Modality, 'CT');
+    rtstr_rows  = strcmpi(info.Modality, 'RTSTRUCT');
+
+    ct_info    = info(ct_rows, :);
+    rtstr_info = info(rtstr_rows, :);
+
+    if height(ct_info) < 2
+        error('step15_process_doses:CBCTDiscoveryFailed', ...
+            'Expected at least 2 CT series in %s, found %d.', rs_dir, height(ct_info));
+    end
+
+    % Read SeriesInstanceUID + SeriesDate/Time per CT series
+    nCt = height(ct_info);
+    ct_series_uid = strings(nCt, 1);
+    ct_datetime   = nan(nCt, 1);
+    ct_files      = cell(nCt, 1);
+    for i = 1:nCt
+        files_i = ct_info.Filenames{i};
+        if iscell(files_i) && ~isempty(files_i) && iscell(files_i{1})
+            files_i = files_i{1};
+        end
+        ct_files{i} = files_i;
+        if isempty(files_i)
+            continue;
+        end
+        try
+            meta = dicominfo(files_i{1});
+            if isfield(meta, 'SeriesInstanceUID')
+                ct_series_uid(i) = string(meta.SeriesInstanceUID);
+            end
+            dateStr = '';
+            timeStr = '';
+            if isfield(meta, 'SeriesDate'), dateStr = strtrim(meta.SeriesDate); end
+            if isfield(meta, 'SeriesTime'), timeStr = strtrim(meta.SeriesTime); end
+            if ~isempty(dateStr) || ~isempty(timeStr)
+                ct_datetime(i) = str2double([dateStr, timeStr]);
+            end
+        catch
+            % leave as default
+        end
+    end
+
+    % If more than two CT series are present, keep the two earliest
+    if nCt > 2
+        [~, dt_sort] = sort(ct_datetime);
+        keep_idx = dt_sort(1:2);
+        ct_series_uid = ct_series_uid(keep_idx);
+        ct_datetime   = ct_datetime(keep_idx);
+        ct_files      = ct_files(keep_idx);
+        nCt = 2;
+        fprintf('    More than 2 CT series found; keeping the two earliest by datetime.\n');
+    end
+
+    % Read referenced-SeriesInstanceUID per RTSTRUCT
+    nRs = height(rtstr_info);
+    rs_ref_uid = strings(nRs, 1);
+    rs_path    = strings(nRs, 1);
+    for i = 1:nRs
+        files_i = rtstr_info.Filenames{i};
+        if iscell(files_i) && ~isempty(files_i) && iscell(files_i{1})
+            files_i = files_i{1};
+        end
+        if isempty(files_i)
+            continue;
+        end
+        rs_path(i) = string(files_i{1});
+        try
+            meta = dicominfo(files_i{1});
+            ref = meta.ReferencedFrameOfReferenceSequence.Item_1 ...
+                      .RTReferencedStudySequence.Item_1 ...
+                      .RTReferencedSeriesSequence.Item_1 ...
+                      .SeriesInstanceUID;
+            rs_ref_uid(i) = string(ref);
+        catch
+            % leave empty; will fail the match check below
+        end
+    end
+
+    % Pair each CT series with the matching RTSTRUCT
+    matched_rtstruct = strings(nCt, 1);
+    for i = 1:nCt
+        match = find(rs_ref_uid == ct_series_uid(i), 1);
+        if isempty(match)
+            error('step15_process_doses:CBCTDiscoveryFailed', ...
+                'No RTSTRUCT references CT SeriesInstanceUID %s in %s.', ...
+                ct_series_uid(i), rs_dir);
+        end
+        matched_rtstruct(i) = rs_path(match);
+    end
+
+    % Sort the two CBCTs by datetime: earlier -> CT_1, later -> CT_3
+    [~, sort_order] = sort(ct_datetime);
+    earlier = sort_order(1);
+    later   = sort_order(2);
+
+    cbct_ct1 = struct( ...
+        'files',      {ct_files{earlier}}, ...
+        'rtstruct',   char(matched_rtstruct(earlier)), ...
+        'series_uid', char(ct_series_uid(earlier)), ...
+        'datetime',   ct_datetime(earlier), ...
+        'label',      'CT_1');
+
+    cbct_ct3 = struct( ...
+        'files',      {ct_files{later}}, ...
+        'rtstruct',   char(matched_rtstruct(later)), ...
+        'series_uid', char(ct_series_uid(later)), ...
+        'datetime',   ct_datetime(later), ...
+        'label',      'CT_3');
+
+    fprintf('    CT_1 (earlier): UID=%s  datetime=%s  files=%d  RTSTRUCT=%s\n', ...
+        cbct_ct1.series_uid, num2str(cbct_ct1.datetime), ...
+        numel(cbct_ct1.files), cbct_ct1.rtstruct);
+    fprintf('    CT_3 (later):   UID=%s  datetime=%s  files=%d  RTSTRUCT=%s\n', ...
+        cbct_ct3.series_uid, num2str(cbct_ct3.datetime), ...
+        numel(cbct_ct3.files), cbct_ct3.rtstruct);
 end
 
 
@@ -1322,54 +1632,59 @@ end
 
 function [tissue_mask, roi_names, roi_masks, body_mask, couch_mask] = loadRtstructAndCreateMasks(...
     sct_dir, dose_origin, dose_spacing, dose_dims)
-%LOADRTSTRUCTANDCREATEMASKS Load RTSTRUCT and create tissue classification masks
+%LOADRTSTRUCTANDCREATEMASKS Find RTSTRUCT in a directory and create masks
 %
-%   [tissue_mask, roi_names, roi_masks, body_mask, couch_mask] = loadRtstructAndCreateMasks(...)
+%   Thin wrapper around loadRtstructAndCreateMasksFromFile: globs
+%   RTSTRUCT*.dcm (then RS*.dcm) in sct_dir and uses the first match.
+
+    tissue_mask = [];
+    roi_names   = {};
+    roi_masks   = struct();
+    body_mask   = false(dose_dims);
+    couch_mask  = false(dose_dims);
+
+    rs_files = dir(fullfile(sct_dir, 'RTSTRUCT*.dcm'));
+    if isempty(rs_files)
+        rs_files = dir(fullfile(sct_dir, 'RS*.dcm'));
+    end
+    if isempty(rs_files)
+        warning('loadRtstructAndCreateMasks:NoRTSTRUCT', ...
+            'No RTSTRUCT file found in: %s', sct_dir);
+        return;
+    end
+
+    rs_path = fullfile(sct_dir, rs_files(1).name);
+    [tissue_mask, roi_names, roi_masks, body_mask, couch_mask] = ...
+        loadRtstructAndCreateMasksFromFile(rs_path, dose_origin, dose_spacing, dose_dims);
+end
+
+
+function [tissue_mask, roi_names, roi_masks, body_mask, couch_mask] = loadRtstructAndCreateMasksFromFile(...
+    rs_path, dose_origin, dose_spacing, dose_dims)
+%LOADRTSTRUCTANDCREATEMASKSFROMFILE Load a specific RTSTRUCT file and create masks
 %
-%   Loads the RTSTRUCT file, extracts all ROI contours, and converts them
-%   to 3D binary masks on the dose grid. Identifies body and couch regions.
-%
-%   INPUTS:
-%       sct_dir      - Path to directory containing RTSTRUCT
-%       dose_origin  - [x, y, z] origin of dose grid (mm)
-%       dose_spacing - [dx, dy, dz] spacing of dose grid (mm)
-%       dose_dims    - [rows, cols, slices] dimensions of dose grid
-%
-%   OUTPUTS:
-%       tissue_mask  - 3D uint8 array with ROI labels (0 = unassigned)
-%       roi_names    - Cell array of ROI names (index matches label in tissue_mask)
-%       roi_masks    - Struct with individual ROI binary masks (ROI_001, ROI_002, ...)
-%       body_mask    - 3D logical array (true = inside body region)
-%       couch_mask   - 3D logical array (true = couch region)
+%   Same outputs as loadRtstructAndCreateMasks but takes an explicit
+%   RTSTRUCT filepath rather than a directory to glob.
 
     tissue_mask = [];
     roi_names = {};
     roi_masks = struct();
     body_mask = false(dose_dims);
     couch_mask = false(dose_dims);
-    
-    % Find RTSTRUCT file (RTSTRUCT*.dcm naming convention)
-    rs_files = dir(fullfile(sct_dir, 'RTSTRUCT*.dcm'));
-    
-    if isempty(rs_files)
-        % Try alternative naming patterns
-        rs_files = dir(fullfile(sct_dir, 'RS*.dcm'));
-    end
-    
-    if isempty(rs_files)
-        warning('loadRtstructAndCreateMasks:NoRTSTRUCT', ...
-            'No RTSTRUCT file found in: %s', sct_dir);
+
+    if isempty(rs_path) || ~isfile(rs_path)
+        warning('loadRtstructAndCreateMasksFromFile:NoRTSTRUCT', ...
+            'RTSTRUCT file not found: %s', rs_path);
         return;
     end
-    
-    % Use first RTSTRUCT file found
-    rs_file = fullfile(sct_dir, rs_files(1).name);
-    fprintf('    Loading RTSTRUCT: %s\n', rs_files(1).name);
-    
+
+    [~, rs_name, rs_ext] = fileparts(rs_path);
+    fprintf('    Loading RTSTRUCT: %s%s\n', rs_name, rs_ext);
+
     try
-        rtstruct = dicominfo(rs_file);
+        rtstruct = dicominfo(rs_path);
     catch ME
-        warning('loadRtstructAndCreateMasks:LoadError', ...
+        warning('loadRtstructAndCreateMasksFromFile:LoadError', ...
             'Failed to load RTSTRUCT: %s', ME.message);
         return;
     end

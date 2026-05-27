@@ -12,10 +12,13 @@ CONFIG.patient_id     = '1194203';
 CONFIG.session        = 'Session_1';
 
 CONFIG.dose_filename = 'dose_1194203_Session_1_reference_B9_96.mat';
-CONFIG.sct_filename  = 'sct_resampled.mat';
+% TEMPORARY: standalone sim always uses CBCT1 (CT_1) geometry, regardless
+% of which CBCT the dose was actually computed on. Per-dose CBCT selection
+% lives in the multi-field driver, not here.
+CONFIG.cbct_filename = 'CBCT1_resampled.mat';
 
 CONFIG.dose_file_override = '';
-CONFIG.sct_file_override  = '';
+CONFIG.cbct_file_override = '';
 
 CONFIG.sensor_placement_method = 'determine_sensor_mask';
 CONFIG.sensor_x_index = 20;
@@ -78,14 +81,47 @@ else
     dose_filepath = fullfile(processed_dir, CONFIG.dose_filename);
 end
 
-if ~isempty(CONFIG.sct_file_override)
-    sct_filepath = CONFIG.sct_file_override;
+if ~isempty(CONFIG.cbct_file_override)
+    cbct_filepath = CONFIG.cbct_file_override;
 else
     if ~exist('processed_dir', 'var')
         processed_dir = fullfile(CONFIG.working_dir, 'RayStationFiles', ...
             CONFIG.patient_id, CONFIG.session, 'processed');
     end
-    sct_filepath = fullfile(processed_dir, CONFIG.sct_filename);
+    cbct_filepath = fullfile(processed_dir, CONFIG.cbct_filename);
+end
+
+%% ========================= LOAD PLAN BEAM METADATA =======================
+% determine_sensor_mask needs beam_metadata for ALL beams in the plan
+% (isocenter + jaw extents per beam) to compute the anterior-surface
+% exclusion zone. step15_process_doses saves this as metadata.beam_metadata
+% in <processed_dir>/metadata.mat. Load it here if not already set by the
+% caller via CONFIG.beam_metadata.
+
+if ~isfield(CONFIG, 'beam_metadata') || isempty(CONFIG.beam_metadata)
+    if exist('processed_dir', 'var')
+        metadata_filepath = fullfile(processed_dir, 'metadata.mat');
+    else
+        metadata_filepath = '';
+    end
+
+    if ~isempty(metadata_filepath) && isfile(metadata_filepath)
+        try
+            md = load(metadata_filepath, 'metadata');
+            if isfield(md, 'metadata') && isfield(md.metadata, 'beam_metadata') ...
+                    && ~isempty(md.metadata.beam_metadata)
+                CONFIG.beam_metadata = md.metadata.beam_metadata;
+                fprintf('  Loaded beam_metadata for %d beams from %s\n', ...
+                    length(CONFIG.beam_metadata), metadata_filepath);
+            else
+                fprintf('  [WARN] metadata.mat present but no beam_metadata field.\n');
+            end
+        catch ME
+            fprintf('  [WARN] Failed to load %s: %s\n', metadata_filepath, ME.message);
+        end
+    else
+        fprintf('  [WARN] No metadata.mat in processed_dir; sensor exclusion zone will be empty.\n');
+    end
 end
 
 %% ========================= PRINT CONFIGURATION ===========================
@@ -95,7 +131,7 @@ fprintf('  Standalone k-Wave Photoacoustic Simulation  (v4.1)\n');
 fprintf('=========================================================\n');
 fprintf('  Patient:         %s / %s\n', CONFIG.patient_id, CONFIG.session);
 fprintf('  Dose file:       %s\n', dose_filepath);
-fprintf('  SCT file:        %s\n', sct_filepath);
+fprintf('  CBCT file:       %s  (TEMP: standalone always uses CBCT1/CT_1)\n', cbct_filepath);
 fprintf('  Sensor:          %s\n', CONFIG.sensor_placement_method);
 fprintf('  Tissue model:    %s\n', CONFIG.gruneisen_method);
 fprintf('  Recon method:    %s\n', CONFIG.reconstruction_method);
@@ -147,7 +183,8 @@ if isfield(dose_data, 'field_dose')
         end
     end
     if isfield(fd, 'gantry_angle')
-        fprintf('       Gantry angle: %.1f deg\n', fd.gantry_angle);
+        fd_gantry_angle = fd.gantry_angle;
+        fprintf('       Gantry angle: %.1f deg\n', fd_gantry_angle);
     end
 
 elseif isfield(dose_data, 'total_rs_dose_sparse')
@@ -182,29 +219,31 @@ Nx = gridSize(1); Ny = gridSize(2); Nz = gridSize(3);
 fprintf('       Grid size: [%d x %d x %d]\n', Nx, Ny, Nz);
 fprintf('       Dose range: [%.6f, %.4f] Gy\n', min(doseGrid(:)), max(doseGrid(:)));
 
-fprintf('[2/7] Loading SCT data...\n');
-if ~isfile(sct_filepath)
-    error('SCT file not found: %s', sct_filepath);
+fprintf('[2/7] Loading CBCT data (CBCT1 / CT_1 — temporary standalone default)...\n');
+if ~isfile(cbct_filepath)
+    error('CBCT file not found: %s', cbct_filepath);
 end
-sct_data = load(sct_filepath);
-if isfield(sct_data, 'sct_resampled')
-    sct = sct_data.sct_resampled;
+cbct_data = load(cbct_filepath);
+if isfield(cbct_data, 'CBCT1_resampled')
+    sct = cbct_data.CBCT1_resampled;
+elseif isfield(cbct_data, 'CBCT3_resampled')
+    sct = cbct_data.CBCT3_resampled;
 else
-    error('sct_resampled variable not found in %s', sct_filepath);
+    error('CBCT1_resampled / CBCT3_resampled variable not found in %s', cbct_filepath);
 end
 
 if ~isfield(sct, 'cubeHU')
-    error('sct_resampled missing required field: cubeHU');
+    error('CBCT resampled struct missing required field: cubeHU');
 end
 
-% Spacing: prefer SCT field; fall back to spacing embedded in step15 field_dose
+% Spacing: prefer CBCT field; fall back to spacing embedded in step15 field_dose
 if isfield(sct, 'spacing') && ~isempty(sct.spacing)
     spacing_mm = sct.spacing(:)';
 elseif exist('step15_spacing_mm', 'var')
     spacing_mm = step15_spacing_mm;
     fprintf('       [INFO] Using spacing from field_dose file: [%.3f %.3f %.3f] mm\n', spacing_mm);
 else
-    error('sct_resampled missing required field: spacing');
+    error('CBCT resampled struct missing required field: spacing');
 end
 dx = spacing_mm(1) / 1000;
 dy = spacing_mm(2) / 1000;
@@ -212,8 +251,8 @@ dz = spacing_mm(3) / 1000;
 
 sctSize = size(sct.cubeHU);
 if ~isequal(gridSize, sctSize)
-    error(['Dose grid [%d %d %d] does not match SCT grid [%d %d %d].\n' ...
-           'Ensure sct_resampled.mat was produced by the same step15 run as the dose file.'], ...
+    error(['Dose grid [%d %d %d] does not match CBCT grid [%d %d %d].\n' ...
+           'Ensure CBCT1_resampled.mat was produced by the same step15 run as the dose file.'], ...
         Nx, Ny, Nz, sctSize(1), sctSize(2), sctSize(3));
 end
 
@@ -376,7 +415,11 @@ switch CONFIG.sensor_placement_method
 
         field_dose_for_sensor = struct();
         field_dose_for_sensor.dose_Gy     = doseGrid;
-        field_dose_for_sensor.gantry_angle = 0;
+        if exist('fd_gantry_angle', 'var') && ~isempty(fd_gantry_angle)
+            field_dose_for_sensor.gantry_angle = fd_gantry_angle;
+        else
+            field_dose_for_sensor.gantry_angle = 0;
+        end
         field_dose_for_sensor.origin      = sct_for_sensor.origin;
         field_dose_for_sensor.spacing     = spacing_mm;
         field_dose_for_sensor.dimensions  = [Nx_orig, Ny_orig, Nz_orig];

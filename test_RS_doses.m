@@ -98,15 +98,13 @@ fprintf('[STEP 1] Loading ETHOS truth dose...\n');
 
 sct_dir  = fullfile(CONFIG.working_dir, 'EthosExports', patient_id, ...
                     CONFIG.treatment_site, session, 'sct');
-rd_files = dir(fullfile(sct_dir, 'RTDOSE*.dcm'));
+rd_path = fullfile(sct_dir, 'RD_reference.dcm');
 
-if isempty(rd_files)
+if ~isfile(rd_path)
     error('test_RS_doses:FileNotFound', ...
-        'No RTDOSE*.dcm file found in:\n  %s\nCheck CONFIG.treatment_site and that DICOM exports are present.', ...
+        'RD_reference.dcm not found in:\n  %s\nCheck CONFIG.treatment_site and that DICOM exports are present.', ...
         sct_dir);
 end
-
-rd_path   = fullfile(sct_dir, rd_files(1).name);
 dose_info = dicominfo(rd_path);
 ethos_dose = double(squeeze(dicomread(rd_path)));
 
@@ -114,7 +112,7 @@ if isfield(dose_info, 'DoseGridScaling')
     ethos_dose = ethos_dose * dose_info.DoseGridScaling;
 end
 
-fprintf('  File:    %s\n', rd_files(1).name);
+fprintf('  File:    %s\n', 'RD_reference.dcm');
 fprintf('  Size:    [%d x %d x %d]\n', size(ethos_dose));
 fprintf('  Max dose: %.4f Gy\n\n', max(ethos_dose(:)));
 

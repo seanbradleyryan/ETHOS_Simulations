@@ -1,7 +1,7 @@
-function [recon_dose, sim_results] = run_single_field_simulation(field_dose, sct_resampled, medium, beam_metadata, config, psf_filter)
+function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbct_resampled, medium, beam_metadata, config, psf_filter)
 %RUN_SINGLE_FIELD_SIMULATION k-Wave forward + time-reversal for one field
 %
-%   [recon_dose, sim_results] = run_single_field_simulation(field_dose, sct_resampled, medium, beam_metadata, config)
+%   [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbct_resampled, medium, beam_metadata, config)
 %
 %   Converts a single radiation field dose to initial acoustic pressure
 %   (p0 = D * Gamma * rho), runs the k-Wave forward simulation to generate
@@ -18,7 +18,10 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, sct
 %           .isocenter     - [x, y, z] mm (from RTPLAN, propagated)
 %           .jaw_x         - [x1, x2] mm at isocenter (from RTPLAN)
 %           .jaw_y         - [y1, y2] mm at isocenter (from RTPLAN)
-%       sct_resampled - Struct with:
+%       cbct_resampled - Per-CBCT geometry struct (CBCT1_resampled or
+%           CBCT3_resampled from step15_process_doses). The caller must
+%           pick the one that matches field_dose.ct_label ('CT_1' or
+%           'CT_3'). Fields used here:
 %           .bodyMask      - 3D logical (true = inside body)
 %           .couchMask     - 3D logical (true = couch region)
 %           .spacing       - [dx, dy, dz] in mm
@@ -117,7 +120,7 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, sct
     Nz = gridSize(3);
 
     % Grid spacing: mm -> m
-    spacing_mm = sct_resampled.spacing(:)';
+    spacing_mm = cbct_resampled.spacing(:)';
     dx = spacing_mm(1) / 1000;
     dy = spacing_mm(2) / 1000;
     dz = spacing_mm(3) / 1000;
@@ -293,7 +296,7 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, sct
 
         case 'fixed_anterior'
             % Deterministic placement: anterior, inferior to beam field,
-            % centered on isocenter X. Requires sct_resampled.bodyMask and
+            % centered on isocenter X. Requires cbct_resampled.bodyMask and
             % either beam_metadata (passed as 4th arg) or config.total_dose.
             fixed_struct = struct();
             if nargin >= 4 && ~isempty(beam_metadata)
@@ -302,9 +305,9 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, sct
             if isfield(config, 'total_dose') && ~isempty(config.total_dose)
                 fixed_struct.total_dose = config.total_dose;
             end
-            % sct_resampled is at original (unpadded) size — correct for placement
+            % cbct_resampled is at original (unpadded) size — correct for placement
             [sensor_mask_orig, sensor_info] = determine_sensor_placement_fixed( ...
-                config, sct_resampled, fixed_struct);
+                config, cbct_resampled, fixed_struct);
             % Embed in current (possibly padded) grid
             m1 = min(Nx, size(sensor_mask_orig, 1));
             m2 = min(Ny, size(sensor_mask_orig, 2));
@@ -577,8 +580,8 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, sct
     reconDosePerPulse = reconPressure ./ conversionFactor;
 
     body_mask_plot = ones(gridSize);
-    if isfield(sct_resampled, 'bodyMask') && isequal(size(sct_resampled.bodyMask), gridSize)
-        body_mask_plot = double(sct_resampled.bodyMask);
+    if isfield(cbct_resampled, 'bodyMask') && isequal(size(cbct_resampled.bodyMask), gridSize)
+        body_mask_plot = double(cbct_resampled.bodyMask);
     end
     recon_dose = reconDosePerPulse * num_pulses .* double(doseMask) .* body_mask_plot;
 
