@@ -230,6 +230,36 @@ try:
             print("  No prior exports for this session. Starting fresh.")
 
         # ========================================================
+        # Export CT 1, CT 3, and their RTSTRUCTs (once per session)
+        # ========================================================
+        ct_log_key = f"{sess}|CT_RTSTRUCT"
+        if ct_log_key in completed_plans:
+            print(f"  SKIPPING CT/RTSTRUCT export for '{sess}' (already exported)")
+        else:
+            available_exams = {e.Name for e in case.Examinations}
+            exams_to_export = [e for e in EXAMINATION_LABELS if e in available_exams]
+            missing_exams   = [e for e in EXAMINATION_LABELS if e not in available_exams]
+
+            if missing_exams:
+                print(f"  WARNING: Examinations not found in case: {missing_exams}")
+
+            if not exams_to_export:
+                print(f"  WARNING: No CT examinations available to export for '{sess}'. Skipping CT/RTSTRUCT export.")
+            else:
+                print(f"  Exporting CTs and RTSTRUCTs for {exams_to_export} ...")
+                try:
+                    case.ScriptableDicomExport(
+                        ExportFolderPath=export_folder,
+                        Examinations=exams_to_export,
+                        RtStructureSetsForExaminations=exams_to_export,
+                        IgnorePreConditionWarnings=True,
+                    )
+                    print(f"  CT/RTSTRUCT export complete for {exams_to_export}.")
+                    log_plan_completion(progress_log, ct_log_key, [])
+                except Exception as exc:
+                    print(f"  WARNING: CT/RTSTRUCT export failed for '{sess}': {exc}")
+
+        # ========================================================
         # INNER LOOP – template plans
         # ========================================================
         for plan_type, origbeam, plan in beam_plans:
