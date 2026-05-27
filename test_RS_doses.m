@@ -74,6 +74,7 @@ CONFIG.gamma_dose_cutoff_pct = 10.0;
 CONFIG.save_figures          = true;
 CONFIG.figure_dir            = '';   % '' = AnalysisResults/<id>/<session>/rs_verification/
 CONFIG.recompute_sums        = false; % true = re-accumulate from field doses even if cache exists
+CONFIG.n_fractions           = 10;   % number of fractions; accumulated dose is divided by this
 
 %% ========================= STEP 0: INITIALISE ============================
 
@@ -117,38 +118,40 @@ fprintf('  File:    %s\n', rd_files(1).name);
 fprintf('  Size:    [%d x %d x %d]\n', size(ethos_dose));
 fprintf('  Max dose: %.4f Gy\n\n', max(ethos_dose(:)));
 
-%% ========================= STEP 2: LOAD PROCESSED FIELD DOSES ============
-
-fprintf('[STEP 2] Loading processed RayStation field doses...\n');
-
-[field_doses, sct_resampled, ~, dose_metadata] = ...
-    load_processed_data(patient_id, session, CONFIG);
-
-rs_size = dose_metadata.dimensions;   % [ny, nx, nz]
-spacing = dose_metadata.spacing;      % [dx, dy, dz] mm
-
-fprintf('  RS dose grid: [%d x %d x %d], spacing [%.2f x %.2f x %.2f] mm\n\n', ...
-    rs_size, spacing);
+%% ========================= STEP 2 & 3: LOAD / ACCUMULATE DOSES ===========
 
 processed_dir = fullfile(CONFIG.working_dir, 'RayStationFiles', patient_id, session, 'processed');
 sums_cache    = fullfile(processed_dir, 'dose_sums_cache.mat');
 
-%% ========================= STEP 3: ACCUMULATE CT_1 AND CT_3 ==============
-
 cache_loaded = false;
 if ~CONFIG.recompute_sums && isfile(sums_cache)
+    fprintf('[STEP 2] Skipping load_processed_data — using cached dose sums.\n');
     fprintf('[STEP 3] Loading cached dose sums from:\n  %s\n', sums_cache);
-    loaded_cache = load(sums_cache, 'ct1_dose', 'ct3_dose', 'n_ct1', 'n_ct3');
-    ct1_dose = loaded_cache.ct1_dose;
-    ct3_dose = loaded_cache.ct3_dose;
-    n_ct1    = loaded_cache.n_ct1;
-    n_ct3    = loaded_cache.n_ct3;
-    cache_loaded = true;
+    loaded_cache  = load(sums_cache, 'ct1_dose', 'ct3_dose', 'n_ct1', 'n_ct3', 'spacing');
+    ct1_dose      = loaded_cache.ct1_dose;
+    ct3_dose      = loaded_cache.ct3_dose;
+    n_ct1         = loaded_cache.n_ct1;
+    n_ct3         = loaded_cache.n_ct3;
+    spacing       = loaded_cache.spacing;
+    rs_size       = size(ct1_dose);
+    sct_resampled = struct();
+    cache_loaded  = true;
     fprintf('  CT_1 fields: %d  (max sum dose: %.4f Gy)\n', n_ct1, max(ct1_dose(:)));
     fprintf('  CT_3 fields: %d  (max sum dose: %.4f Gy)\n\n', n_ct3, max(ct3_dose(:)));
 end
 
 if ~cache_loaded
+    fprintf('[STEP 2] Loading processed RayStation field doses...\n');
+
+    [field_doses, sct_resampled, ~, dose_metadata] = ...
+        load_processed_data(patient_id, session, CONFIG);
+
+    rs_size = dose_metadata.dimensions;   % [ny, nx, nz]
+    spacing = dose_metadata.spacing;      % [dx, dy, dz] mm
+
+    fprintf('  RS dose grid: [%d x %d x %d], spacing [%.2f x %.2f x %.2f] mm\n\n', ...
+        rs_size, spacing);
+
     fprintf('[STEP 3] Accumulating field doses by CT label...\n');
 
     ct1_dose = zeros(rs_size, 'double');
@@ -188,8 +191,13 @@ if ~cache_loaded
     fprintf('\n');
 
     fprintf('  Saving dose sums cache to:\n  %s\n\n', sums_cache);
-    save(sums_cache, 'ct1_dose', 'ct3_dose', 'n_ct1', 'n_ct3', '-v7.3');
+    save(sums_cache, 'ct1_dose', 'ct3_dose', 'n_ct1', 'n_ct3', 'spacing', '-v7.3');
 end
+
+% Scale to per-fraction dose
+fprintf('  Scaling by 1/%d fractions...\n\n', CONFIG.n_fractions);
+ct1_dose = ct1_dose / CONFIG.n_fractions;
+ct3_dose = ct3_dose / CONFIG.n_fractions;
 
 do_ct1 = (n_ct1 > 0);
 do_ct3 = (n_ct3 > 0);
@@ -481,10 +489,8 @@ function rs_fig1_dose_comparison(ethos, ct1, ct3, do_ct1, do_ct3, ...
         out = fullfile(fig_dir, 'dose_comparison.png');
         exportgraphics(fig, out, 'Resolution', 150);
         fprintf('  Saved: %s\n', out);
-    else
-        set(fig, 'Visible', 'on');
     end
-    close(fig);
+    set(fig, 'Visible', 'on');
 end
 
 
@@ -544,10 +550,8 @@ function rs_fig2_dose_difference(ethos, ct1, ct3, do_ct1, do_ct3, ...
         out = fullfile(fig_dir, 'dose_difference.png');
         exportgraphics(fig, out, 'Resolution', 150);
         fprintf('  Saved: %s\n', out);
-    else
-        set(fig, 'Visible', 'on');
     end
-    close(fig);
+    set(fig, 'Visible', 'on');
 end
 
 
@@ -605,10 +609,8 @@ function rs_fig3_gamma_maps(gamma_ct1, gamma_ct3, do_ct1, do_ct3, ...
         out = fullfile(fig_dir, 'gamma_maps.png');
         exportgraphics(fig, out, 'Resolution', 150);
         fprintf('  Saved: %s\n', out);
-    else
-        set(fig, 'Visible', 'on');
     end
-    close(fig);
+    set(fig, 'Visible', 'on');
 end
 
 
@@ -644,10 +646,8 @@ function rs_fig4_ct1_vs_ct3_gamma(gamma_result, ct1_dose, r0, c0, s0, config, do
         out = fullfile(fig_dir, 'gamma_ct1_vs_ct3.png');
         exportgraphics(fig, out, 'Resolution', 150);
         fprintf('  Saved: %s\n', out);
-    else
-        set(fig, 'Visible', 'on');
     end
-    close(fig);
+    set(fig, 'Visible', 'on');
 end
 
 
