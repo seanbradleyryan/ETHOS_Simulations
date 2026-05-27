@@ -73,6 +73,7 @@ CONFIG.gamma_dist_mm         = 3.0;
 CONFIG.gamma_dose_cutoff_pct = 10.0;
 CONFIG.save_figures          = true;
 CONFIG.figure_dir            = '';   % '' = AnalysisResults/<id>/<session>/rs_verification/
+CONFIG.recompute_sums        = false; % true = re-accumulate from field doses even if cache exists
 
 %% ========================= STEP 0: INITIALISE ============================
 
@@ -129,37 +130,65 @@ spacing = dose_metadata.spacing;      % [dx, dy, dz] mm
 fprintf('  RS dose grid: [%d x %d x %d], spacing [%.2f x %.2f x %.2f] mm\n\n', ...
     rs_size, spacing);
 
+processed_dir = fullfile(CONFIG.working_dir, 'RayStationFiles', patient_id, session, 'processed');
+sums_cache    = fullfile(processed_dir, 'dose_sums_cache.mat');
+
 %% ========================= STEP 3: ACCUMULATE CT_1 AND CT_3 ==============
 
-fprintf('[STEP 3] Accumulating field doses by CT label...\n');
+cache_loaded = false;
+if ~CONFIG.recompute_sums && isfile(sums_cache)
+    fprintf('[STEP 3] Loading cached dose sums from:\n  %s\n', sums_cache);
+    loaded_cache = load(sums_cache, 'ct1_dose', 'ct3_dose', 'n_ct1', 'n_ct3');
+    ct1_dose = loaded_cache.ct1_dose;
+    ct3_dose = loaded_cache.ct3_dose;
+    n_ct1    = loaded_cache.n_ct1;
+    n_ct3    = loaded_cache.n_ct3;
+    cache_loaded = true;
+    fprintf('  CT_1 fields: %d  (max sum dose: %.4f Gy)\n', n_ct1, max(ct1_dose(:)));
+    fprintf('  CT_3 fields: %d  (max sum dose: %.4f Gy)\n\n', n_ct3, max(ct3_dose(:)));
+end
 
-ct1_dose = zeros(rs_size, 'double');
-ct3_dose = zeros(rs_size, 'double');
-n_ct1 = 0;  n_ct3 = 0;  n_other = 0;
-warned_other = false;
+if ~cache_loaded
+    fprintf('[STEP 3] Accumulating field doses by CT label...\n');
 
-for i = 1:numel(field_doses)
-    fd = field_doses{i};
-    if isempty(fd), continue; end
+    ct1_dose = zeros(rs_size, 'double');
+    ct3_dose = zeros(rs_size, 'double');
+    n_ct1 = 0;  n_ct3 = 0;  n_other = 0;
+    warned_other = false;
 
-    label = upper(strtrim(fd.ct_label));
+    for i = 1:numel(field_doses)
+        fd = field_doses{i};
+        if isempty(fd), continue; end
 
-    switch label
-        case 'CT_1'
-            ct1_dose = ct1_dose + fd.dose_Gy;
-            n_ct1 = n_ct1 + 1;
-        case 'CT_3'
-            ct3_dose = ct3_dose + fd.dose_Gy;
-            n_ct3 = n_ct3 + 1;
-        otherwise
-            n_other = n_other + 1;
-            if ~warned_other
-                warning('test_RS_doses:UnknownCTLabel', ...
-                    'Field %d has ct_label ''%s'' (not CT_1 or CT_3); excluded from both sums.', ...
-                    i, fd.ct_label);
-                warned_other = true;
-            end
+        label = upper(strtrim(fd.ct_label));
+
+        switch label
+            case 'CT_1'
+                ct1_dose = ct1_dose + fd.dose_Gy;
+                n_ct1 = n_ct1 + 1;
+            case 'CT_3'
+                ct3_dose = ct3_dose + fd.dose_Gy;
+                n_ct3 = n_ct3 + 1;
+            otherwise
+                n_other = n_other + 1;
+                if ~warned_other
+                    warning('test_RS_doses:UnknownCTLabel', ...
+                        'Field %d has ct_label ''%s'' (not CT_1 or CT_3); excluded from both sums.', ...
+                        i, fd.ct_label);
+                    warned_other = true;
+                end
+        end
     end
+
+    fprintf('  CT_1 fields: %d  (max sum dose: %.4f Gy)\n', n_ct1, max(ct1_dose(:)));
+    fprintf('  CT_3 fields: %d  (max sum dose: %.4f Gy)\n', n_ct3, max(ct3_dose(:)));
+    if n_other > 0
+        fprintf('  Other/unlabelled fields excluded: %d\n', n_other);
+    end
+    fprintf('\n');
+
+    fprintf('  Saving dose sums cache to:\n  %s\n\n', sums_cache);
+    save(sums_cache, 'ct1_dose', 'ct3_dose', 'n_ct1', 'n_ct3', '-v7.3');
 end
 
 do_ct1 = (n_ct1 > 0);
@@ -171,13 +200,6 @@ end
 if ~do_ct3
     warning('test_RS_doses:NoCT3', 'No CT_3 field doses found — skipping CT_3 analysis.');
 end
-
-fprintf('  CT_1 fields: %d  (max sum dose: %.4f Gy)\n', n_ct1, max(ct1_dose(:)));
-fprintf('  CT_3 fields: %d  (max sum dose: %.4f Gy)\n', n_ct3, max(ct3_dose(:)));
-if n_other > 0
-    fprintf('  Other/unlabelled fields excluded: %d\n', n_other);
-end
-fprintf('\n');
 
 %% ========================= STEP 4: RESAMPLE ETHOS IF NEEDED ==============
 
@@ -198,8 +220,9 @@ end
 fprintf('[STEP 5] Running gamma analysis (%.0f%%/%.0fmm)...\n', ...
     CONFIG.gamma_dose_pct, CONFIG.gamma_dist_mm);
 
-gamma_ct1 = [];
-gamma_ct3 = [];
+gamma_ct1    = [];
+gamma_ct3    = [];
+gamma_ct1_ct3 = [];
 
 if do_ct1
     fprintf('\n  --- ETHOS vs CT_1 ---\n');
@@ -209,6 +232,11 @@ end
 if do_ct3
     fprintf('\n  --- ETHOS vs CT_3 ---\n');
     gamma_ct3 = rs_gamma(ethos_dose, ct3_dose, spacing, CONFIG);
+end
+
+if do_ct1 && do_ct3
+    fprintf('\n  --- CT_1 vs CT_3 ---\n');
+    gamma_ct1_ct3 = rs_gamma(ct1_dose, ct3_dose, spacing, CONFIG);
 end
 
 %% ========================= STEP 6: SUMMARY TABLE =========================
@@ -235,6 +263,14 @@ if do_ct3
         gamma_ct3.max_gamma, gamma_ct3.num_evaluated);
 else
     fprintf('  %-22s  %s\n', 'ETHOS vs CT_3', 'SKIPPED (no CT_3 fields found)');
+end
+
+if do_ct1 && do_ct3
+    fprintf('  %-22s  %8.1f%%  %8.3f  %7.3f  %d\n', ...
+        'CT_1 vs CT_3', gamma_ct1_ct3.pass_rate, gamma_ct1_ct3.mean_gamma, ...
+        gamma_ct1_ct3.max_gamma, gamma_ct1_ct3.num_evaluated);
+elseif ~do_ct1 || ~do_ct3
+    fprintf('  %-22s  %s\n', 'CT_1 vs CT_3', 'SKIPPED (need both CT_1 and CT_3)');
 end
 
 fprintf('=========================================================\n\n');
@@ -280,9 +316,14 @@ if CONFIG.save_figures || nargout == 0
     rs_fig2_dose_difference(ethos_dose, ct1_dose, ct3_dose, do_ct1, do_ct3, ...
         r0, c0, s0, body_mask, do_save, fig_dir);
 
-    % Figure 3 — Gamma maps
+    % Figure 3 — Gamma maps (ETHOS vs CT_1, ETHOS vs CT_3)
     rs_fig3_gamma_maps(gamma_ct1, gamma_ct3, do_ct1, do_ct3, ...
         r0, c0, s0, CONFIG, do_save, fig_dir);
+
+    % Figure 4 — CT_1 vs CT_3 gamma map
+    if do_ct1 && do_ct3
+        rs_fig4_ct1_vs_ct3_gamma(gamma_ct1_ct3, ct1_dose, r0, c0, s0, CONFIG, do_save, fig_dir);
+    end
 
     if do_save
         fprintf('  Figures saved to: %s\n\n', fig_dir);
@@ -562,6 +603,45 @@ function rs_fig3_gamma_maps(gamma_ct1, gamma_ct3, do_ct1, do_ct3, ...
 
     if do_save
         out = fullfile(fig_dir, 'gamma_maps.png');
+        exportgraphics(fig, out, 'Resolution', 150);
+        fprintf('  Saved: %s\n', out);
+    else
+        set(fig, 'Visible', 'on');
+    end
+    close(fig);
+end
+
+
+function rs_fig4_ct1_vs_ct3_gamma(gamma_result, ct1_dose, r0, c0, s0, config, do_save, fig_dir)
+% Figure 4: gamma map between CT_1 and CT_3 dose sums (1 row x 3 cols).
+
+    gmap = gamma_result.gamma_map;
+    sl   = { gmap(:, :, s0), squeeze(gmap(:, c0, :)), squeeze(gmap(r0, :, :))' };
+
+    gamma_clim = [0, 2];
+    col_titles = {'Axial', 'Coronal', 'Sagittal'};
+    bg_gray    = [0.85 0.85 0.85];
+
+    fig = figure('Position', [50 50 1100 400], 'Visible', 'off');
+
+    for col = 1:3
+        ax = subplot(1, 3, col);
+        set(ax, 'Color', bg_gray);
+        imagesc(sl{col}, gamma_clim);
+        colormap(ax, gamma_colormap()); colorbar;
+        axis image; axis off;
+        title(col_titles{col}, 'FontWeight', 'bold');
+        if col == 1
+            ylabel(sprintf('CT\\_1 vs CT\\_3 (%.1f%% pass)', gamma_result.pass_rate));
+        end
+    end
+
+    sgtitle(sprintf('CT\\_1 vs CT\\_3 Gamma (%.0f%%/%.0fmm) — pass rate %.1f%%', ...
+        config.gamma_dose_pct, config.gamma_dist_mm, gamma_result.pass_rate), ...
+        'FontSize', 13, 'FontWeight', 'bold');
+
+    if do_save
+        out = fullfile(fig_dir, 'gamma_ct1_vs_ct3.png');
         exportgraphics(fig, out, 'Resolution', 150);
         fprintf('  Saved: %s\n', out);
     else

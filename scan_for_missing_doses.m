@@ -76,7 +76,7 @@ end
 %   second-last = beam    (B\d+)
 %   third-last  = ct_label (captured greedily as remainder after plan_type)
 % Pattern captures: plan_type, ct_label, beam, segment
-pattern = '_(adapted|reference)_(.+)_(B\d+)_(\d{2})\.npz$';
+pattern = '_(adapted|reference)_(.+)_(B\d+)_(\d+)\.npz$';
 
 beamset_keys = {};   % unique 'plan_type_beam' strings
 beamset_segs = {};   % cell of segment number vectors per beamset

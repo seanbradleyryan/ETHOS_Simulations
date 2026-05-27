@@ -48,6 +48,8 @@ function [field_doses, sct_resampled, total_rs_dose, metadata] = step15_process_
 %         e.g. dose_1194203_Session_1_adapted_B6_103.mat
 %       - sct_resampled.mat (includes tissueMask and couchMask)
 %       - total_rs_dose.mat
+%       - total_dose_[CT_label].mat (per-CT-image total; e.g. total_dose_CT_1.mat, total_dose_CT_3.mat)
+%         Only written for NPZ-derived inputs that carry a CT label in their filename.
 %       - tissue_masks.mat (individual ROI masks)
 %       - metadata.mat
 %
@@ -306,6 +308,9 @@ fprintf('    Origin (mm): [%.3f, %.3f, %.3f]\n', ref_origin(1), ref_origin(2), r
 % Initialize total dose accumulator
 total_rs_dose = zeros(ref_dims);
 
+% Per-CT-label accumulators; keys added dynamically from filenames (e.g. 'CT_1', 'CT_3')
+ct_dose_accum = struct();
+
 % Initialize metadata structure
 metadata = struct();
 metadata.origin = ref_origin;
@@ -538,6 +543,15 @@ for batch_idx = 1:num_batches
             % Accumulate into batch subtotal (masking already applied)
             batch_total_dose = batch_total_dose + dose_data;
 
+            % Accumulate per-CT-label total (NPZ-derived inputs only)
+            if ~isempty(ct_label)
+                ct_key = strrep(ct_label, '-', '_');  % ensure valid struct field name
+                if ~isfield(ct_dose_accum, ct_key)
+                    ct_dose_accum.(ct_key) = zeros(ref_dims);
+                end
+                ct_dose_accum.(ct_key) = ct_dose_accum.(ct_key) + dose_data;
+            end
+
             % Save individual field dose file — name mirrors source.
             % Format (legacy DICOM):  dose_[id]_[session]_[plan_type]_B[beam]_[seg].mat
             % Format (NPZ-derived):   dose_[id]_[session]_[plan_type]_[ct_label]_B[beam]_[seg].mat
@@ -620,6 +634,12 @@ if config.apply_dose_masking
 
     total_rs_dose(invalid_dose_mask) = 0;
 
+    % Apply same mask to each per-CT-label accumulator
+    ct_keys = fieldnames(ct_dose_accum);
+    for k = 1:numel(ct_keys)
+        ct_dose_accum.(ct_keys{k})(invalid_dose_mask) = 0;
+    end
+
     fprintf('  Voxels outside body: %d\n', num_voxels_outside_body);
     fprintf('  Voxels in couch: %d\n', num_voxels_in_couch);
     fprintf('  Total voxels zeroed: %d\n', num_voxels_zeroed);
@@ -659,6 +679,25 @@ else
 end
 fprintf('  Saved: total_rs_dose.mat\n');
 
+% Save per-CT-label total doses
+ct_keys = fieldnames(ct_dose_accum);
+if ~isempty(ct_keys)
+    fprintf('\n  Saving per-CT total doses (%d CT label(s) found)...\n', numel(ct_keys));
+    for k = 1:numel(ct_keys)
+        ct_key  = ct_keys{k};
+        ct_total = ct_dose_accum.(ct_key);
+        ct_dose_file = fullfile(processed_dir, sprintf('total_dose_%s.mat', ct_key));
+        if config.use_sparse_storage
+            ct_total_dims   = size(ct_total);
+            ct_total_sparse = sparse(reshape(ct_total, [], ct_total_dims(end)));
+            save(ct_dose_file, 'ct_total_sparse', 'ct_total_dims', '-v7.3');
+        else
+            save(ct_dose_file, 'ct_total', '-v7.3');
+        end
+        fprintf('    Saved: total_dose_%s.mat (max: %.4f Gy)\n', ct_key, max(ct_total(:)));
+    end
+end
+
 %% ======================== CREATE SCT RESAMPLED STRUCTURE ========================
 
 sct_resampled = struct();
@@ -697,6 +736,10 @@ fprintf('  Step 1.5 Complete\n');
 fprintf('========================================\n');
 fprintf('  Processed %d field doses\n', processed_count);
 fprintf('  .mat files saved: %d\n', save_count);
+ct_keys = fieldnames(ct_dose_accum);
+if ~isempty(ct_keys)
+    fprintf('  Per-CT total doses saved: %s\n', strjoin(ct_keys, ', '));
+end
 fprintf('  Dose grid: [%d x %d x %d]\n', ref_dims(1), ref_dims(2), ref_dims(3));
 fprintf('  Spacing: [%.3f, %.3f, %.3f] mm\n', ref_spacing(1), ref_spacing(2), ref_spacing(3));
 fprintf('  Total dose max: %.4f Gy\n', max(total_rs_dose(:)));
