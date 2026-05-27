@@ -21,6 +21,9 @@
 %    % Edit the CONFIG block below, then run:
 %    scan_for_missing_doses
 %
+%  FILE FORMAT:  dose_{id}_{session}_{plan_type}_{ct_label}_{beam}_{seg:02d}.npz
+%               e.g. dose_1194203_Session_1_adapted_CT_1_B6_03.npz
+%
 %  DEPENDENCIES: none
 %
 %  AUTHOR: ETHOS Pipeline Team
@@ -59,17 +62,21 @@ end
 
 %% ========================= SCAN FILES ====================================
 
-files = dir(fullfile(dose_dir, 'dose_*.dcm'));
+files = dir(fullfile(dose_dir, 'dose_*.npz'));
 
 if isempty(files)
-    fprintf('  No dose_*.dcm files found.\n');
+    fprintf('  No dose_*.npz files found.\n');
     fprintf('=========================================================\n');
     return
 end
 
-% Parse filenames: dose_{id}_{session}_{plan_type}_{beam}_{seg}.dcm
-% Capture groups: (plan_type) (B\d+) (seg)
-pattern = '_([^_]+)_(B\d+)_(\d+)\.dcm$';
+% Parse filenames: dose_{id}_{session}_{plan_type}_{ct_label}_{beam}_{seg}.npz
+% ct_label may contain underscores (e.g. CT_1), so anchor from the right:
+%   last token  = segment (digits)
+%   second-last = beam    (B\d+)
+%   third-last  = ct_label (captured greedily as remainder after plan_type)
+% Pattern captures: plan_type, ct_label, beam, segment
+pattern = '_(adapted|reference)_(.+)_(B\d+)_(\d{2})\.npz$';
 
 beamset_keys = {};   % unique 'plan_type_beam' strings
 beamset_segs = {};   % cell of segment number vectors per beamset
@@ -84,10 +91,11 @@ for i = 1:numel(files)
         continue
     end
     plan_type = tokens{1}{1};
-    beam      = tokens{1}{2};
-    seg_num   = str2double(tokens{1}{3});
+    ct_label  = tokens{1}{2};
+    beam      = tokens{1}{3};
+    seg_num   = str2double(tokens{1}{4});
 
-    key = sprintf('%s_%s', plan_type, beam);
+    key = sprintf('%s_%s_%s', plan_type, ct_label, beam);
     idx = find(strcmp(beamset_keys, key), 1);
     if isempty(idx)
         beamset_keys{end+1} = key; %#ok<AGROW>
