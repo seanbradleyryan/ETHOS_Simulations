@@ -401,7 +401,59 @@ for ix_start = 1:(Nx - sensor_nx + 1)
     end
 end
 
-% Fallback: if no full-sensor rectangle fits, try shrinking
+% Fallback A: slide past the exclusion zone, allowing the rigid aperture to
+% overhang the patient in Z. Parts of the footprint that sit beyond the body
+% are in coupling water, which is acceptable; we only need body somewhere
+% under the footprint to anchor the Y standoff, and the full footprint must
+% still clear the exclusion zone and the PML.
+if isempty(best_ix_start)
+    fprintf('        [Sensor] No placement entirely on body; sliding past exclusion (Z-overhang allowed).\n');
+
+    slide_available = ~exclusion_zone;
+    slide_available(1:pml_margin_x, :)             = false;
+    slide_available(end-pml_margin_x+1:end, :)     = false;
+    slide_available(:, 1:pml_margin_z)             = false;
+    slide_available(:, end-pml_margin_z+1:end)     = false;
+
+    % Require at least this fraction of the footprint to be over real body,
+    % so the standoff Y can be derived from a surface (not pure water).
+    min_body_coverage_frac = 0.25;
+
+    for ix_start = 1:(Nx - sensor_nx + 1)
+        for iz_start = 1:(Nz - sensor_nz + 1)
+            ix_end = ix_start + sensor_nx - 1;
+            iz_end = iz_start + sensor_nz - 1;
+
+            patch = slide_available(ix_start:ix_end, iz_start:iz_end);
+            if ~all(patch(:))
+                continue;
+            end
+
+            surf_patch = surface_valid(ix_start:ix_end, iz_start:iz_end);
+            if sum(surf_patch(:)) < min_body_coverage_frac * numel(surf_patch)
+                continue;
+            end
+
+            cx = ix_start + half_nx;
+            cz = iz_start + half_nz;
+            dist = sqrt((cx - dose_centroid_ix)^2 + (cz - dose_centroid_iz)^2);
+
+            if dist < best_dist
+                best_dist = dist;
+                best_ix_start = ix_start;
+                best_iz_start = iz_start;
+            end
+        end
+    end
+
+    if ~isempty(best_ix_start)
+        fprintf('        [Sensor] Slid placement: X=[%d,%d], Z=[%d,%d] (dist to dose: %.1f voxels)\n', ...
+            best_ix_start, best_ix_start + sensor_nx - 1, ...
+            best_iz_start, best_iz_start + sensor_nz - 1, best_dist);
+    end
+end
+
+% Fallback B: if even the slide pass fails, try shrinking
 if isempty(best_ix_start)
     warning('determine_sensor_mask:ShrinkSensor', ...
         'Full sensor does not fit in available region. Attempting to shrink.');
@@ -481,7 +533,15 @@ end
 surface_patch = anterior_surface(sensor_x_range(1):sensor_x_range(2), ...
                                   sensor_z_range(1):sensor_z_range(2));
 
-min_anterior_y = min(surface_patch(:));
+% Footprint may overhang the body in Z (slide-pass placement), so NaN columns
+% are expected. Take the min over real surface points only; fall back to the
+% global median anterior surface Y if no body sits under the footprint at all.
+min_anterior_y = min(surface_patch(:), [], 'omitnan');
+if isnan(min_anterior_y)
+    valid_surface_y_all = anterior_surface(surface_valid);
+    min_anterior_y = round(median(valid_surface_y_all));
+    fprintf('        [Sensor] No body under footprint; using median surface Y=%d\n', min_anterior_y);
+end
 
 % Place sensor at standoff distance anterior to the body surface
 standoff_voxels = ceil(standoff_mm / dy);
