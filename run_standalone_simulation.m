@@ -24,6 +24,12 @@ CONFIG.sensor_placement_method = 'determine_sensor_mask';
 CONFIG.sensor_x_index = 20;
 CONFIG.sensor_y_index = 40;
 
+% Physical 2D ultrasound array geometry (sparse element mask).
+% Kerf is derived inside determine_sensor_mask as (pitch - size).
+CONFIG.elements_per_side = 32;
+CONFIG.element_pitch_mm  = 3.65;
+CONFIG.element_size_mm   = 2.43;
+
 CONFIG.gruneisen_method = 'threshold_2';
 
 CONFIG.force_uniform_density     = false;

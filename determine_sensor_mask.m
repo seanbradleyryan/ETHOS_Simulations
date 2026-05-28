@@ -4,10 +4,16 @@ function [sensor_mask, sensor_info] = determine_sensor_mask(sct_resampled, field
 %   [sensor_mask, sensor_info] = determine_sensor_mask(sct_resampled, field_dose, beam_metadata, config)
 %
 %   PURPOSE:
-%   Compute the 3D binary mask for a rigid, flat 10x10 cm ultrasound sensor
-%   pressed against the patient's anterior abdomen. The sensor must avoid all
-%   beam field projections (jaw openings) on the anterior surface. Everything
-%   outside the patient body is water (no coupling concerns).
+%   Compute the 3D binary mask for a rigid, flat 2D ultrasound array
+%   pressed against the patient's anterior abdomen. The array is modeled as
+%   a sparse grid of discrete piezoelectric elements (default 32x32) with a
+%   physical pitch, active element size, and kerf (dead) gap between elements.
+%   Only voxels falling within active element footprints become sensor points;
+%   kerf regions are empty. The aperture footprint is derived from
+%   elements_per_side * element_pitch_mm, not from a separate sensor_size_cm.
+%   The sensor must avoid all beam field projections (jaw openings) on the
+%   anterior surface. Everything outside the patient body is water
+%   (no coupling concerns).
 %
 %   ALGORITHM:
 %   1. Compute anterior surface height map from body mask (excluding couch).
@@ -16,10 +22,15 @@ function [sensor_mask, sensor_info] = determine_sensor_mask(sct_resampled, field
 %      (e.g., lateral/posterior beams with gantry > ~60 deg from AP).
 %   3. Find the largest contiguous anterior surface area outside the exclusion
 %      zone, as close as possible to the dose centroid's X-Z projection.
+%      Aperture footprint = elements_per_side * element_pitch_mm.
 %   4. Place a flat planar sensor at a fixed Y index (the most anterior body
 %      surface point within the chosen region, minus standoff).
-%   5. Validate: sensor outside body, outside exclusion zone, within grid bounds.
-%   6. Optionally partition the sensor into element patches for signal averaging.
+%   5. Build sparse mask: for each of N x N element centers, mark grid voxels
+%      within the element's active footprint (element_size_mm x element_size_mm).
+%      Kerf voxels remain unmarked. element_map encodes element index per voxel.
+%   6. Validate: sensor outside body, outside exclusion zone, within grid bounds.
+%   7. Aliasing check: if grid is too coarse to resolve all elements uniquely,
+%      warn-and-degrade (continue with reduced effective element count).
 %
 %   INPUTS:
 %       sct_resampled - Struct with CT resampled to dose grid:
@@ -41,9 +52,11 @@ function [sensor_mask, sensor_info] = determine_sensor_mask(sct_resampled, field
 %           .jaw_x          - [x1, x2] mm at isocenter
 %           .jaw_y          - [y1, y2] mm at isocenter
 %       config - Struct with sensor parameters:
-%           .sensor_size_cm       - [X, Z] physical sensor dims in cm (default: [10, 10])
+%           .elements_per_side    - N for an NxN element array (default: 32)
+%           .element_pitch_mm     - Center-to-center pitch in mm (default: 3.65)
+%           .element_size_mm      - Active element width in mm (default: 2.43).
+%                                   Kerf is derived: kerf = pitch - size.
 %           .sensor_standoff_mm   - Gap between body surface and sensor (default: 5)
-%           .element_size_mm      - Element patch size for averaging (default: [])
 %           .jaw_margin_mm        - Extra margin around jaw projection (default: 10)
 %           .sensor_placement     - Placement side: 'anterior' (default)
 %           .pml_size             - PML thickness in voxels (default: 10)
@@ -56,10 +69,25 @@ function [sensor_mask, sensor_info] = determine_sensor_mask(sct_resampled, field
 %           .sensor_z_range              - [z_start, z_end] voxel indices
 %           .sensor_center_mm            - [x, y, z] physical position of sensor center
 %           .exclusion_zone              - 2D logical on anterior surface (X x Z)
-%           .element_map                 - 2D array mapping sensor voxels to element index
-%           .num_elements                - Number of signal-averaged elements
+%           .element_map                 - 2D array (X x Z over aperture footprint)
+%                                          mapping each voxel to element index;
+%                                          0 marks kerf/inactive voxels.
+%           .num_elements                - Effective number of resolved elements
+%                                          (= effective_element_count, may be
+%                                          < elements_per_side^2 if aliased).
+%           .element_positions_mm        - [N x 3] physical centers of all elements.
+%           .element_pitch_mm            - Echoed pitch (mm).
+%           .element_size_mm             - Echoed active element width (mm).
+%           .kerf_mm                     - Derived kerf = pitch - size (mm).
+%           .elements_per_side           - Echoed N (default 32).
+%           .effective_element_count     - Elements with >= 1 assigned voxel.
+%           .aliased_element_count       - Elements that lost their voxel.
+%           .voxels_per_element_stats    - [min, median, max] voxels per element.
+%           .aperture_mm                 - Derived total aperture (mm).
+%           .fill_factor_actual          - Actual mask fill within aperture
+%                                          rectangle (compare to spec 0.44).
 %           .surface_to_dose_distance_mm - Distance from sensor plane to dose centroid
-%           .sensor_size_voxels          - [nx_sensor, nz_sensor] sensor extent in voxels
+%           .sensor_size_voxels          - [nx_sensor, nz_sensor] aperture footprint extent in voxels
 %           .placement_valid             - Boolean, true if placement passed all checks
 %
 %   COORDINATE SYSTEM:
@@ -76,9 +104,10 @@ function [sensor_mask, sensor_info] = determine_sensor_mask(sct_resampled, field
 %       - Logging style consistent with pipeline (indented, with step labels).
 %
 %   EXAMPLE:
-%       config.sensor_size_cm = [10, 10];
+%       config.elements_per_side = 32;
+%       config.element_pitch_mm  = 3.65;
+%       config.element_size_mm   = 2.43;
 %       config.sensor_standoff_mm = 5;
-%       config.element_size_mm = 2;
 %       [mask, info] = determine_sensor_mask(sct_resampled, field_dose, beam_metadata, config);
 %
 %   DEPENDENCIES:
@@ -92,17 +121,33 @@ function [sensor_mask, sensor_info] = determine_sensor_mask(sct_resampled, field
 
 %% ======================== CONFIG DEFAULTS ========================
 
-sensor_size_cm    = get_field(config, 'sensor_size_cm', [10, 10]);
+elements_per_side = get_field(config, 'elements_per_side', 32);
+element_pitch_mm  = get_field(config, 'element_pitch_mm', 3.65);
+element_size_mm   = get_field(config, 'element_size_mm', 2.43);
 standoff_mm       = get_field(config, 'sensor_standoff_mm', 5);
-element_size_mm   = get_field(config, 'element_size_mm', []);
 jaw_margin_mm     = get_field(config, 'jaw_margin_mm', 10);
 placement_side    = get_field(config, 'sensor_placement', 'anterior');
 pml_size          = get_field(config, 'pml_size', 10);
 
+% Kerf is derived; never accepted from config.
+kerf_mm = element_pitch_mm - element_size_mm;
+if kerf_mm < 0
+    error('determine_sensor_mask:InvalidGeometry', ...
+        'element_size_mm (%.3f) cannot exceed element_pitch_mm (%.3f).', ...
+        element_size_mm, element_pitch_mm);
+end
+
+% Total aperture footprint (mm) derived from N x pitch.
+aperture_mm = elements_per_side * element_pitch_mm;
+
 SAD_mm = 1000;  % Halcyon/ETHOS source-to-axis distance: 100 cm
 
-fprintf('        [Sensor] Placing %s sensor (%.0fx%.0f cm, standoff %.0f mm)\n', ...
-    placement_side, sensor_size_cm(1), sensor_size_cm(2), standoff_mm);
+fprintf('        [Sensor] Placing %s array: %dx%d elements, pitch %.2f mm, size %.2f mm, kerf %.2f mm\n', ...
+    placement_side, elements_per_side, elements_per_side, ...
+    element_pitch_mm, element_size_mm, kerf_mm);
+fprintf('        [Sensor] Aperture %.1f mm, standoff %.0f mm, fill factor (spec) %.0f%%\n', ...
+    aperture_mm, standoff_mm, ...
+    100 * (element_size_mm / element_pitch_mm)^2);
 
 %% ======================== EXTRACT GRID INFO ========================
 
@@ -120,13 +165,18 @@ dz = sct_resampled.spacing(3);  % mm, Z direction
 % Grid origin in DICOM patient coordinates
 origin = sct_resampled.origin(:)';  % [x, y, z] mm
 
-% Sensor size in voxels
-sensor_nx = round(sensor_size_cm(1) * 10 / dx);  % X extent in voxels
-sensor_nz = round(sensor_size_cm(2) * 10 / dz);  % Z extent in voxels
+% Aperture footprint in voxels (for the placement search)
+sensor_nx = ceil(aperture_mm / dx);  % X extent in voxels
+sensor_nz = ceil(aperture_mm / dz);  % Z extent in voxels
 
 fprintf('        [Sensor] Grid: [%d(Y) x %d(X) x %d(Z)], spacing: [%.2f, %.2f, %.2f] mm\n', ...
     Ny, Nx, Nz, dx, dy, dz);
-fprintf('        [Sensor] Sensor size in voxels: %d(X) x %d(Z)\n', sensor_nx, sensor_nz);
+fprintf('        [Sensor] Aperture footprint in voxels: %d(X) x %d(Z)\n', sensor_nx, sensor_nz);
+if dx > element_pitch_mm || dz > element_pitch_mm
+    warning('determine_sensor_mask:GridCoarserThanPitch', ...
+        'Grid spacing (dx=%.2f, dz=%.2f mm) exceeds element pitch (%.2f mm). Severe element aliasing expected.', ...
+        dx, dz, element_pitch_mm);
+end
 
 %% ======================== STEP 1: ANTERIOR SURFACE MAP ========================
 
@@ -406,6 +456,23 @@ sensor_z_range = [best_iz_start, best_iz_start + sensor_nz - 1];
 fprintf('        [Sensor] Placement: X=[%d,%d], Z=[%d,%d] (dist to dose: %.1f voxels)\n', ...
     sensor_x_range(1), sensor_x_range(2), sensor_z_range(1), sensor_z_range(2), best_dist);
 
+% If shrink fallback reduced the aperture, reduce elements_per_side to fit at
+% the configured pitch. Each axis is capped independently; we use the min so
+% the array stays square. This is reported as a warn-and-degrade event.
+actual_aperture_x_mm = sensor_nx * dx;
+actual_aperture_z_mm = sensor_nz * dz;
+N_fit_x = max(1, floor(actual_aperture_x_mm / element_pitch_mm));
+N_fit_z = max(1, floor(actual_aperture_z_mm / element_pitch_mm));
+N_fit   = min(N_fit_x, N_fit_z);
+if N_fit < elements_per_side
+    warning('determine_sensor_mask:ApertureShrunk', ...
+        'Available aperture (%.1f x %.1f mm) fits %dx%d elements at pitch %.2f mm; reducing from %dx%d.', ...
+        actual_aperture_x_mm, actual_aperture_z_mm, N_fit, N_fit, ...
+        element_pitch_mm, elements_per_side, elements_per_side);
+    elements_per_side = N_fit;
+    aperture_mm = elements_per_side * element_pitch_mm;
+end
+
 %% ======================== STEP 4: DETERMINE SENSOR Y INDEX ========================
 
 % Find the most anterior (minimum Y) body surface point within the sensor region
@@ -436,17 +503,96 @@ fprintf('        [Sensor] Y index: %d (surface min Y: %d, standoff: %d voxels)\n
 fprintf('        [Sensor] Center (mm): [%.1f, %.1f, %.1f]\n', ...
     sensor_center_x, sensor_center_y, sensor_center_z);
 
-%% ======================== STEP 5: CREATE SENSOR MASK ========================
+%% ======================== STEP 5: BUILD SPARSE SENSOR MASK ========================
 
-% Sensor is a flat rectangle at a single Y index spanning the X-Z range.
-% Array indexing: mask(Y, X, Z)
+% The mask is the union of N x N active element footprints. Each element
+% center sits at (ex - 0.5) * pitch from the aperture corner. Kerf voxels
+% are never marked. element_map is built simultaneously so apply_element_averaging
+% can group voxels into elements (0 = inactive/kerf/removed).
+
 sensor_mask = false(grid_dims);
-sensor_mask(sensor_y_index, ...
-            sensor_x_range(1):sensor_x_range(2), ...
-            sensor_z_range(1):sensor_z_range(2)) = true;
+
+local_nx = sensor_x_range(2) - sensor_x_range(1) + 1;
+local_nz = sensor_z_range(2) - sensor_z_range(1) + 1;
+element_map = zeros(local_nx, local_nz);
+
+% Physical coordinate of the aperture corner (top-left voxel center, in mm).
+aperture_origin_x_mm = origin(1) + (sensor_x_range(1) - 1) * dx;
+aperture_origin_z_mm = origin(3) + (sensor_z_range(1) - 1) * dz;
+
+% Half-extent of an active element footprint, in voxel units.
+half_nx_active = (element_size_mm / 2) / dx;
+half_nz_active = (element_size_mm / 2) / dz;
+
+% Pre-allocate element_positions_mm: [N_total x 3] in patient coords.
+N_total_elements = elements_per_side * elements_per_side;
+element_positions_mm = zeros(N_total_elements, 3);
+
+% Track which elements actually got at least one voxel (for aliasing report).
+element_voxel_counts = zeros(N_total_elements, 1);
+
+for ex = 1:elements_per_side
+    % Element center physical X (mm)
+    cx_mm = aperture_origin_x_mm + (ex - 0.5) * element_pitch_mm;
+    % Element center in local voxel coords (1-based, fractional)
+    cx_local = (cx_mm - aperture_origin_x_mm) / dx + 1;
+
+    % Active footprint X voxel range (clamped to local aperture)
+    ix_lo = max(1,        ceil(cx_local - half_nx_active));
+    ix_hi = min(local_nx, floor(cx_local + half_nx_active));
+    % Sub-voxel element: snap to nearest voxel
+    if ix_hi < ix_lo
+        ix_lo = max(1, min(local_nx, round(cx_local)));
+        ix_hi = ix_lo;
+    end
+
+    for ez = 1:elements_per_side
+        cz_mm = aperture_origin_z_mm + (ez - 0.5) * element_pitch_mm;
+        cz_local = (cz_mm - aperture_origin_z_mm) / dz + 1;
+
+        iz_lo = max(1,        ceil(cz_local - half_nz_active));
+        iz_hi = min(local_nz, floor(cz_local + half_nz_active));
+        if iz_hi < iz_lo
+            iz_lo = max(1, min(local_nz, round(cz_local)));
+            iz_hi = iz_lo;
+        end
+
+        elem_idx = (ex - 1) * elements_per_side + ez;
+        element_positions_mm(elem_idx, :) = ...
+            [cx_mm, origin(2) + (sensor_y_index - 1) * dy, cz_mm];
+
+        % Convert local (ix, iz) ranges to global grid indices and mark.
+        for li = ix_lo:ix_hi
+            for lj = iz_lo:iz_hi
+                gi = sensor_x_range(1) + li - 1;
+                gj = sensor_z_range(1) + lj - 1;
+                if gi < 1 || gi > Nx || gj < 1 || gj > Nz
+                    continue;
+                end
+                if element_map(li, lj) == 0
+                    sensor_mask(sensor_y_index, gi, gj) = true;
+                    element_map(li, lj) = elem_idx;
+                    element_voxel_counts(elem_idx) = element_voxel_counts(elem_idx) + 1;
+                else
+                    % Another element already claimed this voxel (aliasing).
+                    % Leave existing assignment; the colliding element gets no voxel.
+                end
+            end
+        end
+    end
+end
 
 num_sensor_voxels = sum(sensor_mask(:));
-fprintf('        [Sensor] Mask created: %d voxels\n', num_sensor_voxels);
+effective_element_count = sum(element_voxel_counts > 0);
+aliased_element_count   = N_total_elements - effective_element_count;
+
+fprintf('        [Sensor] Sparse mask: %d voxels across %d/%d elements\n', ...
+    num_sensor_voxels, effective_element_count, N_total_elements);
+if aliased_element_count > 0
+    warning('determine_sensor_mask:ElementAliasing', ...
+        '%d of %d elements collapsed (grid spacing too coarse for full resolution).', ...
+        aliased_element_count, N_total_elements);
+end
 
 %% ======================== STEP 6: VALIDATION ========================
 
@@ -471,8 +617,18 @@ for ix = sensor_x_range(1):sensor_x_range(2)
                 warning('determine_sensor_mask:ExclusionOverlap', ...
                     'Sensor voxel at X=%d, Z=%d overlaps exclusion zone. Removing.', ix, iz);
                 sensor_mask(sensor_y_index, ix, iz) = false;
+                element_map(ix - sensor_x_range(1) + 1, iz - sensor_z_range(1) + 1) = 0;
                 placement_valid = false;
             end
+        end
+    end
+end
+
+% Also sync element_map for any body-overlap voxels removed in Check 1.
+for ix = sensor_x_range(1):sensor_x_range(2)
+    for iz = sensor_z_range(1):sensor_z_range(2)
+        if ~sensor_mask(sensor_y_index, ix, iz)
+            element_map(ix - sensor_x_range(1) + 1, iz - sensor_z_range(1) + 1) = 0;
         end
     end
 end
@@ -490,47 +646,45 @@ num_sensor_voxels_final = sum(sensor_mask(:));
 fprintf('        [Sensor] Final sensor: %d voxels (valid: %s)\n', ...
     num_sensor_voxels_final, mat2str(placement_valid));
 
-%% ======================== STEP 7: ELEMENT GROUPINGS ========================
+%% ======================== STEP 7: ELEMENT DIAGNOSTICS ========================
 
-element_map = [];
-num_elements = 0;
-
-if ~isempty(element_size_mm) && element_size_mm > 0
-    % Partition sensor into patches of element_size_mm x element_size_mm
-    elem_nx = max(1, floor(element_size_mm / dx));  % Element size in X voxels
-    elem_nz = max(1, floor(element_size_mm / dz));  % Element size in Z voxels
-    
-    % Create element map for the sensor rectangle (local coordinates)
-    local_nx = sensor_x_range(2) - sensor_x_range(1) + 1;
-    local_nz = sensor_z_range(2) - sensor_z_range(1) + 1;
-    element_map = zeros(local_nx, local_nz);
-    
-    elem_idx = 0;
-    for ex = 1:elem_nx:local_nx
-        for ez = 1:elem_nz:local_nz
-            elem_idx = elem_idx + 1;
-            ex_end = min(ex + elem_nx - 1, local_nx);
-            ez_end = min(ez + elem_nz - 1, local_nz);
-            element_map(ex:ex_end, ez:ez_end) = elem_idx;
-        end
+% element_map and per-element voxel counts were built in STEP 5.
+% Recompute counts after validation (voxels may have been removed for body
+% overlap, exclusion zone, etc.) to get an accurate effective_element_count.
+element_voxel_counts = zeros(N_total_elements, 1);
+em_vec = element_map(:);
+for v = 1:numel(em_vec)
+    e = em_vec(v);
+    if e > 0
+        element_voxel_counts(e) = element_voxel_counts(e) + 1;
     end
-    
-    num_elements = elem_idx;
-    
-    % Zero out element assignments for voxels that were removed during validation
-    for local_ix = 1:local_nx
-        for local_iz = 1:local_nz
-            global_ix = sensor_x_range(1) + local_ix - 1;
-            global_iz = sensor_z_range(1) + local_iz - 1;
-            if ~sensor_mask(sensor_y_index, global_ix, global_iz)
-                element_map(local_ix, local_iz) = 0;
-            end
-        end
-    end
-    
-    fprintf('        [Sensor] Element grouping: %d elements (%.1f mm patches, %dx%d voxels each)\n', ...
-        num_elements, element_size_mm, elem_nx, elem_nz);
 end
+
+effective_element_count = sum(element_voxel_counts > 0);
+aliased_element_count   = N_total_elements - effective_element_count;
+num_elements            = effective_element_count;
+
+if effective_element_count > 0
+    vpe_assigned = element_voxel_counts(element_voxel_counts > 0);
+    voxels_per_element_stats = [min(vpe_assigned), median(vpe_assigned), max(vpe_assigned)];
+else
+    voxels_per_element_stats = [0, 0, 0];
+end
+
+% Actual fill factor within the aperture footprint rectangle
+aperture_footprint_voxels = sensor_nx * sensor_nz;
+if aperture_footprint_voxels > 0
+    fill_factor_actual = sum(sensor_mask(:)) / aperture_footprint_voxels;
+else
+    fill_factor_actual = 0;
+end
+
+fprintf('        [Sensor] Element diagnostics: %d/%d effective, %d aliased/removed\n', ...
+    effective_element_count, N_total_elements, aliased_element_count);
+fprintf('        [Sensor] Voxels per element: min=%d, median=%d, max=%d\n', ...
+    voxels_per_element_stats(1), voxels_per_element_stats(2), voxels_per_element_stats(3));
+fprintf('        [Sensor] Fill factor (actual): %.1f%% (spec: %.1f%%)\n', ...
+    100 * fill_factor_actual, 100 * (element_size_mm / element_pitch_mm)^2);
 
 %% ======================== COMPUTE DIAGNOSTICS ========================
 
@@ -547,6 +701,16 @@ sensor_info.sensor_center_mm            = [sensor_center_x, sensor_center_y, sen
 sensor_info.exclusion_zone              = exclusion_zone;
 sensor_info.element_map                 = element_map;
 sensor_info.num_elements                = num_elements;
+sensor_info.element_positions_mm        = element_positions_mm;
+sensor_info.element_pitch_mm            = element_pitch_mm;
+sensor_info.element_size_mm             = element_size_mm;
+sensor_info.kerf_mm                     = kerf_mm;
+sensor_info.elements_per_side           = elements_per_side;
+sensor_info.effective_element_count     = effective_element_count;
+sensor_info.aliased_element_count       = aliased_element_count;
+sensor_info.voxels_per_element_stats    = voxels_per_element_stats;
+sensor_info.aperture_mm                 = aperture_mm;
+sensor_info.fill_factor_actual          = fill_factor_actual;
 sensor_info.surface_to_dose_distance_mm = surface_to_dose_distance_mm;
 sensor_info.sensor_size_voxels          = [sensor_nx, sensor_nz];
 sensor_info.placement_valid             = placement_valid;
@@ -614,6 +778,16 @@ function [sensor_mask, sensor_info] = empty_result(grid_dims)
     sensor_info.exclusion_zone              = false(grid_dims(2), grid_dims(3));
     sensor_info.element_map                 = [];
     sensor_info.num_elements                = 0;
+    sensor_info.element_positions_mm        = zeros(0, 3);
+    sensor_info.element_pitch_mm            = 0;
+    sensor_info.element_size_mm             = 0;
+    sensor_info.kerf_mm                     = 0;
+    sensor_info.elements_per_side           = 0;
+    sensor_info.effective_element_count     = 0;
+    sensor_info.aliased_element_count       = 0;
+    sensor_info.voxels_per_element_stats    = [0, 0, 0];
+    sensor_info.aperture_mm                 = 0;
+    sensor_info.fill_factor_actual          = 0;
     sensor_info.surface_to_dose_distance_mm = 0;
     sensor_info.sensor_size_voxels          = [0, 0];
     sensor_info.placement_valid             = false;

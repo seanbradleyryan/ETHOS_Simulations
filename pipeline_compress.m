@@ -59,6 +59,13 @@ CONFIG.use_sparse_storage  = true;
 CONFIG.run_step14       = true;   % Step 1.4: Convert NPZ field doses to .mat
 CONFIG.run_step15       = true;   % Step 1.5: Process doses and resample CT
 
+% --- Resume / Skip-Completed Behavior ---
+% When true, each step inspects its expected outputs under processed/ and
+% skips any sub-task that is already complete (per-NPZ conversion in 1.4,
+% CBCT resample / mask creation / per-field processing / total accumulation
+% in 1.5). Set false to force a full re-run.
+CONFIG.skip_completed   = true;
+
 %% ========================= INITIALIZATION ================================
 
 fprintf('=========================================================\n');
@@ -106,6 +113,12 @@ for p_idx = 1:length(CONFIG.patients)
                 continue;
             end
             fprintf('[STEP 1] Found %d dose file(s) in %s\n', num_dose_files, rs_dir);
+
+            %% ============================================================
+            %  Report which processed outputs are already on disk
+            %% ============================================================
+            processed_dir = fullfile(rs_dir, 'processed');
+            report_processed_status(processed_dir, rs_dir, CONFIG.skip_completed);
 
             %% ============================================================
             %  STEP 1.4: Convert RayStation NPZ Field Doses to .mat
@@ -203,6 +216,52 @@ function result = init_patient_result(patient_id, session)
     result.session    = session;
     result.status     = 'started';
     result.start_time = datetime('now');
+end
+
+function report_processed_status(processed_dir, rs_dir, skip_completed)
+%REPORT_PROCESSED_STATUS Print which Step 1.4/1.5 outputs are already on disk.
+%
+%   Purely informational — actual skipping is performed inside the daughter
+%   functions (step14_npz_to_mat / step15_process_doses), which honor
+%   config.skip_completed. This summary lets the user see what will be
+%   reused before processing begins.
+
+    fprintf('\n[STATUS] Processed output check (skip_completed=%d)\n', skip_completed);
+
+    if ~isfolder(processed_dir)
+        fprintf('         No processed/ directory yet — full run expected.\n');
+        return;
+    end
+
+    cbct1     = isfile(fullfile(processed_dir, 'CBCT1_resampled.mat'));
+    cbct3     = isfile(fullfile(processed_dir, 'CBCT3_resampled.mat'));
+    masks     = isfile(fullfile(processed_dir, 'tissue_masks.mat'));
+    total_rs  = isfile(fullfile(processed_dir, 'total_rs_dose.mat'));
+    meta      = isfile(fullfile(processed_dir, 'metadata.mat'));
+    ct1_total = isfile(fullfile(processed_dir, 'total_dose_CT_1.mat'));
+    ct3_total = isfile(fullfile(processed_dir, 'total_dose_CT_3.mat'));
+
+    field_outs = dir(fullfile(processed_dir, 'dose_*.mat'));
+    n_field_out = numel(field_outs);
+
+    % NPZ vs converted .mat counts in rs_dir (Step 1.4 progress)
+    npz_files  = dir(fullfile(rs_dir, 'dose_*.npz'));
+    mat_inputs = dir(fullfile(rs_dir, 'dose_*.mat'));
+
+    fprintf('         Step 1.4 (NPZ -> .mat):  %d NPZ / %d .mat in %s\n', ...
+        numel(npz_files), numel(mat_inputs), rs_dir);
+    fprintf('         CBCT1_resampled.mat:     %s\n', present(cbct1));
+    fprintf('         CBCT3_resampled.mat:     %s\n', present(cbct3));
+    fprintf('         tissue_masks.mat:        %s\n', present(masks));
+    fprintf('         total_rs_dose.mat:       %s\n', present(total_rs));
+    fprintf('         total_dose_CT_1.mat:     %s\n', present(ct1_total));
+    fprintf('         total_dose_CT_3.mat:     %s\n', present(ct3_total));
+    fprintf('         metadata.mat:            %s\n', present(meta));
+    fprintf('         Per-field dose .mat:     %d in processed/\n', n_field_out);
+end
+
+function s = present(tf)
+    if tf, s = 'present'; else, s = 'MISSING'; end
 end
 
 function generate_compress_summary(results)

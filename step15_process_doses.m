@@ -152,6 +152,12 @@ if ~isfield(config, 'batch_size') || isempty(config.batch_size)
     config.batch_size = 1000;
 end
 
+% Resume-friendly behavior: detect which outputs in processed/ already
+% exist and skip the corresponding work. Set false for a forced full re-run.
+if ~isfield(config, 'skip_completed')
+    config.skip_completed = true;
+end
+
 % Store dose/mask arrays as sparse 2D matrices for compressibility.
 % Dose grids are mostly zero after body/couch masking.
 % Reconstruct on load: reshape(full(var_sp), var_dims)
@@ -272,6 +278,45 @@ for i = 1:num_files
     fprintf('    [%d] %s\n', i, rd_files(i).name);
 end
 
+%% ======================== DETECT EXISTING PROCESSED OUTPUTS ========================
+
+fprintf('\n[1.5/8] Detecting existing processed outputs (skip_completed=%d)...\n', ...
+    config.skip_completed);
+
+[skip_status, expected_field_outputs] = detectProcessedOutputs( ...
+    processed_dir, rd_files, patient_id, session);
+
+fprintf('  CBCT1_resampled.mat:   %s\n', presentStr(skip_status.cbct1_done));
+fprintf('  CBCT3_resampled.mat:   %s\n', presentStr(skip_status.cbct3_done));
+fprintf('  tissue_masks.mat:      %s\n', presentStr(skip_status.masks_done));
+fprintf('  total_rs_dose.mat:     %s\n', presentStr(skip_status.total_rs_done));
+fprintf('  total_dose_CT_1.mat:   %s\n', presentStr(skip_status.ct1_total_done));
+fprintf('  total_dose_CT_3.mat:   %s\n', presentStr(skip_status.ct3_total_done));
+fprintf('  metadata.mat:          %s\n', presentStr(skip_status.metadata_done));
+fprintf('  Per-field outputs:     %d / %d present\n', ...
+    skip_status.num_fields_done, num_files);
+
+cbct_ready    = config.skip_completed && skip_status.cbct1_done && skip_status.cbct3_done;
+masks_ready   = config.skip_completed && skip_status.masks_done;
+fields_ready  = config.skip_completed && (skip_status.num_fields_done == num_files);
+totals_ready  = config.skip_completed && skip_status.total_rs_done && ...
+                skip_status.ct1_total_done && skip_status.ct3_total_done && ...
+                skip_status.metadata_done;
+
+if cbct_ready && masks_ready && fields_ready && totals_ready
+    fprintf('\n  All Step 1.5 outputs already exist — loading and returning early.\n');
+    [field_doses, cbct_resampled, total_rs_dose, metadata] = ...
+        loadExistingStep15Outputs(processed_dir, expected_field_outputs);
+    fprintf('  Loaded %d field dose entries, total_rs_dose max=%.4f Gy\n', ...
+        numel(field_doses), max(total_rs_dose(:)));
+    return;
+end
+
+% Whether the per-field loop needs to accumulate into running totals.
+% If every field output is on disk AND every totals file is on disk, we
+% can skip total accumulation entirely and load existing totals at the end.
+need_total_accum = ~(fields_ready && totals_ready);
+
 %% ======================== LOAD RTPLAN FOR BEAM METADATA ========================
 
 fprintf('\n[2/8] Loading RTPLAN for beam metadata...\n');
@@ -338,68 +383,124 @@ metadata.beam_metadata = beam_metadata;  % Includes isocenter + jaw data for sen
 
 %% ======================== DISCOVER, LOAD, AND RESAMPLE CBCT1 / CBCT3 ========================
 
-fprintf('\n[4/8] Discovering CBCTs and RTSTRUCTs in RayStation directory...\n');
+if cbct_ready
+    fprintf('\n[4/8] CBCT*_resampled.mat already exist — loading cached resampled CBCTs.\n');
 
-[cbct_ct1_meta, cbct_ct3_meta] = discoverCbctSeries(rs_dir);
+    cbct1_cache = load(fullfile(processed_dir, 'CBCT1_resampled.mat'), 'CBCT1_resampled');
+    cbct3_cache = load(fullfile(processed_dir, 'CBCT3_resampled.mat'), 'CBCT3_resampled');
+    CBCT1_cached = cbct1_cache.CBCT1_resampled;
+    CBCT3_cached = cbct3_cache.CBCT3_resampled;
 
-fprintf('\n  Loading and resampling CBCT1 (CT_1, earlier) to dose grid...\n');
-[ct1_hu, ct1_origin, ct1_spacing, ct1_dims] = loadCbctImagesFromFiles(cbct_ct1_meta.files);
-if isempty(ct1_hu)
-    error('step15_process_doses:NoCBCT', 'Failed to load CBCT1 slices.');
+    ct1_hu_resampled = CBCT1_cached.cubeHU;
+    ct1_density      = CBCT1_cached.cubeDensity;
+    ct1_dims         = CBCT1_cached.original_cbct_dims;
+    ct1_spacing      = CBCT1_cached.original_cbct_spacing;
+    cbct_ct1_meta    = struct('series_uid', CBCT1_cached.series_uid, ...
+                              'datetime',   CBCT1_cached.series_datetime, ...
+                              'label',      'CT_1');
+
+    ct3_hu_resampled = CBCT3_cached.cubeHU;
+    ct3_density      = CBCT3_cached.cubeDensity;
+    ct3_dims         = CBCT3_cached.original_cbct_dims;
+    ct3_spacing      = CBCT3_cached.original_cbct_spacing;
+    cbct_ct3_meta    = struct('series_uid', CBCT3_cached.series_uid, ...
+                              'datetime',   CBCT3_cached.series_datetime, ...
+                              'label',      'CT_3');
+
+    fprintf('    CT_1 cached: HU=[%.0f %.0f]  density=[%.0f %.0f] kg/m^3\n', ...
+        min(ct1_hu_resampled(:)), max(ct1_hu_resampled(:)), ...
+        min(ct1_density(:)), max(ct1_density(:)));
+    fprintf('    CT_3 cached: HU=[%.0f %.0f]  density=[%.0f %.0f] kg/m^3\n', ...
+        min(ct3_hu_resampled(:)), max(ct3_hu_resampled(:)), ...
+        min(ct3_density(:)), max(ct3_density(:)));
+
+    clear cbct1_cache cbct3_cache CBCT1_cached CBCT3_cached;
+else
+    fprintf('\n[4/8] Discovering CBCTs and RTSTRUCTs in RayStation directory...\n');
+
+    [cbct_ct1_meta, cbct_ct3_meta] = discoverCbctSeries(rs_dir);
+
+    fprintf('\n  Loading and resampling CBCT1 (CT_1, earlier) to dose grid...\n');
+    [ct1_hu, ct1_origin, ct1_spacing, ct1_dims] = loadCbctImagesFromFiles(cbct_ct1_meta.files);
+    if isempty(ct1_hu)
+        error('step15_process_doses:NoCBCT', 'Failed to load CBCT1 slices.');
+    end
+    fprintf('    Original CT_1: dims=[%d %d %d]  spacing=[%.3f %.3f %.3f]  origin=[%.3f %.3f %.3f]  HU=[%.0f %.0f]\n', ...
+        ct1_dims(1), ct1_dims(2), ct1_dims(3), ct1_spacing(1), ct1_spacing(2), ct1_spacing(3), ...
+        ct1_origin(1), ct1_origin(2), ct1_origin(3), min(ct1_hu(:)), max(ct1_hu(:)));
+    ct1_hu_resampled = resampleSctToDoseGrid(ct1_hu, ct1_origin, ct1_spacing, ct1_dims, ...
+        ref_origin, ref_spacing, ref_dims);
+    ct1_density = huToDensity(ct1_hu_resampled);
+    fprintf('    CT_1 resampled HU range: [%.0f, %.0f]  density range: [%.0f, %.0f] kg/m^3\n', ...
+        min(ct1_hu_resampled(:)), max(ct1_hu_resampled(:)), min(ct1_density(:)), max(ct1_density(:)));
+
+    fprintf('\n  Loading and resampling CBCT3 (CT_3, later) to dose grid...\n');
+    [ct3_hu, ct3_origin, ct3_spacing, ct3_dims] = loadCbctImagesFromFiles(cbct_ct3_meta.files);
+    if isempty(ct3_hu)
+        error('step15_process_doses:NoCBCT', 'Failed to load CBCT3 slices.');
+    end
+    fprintf('    Original CT_3: dims=[%d %d %d]  spacing=[%.3f %.3f %.3f]  origin=[%.3f %.3f %.3f]  HU=[%.0f %.0f]\n', ...
+        ct3_dims(1), ct3_dims(2), ct3_dims(3), ct3_spacing(1), ct3_spacing(2), ct3_spacing(3), ...
+        ct3_origin(1), ct3_origin(2), ct3_origin(3), min(ct3_hu(:)), max(ct3_hu(:)));
+    ct3_hu_resampled = resampleSctToDoseGrid(ct3_hu, ct3_origin, ct3_spacing, ct3_dims, ...
+        ref_origin, ref_spacing, ref_dims);
+    ct3_density = huToDensity(ct3_hu_resampled);
+    fprintf('    CT_3 resampled HU range: [%.0f, %.0f]  density range: [%.0f, %.0f] kg/m^3\n', ...
+        min(ct3_hu_resampled(:)), max(ct3_hu_resampled(:)), min(ct3_density(:)), max(ct3_density(:)));
+
+    % Free raw CBCT volumes; we only need the dose-grid-resampled cubes from here on.
+    clear ct1_hu ct3_hu;
 end
-fprintf('    Original CT_1: dims=[%d %d %d]  spacing=[%.3f %.3f %.3f]  origin=[%.3f %.3f %.3f]  HU=[%.0f %.0f]\n', ...
-    ct1_dims(1), ct1_dims(2), ct1_dims(3), ct1_spacing(1), ct1_spacing(2), ct1_spacing(3), ...
-    ct1_origin(1), ct1_origin(2), ct1_origin(3), min(ct1_hu(:)), max(ct1_hu(:)));
-ct1_hu_resampled = resampleSctToDoseGrid(ct1_hu, ct1_origin, ct1_spacing, ct1_dims, ...
-    ref_origin, ref_spacing, ref_dims);
-ct1_density = huToDensity(ct1_hu_resampled);
-fprintf('    CT_1 resampled HU range: [%.0f, %.0f]  density range: [%.0f, %.0f] kg/m^3\n', ...
-    min(ct1_hu_resampled(:)), max(ct1_hu_resampled(:)), min(ct1_density(:)), max(ct1_density(:)));
-
-fprintf('\n  Loading and resampling CBCT3 (CT_3, later) to dose grid...\n');
-[ct3_hu, ct3_origin, ct3_spacing, ct3_dims] = loadCbctImagesFromFiles(cbct_ct3_meta.files);
-if isempty(ct3_hu)
-    error('step15_process_doses:NoCBCT', 'Failed to load CBCT3 slices.');
-end
-fprintf('    Original CT_3: dims=[%d %d %d]  spacing=[%.3f %.3f %.3f]  origin=[%.3f %.3f %.3f]  HU=[%.0f %.0f]\n', ...
-    ct3_dims(1), ct3_dims(2), ct3_dims(3), ct3_spacing(1), ct3_spacing(2), ct3_spacing(3), ...
-    ct3_origin(1), ct3_origin(2), ct3_origin(3), min(ct3_hu(:)), max(ct3_hu(:)));
-ct3_hu_resampled = resampleSctToDoseGrid(ct3_hu, ct3_origin, ct3_spacing, ct3_dims, ...
-    ref_origin, ref_spacing, ref_dims);
-ct3_density = huToDensity(ct3_hu_resampled);
-fprintf('    CT_3 resampled HU range: [%.0f, %.0f]  density range: [%.0f, %.0f] kg/m^3\n', ...
-    min(ct3_hu_resampled(:)), max(ct3_hu_resampled(:)), min(ct3_density(:)), max(ct3_density(:)));
-
-% Free raw CBCT volumes; we only need the dose-grid-resampled cubes from here on.
-clear ct1_hu ct3_hu;
 
 %% ======================== LOAD RTSTRUCTS AND CREATE PER-CBCT MASKS ========================
 
-fprintf('\n[5/8] Loading per-CBCT RTSTRUCTs and creating tissue classification masks...\n');
-
-fprintf('  CT_1 RTSTRUCT...\n');
-[tissue_mask_ct1, roi_names_ct1, roi_masks_ct1, body_mask_ct1, couch_mask_ct1] = ...
-    loadRtstructAndCreateMasksFromFile(cbct_ct1_meta.rtstruct, ref_origin, ref_spacing, ref_dims);
-if isempty(tissue_mask_ct1)
-    error('step15_process_doses:NoRTSTRUCT', ...
-        'Could not create CT_1 masks from RTSTRUCT: %s', cbct_ct1_meta.rtstruct);
-end
-fprintf('    CT_1 ROIs=%d  body voxels=%d  couch voxels=%d\n', ...
-    length(roi_names_ct1), sum(body_mask_ct1(:)), sum(couch_mask_ct1(:)));
-
-fprintf('  CT_3 RTSTRUCT...\n');
-[tissue_mask_ct3, roi_names_ct3, roi_masks_ct3, body_mask_ct3, couch_mask_ct3] = ...
-    loadRtstructAndCreateMasksFromFile(cbct_ct3_meta.rtstruct, ref_origin, ref_spacing, ref_dims);
-if isempty(tissue_mask_ct3)
-    error('step15_process_doses:NoRTSTRUCT', ...
-        'Could not create CT_3 masks from RTSTRUCT: %s', cbct_ct3_meta.rtstruct);
-end
-fprintf('    CT_3 ROIs=%d  body voxels=%d  couch voxels=%d\n', ...
-    length(roi_names_ct3), sum(body_mask_ct3(:)), sum(couch_mask_ct3(:)));
-
-% Save both mask sets in a single tissue_masks.mat
-fprintf('  Saving tissue_masks.mat (both CT_1 and CT_3)...\n');
 tissue_masks_file = fullfile(processed_dir, 'tissue_masks.mat');
+
+% When we used the cached CBCT cubes we never called discoverCbctSeries and
+% therefore don't have an .rtstruct path. Fill it in now if we are about to
+% rebuild the masks.
+if cbct_ready && ~masks_ready && (~isfield(cbct_ct1_meta, 'rtstruct') || isempty(cbct_ct1_meta.rtstruct))
+    fprintf('  Cached CBCT cubes lack RTSTRUCT path — running discoverCbctSeries...\n');
+    [tmp_meta1, tmp_meta3] = discoverCbctSeries(rs_dir);
+    cbct_ct1_meta.rtstruct = tmp_meta1.rtstruct;
+    cbct_ct3_meta.rtstruct = tmp_meta3.rtstruct;
+    clear tmp_meta1 tmp_meta3;
+end
+
+if masks_ready
+    fprintf('\n[5/8] tissue_masks.mat already exists — loading cached masks.\n');
+    [tissue_mask_ct1, roi_names_ct1, roi_masks_ct1, body_mask_ct1, couch_mask_ct1, ...
+     tissue_mask_ct3, roi_names_ct3, roi_masks_ct3, body_mask_ct3, couch_mask_ct3] = ...
+        loadCachedTissueMasks(tissue_masks_file, ref_dims);
+    fprintf('    CT_1 ROIs=%d  body voxels=%d  couch voxels=%d\n', ...
+        length(roi_names_ct1), sum(body_mask_ct1(:)), sum(couch_mask_ct1(:)));
+    fprintf('    CT_3 ROIs=%d  body voxels=%d  couch voxels=%d\n', ...
+        length(roi_names_ct3), sum(body_mask_ct3(:)), sum(couch_mask_ct3(:)));
+else
+    fprintf('\n[5/8] Loading per-CBCT RTSTRUCTs and creating tissue classification masks...\n');
+
+    fprintf('  CT_1 RTSTRUCT...\n');
+    [tissue_mask_ct1, roi_names_ct1, roi_masks_ct1, body_mask_ct1, couch_mask_ct1] = ...
+        loadRtstructAndCreateMasksFromFile(cbct_ct1_meta.rtstruct, ref_origin, ref_spacing, ref_dims);
+    if isempty(tissue_mask_ct1)
+        error('step15_process_doses:NoRTSTRUCT', ...
+            'Could not create CT_1 masks from RTSTRUCT: %s', cbct_ct1_meta.rtstruct);
+    end
+    fprintf('    CT_1 ROIs=%d  body voxels=%d  couch voxels=%d\n', ...
+        length(roi_names_ct1), sum(body_mask_ct1(:)), sum(couch_mask_ct1(:)));
+
+    fprintf('  CT_3 RTSTRUCT...\n');
+    [tissue_mask_ct3, roi_names_ct3, roi_masks_ct3, body_mask_ct3, couch_mask_ct3] = ...
+        loadRtstructAndCreateMasksFromFile(cbct_ct3_meta.rtstruct, ref_origin, ref_spacing, ref_dims);
+    if isempty(tissue_mask_ct3)
+        error('step15_process_doses:NoRTSTRUCT', ...
+            'Could not create CT_3 masks from RTSTRUCT: %s', cbct_ct3_meta.rtstruct);
+    end
+    fprintf('    CT_3 ROIs=%d  body voxels=%d  couch voxels=%d\n', ...
+        length(roi_names_ct3), sum(body_mask_ct3(:)), sum(couch_mask_ct3(:)));
+
+    % Save both mask sets in a single tissue_masks.mat
+    fprintf('  Saving tissue_masks.mat (both CT_1 and CT_3)...\n');
 if config.use_sparse_storage
     tissue_mask_ct1_dims = size(tissue_mask_ct1);
     body_mask_ct1_dims   = size(body_mask_ct1);
@@ -430,8 +531,9 @@ else
         'tissue_mask_ct1', 'roi_names_ct1', 'roi_masks_ct1', 'body_mask_ct1', 'couch_mask_ct1', ...
         'tissue_mask_ct3', 'roi_names_ct3', 'roi_masks_ct3', 'body_mask_ct3', 'couch_mask_ct3', ...
         '-v7.3');
-end
-fprintf('  Saved: tissue_masks.mat\n');
+    end
+    fprintf('  Saved: tissue_masks.mat\n');
+end  % if masks_ready / else
 
 % Pre-compute invalid dose mask PER CBCT (selected per field via ct_label)
 if config.apply_dose_masking
@@ -471,6 +573,55 @@ for batch_idx = 1:num_batches
         fprintf('  Processing field %d/%d: %s\n', i, num_files, rd_files(i).name);
 
         try
+            % ----- Skip if the processed output for this field already exists.
+            % If totals also need to be rebuilt we still load the cached dose
+            % and fold it into the running totals; otherwise we only populate
+            % the lightweight field_doses{i} entry.
+            cached_out = expected_field_outputs{i};
+            if config.skip_completed && ~isempty(cached_out) && isfile(cached_out)
+                cached = load(cached_out, 'field_dose');
+                cfd    = cached.field_dose;
+
+                if need_total_accum
+                    if isfield(cfd, 'is_sparse') && cfd.is_sparse
+                        dense_dose = reshape(full(cfd.dose_Gy), cfd.dose_dims);
+                    else
+                        dense_dose = cfd.dose_Gy;
+                    end
+                    batch_total_dose = batch_total_dose + dense_dose;
+                    if isfield(cfd, 'ct_label') && ~isempty(cfd.ct_label)
+                        ck = strrep(cfd.ct_label, '-', '_');
+                        if ~isfield(ct_dose_accum, ck)
+                            ct_dose_accum.(ck) = zeros(ref_dims);
+                        end
+                        ct_dose_accum.(ck) = ct_dose_accum.(ck) + dense_dose;
+                    end
+                    clear dense_dose;
+                end
+
+                field_doses{i} = struct( ...
+                    'filepath',     cached_out, ...
+                    'beam_num',     cfd.beam_num, ...
+                    'seg_num',      cfd.seg_num, ...
+                    'field_num',    cfd.field_num, ...
+                    'plan_type',    cfd.plan_type, ...
+                    'gantry_angle', cfd.gantry_angle, ...
+                    'meterset',     cfd.meterset, ...
+                    'max_dose_Gy',  cfd.max_dose_Gy, ...
+                    'source_file',  cfd.source_file, ...
+                    'isocenter',    cfd.isocenter, ...
+                    'jaw_x',        cfd.jaw_x, ...
+                    'jaw_y',        cfd.jaw_y, ...
+                    'body_masked',  cfd.body_masked, ...
+                    'couch_masked', cfd.couch_masked);
+
+                processed_count = processed_count + 1;
+                fprintf('    [Skip] %s already processed (max: %.4f Gy)\n', ...
+                    rd_files(i).name, cfd.max_dose_Gy);
+                clear cached cfd;
+                continue;
+            end
+
             dose_file = fullfile(rs_dir, rd_files(i).name);
             switch input_format
                 case 'mat'
@@ -665,6 +816,25 @@ metadata.total_dose_max_Gy_before_masking = max(total_rs_dose(:));
 
 %% ======================== ZERO OUT DOSE OUTSIDE BODY AND IN COUCH ========================
 
+if ~need_total_accum
+    fprintf('\n[7/8] Total dose / metadata already on disk — loading for return.\n');
+
+    td = load(fullfile(processed_dir, 'total_rs_dose.mat'));
+    if isfield(td, 'total_rs_dose_sparse')
+        total_rs_dose = reshape(full(td.total_rs_dose_sparse), td.total_rs_dose_dims);
+    else
+        total_rs_dose = td.total_rs_dose;
+    end
+    clear td;
+
+    md = load(fullfile(processed_dir, 'metadata.mat'), 'metadata');
+    metadata = md.metadata;
+    clear md;
+
+    % Skip the masking + save blocks entirely; jump to CBCT struct construction.
+    num_voxels_zeroed = NaN;  %#ok<NASGU>  (kept for summary print compatibility)
+else
+
 % Combined-anatomy masks for the cross-CBCT total dose: keep a voxel that
 % is body in EITHER CBCT and not couch in BOTH.
 body_mask_union  = body_mask_ct1  | body_mask_ct3;
@@ -756,6 +926,8 @@ if ~isempty(ct_keys)
     end
 end
 
+end  % if need_total_accum
+
 %% ======================== CREATE PER-CBCT RESAMPLED STRUCTS ========================
 
 CBCT1_resampled = struct();
@@ -803,18 +975,27 @@ cbct_resampled = struct('CT_1', CBCT1_resampled, 'CT_3', CBCT3_resampled);
 
 fprintf('\n[8/8] Saving processed data...\n');
 
-cbct1_file = fullfile(processed_dir, 'CBCT1_resampled.mat');
-save(cbct1_file, 'CBCT1_resampled', '-v7.3');
-fprintf('  Saved: CBCT1_resampled.mat\n');
+if ~cbct_ready
+    cbct1_file = fullfile(processed_dir, 'CBCT1_resampled.mat');
+    save(cbct1_file, 'CBCT1_resampled', '-v7.3');
+    fprintf('  Saved: CBCT1_resampled.mat\n');
 
-cbct3_file = fullfile(processed_dir, 'CBCT3_resampled.mat');
-save(cbct3_file, 'CBCT3_resampled', '-v7.3');
-fprintf('  Saved: CBCT3_resampled.mat\n');
+    cbct3_file = fullfile(processed_dir, 'CBCT3_resampled.mat');
+    save(cbct3_file, 'CBCT3_resampled', '-v7.3');
+    fprintf('  Saved: CBCT3_resampled.mat\n');
+else
+    fprintf('  CBCT1/CBCT3 .mat already on disk — not re-saving.\n');
+end
 
-% Save metadata
-metadata_file = fullfile(processed_dir, 'metadata.mat');
-save(metadata_file, 'metadata', '-v7.3');
-fprintf('  Saved: metadata.mat\n');
+% Save metadata (only when totals were rebuilt; otherwise the on-disk
+% metadata reflects the current totals and we leave it alone)
+if need_total_accum
+    metadata_file = fullfile(processed_dir, 'metadata.mat');
+    save(metadata_file, 'metadata', '-v7.3');
+    fprintf('  Saved: metadata.mat\n');
+else
+    fprintf('  metadata.mat already on disk — not re-saving.\n');
+end
 
 %% ======================== SUMMARY ========================
 
@@ -848,6 +1029,179 @@ end
 %% ========================================================================
 %  LOCAL HELPER FUNCTIONS
 %% ========================================================================
+
+function s = presentStr(tf)
+%PRESENTSTR Human-readable 'present'/'MISSING' label for status logs.
+    if tf, s = 'present'; else, s = 'MISSING'; end
+end
+
+
+function [status, expected_outputs] = detectProcessedOutputs(processed_dir, rd_files, patient_id, session)
+%DETECTPROCESSEDOUTPUTS Inspect processed/ and report which artifacts exist.
+%
+%   Returns:
+%     status            - struct of booleans + counts
+%     expected_outputs  - cell array (1 per rd_files entry) with the expected
+%                         per-field .mat path under processed/ (empty if the
+%                         input filename can't be parsed)
+
+    status = struct();
+    status.cbct1_done      = false;
+    status.cbct3_done      = false;
+    status.masks_done      = false;
+    status.total_rs_done   = false;
+    status.ct1_total_done  = false;
+    status.ct3_total_done  = false;
+    status.metadata_done   = false;
+    status.num_fields_done = 0;
+
+    n = numel(rd_files);
+    expected_outputs = cell(n, 1);
+
+    if ~isfolder(processed_dir)
+        return;
+    end
+
+    status.cbct1_done     = isfile(fullfile(processed_dir, 'CBCT1_resampled.mat'));
+    status.cbct3_done     = isfile(fullfile(processed_dir, 'CBCT3_resampled.mat'));
+    status.masks_done     = isfile(fullfile(processed_dir, 'tissue_masks.mat'));
+    status.total_rs_done  = isfile(fullfile(processed_dir, 'total_rs_dose.mat'));
+    status.ct1_total_done = isfile(fullfile(processed_dir, 'total_dose_CT_1.mat'));
+    status.ct3_total_done = isfile(fullfile(processed_dir, 'total_dose_CT_3.mat'));
+    status.metadata_done  = isfile(fullfile(processed_dir, 'metadata.mat'));
+
+    for i = 1:n
+        out_path = buildFieldOutputPath(processed_dir, rd_files(i).name, patient_id, session);
+        expected_outputs{i} = out_path;
+        if ~isempty(out_path) && isfile(out_path)
+            status.num_fields_done = status.num_fields_done + 1;
+        end
+    end
+end
+
+
+function out_path = buildFieldOutputPath(processed_dir, rd_name, patient_id, session)
+%BUILDFIELDOUTPUTPATH Reproduce the per-field output filename used by step15.
+%
+%   Mirrors the same parsing + sprintf format used in the main loop so we
+%   can check "was this input already processed?" without re-running it.
+
+    out_path = '';
+    [beam_num, seg_num, ~, plan_type] = extractBeamInfo(rd_name, NaN);
+    if isnan(beam_num) || isnan(seg_num) || strcmp(plan_type, 'unknown')
+        return;
+    end
+
+    ct_tokens = regexp(rd_name, ...
+        '_(?:adapted|reference)_(CT_\d+)_B\d+_\d+\.(?:dcm|mat)$', ...
+        'tokens', 'once', 'ignorecase');
+    if isempty(ct_tokens)
+        fname = sprintf('dose_%s_%s_%s_B%d_%d.mat', ...
+            patient_id, session, plan_type, beam_num, seg_num);
+    else
+        fname = sprintf('dose_%s_%s_%s_%s_B%d_%d.mat', ...
+            patient_id, session, plan_type, ct_tokens{1}, beam_num, seg_num);
+    end
+    out_path = fullfile(processed_dir, fname);
+end
+
+
+function [field_doses, cbct_resampled, total_rs_dose, metadata] = ...
+    loadExistingStep15Outputs(processed_dir, expected_outputs)
+%LOADEXISTINGSTEP15OUTPUTS Reconstruct return values from cached processed/.
+%
+%   Used when every output in processed/ is already present and
+%   skip_completed=true. The per-field cell array mirrors the lightweight
+%   summary struct that the normal path produces (filepath + beam/jaw
+%   metadata, no dose array).
+
+    % Per-field summaries
+    n = numel(expected_outputs);
+    field_doses = cell(n, 1);
+    for i = 1:n
+        fpath = expected_outputs{i};
+        if isempty(fpath) || ~isfile(fpath), continue; end
+        s = load(fpath, 'field_dose');
+        fd = s.field_dose;
+        field_doses{i} = struct( ...
+            'filepath',     fpath, ...
+            'beam_num',     fd.beam_num, ...
+            'seg_num',      fd.seg_num, ...
+            'field_num',    fd.field_num, ...
+            'plan_type',    fd.plan_type, ...
+            'gantry_angle', fd.gantry_angle, ...
+            'meterset',     fd.meterset, ...
+            'max_dose_Gy',  fd.max_dose_Gy, ...
+            'source_file',  fd.source_file, ...
+            'isocenter',    fd.isocenter, ...
+            'jaw_x',        fd.jaw_x, ...
+            'jaw_y',        fd.jaw_y, ...
+            'body_masked',  fd.body_masked, ...
+            'couch_masked', fd.couch_masked);
+    end
+
+    % CBCT bundle
+    c1 = load(fullfile(processed_dir, 'CBCT1_resampled.mat'), 'CBCT1_resampled');
+    c3 = load(fullfile(processed_dir, 'CBCT3_resampled.mat'), 'CBCT3_resampled');
+    cbct_resampled = struct('CT_1', c1.CBCT1_resampled, 'CT_3', c3.CBCT3_resampled);
+
+    % Total dose (sparse 2D or dense 3D)
+    td = load(fullfile(processed_dir, 'total_rs_dose.mat'));
+    if isfield(td, 'total_rs_dose_sparse')
+        total_rs_dose = reshape(full(td.total_rs_dose_sparse), td.total_rs_dose_dims);
+    else
+        total_rs_dose = td.total_rs_dose;
+    end
+
+    md = load(fullfile(processed_dir, 'metadata.mat'), 'metadata');
+    metadata = md.metadata;
+end
+
+
+function [tm_ct1, rn_ct1, rm_ct1, bm_ct1, cm_ct1, ...
+          tm_ct3, rn_ct3, rm_ct3, bm_ct3, cm_ct3] = ...
+    loadCachedTissueMasks(tissue_masks_file, ref_dims)
+%LOADCACHEDTISSUEMASKS Restore CT_1/CT_3 mask variables from tissue_masks.mat
+%
+%   Handles both storage layouts: sparse 2D ([nVoxPerSlice x nSlices], with
+%   the *_dims companion variable) and dense 3D logical arrays.
+
+    s = load(tissue_masks_file);
+
+    % CT_1
+    if isfield(s, 'tissue_mask_ct1_sp')
+        tm_ct1 = uint8(reshape(full(s.tissue_mask_ct1_sp), s.tissue_mask_ct1_dims));
+        bm_ct1 = logical(reshape(full(s.body_mask_ct1_sp),   s.body_mask_ct1_dims));
+        cm_ct1 = logical(reshape(full(s.couch_mask_ct1_sp),  s.couch_mask_ct1_dims));
+    else
+        tm_ct1 = s.tissue_mask_ct1;
+        bm_ct1 = s.body_mask_ct1;
+        cm_ct1 = s.couch_mask_ct1;
+    end
+    rn_ct1 = s.roi_names_ct1;
+    rm_ct1 = s.roi_masks_ct1;
+
+    % CT_3
+    if isfield(s, 'tissue_mask_ct3_sp')
+        tm_ct3 = uint8(reshape(full(s.tissue_mask_ct3_sp), s.tissue_mask_ct3_dims));
+        bm_ct3 = logical(reshape(full(s.body_mask_ct3_sp),   s.body_mask_ct3_dims));
+        cm_ct3 = logical(reshape(full(s.couch_mask_ct3_sp),  s.couch_mask_ct3_dims));
+    else
+        tm_ct3 = s.tissue_mask_ct3;
+        bm_ct3 = s.body_mask_ct3;
+        cm_ct3 = s.couch_mask_ct3;
+    end
+    rn_ct3 = s.roi_names_ct3;
+    rm_ct3 = s.roi_masks_ct3;
+
+    % Defensive: verify shapes line up with the live reference grid
+    if ~isequal(size(bm_ct1), ref_dims) || ~isequal(size(bm_ct3), ref_dims)
+        error('step15_process_doses:CachedMasksShape', ...
+            'Cached tissue_masks.mat shape does not match ref_dims [%d %d %d].', ...
+            ref_dims(1), ref_dims(2), ref_dims(3));
+    end
+end
+
 
 function spacing = extractDoseSpacing(dose_info)
 %EXTRACTDOSESPACING Extract dose grid spacing from DICOM info

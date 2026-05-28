@@ -59,6 +59,12 @@ if ~isfield(config, 'working_dir')
         'config.working_dir is required but not provided.');
 end
 
+% Skip per-file when its target .mat already exists. Set false to force
+% full re-conversion.
+if ~isfield(config, 'skip_completed')
+    config.skip_completed = true;
+end
+
 %% ======================== LOCATE NPZ FILES ========================
 
 rs_dir = fullfile(config.working_dir, 'RayStationFiles', patient_id, session);
@@ -86,12 +92,20 @@ fprintf('  Found %d NPZ file(s)\n', numel(npz_files));
 %% ======================== CONVERT EACH NPZ ========================
 
 n_converted = 0;
+n_skipped   = 0;
 for i = 1:numel(npz_files)
     npz_name = npz_files(i).name;
     npz_path = fullfile(rs_dir, npz_name);
     [~, stem, ~] = fileparts(npz_name);
     mat_name = [stem '.mat'];
     mat_path = fullfile(rs_dir, mat_name);
+
+    if config.skip_completed && isfile(mat_path)
+        fprintf('  [%d/%d] %s -> %s already exists, skipping.\n', ...
+            i, numel(npz_files), npz_name, mat_name);
+        n_skipped = n_skipped + 1;
+        continue;
+    end
 
     fprintf('  [%d/%d] %s\n', i, numel(npz_files), npz_name);
 
@@ -146,7 +160,8 @@ for i = 1:numel(npz_files)
     end
 end
 
-fprintf('  Converted %d/%d NPZ file(s).\n', n_converted, numel(npz_files));
+fprintf('  Converted %d/%d NPZ file(s). Skipped (already converted): %d\n', ...
+    n_converted, numel(npz_files), n_skipped);
 
 end
 
