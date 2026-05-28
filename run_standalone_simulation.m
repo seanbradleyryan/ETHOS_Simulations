@@ -413,8 +413,17 @@ switch CONFIG.sensor_placement_method
         sensor.mask = makeSphere(Nx, Ny, Nz, sph_radius);
         fprintf('       Sensor: spherical, radius %d voxels\n', sph_radius);
     case 'determine_sensor_mask'
-        % Automatic placement via determine_sensor_mask: places a flat anterior
-        % sensor avoiding beam exclusion zones, closest to the dose centroid.
+        % Automatic placement via determine_sensor_mask: tilts a 2D array
+        % toward the beam isocenter (or places it flat when CONFIG.aim_at_iso
+        % is false), avoiding beam exclusion zones.
+        %
+        % SESSION-LEVEL USAGE: because all beams in an ETHOS plan share one
+        % isocenter, the placement is reusable across fields. When using this
+        % once per session, pass the SUMMED PLAN DOSE as
+        %   field_dose_for_sensor.dose_Gy
+        % so the exclusion zone reflects the full beam path from every field.
+        % Passing a single field's dose here yields a per-field exclusion zone
+        % only — correct for per-field placement but not session-level reuse.
         sct_for_sensor = sct;
         if ~isfield(sct_for_sensor, 'couchMask')
             sct_for_sensor.couchMask = false(size(sct_for_sensor.bodyMask));

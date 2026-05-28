@@ -1,36 +1,51 @@
 function [sensor_mask, sensor_info] = determine_sensor_mask(sct_resampled, field_dose, beam_metadata, config)
-%DETERMINE_SENSOR_MASK Place a flat 2D ultrasound array on the anterior abdomen
+%DETERMINE_SENSOR_MASK Place a 2D ultrasound array tilted toward beam isocenter
 %
 %   [sensor_mask, sensor_info] = determine_sensor_mask(sct_resampled, field_dose, beam_metadata, config)
 %
 %   PURPOSE:
-%   Compute the 3D binary mask for a rigid, flat 2D ultrasound array
-%   pressed against the patient's anterior abdomen. The array is modeled as
-%   a sparse grid of discrete piezoelectric elements (default 32x32) with a
-%   physical pitch, active element size, and kerf (dead) gap between elements.
-%   Only voxels falling within active element footprints become sensor points;
-%   kerf regions are empty. The aperture footprint is derived from
-%   elements_per_side * element_pitch_mm, not from a separate sensor_size_cm.
-%   The sensor must avoid all beam field projections (jaw openings) on the
-%   anterior surface. Everything outside the patient body is water
-%   (no coupling concerns).
+%   Compute the 3D binary mask for a rigid 2D ultrasound array pressed
+%   against the patient's anterior abdomen. The array is modeled as a sparse
+%   grid of discrete piezoelectric elements (default 32x32) with a physical
+%   pitch, active element size, and kerf (dead) gap between elements.
+%
+%   When config.aim_at_iso is true (default), the array is tilted so its
+%   outward normal points toward the beam isocenter. Tilt magnitude is a
+%   scalar theta in [0, 1] scaling a Rodrigues rotation from the flat coronal
+%   pose (theta = 0) to the full aim-at-iso pose (theta = 1). Center placement
+%   and tilt are jointly optimized to minimize XZ distance from sensor center
+%   to iso while keeping all elements outside the body, outside the dose
+%   exclusion zone, outside PML margin, and inside the grid.
+%
+%   When config.aim_at_iso is false, the legacy flat coronal sensor (single Y
+%   index slab) is produced for bit-for-bit reproducibility.
 %
 %   ALGORITHM:
 %   1. Compute anterior surface height map from body mask (excluding couch).
-%   2. Project each beam's jaw opening from isocenter onto the anterior surface.
-%      Exclude beams whose projections do not intersect the anterior surface
-%      (e.g., lateral/posterior beams with gantry > ~60 deg from AP).
-%   3. Find the largest contiguous anterior surface area outside the exclusion
-%      zone, as close as possible to the dose centroid's X-Z projection.
-%      Aperture footprint = elements_per_side * element_pitch_mm.
-%   4. Place a flat planar sensor at a fixed Y index (the most anterior body
-%      surface point within the chosen region, minus standoff).
-%   5. Build sparse mask: for each of N x N element centers, mark grid voxels
-%      within the element's active footprint (element_size_mm x element_size_mm).
-%      Kerf voxels remain unmarked. element_map encodes element index per voxel.
-%   6. Validate: sensor outside body, outside exclusion zone, within grid bounds.
-%   7. Aliasing check: if grid is too coarse to resolve all elements uniquely,
-%      warn-and-degrade (continue with reduced effective element count).
+%   2. Compute dose-based Z exclusion zone (>= 10% of peak per Z slice).
+%      Caller should pass the SUMMED PLAN DOSE in field_dose.dose_Gy when
+%      computing a session-level sensor.
+%   3. If aim_at_iso: joint (center, theta) optimization
+%       a. Sample candidate centers across the available anterior surface
+%          on a coarse stride.
+%       b. For each candidate, build full aim rotation R_full and binary-
+%          search the largest theta in [0, 1] for which every element stays
+%          feasible (outside body, outside exclusion, inside grid + PML).
+%       c. Score each candidate by:
+%             cost = ||c_xz - iso_xz|| + tilt_weight_mm * (1 - theta_max)
+%          and keep the minimum.
+%      If no candidate succeeds, fall back to the legacy flat sweep below.
+%   4. Legacy flat sweep (only if aim_at_iso is false OR joint search failed):
+%      sweep candidate flat-sensor rectangles to find the position closest
+%      to the dose centroid; grid-expand with water padding if necessary.
+%   5. Voxelize the tilted plane: for each element (i, j), compute
+%         P_world = R(theta) * P_local + c
+%      and mark the nearest voxel. Build sensor_element_label (3D) which
+%      records the element index per voxel. After validation, derive
+%      voxel_element_idx as sensor_element_label(sensor_mask).
+%   6. Validate: drop sensor voxels that fell inside body, in the exclusion
+%      XZ projection, or inside the PML margin.
+%   7. Element diagnostics: count voxels per element, fill factor, etc.
 %
 %   INPUTS:
 %       sct_resampled - Struct with CT resampled to dose grid:
@@ -40,8 +55,9 @@ function [sensor_mask, sensor_info] = determine_sensor_mask(sct_resampled, field
 %           .spacing        - [dx, dy, dz] mm
 %           .dimensions     - [ny, nx, nz] (rows=Y, cols=X, slices=Z)
 %       field_dose - Struct with:
-%           .dose_Gy        - 3D dose array (Gy)
-%           .gantry_angle   - Gantry angle for this field (degrees)
+%           .dose_Gy        - 3D dose array (Gy). For session-level sensor
+%                             placement pass the SUMMED PLAN DOSE.
+%           .gantry_angle   - Gantry angle (degrees) — logged only.
 %           .origin         - [x, y, z] mm
 %           .spacing        - [dx, dy, dz] mm
 %           .dimensions     - [ny, nx, nz]
@@ -54,28 +70,35 @@ function [sensor_mask, sensor_info] = determine_sensor_mask(sct_resampled, field
 %       config - Struct with sensor parameters:
 %           .elements_per_side    - N for an NxN element array (default: 32)
 %           .element_pitch_mm     - Center-to-center pitch in mm (default: 3.65)
-%           .element_size_mm      - Active element width in mm (default: 2.43).
-%                                   Kerf is derived: kerf = pitch - size.
+%           .element_size_mm      - Active element width in mm (default: 2.43)
 %           .sensor_standoff_mm   - Gap between body surface and sensor (default: 5)
 %           .jaw_margin_mm        - Extra margin around jaw projection (default: 10)
 %           .sensor_placement     - Placement side: 'anterior' (default)
 %           .pml_size             - PML thickness in voxels (default: 10)
+%           .aim_at_iso           - Enable iso-aimed tilt (default: true)
+%           .tilt_weight_mm       - Cost weight for tilt deficit, mm (default: 30)
+%           .tilt_search_stride_voxels - Candidate center stride (default: 5)
 %
 %   OUTPUTS:
 %       sensor_mask - 3D logical array (same size as dose grid), true at sensor voxels.
 %       sensor_info - Struct with diagnostic fields:
-%           .sensor_y_index              - Y index of the sensor plane
-%           .sensor_x_range              - [x_start, x_end] voxel indices
-%           .sensor_z_range              - [z_start, z_end] voxel indices
-%           .sensor_center_mm            - [x, y, z] physical position of sensor center
+%           .sensor_y_index              - Y index of the sensor CENTER voxel.
+%                                          NOTE: when tilted, sensor voxels span
+%                                          multiple Y indices; this is the centroid.
+%           .sensor_x_range              - XZ bounding box of true voxels, X indices.
+%           .sensor_z_range              - XZ bounding box of true voxels, Z indices.
+%           .sensor_center_mm            - [x, y, z] physical position of sensor center.
 %           .exclusion_zone              - 2D logical on anterior surface (X x Z)
-%           .element_map                 - 2D array (X x Z over aperture footprint)
-%                                          mapping each voxel to element index;
-%                                          0 marks kerf/inactive voxels.
-%           .num_elements                - Effective number of resolved elements
-%                                          (= effective_element_count, may be
-%                                          < elements_per_side^2 if aliased).
-%           .element_positions_mm        - [N x 3] physical centers of all elements.
+%           .element_map                 - 2D (X x Z) projection of element index per
+%                                          voxel. Best-effort for back-compat; not
+%                                          authoritative for tilted sensors. Use
+%                                          voxel_element_idx instead.
+%           .voxel_element_idx           - Nvox x 1 element-index lookup keyed by
+%                                          find(sensor_mask) linear-index ordering.
+%                                          AUTHORITATIVE voxel->element mapping.
+%           .num_elements                - Effective number of resolved elements.
+%           .element_positions_mm        - [N x 3] physical centers of all elements
+%                                          (reflects tilt).
 %           .element_pitch_mm            - Echoed pitch (mm).
 %           .element_size_mm             - Echoed active element width (mm).
 %           .kerf_mm                     - Derived kerf = pitch - size (mm).
@@ -84,11 +107,19 @@ function [sensor_mask, sensor_info] = determine_sensor_mask(sct_resampled, field
 %           .aliased_element_count       - Elements that lost their voxel.
 %           .voxels_per_element_stats    - [min, median, max] voxels per element.
 %           .aperture_mm                 - Derived total aperture (mm).
-%           .fill_factor_actual          - Actual mask fill within aperture
-%                                          rectangle (compare to spec 0.44).
-%           .surface_to_dose_distance_mm - Distance from sensor plane to dose centroid
-%           .sensor_size_voxels          - [nx_sensor, nz_sensor] aperture footprint extent in voxels
-%           .placement_valid             - Boolean, true if placement passed all checks
+%           .fill_factor_actual          - Actual mask fill within aperture rectangle.
+%           .surface_to_dose_distance_mm - Distance from sensor center to dose centroid.
+%           .sensor_size_voxels          - [nx_sensor, nz_sensor] aperture footprint in voxels.
+%           .placement_valid             - Boolean, true if placement passed all checks.
+%           .tilt_theta                  - Tilt scalar in [0, 1].
+%           .tilt_angle_deg              - theta * alpha_full in degrees.
+%           .tilt_alpha_full_deg         - Full aim-at-iso rotation magnitude in degrees.
+%           .rotation_R                  - 3x3 rotation applied to the sensor.
+%           .rotation_axis               - Unit rotation axis (3-vec).
+%           .aim_target_mm               - Isocenter target, [x, y, z] mm.
+%           .aim_normal                  - Unit normal vector used for aim.
+%           .aim_enabled                 - True if aim-at-iso was applied.
+%           .grid_pad                    - Grid-expansion fallback bookkeeping.
 %
 %   COORDINATE SYSTEM:
 %       Dose grid uses DICOM patient coordinates:
@@ -99,25 +130,19 @@ function [sensor_mask, sensor_info] = determine_sensor_mask(sct_resampled, field
 %
 %   NOTES:
 %       - Source-to-axis distance (SAD) for Halcyon/ETHOS is 100 cm.
-%       - Sensor must be entirely outside body mask and all jaw projections.
+%       - All beams in a plan share the same isocenter (DICOM guarantee);
+%         the iso for tilt is read from beam_metadata(1).isocenter and
+%         consistency is verified across remaining beams.
 %       - Uses warnings (not errors) for non-fatal issues to support batch processing.
-%       - Logging style consistent with pipeline (indented, with step labels).
-%
-%   EXAMPLE:
-%       config.elements_per_side = 32;
-%       config.element_pitch_mm  = 3.65;
-%       config.element_size_mm   = 2.43;
-%       config.sensor_standoff_mm = 5;
-%       [mask, info] = determine_sensor_mask(sct_resampled, field_dose, beam_metadata, config);
 %
 %   DEPENDENCIES:
 %       - Image Processing Toolbox (bwconncomp, regionprops)
 %
 %   AUTHOR: ETHOS Pipeline Team
-%   DATE: February 2026
-%   VERSION: 1.0
+%   DATE: May 2026
+%   VERSION: 2.0 (tilted)
 %
-%   See also: run_single_field_simulation, step15_process_doses
+%   See also: run_single_field_simulation, step15_process_doses, apply_element_averaging
 
 %% ======================== CONFIG DEFAULTS ========================
 
@@ -125,10 +150,14 @@ elements_per_side = get_field(config, 'elements_per_side', 32);
 element_pitch_mm  = get_field(config, 'element_pitch_mm', 3.65);
 element_size_mm   = get_field(config, 'element_size_mm', 2.43);
 standoff_mm       = get_field(config, 'sensor_standoff_mm', 5);
-jaw_margin_mm     = get_field(config, 'jaw_margin_mm', 10);
+jaw_margin_mm     = get_field(config, 'jaw_margin_mm', 10); %#ok<NASGU>
 placement_side    = get_field(config, 'sensor_placement', 'anterior');
 pml_size          = get_field(config, 'pml_size', 10);
-pml_size = 1; % Hardcoded because script logic assumes pml inside. 
+pml_size = 1; % Hardcoded because script logic assumes pml inside.
+
+aim_at_iso        = get_field(config, 'aim_at_iso', true);
+tilt_weight_mm    = get_field(config, 'tilt_weight_mm', 30);
+tilt_stride       = max(1, round(get_field(config, 'tilt_search_stride_voxels', 5)));
 
 % Kerf is derived; never accepted from config.
 kerf_mm = element_pitch_mm - element_size_mm;
@@ -141,7 +170,7 @@ end
 % Total aperture footprint (mm) derived from N x pitch.
 aperture_mm = elements_per_side * element_pitch_mm;
 
-SAD_mm = 1000;  % Halcyon/ETHOS source-to-axis distance: 100 cm
+SAD_mm = 1000;  %#ok<NASGU>  % Halcyon/ETHOS source-to-axis distance: 100 cm
 
 fprintf('        [Sensor] Placing %s array: %dx%d elements, pitch %.2f mm, size %.2f mm, kerf %.2f mm\n', ...
     placement_side, elements_per_side, elements_per_side, ...
@@ -149,6 +178,12 @@ fprintf('        [Sensor] Placing %s array: %dx%d elements, pitch %.2f mm, size 
 fprintf('        [Sensor] Aperture %.1f mm, standoff %.0f mm, fill factor (spec) %.0f%%\n', ...
     aperture_mm, standoff_mm, ...
     100 * (element_size_mm / element_pitch_mm)^2);
+if aim_at_iso
+    fprintf('        [Sensor] aim_at_iso=true, tilt_weight=%.1f mm, stride=%d voxels\n', ...
+        tilt_weight_mm, tilt_stride);
+else
+    fprintf('        [Sensor] aim_at_iso=false (legacy flat coronal placement)\n');
+end
 
 %% ======================== EXTRACT GRID INFO ========================
 
@@ -186,12 +221,10 @@ body = sct_resampled.bodyMask & ~sct_resampled.couchMask;
 
 % Anterior surface height map: for each (X, Z) column, find minimum Y index
 % where body is true. Lower Y = more anterior.
-% anterior_surface(x, z) = min Y index with body==true, or NaN if no body
 anterior_surface = NaN(Nx, Nz);
-
 for ix = 1:Nx
     for iz = 1:Nz
-        col = squeeze(body(:, ix, iz));  % Y-column
+        col = squeeze(body(:, ix, iz));
         y_indices = find(col);
         if ~isempty(y_indices)
             anterior_surface(ix, iz) = min(y_indices);
@@ -199,7 +232,6 @@ for ix = 1:Nx
     end
 end
 
-% Valid surface points (where body exists in column)
 surface_valid = ~isnan(anterior_surface);
 num_surface_pts = sum(surface_valid(:));
 fprintf('        [Sensor] Anterior surface: %d valid columns\n', num_surface_pts);
@@ -213,31 +245,19 @@ end
 
 %% ======================== STEP 2: DOSE-BASED EXCLUSION ZONE ========================
 
-% Exclusion zone: any transverse (Z) slice that contains a voxel with
-% >= 10% of the peak dose is excluded across its full X extent on the
-% anterior surface. This keeps the sensor longitudinally clear of the
-% high-dose region without depending on beam-metadata projection geometry.
-%
-% beam_metadata is no longer consulted for exclusion; it is retained in
-% the function signature for backwards compatibility.
-
 exclusion_zone = false(Nx, Nz);
-
 dose = field_dose.dose_Gy;
 dose_max = max(dose(:));
 
 if ~isempty(dose) && dose_max > 0
     dose_thresh = 0.10 * dose_max;
-
-    % field_dose.dose_Gy shares the sct grid layout (Ny, Nx, Nz). Per-slice
-    % peak along Z by collapsing dims 1 and 2.
     if ~isequal(size(dose), [Ny, Nx, Nz])
         warning('determine_sensor_mask:DoseSizeMismatch', ...
             'field_dose.dose_Gy size %s does not match sct grid [%d %d %d]. Skipping exclusion.', ...
             mat2str(size(dose)), Ny, Nx, Nz);
     else
-        slice_max = squeeze(max(max(dose, [], 1), [], 2));   % [Nz x 1]
-        excluded_z_mask = slice_max(:) >= dose_thresh;        % logical [Nz x 1]
+        slice_max = squeeze(max(max(dose, [], 1), [], 2));
+        excluded_z_mask = slice_max(:) >= dose_thresh;
         exclusion_zone(:, excluded_z_mask) = true;
 
         excluded_z_idx = find(excluded_z_mask);
@@ -259,13 +279,34 @@ fprintf('        [Sensor] Exclusion zone: %d voxels (%.1f%% of surface)\n', ...
     sum(exclusion_zone(:) & surface_valid(:)), ...
     100 * sum(exclusion_zone(:) & surface_valid(:)) / max(1, num_surface_pts));
 
-%% ======================== STEP 3: FIND SENSOR PLACEMENT REGION ========================
+%% ======================== RESOLVE AIM TARGET ========================
+
+iso_mm = [];
+if aim_at_iso
+    if isempty(beam_metadata)
+        warning('determine_sensor_mask:NoBeamMetadata', ...
+            'aim_at_iso=true but beam_metadata is empty. Disabling tilt.');
+        aim_at_iso = false;
+    else
+        iso_mm = resolve_iso(beam_metadata);
+        if isempty(iso_mm)
+            warning('determine_sensor_mask:NoIsocenter', ...
+                'beam_metadata does not contain a usable isocenter. Disabling tilt.');
+            aim_at_iso = false;
+        else
+            fprintf('        [Sensor] Aim target (isocenter): [%.1f, %.1f, %.1f] mm\n', ...
+                iso_mm(1), iso_mm(2), iso_mm(3));
+        end
+    end
+end
+
+%% ======================== STEP 3: PLACEMENT (joint OR legacy) ========================
 
 % Available region: on body surface AND not in exclusion zone
 available = surface_valid & ~exclusion_zone;
 
 % Also exclude PML boundary regions
-pml_margin_x = pml_size + 2;  % Extra safety margin beyond PML
+pml_margin_x = pml_size + 2;
 pml_margin_z = pml_size + 2;
 available(1:pml_margin_x, :) = false;
 available(end-pml_margin_x+1:end, :) = false;
@@ -278,331 +319,313 @@ if sum(available(:)) < sensor_nx * sensor_nz
         sum(available(:)), sensor_nx * sensor_nz);
 end
 
-% Compute dose centroid in X-Z (for proximity targeting)
+% Compute dose centroid in X-Z (for proximity targeting in legacy path)
 dose_centroid_mm = compute_dose_centroid_mm(field_dose, origin, dx, dy, dz);
 dose_centroid_ix = round((dose_centroid_mm(1) - origin(1)) / dx) + 1;
 dose_centroid_iz = round((dose_centroid_mm(3) - origin(3)) / dz) + 1;
-
 fprintf('        [Sensor] Dose centroid (voxel): X=%d, Z=%d\n', dose_centroid_ix, dose_centroid_iz);
 
-% Strategy: sweep candidate sensor rectangles across the available region,
-% find the position closest to the dose centroid where the full sensor fits.
-best_dist = Inf;
-best_ix_start = [];
-best_iz_start = [];
+% Standoff in Y voxels (used for placing center anterior to body surface)
+standoff_voxels = ceil(standoff_mm / dy);
 
-% Track grid-expansion padding (set by the fallback path below).
-% Caller must apply matching water-filled padding to medium/p0/etc.
+% Track grid-expansion padding (set by legacy fallback path)
 grid_pad_x_pre  = 0; grid_pad_x_post = 0;
 grid_pad_y_pre  = 0; grid_pad_y_post = 0;
 grid_pad_z_pre  = 0; grid_pad_z_post = 0;
 grid_was_expanded = false;
 
-% Half-sensor extents for centering search
-half_nx = floor(sensor_nx / 2);
-half_nz = floor(sensor_nz / 2);
-
-% Search grid: candidate top-left corners for the sensor rectangle
-for ix_start = 1:(Nx - sensor_nx + 1)
-    for iz_start = 1:(Nz - sensor_nz + 1)
-        ix_end = ix_start + sensor_nx - 1;
-        iz_end = iz_start + sensor_nz - 1;
-        
-        % Check if entire sensor rectangle is in available region
-        patch = available(ix_start:ix_end, iz_start:iz_end);
-        if all(patch(:))
-            % Compute center of this candidate
-            cx = ix_start + half_nx;
-            cz = iz_start + half_nz;
-            
-            % Distance to dose centroid in X-Z plane (voxel units)
-            dist = sqrt((cx - dose_centroid_ix)^2 + (cz - dose_centroid_iz)^2);
-            
-            if dist < best_dist
-                best_dist = dist;
-                best_ix_start = ix_start;
-                best_iz_start = iz_start;
-            end
-        end
-    end
-end
-
-% Fallback: expand the computational grid (in X and/or Z) to fit the sensor
-% outside the exclusion zone. New voxels are treated as water — body=false,
-% exclusion=false, no anterior surface. The caller must apply matching
-% water-filled padding to medium/p0 using sensor_info.grid_pad.
-% Inferior Z placement is preferred over superior on ties (per user).
-if isempty(best_ix_start)
-    fprintf('        [Sensor] No placement in original grid; expanding grid past exclusion zone.\n');
-
-    % --- X placement: center on dose centroid; pad X only if sensor wider than grid ---
-    ix_start_target = dose_centroid_ix - half_nx;
-    ix_start_min_orig = pml_margin_x + 1;
-    ix_start_max_orig = Nx - pml_margin_x - sensor_nx + 1;
-
-    if ix_start_max_orig >= ix_start_min_orig
-        ix_start_orig = max(ix_start_min_orig, min(ix_start_max_orig, ix_start_target));
-    else
-        % Grid narrower than sensor+PML; pad X symmetrically around target.
-        extra_x = (sensor_nx + 2 * pml_margin_x) - Nx;
-        grid_pad_x_pre  = floor(extra_x / 2);
-        grid_pad_x_post = extra_x - grid_pad_x_pre;
-        % In pre-expansion coords, the sensor's left edge sits at
-        % (pml_margin_x+1) - grid_pad_x_pre (may be <= 0; that range is water).
-        ix_start_orig = (pml_margin_x + 1) - grid_pad_x_pre;
-    end
-    ix_end_orig = ix_start_orig + sensor_nx - 1;
-
-    % --- Find exclusion Z extent within the sensor's X strip (clipped to original grid) ---
-    ix_lo_clip = max(1, ix_start_orig);
-    ix_hi_clip = min(Nx, ix_end_orig);
-    if ix_lo_clip > ix_hi_clip
-        excl_z_indices = [];
-    else
-        excl_strip = exclusion_zone(ix_lo_clip:ix_hi_clip, :);
-        excl_z_indices = find(any(excl_strip, 1));
-    end
-
-    if isempty(excl_z_indices)
-        % No exclusion under the sensor X strip — center on dose Z, no Z pad needed.
-        iz_start_orig   = max(pml_margin_z + 1, ...
-                          min(Nz - pml_margin_z - sensor_nz + 1, ...
-                              dose_centroid_iz - half_nz));
-        grid_pad_z_pre  = 0;
-        grid_pad_z_post = 0;
-        fprintf('        [Sensor] No exclusion in X strip; centered Z=%d (no Z pad)\n', iz_start_orig);
-    else
-        excl_z_max = max(excl_z_indices);
-        excl_z_min = min(excl_z_indices);
-
-        % Inferior candidate: butt up just past excl_z_max
-        iz_start_inf  = excl_z_max + 1;
-        iz_end_inf    = iz_start_inf + sensor_nz - 1;
-        pad_z_post_inf = max(0, iz_end_inf - (Nz - pml_margin_z));
-
-        % Superior candidate: butt up just before excl_z_min
-        iz_end_sup    = excl_z_min - 1;
-        iz_start_sup  = iz_end_sup - sensor_nz + 1;
-        pad_z_pre_sup = max(0, (pml_margin_z + 1) - iz_start_sup);
-
-        if pad_z_post_inf <= pad_z_pre_sup
-            iz_start_orig   = iz_start_inf;
-            grid_pad_z_post = pad_z_post_inf;
-            fprintf('        [Sensor] Inferior to exclusion (Z=%d); padding Z+ by %d voxels (water)\n', ...
-                iz_start_orig, grid_pad_z_post);
-        else
-            iz_start_orig   = iz_start_sup;
-            grid_pad_z_pre  = pad_z_pre_sup;
-            fprintf('        [Sensor] Superior to exclusion (Z=%d orig); padding Z- by %d voxels (water)\n', ...
-                iz_start_orig, grid_pad_z_pre);
-        end
-    end
-
-    % --- Pad anterior_surface / body / surface_valid / exclusion_zone with water defaults ---
-    new_Nx = Nx + grid_pad_x_pre + grid_pad_x_post;
-    new_Nz = Nz + grid_pad_z_pre + grid_pad_z_post;
-
-    body_expanded = false(Ny, new_Nx, new_Nz);
-    body_expanded(:, grid_pad_x_pre + (1:Nx), grid_pad_z_pre + (1:Nz)) = body;
-    body = body_expanded;
-
-    surface_valid_expanded = false(new_Nx, new_Nz);
-    surface_valid_expanded(grid_pad_x_pre + (1:Nx), grid_pad_z_pre + (1:Nz)) = surface_valid;
-    surface_valid = surface_valid_expanded;
-
-    exclusion_zone_expanded = false(new_Nx, new_Nz);
-    exclusion_zone_expanded(grid_pad_x_pre + (1:Nx), grid_pad_z_pre + (1:Nz)) = exclusion_zone;
-    exclusion_zone = exclusion_zone_expanded;
-
-    anterior_surface_expanded = NaN(new_Nx, new_Nz);
-    anterior_surface_expanded(grid_pad_x_pre + (1:Nx), grid_pad_z_pre + (1:Nz)) = anterior_surface;
-    anterior_surface = anterior_surface_expanded;
-
-    % Update grid dims to expanded values; downstream mask building uses these.
-    Nx_pre_expansion = Nx;
-    Nz_pre_expansion = Nz;
-    Nx = new_Nx;
-    Nz = new_Nz;
-    grid_dims = [Ny, Nx, Nz];
-
-    % Convert pre-expansion placement coords to expanded coords.
-    best_ix_start = ix_start_orig + grid_pad_x_pre;
-    best_iz_start = iz_start_orig + grid_pad_z_pre;
-    best_dist     = sqrt( (best_ix_start + half_nx - (dose_centroid_ix + grid_pad_x_pre))^2 + ...
-                          (best_iz_start + half_nz - (dose_centroid_iz + grid_pad_z_pre))^2 );
-
-    % Shift dose centroid voxel index into expanded coords (for any downstream use).
-    dose_centroid_ix = dose_centroid_ix + grid_pad_x_pre;
-    dose_centroid_iz = dose_centroid_iz + grid_pad_z_pre;
-
-    grid_was_expanded = (grid_pad_x_pre + grid_pad_x_post + grid_pad_z_pre + grid_pad_z_post) > 0;
-
-    fprintf('        [Sensor] Grid expanded: [Nx %d, Nz %d] -> [Nx %d, Nz %d]; sensor at X=[%d,%d], Z=[%d,%d]\n', ...
-        Nx_pre_expansion, Nz_pre_expansion, Nx, Nz, ...
-        best_ix_start, best_ix_start + sensor_nx - 1, ...
-        best_iz_start, best_iz_start + sensor_nz - 1);
-end
-
-if isempty(best_ix_start)
-    warning('determine_sensor_mask:NoPlacement', ...
-        'Could not find any valid sensor placement. Returning empty mask.');
-    [sensor_mask, sensor_info] = empty_result(grid_dims);
-    sensor_info.exclusion_zone = exclusion_zone;
-    return;
-end
-
-% Final sensor X and Z ranges (voxel indices in the X and Z dimensions)
-sensor_x_range = [best_ix_start, best_ix_start + sensor_nx - 1];
-sensor_z_range = [best_iz_start, best_iz_start + sensor_nz - 1];
-
-fprintf('        [Sensor] Placement: X=[%d,%d], Z=[%d,%d] (dist to dose: %.1f voxels)\n', ...
-    sensor_x_range(1), sensor_x_range(2), sensor_z_range(1), sensor_z_range(2), best_dist);
-
-% Defensive: confirm the aperture footprint can host the configured element
-% grid at the requested pitch. With grid-expansion, this should always pass;
-% kept as a guard in case sensor_nx/sensor_nz were modified elsewhere.
-actual_aperture_x_mm = sensor_nx * dx;
-actual_aperture_z_mm = sensor_nz * dz;
-N_fit_x = max(1, floor(actual_aperture_x_mm / element_pitch_mm));
-N_fit_z = max(1, floor(actual_aperture_z_mm / element_pitch_mm));
-N_fit   = min(N_fit_x, N_fit_z);
-if N_fit < elements_per_side
-    warning('determine_sensor_mask:ApertureShrunk', ...
-        'Available aperture (%.1f x %.1f mm) fits %dx%d elements at pitch %.2f mm; reducing from %dx%d.', ...
-        actual_aperture_x_mm, actual_aperture_z_mm, N_fit, N_fit, ...
-        element_pitch_mm, elements_per_side, elements_per_side);
-    elements_per_side = N_fit;
-    aperture_mm = elements_per_side * element_pitch_mm;
-end
-
-%% ======================== STEP 4: DETERMINE SENSOR Y INDEX ========================
-
-% Find the most anterior (minimum Y) body surface point within the sensor region
-surface_patch = anterior_surface(sensor_x_range(1):sensor_x_range(2), ...
-                                  sensor_z_range(1):sensor_z_range(2));
-
-% Footprint may overhang the body (grid-expansion placement places the
-% sensor in water past the body's Z extent), so NaN columns are expected.
-% Take the min over real surface points only; fall back to the global
-% median anterior surface Y if no body sits under the footprint at all.
-min_anterior_y = min(surface_patch(:), [], 'omitnan');
-if isnan(min_anterior_y)
-    valid_surface_y_all = anterior_surface(surface_valid);
-    min_anterior_y = round(median(valid_surface_y_all));
-    fprintf('        [Sensor] No body under footprint; using median surface Y=%d\n', min_anterior_y);
-end
-
-% Place sensor at standoff distance anterior to the body surface
-standoff_voxels = ceil(standoff_mm / dy);
-sensor_y_index = max(1, min_anterior_y - standoff_voxels);
-
-% Ensure sensor Y is within grid bounds (accounting for PML)
-if sensor_y_index <= pml_size
-    warning('determine_sensor_mask:SensorNearPML', ...
-        'Sensor Y index (%d) is within PML region (size %d). Adjusting.', ...
-        sensor_y_index, pml_size);
-    sensor_y_index = pml_size + 1;
-end
-
-% Physical position of sensor center
-sensor_center_x = origin(1) + (mean(sensor_x_range) - 1) * dx;
-sensor_center_y = origin(2) + (sensor_y_index - 1) * dy;
-sensor_center_z = origin(3) + (mean(sensor_z_range) - 1) * dz;
-
-fprintf('        [Sensor] Y index: %d (surface min Y: %d, standoff: %d voxels)\n', ...
-    sensor_y_index, min_anterior_y, standoff_voxels);
-fprintf('        [Sensor] Center (mm): [%.1f, %.1f, %.1f]\n', ...
-    sensor_center_x, sensor_center_y, sensor_center_z);
-
-%% ======================== STEP 5: BUILD SPARSE SENSOR MASK ========================
-
-% The mask is the union of N x N active element footprints. Each element
-% center sits at (ex - 0.5) * pitch from the aperture corner. Kerf voxels
-% are never marked. element_map is built simultaneously so apply_element_averaging
-% can group voxels into elements (0 = inactive/kerf/removed).
-
+% Outputs populated by the chosen placement path
 sensor_mask = false(grid_dims);
-
-local_nx = sensor_x_range(2) - sensor_x_range(1) + 1;
-local_nz = sensor_z_range(2) - sensor_z_range(1) + 1;
-element_map = zeros(local_nx, local_nz);
-
-% Physical coordinate of the aperture corner (top-left voxel center, in mm).
-aperture_origin_x_mm = origin(1) + (sensor_x_range(1) - 1) * dx;
-aperture_origin_z_mm = origin(3) + (sensor_z_range(1) - 1) * dz;
-
-% Half-extent of an active element footprint, in voxel units.
-half_nx_active = (element_size_mm / 2) / dx;
-half_nz_active = (element_size_mm / 2) / dz;
-
-% Pre-allocate element_positions_mm: [N_total x 3] in patient coords.
+sensor_element_label = zeros(grid_dims, 'uint32');  % 0 = no sensor; else element idx
+voxel_element_idx = [];
+element_positions_mm = [];
+element_map = [];
+sensor_x_range = [0, 0];
+sensor_z_range = [0, 0];
+sensor_y_index = 0;
+sensor_center_x = NaN; sensor_center_y = NaN; sensor_center_z = NaN;
+min_anterior_y = NaN;
+tilt_R = eye(3);
+tilt_theta = 0;
+tilt_alpha = 0;
+tilt_axis = [0; 0; 1];
+aim_normal_used = [0, -1, 0];
 N_total_elements = elements_per_side * elements_per_side;
-element_positions_mm = zeros(N_total_elements, 3);
 
-% Track which elements actually got at least one voxel (for aliasing report).
-element_voxel_counts = zeros(N_total_elements, 1);
+joint_success = false;
 
-for ex = 1:elements_per_side
-    % Element center physical X (mm)
-    cx_mm = aperture_origin_x_mm + (ex - 0.5) * element_pitch_mm;
-    % Element center in local voxel coords (1-based, fractional)
-    cx_local = (cx_mm - aperture_origin_x_mm) / dx + 1;
+if aim_at_iso
+    fprintf('        [Sensor] Joint (center, tilt) optimization...\n');
+    [joint_success, jr] = joint_optimize_placement( ...
+        available, anterior_surface, body, exclusion_zone, ...
+        iso_mm, origin, dx, dy, dz, ...
+        Nx, Ny, Nz, ...
+        elements_per_side, element_pitch_mm, ...
+        sensor_nx, sensor_nz, ...
+        standoff_voxels, pml_size, pml_margin_x, pml_margin_z, ...
+        tilt_weight_mm, tilt_stride);
 
-    % Active footprint X voxel range (clamped to local aperture)
-    ix_lo = max(1,        ceil(cx_local - half_nx_active));
-    ix_hi = min(local_nx, floor(cx_local + half_nx_active));
-    % Sub-voxel element: snap to nearest voxel
-    if ix_hi < ix_lo
-        ix_lo = max(1, min(local_nx, round(cx_local)));
-        ix_hi = ix_lo;
+    if joint_success
+        sensor_mask          = jr.sensor_mask;
+        sensor_element_label = jr.sensor_element_label;
+        element_positions_mm = jr.element_positions_mm;
+        element_map          = jr.element_map;
+        sensor_x_range       = jr.sensor_x_range;
+        sensor_z_range       = jr.sensor_z_range;
+        sensor_y_index       = jr.sensor_y_index;
+        sensor_center_x      = jr.c_mm(1);
+        sensor_center_y      = jr.c_mm(2);
+        sensor_center_z      = jr.c_mm(3);
+        min_anterior_y       = jr.min_anterior_y;
+        tilt_R               = jr.R;
+        tilt_theta           = jr.theta;
+        tilt_alpha           = jr.alpha;
+        tilt_axis            = jr.axis;
+        aim_normal_used      = jr.aim_normal;
+        fprintf('        [Sensor] Joint placement: theta=%.3f (tilt %.2f deg of full %.2f deg), center=[%.1f %.1f %.1f] mm\n', ...
+            tilt_theta, tilt_theta * tilt_alpha * 180/pi, tilt_alpha * 180/pi, ...
+            sensor_center_x, sensor_center_y, sensor_center_z);
+    else
+        fprintf('        [Sensor] Joint optimization found no valid tilted placement; falling back to legacy flat sweep.\n');
     end
+end
 
-    for ez = 1:elements_per_side
-        cz_mm = aperture_origin_z_mm + (ez - 0.5) * element_pitch_mm;
-        cz_local = (cz_mm - aperture_origin_z_mm) / dz + 1;
+if ~joint_success
+    % --- LEGACY: flat-plane center sweep with optional grid expansion ---
+    best_dist = Inf;
+    best_ix_start = [];
+    best_iz_start = [];
+    half_nx = floor(sensor_nx / 2);
+    half_nz = floor(sensor_nz / 2);
 
-        iz_lo = max(1,        ceil(cz_local - half_nz_active));
-        iz_hi = min(local_nz, floor(cz_local + half_nz_active));
-        if iz_hi < iz_lo
-            iz_lo = max(1, min(local_nz, round(cz_local)));
-            iz_hi = iz_lo;
-        end
-
-        elem_idx = (ex - 1) * elements_per_side + ez;
-        element_positions_mm(elem_idx, :) = ...
-            [cx_mm, origin(2) + (sensor_y_index - 1) * dy, cz_mm];
-
-        % Convert local (ix, iz) ranges to global grid indices and mark.
-        for li = ix_lo:ix_hi
-            for lj = iz_lo:iz_hi
-                gi = sensor_x_range(1) + li - 1;
-                gj = sensor_z_range(1) + lj - 1;
-                if gi < 1 || gi > Nx || gj < 1 || gj > Nz
-                    continue;
-                end
-                if element_map(li, lj) == 0
-                    sensor_mask(sensor_y_index, gi, gj) = true;
-                    element_map(li, lj) = elem_idx;
-                    element_voxel_counts(elem_idx) = element_voxel_counts(elem_idx) + 1;
-                else
-                    % Another element already claimed this voxel (aliasing).
-                    % Leave existing assignment; the colliding element gets no voxel.
+    for ix_start = 1:(Nx - sensor_nx + 1)
+        for iz_start = 1:(Nz - sensor_nz + 1)
+            ix_end = ix_start + sensor_nx - 1;
+            iz_end = iz_start + sensor_nz - 1;
+            patch = available(ix_start:ix_end, iz_start:iz_end);
+            if all(patch(:))
+                cx = ix_start + half_nx;
+                cz = iz_start + half_nz;
+                dist = sqrt((cx - dose_centroid_ix)^2 + (cz - dose_centroid_iz)^2);
+                if dist < best_dist
+                    best_dist = dist;
+                    best_ix_start = ix_start;
+                    best_iz_start = iz_start;
                 end
             end
         end
     end
-end
 
-num_sensor_voxels = sum(sensor_mask(:));
-effective_element_count = sum(element_voxel_counts > 0);
-aliased_element_count   = N_total_elements - effective_element_count;
+    % Grid-expansion fallback (water padding) if no in-grid candidate
+    if isempty(best_ix_start)
+        fprintf('        [Sensor] No placement in original grid; expanding grid past exclusion zone.\n');
 
-fprintf('        [Sensor] Sparse mask: %d voxels across %d/%d elements\n', ...
-    num_sensor_voxels, effective_element_count, N_total_elements);
-if aliased_element_count > 0
-    warning('determine_sensor_mask:ElementAliasing', ...
-        '%d of %d elements collapsed (grid spacing too coarse for full resolution).', ...
-        aliased_element_count, N_total_elements);
+        ix_start_target = dose_centroid_ix - half_nx;
+        ix_start_min_orig = pml_margin_x + 1;
+        ix_start_max_orig = Nx - pml_margin_x - sensor_nx + 1;
+
+        if ix_start_max_orig >= ix_start_min_orig
+            ix_start_orig = max(ix_start_min_orig, min(ix_start_max_orig, ix_start_target));
+        else
+            extra_x = (sensor_nx + 2 * pml_margin_x) - Nx;
+            grid_pad_x_pre  = floor(extra_x / 2);
+            grid_pad_x_post = extra_x - grid_pad_x_pre;
+            ix_start_orig = (pml_margin_x + 1) - grid_pad_x_pre;
+        end
+        ix_end_orig = ix_start_orig + sensor_nx - 1;
+
+        ix_lo_clip = max(1, ix_start_orig);
+        ix_hi_clip = min(Nx, ix_end_orig);
+        if ix_lo_clip > ix_hi_clip
+            excl_z_indices = [];
+        else
+            excl_strip = exclusion_zone(ix_lo_clip:ix_hi_clip, :);
+            excl_z_indices = find(any(excl_strip, 1));
+        end
+
+        if isempty(excl_z_indices)
+            iz_start_orig   = max(pml_margin_z + 1, ...
+                              min(Nz - pml_margin_z - sensor_nz + 1, ...
+                                  dose_centroid_iz - half_nz));
+            grid_pad_z_pre  = 0;
+            grid_pad_z_post = 0;
+            fprintf('        [Sensor] No exclusion in X strip; centered Z=%d (no Z pad)\n', iz_start_orig);
+        else
+            excl_z_max = max(excl_z_indices);
+            excl_z_min = min(excl_z_indices);
+            iz_start_inf  = excl_z_max + 1;
+            iz_end_inf    = iz_start_inf + sensor_nz - 1;
+            pad_z_post_inf = max(0, iz_end_inf - (Nz - pml_margin_z));
+
+            iz_end_sup    = excl_z_min - 1;
+            iz_start_sup  = iz_end_sup - sensor_nz + 1;
+            pad_z_pre_sup = max(0, (pml_margin_z + 1) - iz_start_sup);
+
+            if pad_z_post_inf <= pad_z_pre_sup
+                iz_start_orig   = iz_start_inf;
+                grid_pad_z_post = pad_z_post_inf;
+                fprintf('        [Sensor] Inferior to exclusion (Z=%d); padding Z+ by %d voxels (water)\n', ...
+                    iz_start_orig, grid_pad_z_post);
+            else
+                iz_start_orig   = iz_start_sup;
+                grid_pad_z_pre  = pad_z_pre_sup;
+                fprintf('        [Sensor] Superior to exclusion (Z=%d orig); padding Z- by %d voxels (water)\n', ...
+                    iz_start_orig, grid_pad_z_pre);
+            end
+        end
+
+        new_Nx = Nx + grid_pad_x_pre + grid_pad_x_post;
+        new_Nz = Nz + grid_pad_z_pre + grid_pad_z_post;
+
+        body_expanded = false(Ny, new_Nx, new_Nz);
+        body_expanded(:, grid_pad_x_pre + (1:Nx), grid_pad_z_pre + (1:Nz)) = body;
+        body = body_expanded;
+
+        surface_valid_expanded = false(new_Nx, new_Nz);
+        surface_valid_expanded(grid_pad_x_pre + (1:Nx), grid_pad_z_pre + (1:Nz)) = surface_valid;
+        surface_valid = surface_valid_expanded; %#ok<NASGU>
+
+        exclusion_zone_expanded = false(new_Nx, new_Nz);
+        exclusion_zone_expanded(grid_pad_x_pre + (1:Nx), grid_pad_z_pre + (1:Nz)) = exclusion_zone;
+        exclusion_zone = exclusion_zone_expanded;
+
+        anterior_surface_expanded = NaN(new_Nx, new_Nz);
+        anterior_surface_expanded(grid_pad_x_pre + (1:Nx), grid_pad_z_pre + (1:Nz)) = anterior_surface;
+        anterior_surface = anterior_surface_expanded;
+
+        Nx_pre_expansion = Nx;
+        Nz_pre_expansion = Nz;
+        Nx = new_Nx;
+        Nz = new_Nz;
+        grid_dims = [Ny, Nx, Nz];
+
+        sensor_mask = false(grid_dims);
+        sensor_element_label = zeros(grid_dims, 'uint32');
+
+        best_ix_start = ix_start_orig + grid_pad_x_pre;
+        best_iz_start = iz_start_orig + grid_pad_z_pre;
+        best_dist     = sqrt( (best_ix_start + half_nx - (dose_centroid_ix + grid_pad_x_pre))^2 + ...
+                              (best_iz_start + half_nz - (dose_centroid_iz + grid_pad_z_pre))^2 );
+
+        dose_centroid_ix = dose_centroid_ix + grid_pad_x_pre;
+        dose_centroid_iz = dose_centroid_iz + grid_pad_z_pre;
+
+        grid_was_expanded = (grid_pad_x_pre + grid_pad_x_post + grid_pad_z_pre + grid_pad_z_post) > 0;
+
+        fprintf('        [Sensor] Grid expanded: [Nx %d, Nz %d] -> [Nx %d, Nz %d]; sensor at X=[%d,%d], Z=[%d,%d]\n', ...
+            Nx_pre_expansion, Nz_pre_expansion, Nx, Nz, ...
+            best_ix_start, best_ix_start + sensor_nx - 1, ...
+            best_iz_start, best_iz_start + sensor_nz - 1);
+    end
+
+    if isempty(best_ix_start)
+        warning('determine_sensor_mask:NoPlacement', ...
+            'Could not find any valid sensor placement. Returning empty mask.');
+        [sensor_mask, sensor_info] = empty_result(grid_dims);
+        sensor_info.exclusion_zone = exclusion_zone;
+        return;
+    end
+
+    sensor_x_range = [best_ix_start, best_ix_start + sensor_nx - 1];
+    sensor_z_range = [best_iz_start, best_iz_start + sensor_nz - 1];
+
+    fprintf('        [Sensor] Placement: X=[%d,%d], Z=[%d,%d] (dist to dose: %.1f voxels)\n', ...
+        sensor_x_range(1), sensor_x_range(2), sensor_z_range(1), sensor_z_range(2), best_dist);
+
+    actual_aperture_x_mm = sensor_nx * dx;
+    actual_aperture_z_mm = sensor_nz * dz;
+    N_fit_x = max(1, floor(actual_aperture_x_mm / element_pitch_mm));
+    N_fit_z = max(1, floor(actual_aperture_z_mm / element_pitch_mm));
+    N_fit   = min(N_fit_x, N_fit_z);
+    if N_fit < elements_per_side
+        warning('determine_sensor_mask:ApertureShrunk', ...
+            'Available aperture (%.1f x %.1f mm) fits %dx%d elements at pitch %.2f mm; reducing from %dx%d.', ...
+            actual_aperture_x_mm, actual_aperture_z_mm, N_fit, N_fit, ...
+            element_pitch_mm, elements_per_side, elements_per_side);
+        elements_per_side = N_fit;
+        aperture_mm = elements_per_side * element_pitch_mm;
+        N_total_elements = elements_per_side * elements_per_side;
+    end
+
+    % --- LEGACY STEP 4: sensor Y index ---
+    surface_patch = anterior_surface(sensor_x_range(1):sensor_x_range(2), ...
+                                      sensor_z_range(1):sensor_z_range(2));
+    min_anterior_y = min(surface_patch(:), [], 'omitnan');
+    if isnan(min_anterior_y)
+        valid_surface_y_all = anterior_surface(~isnan(anterior_surface));
+        min_anterior_y = round(median(valid_surface_y_all));
+        fprintf('        [Sensor] No body under footprint; using median surface Y=%d\n', min_anterior_y);
+    end
+    sensor_y_index = max(1, min_anterior_y - standoff_voxels);
+    if sensor_y_index <= pml_size
+        warning('determine_sensor_mask:SensorNearPML', ...
+            'Sensor Y index (%d) is within PML region (size %d). Adjusting.', ...
+            sensor_y_index, pml_size);
+        sensor_y_index = pml_size + 1;
+    end
+
+    sensor_center_x = origin(1) + (mean(sensor_x_range) - 1) * dx;
+    sensor_center_y = origin(2) + (sensor_y_index - 1) * dy;
+    sensor_center_z = origin(3) + (mean(sensor_z_range) - 1) * dz;
+
+    fprintf('        [Sensor] Y index: %d (surface min Y: %d, standoff: %d voxels)\n', ...
+        sensor_y_index, min_anterior_y, standoff_voxels);
+    fprintf('        [Sensor] Center (mm): [%.1f, %.1f, %.1f]\n', ...
+        sensor_center_x, sensor_center_y, sensor_center_z);
+
+    % --- LEGACY STEP 5: flat sparse mask ---
+    local_nx = sensor_x_range(2) - sensor_x_range(1) + 1;
+    local_nz = sensor_z_range(2) - sensor_z_range(1) + 1;
+    element_map = zeros(local_nx, local_nz);
+
+    aperture_origin_x_mm = origin(1) + (sensor_x_range(1) - 1) * dx;
+    aperture_origin_z_mm = origin(3) + (sensor_z_range(1) - 1) * dz;
+
+    half_nx_active = (element_size_mm / 2) / dx;
+    half_nz_active = (element_size_mm / 2) / dz;
+
+    element_positions_mm = zeros(N_total_elements, 3);
+
+    for ex = 1:elements_per_side
+        cx_mm = aperture_origin_x_mm + (ex - 0.5) * element_pitch_mm;
+        cx_local = (cx_mm - aperture_origin_x_mm) / dx + 1;
+        ix_lo = max(1,        ceil(cx_local - half_nx_active));
+        ix_hi = min(local_nx, floor(cx_local + half_nx_active));
+        if ix_hi < ix_lo
+            ix_lo = max(1, min(local_nx, round(cx_local)));
+            ix_hi = ix_lo;
+        end
+
+        for ez = 1:elements_per_side
+            cz_mm = aperture_origin_z_mm + (ez - 0.5) * element_pitch_mm;
+            cz_local = (cz_mm - aperture_origin_z_mm) / dz + 1;
+            iz_lo = max(1,        ceil(cz_local - half_nz_active));
+            iz_hi = min(local_nz, floor(cz_local + half_nz_active));
+            if iz_hi < iz_lo
+                iz_lo = max(1, min(local_nz, round(cz_local)));
+                iz_hi = iz_lo;
+            end
+
+            elem_idx = (ex - 1) * elements_per_side + ez;
+            element_positions_mm(elem_idx, :) = ...
+                [cx_mm, origin(2) + (sensor_y_index - 1) * dy, cz_mm];
+
+            for li = ix_lo:ix_hi
+                for lj = iz_lo:iz_hi
+                    gi = sensor_x_range(1) + li - 1;
+                    gj = sensor_z_range(1) + lj - 1;
+                    if gi < 1 || gi > Nx || gj < 1 || gj > Nz
+                        continue;
+                    end
+                    if element_map(li, lj) == 0
+                        sensor_mask(sensor_y_index, gi, gj) = true;
+                        sensor_element_label(sensor_y_index, gi, gj) = uint32(elem_idx);
+                        element_map(li, lj) = elem_idx;
+                    end
+                end
+            end
+        end
+    end
 end
 
 %% ======================== STEP 6: VALIDATION ========================
@@ -616,41 +639,41 @@ if any(overlap_body(:))
     warning('determine_sensor_mask:BodyOverlap', ...
         'Sensor overlaps body mask at %d voxels. Removing overlapping voxels.', num_overlap);
     sensor_mask = sensor_mask & ~body;
+    sensor_element_label(overlap_body) = 0;
     placement_valid = false;
 end
 
-% Check 2: No sensor voxels in exclusion zone
-% Map exclusion zone (X, Z) to sensor Y plane
-for ix = sensor_x_range(1):sensor_x_range(2)
-    for iz = sensor_z_range(1):sensor_z_range(2)
-        if exclusion_zone(ix, iz)
-            if sensor_mask(sensor_y_index, ix, iz)
-                warning('determine_sensor_mask:ExclusionOverlap', ...
-                    'Sensor voxel at X=%d, Z=%d overlaps exclusion zone. Removing.', ix, iz);
-                sensor_mask(sensor_y_index, ix, iz) = false;
-                element_map(ix - sensor_x_range(1) + 1, iz - sensor_z_range(1) + 1) = 0;
-                placement_valid = false;
-            end
-        end
-    end
-end
-
-% Also sync element_map for any body-overlap voxels removed in Check 1.
-for ix = sensor_x_range(1):sensor_x_range(2)
-    for iz = sensor_z_range(1):sensor_z_range(2)
-        if ~sensor_mask(sensor_y_index, ix, iz)
-            element_map(ix - sensor_x_range(1) + 1, iz - sensor_z_range(1) + 1) = 0;
-        end
+% Check 2: No sensor voxels project into exclusion zone
+sensor_lin = find(sensor_mask);
+if ~isempty(sensor_lin)
+    [sv_y, sv_x, sv_z] = ind2sub(size(sensor_mask), sensor_lin);
+    excl_lookup_lin = sub2ind(size(exclusion_zone), sv_x, sv_z);
+    in_excl = exclusion_zone(excl_lookup_lin);
+    if any(in_excl)
+        warning('determine_sensor_mask:ExclusionOverlap', ...
+            '%d sensor voxels overlap exclusion zone projection. Removing.', sum(in_excl));
+        bad_lin = sensor_lin(in_excl);
+        sensor_mask(bad_lin) = false;
+        sensor_element_label(bad_lin) = 0;
+        placement_valid = false;
     end
 end
 
 % Check 3: Sensor within grid bounds (accounting for PML)
-if sensor_x_range(1) <= pml_size || sensor_x_range(2) > Nx - pml_size || ...
-   sensor_z_range(1) <= pml_size || sensor_z_range(2) > Nz - pml_size || ...
-   sensor_y_index <= pml_size
-    warning('determine_sensor_mask:PMLOverlap', ...
-        'Sensor extends into PML region (PML size: %d). Results may be affected.', pml_size);
-    placement_valid = false;
+sensor_lin = find(sensor_mask);
+if ~isempty(sensor_lin)
+    [sv_y, sv_x, sv_z] = ind2sub(size(sensor_mask), sensor_lin);
+    bad = (sv_x <= pml_size) | (sv_x > Nx - pml_size) | ...
+          (sv_z <= pml_size) | (sv_z > Nz - pml_size) | ...
+          (sv_y <= pml_size) | (sv_y > Ny - pml_size);
+    if any(bad)
+        warning('determine_sensor_mask:PMLOverlap', ...
+            '%d sensor voxels lie inside PML margin. Removing.', sum(bad));
+        bad_lin = sensor_lin(bad);
+        sensor_mask(bad_lin) = false;
+        sensor_element_label(bad_lin) = 0;
+        placement_valid = false;
+    end
 end
 
 num_sensor_voxels_final = sum(sensor_mask(:));
@@ -659,13 +682,14 @@ fprintf('        [Sensor] Final sensor: %d voxels (valid: %s)\n', ...
 
 %% ======================== STEP 7: ELEMENT DIAGNOSTICS ========================
 
-% element_map and per-element voxel counts were built in STEP 5.
-% Recompute counts after validation (voxels may have been removed for body
-% overlap, exclusion zone, etc.) to get an accurate effective_element_count.
+% Build authoritative voxel_element_idx from sensor_element_label.
+sensor_lin_final = find(sensor_mask);
+voxel_element_idx = double(sensor_element_label(sensor_lin_final));
+
+% Count voxels per element using the authoritative label.
 element_voxel_counts = zeros(N_total_elements, 1);
-em_vec = element_map(:);
-for v = 1:numel(em_vec)
-    e = em_vec(v);
+for v = 1:numel(voxel_element_idx)
+    e = voxel_element_idx(v);
     if e > 0
         element_voxel_counts(e) = element_voxel_counts(e) + 1;
     end
@@ -682,24 +706,30 @@ else
     voxels_per_element_stats = [0, 0, 0];
 end
 
-% Actual fill factor within the aperture footprint rectangle
 aperture_footprint_voxels = sensor_nx * sensor_nz;
 if aperture_footprint_voxels > 0
-    fill_factor_actual = sum(sensor_mask(:)) / aperture_footprint_voxels;
+    fill_factor_actual = num_sensor_voxels_final / aperture_footprint_voxels;
 else
     fill_factor_actual = 0;
 end
 
 fprintf('        [Sensor] Element diagnostics: %d/%d effective, %d aliased/removed\n', ...
     effective_element_count, N_total_elements, aliased_element_count);
-fprintf('        [Sensor] Voxels per element: min=%d, median=%d, max=%d\n', ...
-    voxels_per_element_stats(1), voxels_per_element_stats(2), voxels_per_element_stats(3));
+if ~isempty(vpe_assigned)
+    fprintf('        [Sensor] Voxels per element: min=%d, median=%d, max=%d\n', ...
+        voxels_per_element_stats(1), voxels_per_element_stats(2), voxels_per_element_stats(3));
+end
 fprintf('        [Sensor] Fill factor (actual): %.1f%% (spec: %.1f%%)\n', ...
     100 * fill_factor_actual, 100 * (element_size_mm / element_pitch_mm)^2);
 
+if aliased_element_count > 0
+    warning('determine_sensor_mask:ElementAliasing', ...
+        '%d of %d elements collapsed (grid spacing too coarse or voxels removed by validation).', ...
+        aliased_element_count, N_total_elements);
+end
+
 %% ======================== COMPUTE DIAGNOSTICS ========================
 
-% Distance from sensor plane to dose centroid
 surface_to_dose_distance_mm = abs(dose_centroid_mm(2) - sensor_center_y);
 
 %% ======================== PACK OUTPUT ========================
@@ -711,6 +741,7 @@ sensor_info.sensor_z_range              = sensor_z_range;
 sensor_info.sensor_center_mm            = [sensor_center_x, sensor_center_y, sensor_center_z];
 sensor_info.exclusion_zone              = exclusion_zone;
 sensor_info.element_map                 = element_map;
+sensor_info.voxel_element_idx           = voxel_element_idx;
 sensor_info.num_elements                = num_elements;
 sensor_info.element_positions_mm        = element_positions_mm;
 sensor_info.element_pitch_mm            = element_pitch_mm;
@@ -730,10 +761,16 @@ sensor_info.anterior_surface            = anterior_surface;
 sensor_info.standoff_voxels             = standoff_voxels;
 sensor_info.gantry_angle                = field_dose.gantry_angle;
 
-% Grid expansion applied to fit sensor outside exclusion zone. Caller must
-% apply matching water-filled padding to medium fields and p0 so the sensor
-% mask's coordinate system matches the simulation grid. Order matches the
-% native (Ny, Nx, Nz) array layout returned by size(sensor_mask).
+% Tilt geometry
+sensor_info.tilt_theta                  = tilt_theta;
+sensor_info.tilt_angle_deg              = tilt_theta * tilt_alpha * 180 / pi;
+sensor_info.tilt_alpha_full_deg         = tilt_alpha * 180 / pi;
+sensor_info.rotation_R                  = tilt_R;
+sensor_info.rotation_axis               = tilt_axis(:)';
+sensor_info.aim_target_mm               = iso_mm;
+sensor_info.aim_normal                  = aim_normal_used;
+sensor_info.aim_enabled                 = aim_at_iso && joint_success;
+
 sensor_info.grid_pad = struct( ...
     'y_pre',  grid_pad_y_pre,  'y_post', grid_pad_y_post, ...
     'x_pre',  grid_pad_x_pre,  'x_post', grid_pad_x_post, ...
@@ -752,44 +789,30 @@ end
 
 function centroid_mm = compute_dose_centroid_mm(field_dose, origin, dx, dy, dz)
 %COMPUTE_DOSE_CENTROID_MM Compute the physical centroid of the dose distribution
-%
-%   Returns [x, y, z] in mm (DICOM patient coordinates).
-
     dose = field_dose.dose_Gy;
-    dose(dose < 0.01 * max(dose(:))) = 0;  % Threshold at 1% of max
-    
+    dose(dose < 0.01 * max(dose(:))) = 0;
     total_dose = sum(dose(:));
     if total_dose == 0
-        % Fallback: center of the grid
         dims = size(dose);
         centroid_mm = origin + ([dims(2), dims(1), dims(3)] - 1) / 2 .* [dx, dy, dz];
         return;
     end
-    
     [Ny, Nx, Nz] = size(dose);
-    
-    % Create coordinate grids (physical mm)
     x_vec = origin(1) + (0:Nx-1) * dx;
     y_vec = origin(2) + (0:Ny-1) * dy;
     z_vec = origin(3) + (0:Nz-1) * dz;
-    
-    % Dose-weighted centroid
-    % Sum over Y, Z to get X projection; etc.
-    dose_x = squeeze(sum(sum(dose, 1), 3));  % [1 x Nx] -> [Nx x 1]
-    dose_y = squeeze(sum(sum(dose, 2), 3));  % [Ny x 1]
-    dose_z = squeeze(sum(sum(dose, 1), 2));  % [1 x 1 x Nz] -> [Nz x 1]
-    
+    dose_x = squeeze(sum(sum(dose, 1), 3));
+    dose_y = squeeze(sum(sum(dose, 2), 3));
+    dose_z = squeeze(sum(sum(dose, 1), 2));
     cx = sum(x_vec(:) .* dose_x(:)) / total_dose;
     cy = sum(y_vec(:) .* dose_y(:)) / total_dose;
     cz = sum(z_vec(:) .* dose_z(:)) / total_dose;
-    
     centroid_mm = [cx, cy, cz];
 end
 
 
 function [sensor_mask, sensor_info] = empty_result(grid_dims)
 %EMPTY_RESULT Return empty/default sensor mask and info struct
-
     sensor_mask = false(grid_dims);
     sensor_info = struct();
     sensor_info.sensor_y_index              = 0;
@@ -798,6 +821,7 @@ function [sensor_mask, sensor_info] = empty_result(grid_dims)
     sensor_info.sensor_center_mm            = [0, 0, 0];
     sensor_info.exclusion_zone              = false(grid_dims(2), grid_dims(3));
     sensor_info.element_map                 = [];
+    sensor_info.voxel_element_idx           = [];
     sensor_info.num_elements                = 0;
     sensor_info.element_positions_mm        = zeros(0, 3);
     sensor_info.element_pitch_mm            = 0;
@@ -813,6 +837,14 @@ function [sensor_mask, sensor_info] = empty_result(grid_dims)
     sensor_info.sensor_size_voxels          = [0, 0];
     sensor_info.placement_valid             = false;
     sensor_info.num_sensor_voxels           = 0;
+    sensor_info.tilt_theta                  = 0;
+    sensor_info.tilt_angle_deg              = 0;
+    sensor_info.tilt_alpha_full_deg         = 0;
+    sensor_info.rotation_R                  = eye(3);
+    sensor_info.rotation_axis               = [0, 0, 1];
+    sensor_info.aim_target_mm               = [];
+    sensor_info.aim_normal                  = [0, -1, 0];
+    sensor_info.aim_enabled                 = false;
     sensor_info.grid_pad                    = struct( ...
         'y_pre', 0, 'y_post', 0, 'x_pre', 0, 'x_post', 0, ...
         'z_pre', 0, 'z_post', 0, 'expanded', false);
@@ -826,4 +858,381 @@ function val = get_field(s, name, default)
     else
         val = default;
     end
+end
+
+
+function iso_mm = resolve_iso(beam_metadata)
+%RESOLVE_ISO Extract the plan isocenter from beam_metadata; warn if inconsistent.
+%   Returns [x, y, z] in mm, or [] if no usable isocenter is present.
+
+    iso_mm = [];
+    isos = [];
+    for i = 1:numel(beam_metadata)
+        if isfield(beam_metadata(i), 'isocenter') && ...
+                ~isempty(beam_metadata(i).isocenter) && ...
+                numel(beam_metadata(i).isocenter) == 3
+            isos(end+1, :) = beam_metadata(i).isocenter(:)'; %#ok<AGROW>
+        end
+    end
+    if isempty(isos)
+        return;
+    end
+    iso_mm = isos(1, :);
+    if size(isos, 1) > 1
+        max_drift = max(vecnorm(isos - iso_mm, 2, 2));
+        if max_drift > 1.0  % mm
+            warning('determine_sensor_mask:IsocenterDrift', ...
+                'beam_metadata isocenters disagree by up to %.2f mm; using beam 1.', max_drift);
+        end
+    end
+end
+
+
+function R = rodrigues(k, ang)
+%RODRIGUES Rotation matrix from unit axis k (3-vec) and angle ang (rad).
+    k = k(:);
+    nk = norm(k);
+    if nk < eps || abs(ang) < eps
+        R = eye(3);
+        return;
+    end
+    k = k / nk;
+    K = [   0   -k(3)  k(2);
+          k(3)    0   -k(1);
+         -k(2)  k(1)    0  ];
+    R = eye(3) + sin(ang) * K + (1 - cos(ang)) * (K * K);
+end
+
+
+function [R_full, alpha, axis_k] = build_aim_rotation(c_mm, iso_mm)
+%BUILD_AIM_ROTATION Rotation that rotates coronal normal [0,-1,0] to (c-iso)/|c-iso|.
+%   c_mm    - 1x3 sensor center (mm)
+%   iso_mm  - 1x3 isocenter (mm)
+%   Returns R_full (3x3), full rotation angle alpha (rad), unit rotation axis axis_k.
+
+    n0 = [0, -1, 0];
+    d  = c_mm(:)' - iso_mm(:)';
+    nd = norm(d);
+    if nd < eps
+        R_full = eye(3);
+        alpha = 0;
+        axis_k = [0; 0; 1];
+        return;
+    end
+    n_aim = d / nd;
+
+    cross_v = cross(n0, n_aim);
+    sin_a = norm(cross_v);
+    cos_a = dot(n0, n_aim);
+    alpha = atan2(sin_a, cos_a);
+
+    if sin_a < 1e-9
+        % Either aligned (alpha~0) or anti-parallel (alpha~pi).
+        if cos_a > 0
+            R_full = eye(3);
+            axis_k = [0; 0; 1];
+            alpha = 0;
+        else
+            % 180 deg flip about any in-plane axis; choose X.
+            axis_k = [1; 0; 0];
+            R_full = rodrigues(axis_k, alpha);
+        end
+        return;
+    end
+    axis_k = cross_v(:) / sin_a;
+    R_full = rodrigues(axis_k, alpha);
+end
+
+
+function [feasible, P_world, vox_idx] = check_placement(c_mm, R, ...
+        elements_per_side, element_pitch_mm, origin, dx, dy, dz, ...
+        body, exclusion_zone, pml_size, Nx, Ny, Nz)
+%CHECK_PLACEMENT Evaluate whether ALL elements at (c, R) are inside grid,
+%   outside body, outside exclusion projection, and clear of PML.
+%   Returns:
+%     feasible - logical
+%     P_world  - [N x 3] world positions (mm) for each element
+%     vox_idx  - [N x 3] voxel indices (y, x, z) for each element (NaN if out of grid)
+
+    N2 = elements_per_side * elements_per_side;
+    P_world = zeros(N2, 3);
+    vox_idx = nan(N2, 3);
+
+    half_span = (elements_per_side - 1) / 2;
+
+    feasible = true;
+    e = 0;
+    for ex = 1:elements_per_side
+        u_off = (ex - 1 - half_span) * element_pitch_mm;
+        for ez = 1:elements_per_side
+            v_off = (ez - 1 - half_span) * element_pitch_mm;
+            e = e + 1;
+            p_local = [u_off; v_off; 0];
+            p_w = (R * p_local)' + c_mm(:)';
+            P_world(e, :) = p_w;
+
+            vx = round((p_w(1) - origin(1)) / dx) + 1;
+            vy = round((p_w(2) - origin(2)) / dy) + 1;
+            vz = round((p_w(3) - origin(3)) / dz) + 1;
+
+            if vx <= pml_size || vx > Nx - pml_size || ...
+               vy <= pml_size || vy > Ny - pml_size || ...
+               vz <= pml_size || vz > Nz - pml_size
+                feasible = false;
+                return;
+            end
+            if body(vy, vx, vz)
+                feasible = false;
+                return;
+            end
+            if exclusion_zone(vx, vz)
+                feasible = false;
+                return;
+            end
+            vox_idx(e, :) = [vy, vx, vz];
+        end
+    end
+end
+
+
+function theta_max = binary_search_theta_max(c_mm, axis_k, alpha, ...
+        elements_per_side, element_pitch_mm, origin, dx, dy, dz, ...
+        body, exclusion_zone, pml_size, Nx, Ny, Nz)
+%BINARY_SEARCH_THETA_MAX Largest theta in [0, 1] for which all elements are
+%   feasible at rotation rodrigues(axis_k, theta * alpha) about c_mm.
+%   Returns NaN if theta = 0 is infeasible.
+
+    R0 = eye(3);
+    [ok0, ~, ~] = check_placement(c_mm, R0, ...
+        elements_per_side, element_pitch_mm, origin, dx, dy, dz, ...
+        body, exclusion_zone, pml_size, Nx, Ny, Nz);
+    if ~ok0
+        theta_max = NaN;
+        return;
+    end
+
+    if abs(alpha) < 1e-6
+        theta_max = 0;
+        return;
+    end
+
+    R1 = rodrigues(axis_k, alpha);
+    [ok1, ~, ~] = check_placement(c_mm, R1, ...
+        elements_per_side, element_pitch_mm, origin, dx, dy, dz, ...
+        body, exclusion_zone, pml_size, Nx, Ny, Nz);
+    if ok1
+        theta_max = 1;
+        return;
+    end
+
+    lo = 0; hi = 1;
+    for it = 1:12
+        mid = 0.5 * (lo + hi);
+        Rm = rodrigues(axis_k, mid * alpha);
+        [okm, ~, ~] = check_placement(c_mm, Rm, ...
+            elements_per_side, element_pitch_mm, origin, dx, dy, dz, ...
+            body, exclusion_zone, pml_size, Nx, Ny, Nz);
+        if okm
+            lo = mid;
+        else
+            hi = mid;
+        end
+    end
+    theta_max = lo;
+end
+
+
+function [success, result] = joint_optimize_placement( ...
+        available, anterior_surface, body, exclusion_zone, ...
+        iso_mm, origin, dx, dy, dz, ...
+        Nx, Ny, Nz, ...
+        elements_per_side, element_pitch_mm, ...
+        sensor_nx, sensor_nz, ...
+        standoff_voxels, pml_size, pml_margin_x, pml_margin_z, ...
+        tilt_weight_mm, tilt_stride)
+%JOINT_OPTIMIZE_PLACEMENT Sweep candidate centers on the anterior surface,
+%   binary-search max tilt theta for each, and return the lowest-cost winner.
+
+    result = struct();
+    success = false;
+
+    available_idx = find(available);
+    if isempty(available_idx)
+        return;
+    end
+    [cand_ix_idx, cand_iz_idx] = ind2sub(size(available), available_idx);
+
+    % Stride sub-sample
+    if tilt_stride > 1
+        keep = (mod(cand_ix_idx - 1, tilt_stride) == 0) & ...
+               (mod(cand_iz_idx - 1, tilt_stride) == 0);
+        cand_ix_idx = cand_ix_idx(keep);
+        cand_iz_idx = cand_iz_idx(keep);
+    end
+    fprintf('        [Sensor] Joint optimization: %d candidate centers (stride=%d)\n', ...
+            numel(cand_ix_idx), tilt_stride);
+
+    half_nx = floor(sensor_nx / 2);
+    half_nz = floor(sensor_nz / 2);
+
+    best_cost  = Inf;
+    best_c     = [];
+    best_theta = 0;
+    best_alpha = 0;
+    best_axis  = [0; 0; 1];
+    best_R     = eye(3);
+    best_cy_voxels = 0;
+    best_min_y     = NaN;
+    best_aim_normal = [0, -1, 0];
+
+    iso_xz_mm = [iso_mm(1), iso_mm(3)];
+
+    for k = 1:numel(cand_ix_idx)
+        ix_c = cand_ix_idx(k);
+        iz_c = cand_iz_idx(k);
+
+        ix_lo = max(1, ix_c - half_nx);
+        ix_hi = min(Nx, ix_c + half_nx);
+        iz_lo = max(1, iz_c - half_nz);
+        iz_hi = min(Nz, iz_c + half_nz);
+        surf_patch = anterior_surface(ix_lo:ix_hi, iz_lo:iz_hi);
+        min_y = min(surf_patch(:), [], 'omitnan');
+        if isnan(min_y), continue; end
+
+        cy = max(pml_size + 1, min_y - standoff_voxels);
+        if cy <= pml_size || cy > Ny - pml_size, continue; end
+
+        if ix_c <= pml_margin_x || ix_c > Nx - pml_margin_x, continue; end
+        if iz_c <= pml_margin_z || iz_c > Nz - pml_margin_z, continue; end
+
+        c_mm = [origin(1) + (ix_c - 1) * dx, ...
+                origin(2) + (cy   - 1) * dy, ...
+                origin(3) + (iz_c - 1) * dz];
+
+        [~, alpha, axis_k] = build_aim_rotation(c_mm, iso_mm);
+
+        theta_max = binary_search_theta_max(c_mm, axis_k, alpha, ...
+            elements_per_side, element_pitch_mm, origin, dx, dy, dz, ...
+            body, exclusion_zone, pml_size, Nx, Ny, Nz);
+        if isnan(theta_max), continue; end
+
+        c_xz_mm = [c_mm(1), c_mm(3)];
+        dist_mm = norm(c_xz_mm - iso_xz_mm);
+        cost = dist_mm + tilt_weight_mm * (1 - theta_max);
+
+        if cost < best_cost
+            best_cost  = cost;
+            best_c     = c_mm;
+            best_theta = theta_max;
+            best_alpha = alpha;
+            best_axis  = axis_k;
+            best_R     = rodrigues(axis_k, theta_max * alpha);
+            best_cy_voxels = cy;
+            best_min_y     = min_y;
+            d = c_mm - iso_mm;
+            nd = norm(d);
+            if nd > eps
+                best_aim_normal = d / nd;
+            else
+                best_aim_normal = [0, -1, 0];
+            end
+        end
+    end
+
+    if ~isfinite(best_cost)
+        return;  % no candidate succeeded
+    end
+
+    % Voxelize the winning tilted plane: round each element to its nearest voxel.
+    grid_dims = [Ny, Nx, Nz];
+    sensor_mask = false(grid_dims);
+    sensor_element_label = zeros(grid_dims, 'uint32');
+
+    N2 = elements_per_side * elements_per_side;
+    element_positions_mm = zeros(N2, 3);
+
+    half_span = (elements_per_side - 1) / 2;
+    e = 0;
+    min_vx = Inf; max_vx = -Inf;
+    min_vz = Inf; max_vz = -Inf;
+    sum_vy = 0; count_vy = 0;
+
+    % 2D element_map (X x Z) projection (best-effort, for back-compat)
+    sensor_nx_for_map = sensor_nx;
+    sensor_nz_for_map = sensor_nz;
+    element_map = zeros(sensor_nx_for_map, sensor_nz_for_map);
+    map_origin_ix = best_cy_voxels;  %#ok<NASGU>
+    aperture_origin_ix = max(1, round(best_c(1)/dx) - half_nx);  %#ok<NASGU>
+
+    for ex = 1:elements_per_side
+        u_off = (ex - 1 - half_span) * element_pitch_mm;
+        for ez = 1:elements_per_side
+            v_off = (ez - 1 - half_span) * element_pitch_mm;
+            e = e + 1;
+            p_local = [u_off; v_off; 0];
+            p_w = (best_R * p_local)' + best_c;
+            element_positions_mm(e, :) = p_w;
+
+            vx = round((p_w(1) - origin(1)) / dx) + 1;
+            vy = round((p_w(2) - origin(2)) / dy) + 1;
+            vz = round((p_w(3) - origin(3)) / dz) + 1;
+
+            if vx < 1 || vx > Nx || vy < 1 || vy > Ny || vz < 1 || vz > Nz
+                continue;
+            end
+            if sensor_element_label(vy, vx, vz) == 0
+                sensor_mask(vy, vx, vz) = true;
+                sensor_element_label(vy, vx, vz) = uint32(e);
+            end
+
+            if vx < min_vx, min_vx = vx; end
+            if vx > max_vx, max_vx = vx; end
+            if vz < min_vz, min_vz = vz; end
+            if vz > max_vz, max_vz = vz; end
+            sum_vy = sum_vy + vy;
+            count_vy = count_vy + 1;
+        end
+    end
+
+    if count_vy == 0
+        return;  % degenerate, no elements voxelized
+    end
+
+    sensor_y_index = round(sum_vy / count_vy);
+    sensor_x_range = [min_vx, max_vx];
+    sensor_z_range = [min_vz, max_vz];
+
+    % Best-effort 2D element_map: project each element to (vx, vz) within
+    % a bounding box anchored at the sensor's XZ extent. Not authoritative.
+    local_nx = sensor_x_range(2) - sensor_x_range(1) + 1;
+    local_nz = sensor_z_range(2) - sensor_z_range(1) + 1;
+    element_map = zeros(local_nx, local_nz);
+    for ee = 1:N2
+        p_w = element_positions_mm(ee, :);
+        vx = round((p_w(1) - origin(1)) / dx) + 1;
+        vz = round((p_w(3) - origin(3)) / dz) + 1;
+        li = vx - sensor_x_range(1) + 1;
+        lj = vz - sensor_z_range(1) + 1;
+        if li >= 1 && li <= local_nx && lj >= 1 && lj <= local_nz
+            if element_map(li, lj) == 0
+                element_map(li, lj) = ee;
+            end
+        end
+    end
+
+    success = true;
+    result.sensor_mask          = sensor_mask;
+    result.sensor_element_label = sensor_element_label;
+    result.element_positions_mm = element_positions_mm;
+    result.element_map          = element_map;
+    result.sensor_x_range       = sensor_x_range;
+    result.sensor_z_range       = sensor_z_range;
+    result.sensor_y_index       = sensor_y_index;
+    result.c_mm                 = best_c;
+    result.R                    = best_R;
+    result.theta                = best_theta;
+    result.alpha                = best_alpha;
+    result.axis                 = best_axis;
+    result.aim_normal           = best_aim_normal;
+    result.min_anterior_y       = best_min_y;
 end

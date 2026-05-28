@@ -15,12 +15,14 @@ function [sensor_data_avg, sensor_data_expanded] = apply_element_averaging(senso
 %                     Rows correspond to true voxels in sensor_mask, ordered
 %                     by linear index (column-major).
 %       sensor_info - Struct from determine_sensor_mask with:
-%           .element_map     - 2D array (local_nx x local_nz) mapping each
-%                              sensor voxel to an element index. 0 = removed voxel.
-%           .num_elements    - Number of unique elements.
-%           .sensor_x_range  - [x_start, x_end] voxel indices.
-%           .sensor_z_range  - [z_start, z_end] voxel indices.
-%           .sensor_y_index  - Y index of the sensor plane.
+%           .voxel_element_idx - Nvox x 1 vector mapping each sensor voxel to
+%                                its element index (0 = unassigned). Ordered by
+%                                find(sensor_mask) linear index, which matches
+%                                the sensor_data row order from kspaceFirstOrder3D.
+%                                AUTHORITATIVE mapping; required for tilted sensors.
+%           .element_map       - LEGACY 2D fallback (local_nx x local_nz). Used
+%                                only when voxel_element_idx is missing.
+%           .num_elements      - Number of unique elements.
 %
 %   OUTPUTS:
 %       sensor_data_avg     - [num_elements x Nt] averaged sensor data.
@@ -29,11 +31,11 @@ function [sensor_data_avg, sensor_data_expanded] = apply_element_averaging(senso
 %                              Use this for time reversal input.
 %
 %   NOTES:
-%       - If element_map is empty or num_elements == 0, returns inputs unchanged.
-%       - The mapping from sensor_data rows to element indices relies on the
-%         sensor mask being ordered by linear index (MATLAB column-major).
-%         The sensor mask is at a single Y index, so the linear ordering
-%         within that Y-plane is column-major over (X, Z).
+%       - If both voxel_element_idx and element_map are empty (or num_elements
+%         == 0), returns inputs unchanged.
+%       - Prefers voxel_element_idx (works for tilted and flat sensors); falls
+%         back to flattening element_map column-major (legacy single-Y sensors
+%         only).
 %
 %   EXAMPLE:
 %       [sensor_data_avg, sensor_data_exp] = apply_element_averaging(sensor_data, sensor_info);
@@ -47,32 +49,34 @@ function [sensor_data_avg, sensor_data_expanded] = apply_element_averaging(senso
 %   See also: determine_sensor_mask, run_single_field_simulation
 
     % Passthrough if no element averaging
-    if isempty(sensor_info.element_map) || sensor_info.num_elements == 0
+    has_vox_idx = isfield(sensor_info, 'voxel_element_idx') && ...
+                  ~isempty(sensor_info.voxel_element_idx);
+    has_element_map = isfield(sensor_info, 'element_map') && ...
+                      ~isempty(sensor_info.element_map);
+    if (~has_vox_idx && ~has_element_map) || sensor_info.num_elements == 0
         sensor_data_avg = sensor_data;
         sensor_data_expanded = sensor_data;
         return;
     end
-    
+
     num_voxels = size(sensor_data, 1);
     Nt = size(sensor_data, 2);
     num_elements = sensor_info.num_elements;
-    element_map = sensor_info.element_map;
-    
-    % Flatten element_map to a vector matching the sensor voxel ordering.
-    % The sensor mask is at a single Y index, and sensor_data rows are ordered
-    % by linear index within the 3D grid. For a planar sensor at one Y index,
-    % the ordering is column-major over (Y=fixed, X, Z) which means X varies
-    % fastest, then Z.
-    %
-    % element_map is (local_nx x local_nz), where local_nx = X extent.
-    % Flatten column-major: element_map(:) gives X-first ordering, which
-    % matches the linear index ordering of the sensor plane.
-    
-    elem_vec = element_map(:);  % [local_nx * local_nz x 1]
-    
-    % Remove entries where element_map == 0 (removed voxels during validation)
-    valid_mask = elem_vec > 0;
-    elem_vec_valid = elem_vec(valid_mask);
+
+    if has_vox_idx
+        % Authoritative mapping: one entry per true sensor voxel, ordered by
+        % find(sensor_mask) linear index — exactly the order kspaceFirstOrder3D
+        % returns sensor_data rows in. Works for both flat and tilted sensors.
+        elem_vec_valid = double(sensor_info.voxel_element_idx(:));
+        elem_vec_valid = elem_vec_valid(elem_vec_valid > 0);
+    else
+        % LEGACY fallback for sensors built before the tilt refactor: flatten
+        % element_map column-major over (X, Z). Only correct when the sensor
+        % lies on a single Y slab.
+        elem_vec = sensor_info.element_map(:);
+        valid_mask = elem_vec > 0;
+        elem_vec_valid = elem_vec(valid_mask);
+    end
     
     % Sanity check: number of valid elements should match sensor voxels
     if length(elem_vec_valid) ~= num_voxels
