@@ -55,7 +55,7 @@ CONFIG.use_pressure_scale_correction = true;   % divide max(p0) / max(recon_pres
 %   'tr'     : iterative time-reversal (k-Wave back-propagation)
 %   'DAS'    : Delay-And-Sum back-projection (homogeneous c, non-iterative)
 %   'hybrid' : DAS for iter 1, k-Wave TR with residual correction for iters 2..N
-CONFIG.reconstruction_method = 'tr';
+CONFIG.reconstruction_method = 'DAS';
 
 CONFIG.num_time_reversal_iter = 30;
 CONFIG.convergence_tol        = 1e-3;

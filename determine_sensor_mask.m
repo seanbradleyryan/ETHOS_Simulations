@@ -128,6 +128,7 @@ standoff_mm       = get_field(config, 'sensor_standoff_mm', 5);
 jaw_margin_mm     = get_field(config, 'jaw_margin_mm', 10);
 placement_side    = get_field(config, 'sensor_placement', 'anterior');
 pml_size          = get_field(config, 'pml_size', 10);
+pml_size = 1; % Hardcoded because script logic assumes pml inside. 
 
 % Kerf is derived; never accepted from config.
 kerf_mm = element_pitch_mm - element_size_mm;
@@ -220,16 +221,17 @@ x_coords = origin(1) + (0:Nx-1) * dx;  % X physical positions (mm)
 z_coords = origin(3) + (0:Nz-1) * dz;  % Z physical positions (mm)
 
 % For each beam, project jaw opening onto the anterior surface
+% beam_metadata = [];
 if ~isempty(beam_metadata) && isstruct(beam_metadata)
     for b = 1:length(beam_metadata)
         ga = mod(beam_metadata(b).gantry_angle, 360);
         
         % Only exclude beams that project onto the anterior surface.
-        % AP beam (gantry ~0°): source is anterior, beam enters anteriorly.
-        % Beams with gantry > ~60° from anterior don't constrain anterior sensor.
+        % AP beam (gantry ~0): source is anterior, beam enters anteriorly.
+        % Beams with gantry > ~60 from anterior don't constrain anterior sensor.
         % Anterior-facing beams: gantry in [0, 60] or [300, 360].
         if ~((ga >= 0 && ga <= 60) || (ga >= 300 && ga <= 360))
-            fprintf('        [Sensor] Beam %d (gantry %.1f°): lateral/posterior, no anterior exclusion\n', ...
+            fprintf('        [Sensor] Beam %d (gantry %.1f): lateral/posterior, no anterior exclusion\n', ...
                 beam_metadata(b).beam_number, ga);
             continue;
         end
@@ -258,10 +260,10 @@ if ~isempty(beam_metadata) && isstruct(beam_metadata)
         end
         
         % Project jaw opening from source through isocenter onto anterior surface.
-        % For gantry ~0° (AP beam): source is above (anterior to) patient.
+        % For gantry ~0 (AP beam): source is above (anterior to) patient.
         % Source position: isocenter + SAD in the beam direction.
         %
-        % For gantry 0°: beam travels in +Y direction (anterior to posterior).
+        % For gantry 0: beam travels in +Y direction (anterior to posterior).
         % Source is at Y = iso_y - SAD (more anterior).
         % Jaw X limits define left-right field extent at isocenter.
         % Jaw Y limits define sup-inf field extent at isocenter.
@@ -276,12 +278,12 @@ if ~isempty(beam_metadata) && isstruct(beam_metadata)
         mean_surface_y_idx = round(median(valid_surface_y));
         mean_surface_y_mm = origin(2) + (mean_surface_y_idx - 1) * dy;
         
-        % For gantry ~0°: source Y = iso_y - SAD
+        % For gantry ~0: source Y = iso_y - SAD
         % SSD = source_y to surface_y distance
         ga_rad = deg2rad(ga);
         
         % Source position relative to isocenter (IEC gantry convention)
-        % Gantry 0°: beam travels +Y (ant→post), source at -Y from iso
+        % Gantry 0: beam travels +Y (antpost), source at -Y from iso
         % Using simplified projection for near-AP beams:
         source_y = iso(2) - SAD_mm * cosd(ga);
         
@@ -326,7 +328,7 @@ if ~isempty(beam_metadata) && isstruct(beam_metadata)
         % Mark exclusion zone
         exclusion_zone(ix_min:ix_max, iz_min:iz_max) = true;
         
-        fprintf('        [Sensor] Beam %d (gantry %.1f°): exclusion X=[%d,%d], Z=[%d,%d] (mag=%.2f)\n', ...
+        fprintf('        [Sensor] Beam %d (gantry %.1f): exclusion X=[%d,%d], Z=[%d,%d] (mag=%.2f)\n', ...
             beam_metadata(b).beam_number, ga, ix_min, ix_max, iz_min, iz_max, mag);
     end
 else
