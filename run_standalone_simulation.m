@@ -11,7 +11,7 @@ CONFIG.working_dir    = '/mnt/weka/home/80030361/ETHOS_Simulations';
 CONFIG.patient_id     = '1194203';
 CONFIG.session        = 'Session_1';
 
-CONFIG.dose_filename = 'dose_1194203_Session_1_reference_B9_96.mat';
+CONFIG.dose_filename = 'dose_1194203_Session_1_reference_CT_3_B15_112.mat';
 % TEMPORARY: standalone sim always uses CBCT1 (CT_1) geometry, regardless
 % of which CBCT the dose was actually computed on. Per-dose CBCT selection
 % lives in the multi-field driver, not here.
@@ -21,8 +21,8 @@ CONFIG.dose_file_override = '';
 CONFIG.cbct_file_override = '';
 
 CONFIG.sensor_placement_method = 'determine_sensor_mask';
-CONFIG.sensor_x_index = 20;
-CONFIG.sensor_y_index = 40;
+CONFIG.sensor_x_index = 2;
+CONFIG.sensor_y_index = 4;
 
 % Physical 2D ultrasound array geometry (sparse element mask).
 % Kerf is derived inside determine_sensor_mask as (pitch - size).
@@ -168,7 +168,7 @@ if isfield(dose_data, 'field_dose')
     end
     if (isfield(fd, 'is_sparse') && fd.is_sparse) || issparse(fd.dose_Gy)
         if ~isfield(fd, 'dose_dims')
-            error('field_dose.dose_dims missing — cannot reconstruct sparse dose.');
+            error('field_dose.dose_dims missing  cannot reconstruct sparse dose.');
         end
         doseGrid = reshape(full(fd.dose_Gy), fd.dose_dims);
         fprintf('       Loaded: field_dose.dose_Gy (sparse -> [%d x %d x %d])\n', fd.dose_dims);
@@ -196,7 +196,7 @@ if isfield(dose_data, 'field_dose')
 elseif isfield(dose_data, 'total_rs_dose_sparse')
     % Total dose file from step15_process_doses (sparse format).
     if ~isfield(dose_data, 'total_rs_dose_dims')
-        error('total_rs_dose_dims missing — cannot reconstruct sparse total dose.');
+        error('total_rs_dose_dims missing  cannot reconstruct sparse total dose.');
     end
     doseGrid = reshape(full(dose_data.total_rs_dose_sparse), dose_data.total_rs_dose_dims);
     fprintf('       Loaded: total_rs_dose_sparse (reconstructed [%d x %d x %d])\n', ...
@@ -225,7 +225,7 @@ Nx = gridSize(1); Ny = gridSize(2); Nz = gridSize(3);
 fprintf('       Grid size: [%d x %d x %d]\n', Nx, Ny, Nz);
 fprintf('       Dose range: [%.6f, %.4f] Gy\n', min(doseGrid(:)), max(doseGrid(:)));
 
-fprintf('[2/7] Loading CBCT data (CBCT1 / CT_1 — temporary standalone default)...\n');
+fprintf('[2/7] Loading CBCT data (CBCT1 / CT_1  temporary standalone default)...\n');
 if ~isfile(cbct_filepath)
     error('CBCT file not found: %s', cbct_filepath);
 end
@@ -443,7 +443,7 @@ switch CONFIG.sensor_placement_method
         m2 = min(Ny, size(sensor_mask_orig, 2));
         m3 = min(Nz, size(sensor_mask_orig, 3));
         sensor.mask(1:m1, 1:m2, 1:m3) = double(sensor_mask_orig(1:m1, 1:m2, 1:m3));
-        fprintf('       Sensor: determine_sensor_mask — %d active points\n', sum(sensor_mask_orig(:)));
+        fprintf('       Sensor: determine_sensor_mask  %d active points\n', sum(sensor_mask_orig(:)));
     case 'fixed_anterior'
         % Deterministic placement: anterior, inferior to beam field,
         % laterally centered on isocenter X.
@@ -462,7 +462,7 @@ switch CONFIG.sensor_placement_method
         m2 = min(Ny, size(sensor_mask_orig, 2));
         m3 = min(Nz, size(sensor_mask_orig, 3));
         sensor.mask(1:m1, 1:m2, 1:m3) = double(sensor_mask_orig(1:m1, 1:m2, 1:m3));
-        fprintf('       Sensor: fixed_anterior — %d active points\n', sum(sensor_mask_orig(:)));
+        fprintf('       Sensor: fixed_anterior  %d active points\n', sum(sensor_mask_orig(:)));
     otherwise
         error('Unknown sensor_placement_method: "%s"', CONFIG.sensor_placement_method);
 end
@@ -577,7 +577,7 @@ if CONFIG.convolution_kernel > 0
     fprintf('       Pulse model: sigma=%.1f us, noise=%.1f%%, lambda=%.1e\n', ...
         conv_kernel_sigma * 1e6, conv_noise_level * 100, conv_deconv_lambda);
 
-    % Build normalized Gaussian kernel in time (truncated at ±4 sigma)
+    % Build normalized Gaussian kernel in time (truncated at 4 sigma)
     sigma_samples = conv_kernel_sigma / dt;
     kernel_half   = ceil(4 * sigma_samples);
     t_kernel      = (-kernel_half : kernel_half)';
@@ -1129,7 +1129,7 @@ if CONFIG.plot_results
     plot_dose_panels(doseGrid, recon_dose, sensor.mask, medium_orig.density, spacing_mm, ...
         'Dose Comparison: Original vs Reconstructed');
 
-    % Figure 2  p0 convergence (max pressure + relative change) — TR & hybrid only
+    % Figure 2  p0 convergence (max pressure + relative change)  TR & hybrid only
     if any(strcmpi(CONFIG.reconstruction_method, {'tr', 'hybrid'}))
         p0_max_for_plot = max(p0(:));
         plot_convergence_history(conv_max_pressure, conv_rel_change, ...
@@ -1158,7 +1158,7 @@ function plot_sensor_dose_planes(dose_mask, sensor_mask, spacing_mm, density, co
 %  Shows three orthogonal projections (coronal, sagittal, axial).
 %  CT density is rendered as a grayscale background (mean-projection).
 %  Dose mask (dose >= 10% max) drawn as a filled semi-transparent blue region.
-%  Sensor drawn as a solid red line/region — computed via max-projection so it
+%  Sensor drawn as a solid red line/region  computed via max-projection so it
 %  always appears regardless of which slice the dose centroid falls on.
 %  This replaces the interactive 3-D isosurface view.
 
@@ -1530,7 +1530,7 @@ function reconPressure = run_das_recon(sensorData, sensor, medium, ...
                                        Nx, Ny, Nz, dx, dy, dz, dt)
 %RUN_DAS_RECON Delay-And-Sum back-projection at homogeneous sound speed.
 %  Returns reconPressure on the padded grid, max(.,0)-clipped, in DAS units.
-%  No correction_factor scaling applied — the caller decides when to apply it.
+%  No correction_factor scaling applied  the caller decides when to apply it.
 %
 %  Algorithm:
 %    1. Sensor positions from sensor.mask
@@ -1602,7 +1602,7 @@ function [fig_live, ax_recon, hImg_recon, hLine_max] = ...
     fig_live = figure('Name', 'Live Reconstruction', 'Color', 'w', ...
         'NumberTitle', 'off', 'Position', [100, 100, 1060, 440]);
 
-    % Panel 1 — initial p0 (axial slice, fixed reference)
+    % Panel 1  initial p0 (axial slice, fixed reference)
     ax_p0 = subplot(1, 3, 1);
     p0_orig_slice = squeeze(p0(1:Nx_orig, 1:Ny_orig, cz_live))';
     imagesc(ax_p0, p0_orig_slice);
@@ -1613,7 +1613,7 @@ function [fig_live, ax_recon, hImg_recon, hLine_max] = ...
     xlabel(ax_p0, 'X (voxel)'); ylabel(ax_p0, 'Y (voxel)');
     title(ax_p0, sprintf('Initial p_0   (Z=%d)', cz_live), 'FontWeight', 'bold');
 
-    % Panel 2 — current reconstructed p0 (updates each iteration)
+    % Panel 2  current reconstructed p0 (updates each iteration)
     ax_recon = subplot(1, 3, 2);
     hImg_recon = imagesc(ax_recon, zeros(Ny_orig, Nx_orig));
     axis(ax_recon, 'xy'); axis(ax_recon, 'image');
@@ -1621,7 +1621,7 @@ function [fig_live, ax_recon, hImg_recon, hLine_max] = ...
     xlabel(ax_recon, 'X (voxel)'); ylabel(ax_recon, 'Y (voxel)');
     title(ax_recon, 'Reconstructed p_0   (iter 0)', 'FontWeight', 'bold');
 
-    % Panel 3 — live max-pressure convergence
+    % Panel 3  live max-pressure convergence
     ax_conv = subplot(1, 3, 3);
     hLine_max = plot(ax_conv, NaN, NaN, 'b-o', 'LineWidth', 1.6, ...
         'MarkerSize', 4, 'MarkerFaceColor', [0.2, 0.4, 1.0]);
