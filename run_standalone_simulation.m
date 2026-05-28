@@ -77,6 +77,11 @@ CONFIG.save_results = true;
 CONFIG.output_file  = 'standalone_recon_results.mat';
 CONFIG.plot_results = true;
 
+% Diagnostic plot: three anatomical views (transverse, sagittal, coronal) of
+% the beam exclusion zone over the body. Useful to sanity-check that the
+% projected jaw rectangles aren't unrealistically large.
+CONFIG.plot_exclusion_zone = false;
+
 %% ========================= RESOLVE FILE PATHS ============================
 
 if ~isempty(CONFIG.dose_file_override)
@@ -438,6 +443,12 @@ switch CONFIG.sensor_placement_method
         [sensor_mask_orig, sensor_info_orig] = determine_sensor_mask( ...
             sct_for_sensor, field_dose_for_sensor, beam_meta, CONFIG);
 
+        % Optional diagnostic: three anatomical views of the exclusion zone.
+        if isfield(CONFIG, 'plot_exclusion_zone') && CONFIG.plot_exclusion_zone
+            plot_exclusion_zone_views(sct_for_sensor, sensor_info_orig, spacing_mm, ...
+                sprintf('Exclusion zone (gantry %.1f deg)', field_dose_for_sensor.gantry_angle));
+        end
+
         % --- GRID EXPANSION HANDLING ---
         % determine_sensor_mask may expand the grid in X/Z (or Y) to place the
         % sensor outside the beam exclusion zone, filling the new region with
@@ -495,6 +506,39 @@ switch CONFIG.sensor_placement_method
             medium.alpha_coeff = alphaCoeff_exp;
             medium.gruneisen   = gruneisen_exp;
             p0 = p0_exp;
+
+            % medium_orig is restored after FFT-pad cropping (~line 1059), and
+            % feeds conversionFactor for pressure->dose. Update it to the
+            % expanded pre-FFT-pad medium so its size matches the expanded
+            % reconPressure after cropping.
+            medium_orig = struct( ...
+                'density',     density_exp, ...
+                'sound_speed', soundSpeed_exp, ...
+                'alpha_coeff', alphaCoeff_exp, ...
+                'gruneisen',   gruneisen_exp);
+
+            % Expand doseGrid / doseMask with zeros (no dose in water padding).
+            doseGrid_exp = zeros(Nx_exp, Ny_exp, Nz_exp);
+            doseGrid_exp(xr, yr, zr) = doseGrid;
+            doseGrid = doseGrid_exp;
+
+            doseMask_exp = false(Nx_exp, Ny_exp, Nz_exp);
+            doseMask_exp(xr, yr, zr) = doseMask;
+            doseMask = doseMask_exp;
+
+            % Expand sct.bodyMask with false in the water region so downstream
+            % visualizations and masking still align with the expanded grid.
+            if isfield(sct, 'bodyMask') && isequal(size(sct.bodyMask), [Nx_orig, Ny_orig, Nz_orig])
+                body_exp = false(Nx_exp, Ny_exp, Nz_exp);
+                body_exp(xr, yr, zr) = sct.bodyMask;
+                sct.bodyMask = body_exp;
+            end
+            if isfield(sct, 'couchMask') && ~isempty(sct.couchMask) && ...
+                    isequal(size(sct.couchMask), [Nx_orig, Ny_orig, Nz_orig])
+                couch_exp = false(Nx_exp, Ny_exp, Nz_exp);
+                couch_exp(xr, yr, zr) = sct.couchMask;
+                sct.couchMask = couch_exp;
+            end
 
             Nx_orig = Nx_exp; Ny_orig = Ny_exp; Nz_orig = Nz_exp;
             gridSize_orig = [Nx_orig, Ny_orig, Nz_orig];
