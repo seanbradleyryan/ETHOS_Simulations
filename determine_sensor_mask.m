@@ -372,6 +372,13 @@ best_dist = Inf;
 best_ix_start = [];
 best_iz_start = [];
 
+% Track grid-expansion padding (set by the fallback path below).
+% Caller must apply matching water-filled padding to medium/p0/etc.
+grid_pad_x_pre  = 0; grid_pad_x_post = 0;
+grid_pad_y_pre  = 0; grid_pad_y_post = 0;
+grid_pad_z_pre  = 0; grid_pad_z_post = 0;
+grid_was_expanded = false;
+
 % Half-sensor extents for centering search
 half_nx = floor(sensor_nx / 2);
 half_nz = floor(sensor_nz / 2);
@@ -401,98 +408,120 @@ for ix_start = 1:(Nx - sensor_nx + 1)
     end
 end
 
-% Fallback A: slide past the exclusion zone, allowing the rigid aperture to
-% overhang the patient in Z. Parts of the footprint that sit beyond the body
-% are in coupling water, which is acceptable; we only need body somewhere
-% under the footprint to anchor the Y standoff, and the full footprint must
-% still clear the exclusion zone and the PML.
+% Fallback: expand the computational grid (in X and/or Z) to fit the sensor
+% outside the exclusion zone. New voxels are treated as water — body=false,
+% exclusion=false, no anterior surface. The caller must apply matching
+% water-filled padding to medium/p0 using sensor_info.grid_pad.
+% Inferior Z placement is preferred over superior on ties (per user).
 if isempty(best_ix_start)
-    fprintf('        [Sensor] No placement entirely on body; sliding past exclusion (Z-overhang allowed).\n');
+    fprintf('        [Sensor] No placement in original grid; expanding grid past exclusion zone.\n');
 
-    slide_available = ~exclusion_zone;
-    slide_available(1:pml_margin_x, :)             = false;
-    slide_available(end-pml_margin_x+1:end, :)     = false;
-    slide_available(:, 1:pml_margin_z)             = false;
-    slide_available(:, end-pml_margin_z+1:end)     = false;
+    % --- X placement: center on dose centroid; pad X only if sensor wider than grid ---
+    ix_start_target = dose_centroid_ix - half_nx;
+    ix_start_min_orig = pml_margin_x + 1;
+    ix_start_max_orig = Nx - pml_margin_x - sensor_nx + 1;
 
-    % Require at least this fraction of the footprint to be over real body,
-    % so the standoff Y can be derived from a surface (not pure water).
-    min_body_coverage_frac = 0.25;
+    if ix_start_max_orig >= ix_start_min_orig
+        ix_start_orig = max(ix_start_min_orig, min(ix_start_max_orig, ix_start_target));
+    else
+        % Grid narrower than sensor+PML; pad X symmetrically around target.
+        extra_x = (sensor_nx + 2 * pml_margin_x) - Nx;
+        grid_pad_x_pre  = floor(extra_x / 2);
+        grid_pad_x_post = extra_x - grid_pad_x_pre;
+        % In pre-expansion coords, the sensor's left edge sits at
+        % (pml_margin_x+1) - grid_pad_x_pre (may be <= 0; that range is water).
+        ix_start_orig = (pml_margin_x + 1) - grid_pad_x_pre;
+    end
+    ix_end_orig = ix_start_orig + sensor_nx - 1;
 
-    for ix_start = 1:(Nx - sensor_nx + 1)
-        for iz_start = 1:(Nz - sensor_nz + 1)
-            ix_end = ix_start + sensor_nx - 1;
-            iz_end = iz_start + sensor_nz - 1;
+    % --- Find exclusion Z extent within the sensor's X strip (clipped to original grid) ---
+    ix_lo_clip = max(1, ix_start_orig);
+    ix_hi_clip = min(Nx, ix_end_orig);
+    if ix_lo_clip > ix_hi_clip
+        excl_z_indices = [];
+    else
+        excl_strip = exclusion_zone(ix_lo_clip:ix_hi_clip, :);
+        excl_z_indices = find(any(excl_strip, 1));
+    end
 
-            patch = slide_available(ix_start:ix_end, iz_start:iz_end);
-            if ~all(patch(:))
-                continue;
-            end
+    if isempty(excl_z_indices)
+        % No exclusion under the sensor X strip — center on dose Z, no Z pad needed.
+        iz_start_orig   = max(pml_margin_z + 1, ...
+                          min(Nz - pml_margin_z - sensor_nz + 1, ...
+                              dose_centroid_iz - half_nz));
+        grid_pad_z_pre  = 0;
+        grid_pad_z_post = 0;
+        fprintf('        [Sensor] No exclusion in X strip; centered Z=%d (no Z pad)\n', iz_start_orig);
+    else
+        excl_z_max = max(excl_z_indices);
+        excl_z_min = min(excl_z_indices);
 
-            surf_patch = surface_valid(ix_start:ix_end, iz_start:iz_end);
-            if sum(surf_patch(:)) < min_body_coverage_frac * numel(surf_patch)
-                continue;
-            end
+        % Inferior candidate: butt up just past excl_z_max
+        iz_start_inf  = excl_z_max + 1;
+        iz_end_inf    = iz_start_inf + sensor_nz - 1;
+        pad_z_post_inf = max(0, iz_end_inf - (Nz - pml_margin_z));
 
-            cx = ix_start + half_nx;
-            cz = iz_start + half_nz;
-            dist = sqrt((cx - dose_centroid_ix)^2 + (cz - dose_centroid_iz)^2);
+        % Superior candidate: butt up just before excl_z_min
+        iz_end_sup    = excl_z_min - 1;
+        iz_start_sup  = iz_end_sup - sensor_nz + 1;
+        pad_z_pre_sup = max(0, (pml_margin_z + 1) - iz_start_sup);
 
-            if dist < best_dist
-                best_dist = dist;
-                best_ix_start = ix_start;
-                best_iz_start = iz_start;
-            end
+        if pad_z_post_inf <= pad_z_pre_sup
+            iz_start_orig   = iz_start_inf;
+            grid_pad_z_post = pad_z_post_inf;
+            fprintf('        [Sensor] Inferior to exclusion (Z=%d); padding Z+ by %d voxels (water)\n', ...
+                iz_start_orig, grid_pad_z_post);
+        else
+            iz_start_orig   = iz_start_sup;
+            grid_pad_z_pre  = pad_z_pre_sup;
+            fprintf('        [Sensor] Superior to exclusion (Z=%d orig); padding Z- by %d voxels (water)\n', ...
+                iz_start_orig, grid_pad_z_pre);
         end
     end
 
-    if ~isempty(best_ix_start)
-        fprintf('        [Sensor] Slid placement: X=[%d,%d], Z=[%d,%d] (dist to dose: %.1f voxels)\n', ...
-            best_ix_start, best_ix_start + sensor_nx - 1, ...
-            best_iz_start, best_iz_start + sensor_nz - 1, best_dist);
-    end
-end
+    % --- Pad anterior_surface / body / surface_valid / exclusion_zone with water defaults ---
+    new_Nx = Nx + grid_pad_x_pre + grid_pad_x_post;
+    new_Nz = Nz + grid_pad_z_pre + grid_pad_z_post;
 
-% Fallback B: if even the slide pass fails, try shrinking
-if isempty(best_ix_start)
-    warning('determine_sensor_mask:ShrinkSensor', ...
-        'Full sensor does not fit in available region. Attempting to shrink.');
-    
-    % Try progressively smaller sizes (90%, 80%, ..., 50%)
-    for shrink_pct = [0.9, 0.8, 0.7, 0.6, 0.5]
-        trial_nx = round(sensor_nx * shrink_pct);
-        trial_nz = round(sensor_nz * shrink_pct);
-        trial_half_nx = floor(trial_nx / 2);
-        trial_half_nz = floor(trial_nz / 2);
-        
-        for ix_start = 1:(Nx - trial_nx + 1)
-            for iz_start = 1:(Nz - trial_nz + 1)
-                ix_end = ix_start + trial_nx - 1;
-                iz_end = iz_start + trial_nz - 1;
-                
-                patch = available(ix_start:ix_end, iz_start:iz_end);
-                if all(patch(:))
-                    cx = ix_start + trial_half_nx;
-                    cz = iz_start + trial_half_nz;
-                    dist = sqrt((cx - dose_centroid_ix)^2 + (cz - dose_centroid_iz)^2);
-                    
-                    if dist < best_dist
-                        best_dist = dist;
-                        best_ix_start = ix_start;
-                        best_iz_start = iz_start;
-                        sensor_nx = trial_nx;
-                        sensor_nz = trial_nz;
-                    end
-                end
-            end
-        end
-        
-        if ~isempty(best_ix_start)
-            fprintf('        [Sensor] Sensor shrunk to %.0f%% (now %d x %d voxels)\n', ...
-                shrink_pct * 100, sensor_nx, sensor_nz);
-            break;
-        end
-    end
+    body_expanded = false(Ny, new_Nx, new_Nz);
+    body_expanded(:, grid_pad_x_pre + (1:Nx), grid_pad_z_pre + (1:Nz)) = body;
+    body = body_expanded;
+
+    surface_valid_expanded = false(new_Nx, new_Nz);
+    surface_valid_expanded(grid_pad_x_pre + (1:Nx), grid_pad_z_pre + (1:Nz)) = surface_valid;
+    surface_valid = surface_valid_expanded;
+
+    exclusion_zone_expanded = false(new_Nx, new_Nz);
+    exclusion_zone_expanded(grid_pad_x_pre + (1:Nx), grid_pad_z_pre + (1:Nz)) = exclusion_zone;
+    exclusion_zone = exclusion_zone_expanded;
+
+    anterior_surface_expanded = NaN(new_Nx, new_Nz);
+    anterior_surface_expanded(grid_pad_x_pre + (1:Nx), grid_pad_z_pre + (1:Nz)) = anterior_surface;
+    anterior_surface = anterior_surface_expanded;
+
+    % Update grid dims to expanded values; downstream mask building uses these.
+    Nx_pre_expansion = Nx;
+    Nz_pre_expansion = Nz;
+    Nx = new_Nx;
+    Nz = new_Nz;
+    grid_dims = [Ny, Nx, Nz];
+
+    % Convert pre-expansion placement coords to expanded coords.
+    best_ix_start = ix_start_orig + grid_pad_x_pre;
+    best_iz_start = iz_start_orig + grid_pad_z_pre;
+    best_dist     = sqrt( (best_ix_start + half_nx - (dose_centroid_ix + grid_pad_x_pre))^2 + ...
+                          (best_iz_start + half_nz - (dose_centroid_iz + grid_pad_z_pre))^2 );
+
+    % Shift dose centroid voxel index into expanded coords (for any downstream use).
+    dose_centroid_ix = dose_centroid_ix + grid_pad_x_pre;
+    dose_centroid_iz = dose_centroid_iz + grid_pad_z_pre;
+
+    grid_was_expanded = (grid_pad_x_pre + grid_pad_x_post + grid_pad_z_pre + grid_pad_z_post) > 0;
+
+    fprintf('        [Sensor] Grid expanded: [Nx %d, Nz %d] -> [Nx %d, Nz %d]; sensor at X=[%d,%d], Z=[%d,%d]\n', ...
+        Nx_pre_expansion, Nz_pre_expansion, Nx, Nz, ...
+        best_ix_start, best_ix_start + sensor_nx - 1, ...
+        best_iz_start, best_iz_start + sensor_nz - 1);
 end
 
 if isempty(best_ix_start)
@@ -510,9 +539,9 @@ sensor_z_range = [best_iz_start, best_iz_start + sensor_nz - 1];
 fprintf('        [Sensor] Placement: X=[%d,%d], Z=[%d,%d] (dist to dose: %.1f voxels)\n', ...
     sensor_x_range(1), sensor_x_range(2), sensor_z_range(1), sensor_z_range(2), best_dist);
 
-% If shrink fallback reduced the aperture, reduce elements_per_side to fit at
-% the configured pitch. Each axis is capped independently; we use the min so
-% the array stays square. This is reported as a warn-and-degrade event.
+% Defensive: confirm the aperture footprint can host the configured element
+% grid at the requested pitch. With grid-expansion, this should always pass;
+% kept as a guard in case sensor_nx/sensor_nz were modified elsewhere.
 actual_aperture_x_mm = sensor_nx * dx;
 actual_aperture_z_mm = sensor_nz * dz;
 N_fit_x = max(1, floor(actual_aperture_x_mm / element_pitch_mm));
@@ -533,9 +562,10 @@ end
 surface_patch = anterior_surface(sensor_x_range(1):sensor_x_range(2), ...
                                   sensor_z_range(1):sensor_z_range(2));
 
-% Footprint may overhang the body in Z (slide-pass placement), so NaN columns
-% are expected. Take the min over real surface points only; fall back to the
-% global median anterior surface Y if no body sits under the footprint at all.
+% Footprint may overhang the body (grid-expansion placement places the
+% sensor in water past the body's Z extent), so NaN columns are expected.
+% Take the min over real surface points only; fall back to the global
+% median anterior surface Y if no body sits under the footprint at all.
 min_anterior_y = min(surface_patch(:), [], 'omitnan');
 if isnan(min_anterior_y)
     valid_surface_y_all = anterior_surface(surface_valid);
@@ -781,6 +811,16 @@ sensor_info.anterior_surface            = anterior_surface;
 sensor_info.standoff_voxels             = standoff_voxels;
 sensor_info.gantry_angle                = field_dose.gantry_angle;
 
+% Grid expansion applied to fit sensor outside exclusion zone. Caller must
+% apply matching water-filled padding to medium fields and p0 so the sensor
+% mask's coordinate system matches the simulation grid. Order matches the
+% native (Ny, Nx, Nz) array layout returned by size(sensor_mask).
+sensor_info.grid_pad = struct( ...
+    'y_pre',  grid_pad_y_pre,  'y_post', grid_pad_y_post, ...
+    'x_pre',  grid_pad_x_pre,  'x_post', grid_pad_x_post, ...
+    'z_pre',  grid_pad_z_pre,  'z_post', grid_pad_z_post, ...
+    'expanded', grid_was_expanded);
+
 fprintf('        [Sensor] Surface-to-dose distance: %.1f mm\n', surface_to_dose_distance_mm);
 fprintf('        [Sensor] Placement complete.\n');
 
@@ -854,6 +894,9 @@ function [sensor_mask, sensor_info] = empty_result(grid_dims)
     sensor_info.sensor_size_voxels          = [0, 0];
     sensor_info.placement_valid             = false;
     sensor_info.num_sensor_voxels           = 0;
+    sensor_info.grid_pad                    = struct( ...
+        'y_pre', 0, 'y_post', 0, 'x_pre', 0, 'x_post', 0, ...
+        'z_pre', 0, 'z_post', 0, 'expanded', false);
 end
 
 

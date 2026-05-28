@@ -435,10 +435,113 @@ switch CONFIG.sensor_placement_method
             beam_meta = CONFIG.beam_metadata;
         end
 
-        [sensor_mask_orig, ~] = determine_sensor_mask( ...
+        [sensor_mask_orig, sensor_info_orig] = determine_sensor_mask( ...
             sct_for_sensor, field_dose_for_sensor, beam_meta, CONFIG);
 
-        % Embed into the current (possibly padded) grid
+        % --- GRID EXPANSION HANDLING ---
+        % determine_sensor_mask may expand the grid in X/Z (or Y) to place the
+        % sensor outside the beam exclusion zone, filling the new region with
+        % water. Apply matching water padding to medium/p0 here so the sim
+        % grid coordinate system matches the sensor mask. Expansion is applied
+        % to the un-FFT-padded data, then FFT-optimal padding is re-run.
+        gp = sensor_info_orig.grid_pad;
+        if gp.expanded
+            fprintf('       [Sensor] Grid expansion: Y(+%d/+%d), X(+%d/+%d), Z(+%d/+%d). Re-padding with water.\n', ...
+                gp.y_pre, gp.y_post, gp.x_pre, gp.x_post, gp.z_pre, gp.z_post);
+
+            density_unp    = medium.density(1:Nx_orig, 1:Ny_orig, 1:Nz_orig);
+            soundSpeed_unp = medium.sound_speed(1:Nx_orig, 1:Ny_orig, 1:Nz_orig);
+            if numel(medium.alpha_coeff) > 1
+                alphaCoeff_unp = medium.alpha_coeff(1:Nx_orig, 1:Ny_orig, 1:Nz_orig);
+            else
+                alphaCoeff_unp = medium.alpha_coeff;
+            end
+            gruneisen_unp  = medium.gruneisen(1:Nx_orig, 1:Ny_orig, 1:Nz_orig);
+            p0_unp         = p0(1:Nx_orig, 1:Ny_orig, 1:Nz_orig);
+
+            % determine_sensor_mask labels dim 1=Y, dim 2=X, dim 3=Z, but it
+            % preserves the caller's actual dim order. Since this script passes
+            % bodyMask with dim 1=Nx, dim 2=Ny, dim 3=Nz, the function's
+            % grid_pad fields map as:
+            %   gp.y_*  -> script dim 1 (Nx)   [currently always 0]
+            %   gp.x_*  -> script dim 2 (Ny)
+            %   gp.z_*  -> script dim 3 (Nz)
+            Nx_exp = Nx_orig + gp.y_pre + gp.y_post;
+            Ny_exp = Ny_orig + gp.x_pre + gp.x_post;
+            Nz_exp = Nz_orig + gp.z_pre + gp.z_post;
+
+            density_exp    = ones(Nx_exp, Ny_exp, Nz_exp)  * 1000;
+            soundSpeed_exp = ones(Nx_exp, Ny_exp, Nz_exp)  * 1540;
+            alphaCoeff_exp = zeros(Nx_exp, Ny_exp, Nz_exp);
+            gruneisen_exp  = zeros(Nx_exp, Ny_exp, Nz_exp);
+            p0_exp         = zeros(Nx_exp, Ny_exp, Nz_exp);
+
+            xr = gp.y_pre + (1:Nx_orig);
+            yr = gp.x_pre + (1:Ny_orig);
+            zr = gp.z_pre + (1:Nz_orig);
+
+            density_exp(xr, yr, zr)    = density_unp;
+            soundSpeed_exp(xr, yr, zr) = soundSpeed_unp;
+            if numel(alphaCoeff_unp) > 1
+                alphaCoeff_exp(xr, yr, zr) = alphaCoeff_unp;
+            else
+                alphaCoeff_exp(:) = alphaCoeff_unp;
+            end
+            gruneisen_exp(xr, yr, zr)  = gruneisen_unp;
+            p0_exp(xr, yr, zr)         = p0_unp;
+
+            medium.density     = density_exp;
+            medium.sound_speed = soundSpeed_exp;
+            medium.alpha_coeff = alphaCoeff_exp;
+            medium.gruneisen   = gruneisen_exp;
+            p0 = p0_exp;
+
+            Nx_orig = Nx_exp; Ny_orig = Ny_exp; Nz_orig = Nz_exp;
+            gridSize_orig = [Nx_orig, Ny_orig, Nz_orig];
+
+            % Re-run FFT-optimal padding on the expanded grid (water fills).
+            if CONFIG.use_grid_padding
+                Nx_pad2 = find_optimal_kwave_size(Nx_orig, CONFIG.pml_size);
+                Ny_pad2 = find_optimal_kwave_size(Ny_orig, CONFIG.pml_size);
+                Nz_pad2 = find_optimal_kwave_size(Nz_orig, CONFIG.pml_size);
+            else
+                Nx_pad2 = Nx_orig; Ny_pad2 = Ny_orig; Nz_pad2 = Nz_orig;
+            end
+
+            if ~isequal([Nx_pad2, Ny_pad2, Nz_pad2], [Nx_orig, Ny_orig, Nz_orig])
+                fprintf('       [Sensor] Re-pad to FFT-optimal: [%d %d %d] -> [%d %d %d]\n', ...
+                    Nx_orig, Ny_orig, Nz_orig, Nx_pad2, Ny_pad2, Nz_pad2);
+                density_pad    = ones(Nx_pad2, Ny_pad2, Nz_pad2)  * 1000;
+                soundSpeed_pad = ones(Nx_pad2, Ny_pad2, Nz_pad2)  * 1540;
+                alphaCoeff_pad = zeros(Nx_pad2, Ny_pad2, Nz_pad2);
+                gruneisen_pad  = zeros(Nx_pad2, Ny_pad2, Nz_pad2);
+                p0_pad2        = zeros(Nx_pad2, Ny_pad2, Nz_pad2);
+
+                density_pad(1:Nx_orig, 1:Ny_orig, 1:Nz_orig)    = medium.density;
+                soundSpeed_pad(1:Nx_orig, 1:Ny_orig, 1:Nz_orig) = medium.sound_speed;
+                if numel(medium.alpha_coeff) > 1
+                    alphaCoeff_pad(1:Nx_orig, 1:Ny_orig, 1:Nz_orig) = medium.alpha_coeff;
+                else
+                    alphaCoeff_pad(:) = medium.alpha_coeff;
+                end
+                gruneisen_pad(1:Nx_orig, 1:Ny_orig, 1:Nz_orig) = medium.gruneisen;
+                p0_pad2(1:Nx_orig, 1:Ny_orig, 1:Nz_orig)       = p0;
+
+                medium.density     = density_pad;
+                medium.sound_speed = soundSpeed_pad;
+                medium.alpha_coeff = alphaCoeff_pad;
+                medium.gruneisen   = gruneisen_pad;
+                p0 = p0_pad2;
+            end
+
+            Nx = Nx_pad2; Ny = Ny_pad2; Nz = Nz_pad2;
+            gridSize = [Nx, Ny, Nz];
+            sensor.mask = zeros(Nx, Ny, Nz);
+        end
+
+        % Embed sensor mask. determine_sensor_mask preserves the caller's dim
+        % order — its dim 1 matches sct.bodyMask's dim 1 (which is Nx in this
+        % script). No permute needed.
         m1 = min(Nx, size(sensor_mask_orig, 1));
         m2 = min(Ny, size(sensor_mask_orig, 2));
         m3 = min(Nz, size(sensor_mask_orig, 3));
