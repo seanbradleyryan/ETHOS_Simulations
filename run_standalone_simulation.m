@@ -443,12 +443,6 @@ switch CONFIG.sensor_placement_method
         [sensor_mask_orig, sensor_info_orig] = determine_sensor_mask( ...
             sct_for_sensor, field_dose_for_sensor, beam_meta, CONFIG);
 
-        % Optional diagnostic: three anatomical views of the exclusion zone.
-        if isfield(CONFIG, 'plot_exclusion_zone') && CONFIG.plot_exclusion_zone
-            plot_exclusion_zone_views(sct_for_sensor, sensor_info_orig, spacing_mm, ...
-                sprintf('Exclusion zone (gantry %.1f deg)', field_dose_for_sensor.gantry_angle));
-        end
-
         % --- GRID EXPANSION HANDLING ---
         % determine_sensor_mask may expand the grid in X/Z (or Y) to place the
         % sensor outside the beam exclusion zone, filling the new region with
@@ -581,6 +575,14 @@ switch CONFIG.sensor_placement_method
             Nx = Nx_pad2; Ny = Ny_pad2; Nz = Nz_pad2;
             gridSize = [Nx, Ny, Nz];
             sensor.mask = zeros(Nx, Ny, Nz);
+        end
+
+        % Optional diagnostic: three anatomical views of the exclusion zone.
+        % Placed after grid expansion so sct.bodyMask and the exclusion zone
+        % share the same coordinate system (both expanded if expansion ran).
+        if isfield(CONFIG, 'plot_exclusion_zone') && CONFIG.plot_exclusion_zone
+            plot_exclusion_zone_views(sct, sensor_info_orig, spacing_mm, ...
+                sprintf('Exclusion zone (gantry %.1f deg)', field_dose_for_sensor.gantry_angle));
         end
 
         % Embed sensor mask. determine_sensor_mask preserves the caller's dim
