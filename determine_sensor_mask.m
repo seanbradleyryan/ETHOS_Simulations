@@ -211,129 +211,48 @@ if num_surface_pts == 0
     return;
 end
 
-%% ======================== STEP 2: BEAM FIELD EXCLUSION ZONE ========================
+%% ======================== STEP 2: DOSE-BASED EXCLUSION ZONE ========================
 
-% Initialize exclusion zone on the anterior surface (X x Z)
+% Exclusion zone: any transverse (Z) slice that contains a voxel with
+% >= 10% of the peak dose is excluded across its full X extent on the
+% anterior surface. This keeps the sensor longitudinally clear of the
+% high-dose region without depending on beam-metadata projection geometry.
+%
+% beam_metadata is no longer consulted for exclusion; it is retained in
+% the function signature for backwards compatibility.
+
 exclusion_zone = false(Nx, Nz);
 
-% Compute physical coordinates for each X, Z index
-x_coords = origin(1) + (0:Nx-1) * dx;  % X physical positions (mm)
-z_coords = origin(3) + (0:Nz-1) * dz;  % Z physical positions (mm)
+dose = field_dose.dose_Gy;
+dose_max = max(dose(:));
 
-% For each beam, project jaw opening onto the anterior surface
-% beam_metadata = [];
-if ~isempty(beam_metadata) && isstruct(beam_metadata)
-    for b = 1:length(beam_metadata)
-        ga = mod(beam_metadata(b).gantry_angle, 360);
-        
-        % Only exclude beams that project onto the anterior surface.
-        % AP beam (gantry ~0): source is anterior, beam enters anteriorly.
-        % Beams with gantry > ~60 from anterior don't constrain anterior sensor.
-        % Anterior-facing beams: gantry in [0, 60] or [300, 360].
-        if ~((ga >= 0 && ga <= 60) || (ga >= 300 && ga <= 360))
-            fprintf('        [Sensor] Beam %d (gantry %.1f): lateral/posterior, no anterior exclusion\n', ...
-                beam_metadata(b).beam_number, ga);
-            continue;
-        end
-        
-        % Check for required fields
-        if ~isfield(beam_metadata(b), 'isocenter') || isempty(beam_metadata(b).isocenter)
-            warning('determine_sensor_mask:NoIsocenter', ...
-                'Beam %d missing isocenter. Using dose centroid as fallback.', ...
-                beam_metadata(b).beam_number);
-            % Fallback: use dose centroid
-            iso = compute_dose_centroid_mm(field_dose, origin, dx, dy, dz);
+if ~isempty(dose) && dose_max > 0
+    dose_thresh = 0.10 * dose_max;
+
+    % field_dose.dose_Gy shares the sct grid layout (Ny, Nx, Nz). Per-slice
+    % peak along Z by collapsing dims 1 and 2.
+    if ~isequal(size(dose), [Ny, Nx, Nz])
+        warning('determine_sensor_mask:DoseSizeMismatch', ...
+            'field_dose.dose_Gy size %s does not match sct grid [%d %d %d]. Skipping exclusion.', ...
+            mat2str(size(dose)), Ny, Nx, Nz);
+    else
+        slice_max = squeeze(max(max(dose, [], 1), [], 2));   % [Nz x 1]
+        excluded_z_mask = slice_max(:) >= dose_thresh;        % logical [Nz x 1]
+        exclusion_zone(:, excluded_z_mask) = true;
+
+        excluded_z_idx = find(excluded_z_mask);
+        if isempty(excluded_z_idx)
+            z_lo = 0; z_hi = 0;
         else
-            iso = beam_metadata(b).isocenter(:)';  % [x, y, z] mm
+            z_lo = excluded_z_idx(1);
+            z_hi = excluded_z_idx(end);
         end
-        
-        if ~isfield(beam_metadata(b), 'jaw_x') || isempty(beam_metadata(b).jaw_x)
-            % Default Halcyon 10x10 cm jaws
-            warning('determine_sensor_mask:NoJaws', ...
-                'Beam %d missing jaw data. Using default [-50, 50] mm.', ...
-                beam_metadata(b).beam_number);
-            jaw_x = [-50, 50];
-            jaw_y = [-50, 50];
-        else
-            jaw_x = beam_metadata(b).jaw_x;
-            jaw_y = beam_metadata(b).jaw_y;
-        end
-        
-        % Project jaw opening from source through isocenter onto anterior surface.
-        % For gantry ~0 (AP beam): source is above (anterior to) patient.
-        % Source position: isocenter + SAD in the beam direction.
-        %
-        % For gantry 0: beam travels in +Y direction (anterior to posterior).
-        % Source is at Y = iso_y - SAD (more anterior).
-        % Jaw X limits define left-right field extent at isocenter.
-        % Jaw Y limits define sup-inf field extent at isocenter.
-        %
-        % Project to the anterior surface Y plane:
-        % For a general anterior beam, we project the jaw rectangle at isocenter
-        % onto the mean anterior surface Y. Divergence factor = SSD / SAD,
-        % where SSD = distance from source to anterior surface.
-        
-        % Mean anterior surface Y position (physical)
-        valid_surface_y = anterior_surface(surface_valid);
-        mean_surface_y_idx = round(median(valid_surface_y));
-        mean_surface_y_mm = origin(2) + (mean_surface_y_idx - 1) * dy;
-        
-        % For gantry ~0: source Y = iso_y - SAD
-        % SSD = source_y to surface_y distance
-        ga_rad = deg2rad(ga);
-        
-        % Source position relative to isocenter (IEC gantry convention)
-        % Gantry 0: beam travels +Y (antpost), source at -Y from iso
-        % Using simplified projection for near-AP beams:
-        source_y = iso(2) - SAD_mm * cosd(ga);
-        
-        % Distance from source to anterior surface
-        SSD = mean_surface_y_mm - source_y;
-        
-        if SSD <= 0
-            % Surface is behind the source - shouldn't happen for AP
-            fprintf('        [Sensor] Beam %d: SSD <= 0, skipping exclusion\n', ...
-                beam_metadata(b).beam_number);
-            continue;
-        end
-        
-        % Divergence magnification factor from isocenter to surface
-        SAD_to_surface = mean_surface_y_mm - source_y;
-        SAD_to_iso = iso(2) - source_y;
-        
-        if SAD_to_iso <= 0
-            mag = 1.0;  % Fallback
-        else
-            mag = SAD_to_surface / SAD_to_iso;
-        end
-        
-        % Projected field extent at anterior surface (mm, centered on isocenter X,Z)
-        field_x_min = iso(1) + jaw_x(1) * mag;
-        field_x_max = iso(1) + jaw_x(2) * mag;
-        field_z_min = iso(3) + jaw_y(1) * mag;  % jaw_y maps to Z (sup-inf)
-        field_z_max = iso(3) + jaw_y(2) * mag;
-        
-        % Add margin
-        field_x_min = field_x_min - jaw_margin_mm;
-        field_x_max = field_x_max + jaw_margin_mm;
-        field_z_min = field_z_min - jaw_margin_mm;
-        field_z_max = field_z_max + jaw_margin_mm;
-        
-        % Convert to voxel indices
-        ix_min = max(1,  floor((field_x_min - origin(1)) / dx) + 1);
-        ix_max = min(Nx, ceil( (field_x_max - origin(1)) / dx) + 1);
-        iz_min = max(1,  floor((field_z_min - origin(3)) / dz) + 1);
-        iz_max = min(Nz, ceil( (field_z_max - origin(3)) / dz) + 1);
-        
-        % Mark exclusion zone
-        exclusion_zone(ix_min:ix_max, iz_min:iz_max) = true;
-        
-        fprintf('        [Sensor] Beam %d (gantry %.1f): exclusion X=[%d,%d], Z=[%d,%d] (mag=%.2f)\n', ...
-            beam_metadata(b).beam_number, ga, ix_min, ix_max, iz_min, iz_max, mag);
+        fprintf('        [Sensor] Dose-based exclusion: %d/%d Z-slices (Z=[%d,%d]) >= 10%% of peak dose (%.3f Gy)\n', ...
+            sum(excluded_z_mask), Nz, z_lo, z_hi, dose_thresh);
     end
 else
-    warning('determine_sensor_mask:NoBeamMetadata', ...
-        'No beam metadata provided. Sensor placed without beam exclusion.');
+    warning('determine_sensor_mask:NoDose', ...
+        'Dose array is empty or zero; exclusion zone left empty.');
 end
 
 fprintf('        [Sensor] Exclusion zone: %d voxels (%.1f%% of surface)\n', ...
