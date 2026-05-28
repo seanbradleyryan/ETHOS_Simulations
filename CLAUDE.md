@@ -70,10 +70,15 @@ C:/Users/80030361/ETHOS_Simulations/
 
 ## Coordinate System
 
-- **DICOM:** `(x, y, z)` in mm; origin from `ImagePositionPatient`.
+- **DICOM:** `(x, y, z)` in mm; origin from `ImagePositionPatient`. HFS (head-first supine) convention assumed throughout.
 - **MATLAB arrays:** `(row, col, slice)` = `(Y, X, Z)`. **This mapping matters everywhere.**
 - **Grid dims stored as** `[ny, nx, nz]` — watch for transposition bugs.
 - **Spacing:** `[dx, dy, dz]` in mm; k-Wave requires meters: `dx_m = spacing(1) * 1e-3`.
+- **Axis directions** (HFS, all in voxel-index space):
+    - `X` (cols, dim 2): higher index = patient LEFT, lower = RIGHT.
+    - `Y` (rows, dim 1): **lower** index = ANTERIOR, higher = POSTERIOR.
+    - `Z` (slices, dim 3): **higher** index = SUPERIOR (cranial/head), lower = INFERIOR (caudal/feet). `dz > 0`.
+  When code talks about "sliding inferior" it means *toward lower iz* (feet). For abdominal/pancreas placement the ribs sit on the superior side, so a sensor that drifts to higher iz to clear an exclusion zone will be acoustically blocked.
 
 ## Code Conventions
 

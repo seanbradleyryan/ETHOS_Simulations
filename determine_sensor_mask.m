@@ -112,10 +112,13 @@ function [sensor_mask, sensor_info] = determine_sensor_mask(sct_resampled, field
 %           .grid_pad                    - Grid-expansion fallback bookkeeping.
 %
 %   COORDINATE SYSTEM:
-%       Dose grid uses DICOM patient coordinates:
+%       Dose grid uses DICOM patient coordinates (HFS convention):
 %           X = patient left-right (columns, dim 2)
-%           Y = patient anterior-posterior (rows, dim 1). Lower index = more anterior.
-%           Z = patient superior-inferior (slices, dim 3)
+%           Y = patient anterior-posterior (rows, dim 1).
+%               Lower index = more anterior.
+%           Z = patient superior-inferior (slices, dim 3).
+%               Higher index = SUPERIOR (cranial/head).
+%               Lower  index = INFERIOR (caudal/feet).
 %       Array indexing: array(Y, X, Z)
 %
 %   NOTES:
@@ -334,26 +337,63 @@ tilt_axis = [0; 0; 1];
 aim_normal_used = [0, -1, 0];
 N_total_elements = elements_per_side * elements_per_side;
 
-% Sweep candidate flat-sensor rectangles; pick the one closest to dose centroid
+% Sweep candidate flat-sensor rectangles. Two-stage search to bias slides
+% toward the FEET (inferior) when the dose centroid Z is blocked by the
+% exclusion zone — sliding superior (toward the head) would put the sensor
+% under the ribs, blocking the acoustic signal.
+%
+% HFS convention (see CLAUDE.md "Coordinate System"): higher Z voxel index
+% = superior (cranial/head); lower Z voxel index = inferior (caudal/feet).
 best_dist = Inf;
 best_ix_start = [];
 best_iz_start = [];
 half_nx = floor(sensor_nx / 2);
 half_nz = floor(sensor_nz / 2);
 
+% Stage 1: only consider placements whose center is inferior to (or aligned
+% with) the dose centroid Z.
 for ix_start = 1:(Nx - sensor_nx + 1)
     for iz_start = 1:(Nz - sensor_nz + 1)
+        cz = iz_start + half_nz;
+        if cz > dose_centroid_iz
+            continue;  % superior placement — skipped in stage 1
+        end
         ix_end = ix_start + sensor_nx - 1;
         iz_end = iz_start + sensor_nz - 1;
         patch = available(ix_start:ix_end, iz_start:iz_end);
         if all(patch(:))
             cx = ix_start + half_nx;
-            cz = iz_start + half_nz;
             dist = sqrt((cx - dose_centroid_ix)^2 + (cz - dose_centroid_iz)^2);
             if dist < best_dist
                 best_dist = dist;
                 best_ix_start = ix_start;
                 best_iz_start = iz_start;
+            end
+        end
+    end
+end
+
+% Stage 2: only run if no inferior placement is feasible — then allow
+% superior placements (last resort).
+if isempty(best_ix_start)
+    fprintf('        [Sensor] No inferior-of-dose placement; allowing superior.\n');
+    for ix_start = 1:(Nx - sensor_nx + 1)
+        for iz_start = 1:(Nz - sensor_nz + 1)
+            cz = iz_start + half_nz;
+            if cz <= dose_centroid_iz
+                continue;  % already exhausted in stage 1
+            end
+            ix_end = ix_start + sensor_nx - 1;
+            iz_end = iz_start + sensor_nz - 1;
+            patch = available(ix_start:ix_end, iz_start:iz_end);
+            if all(patch(:))
+                cx = ix_start + half_nx;
+                dist = sqrt((cx - dose_centroid_ix)^2 + (cz - dose_centroid_iz)^2);
+                if dist < best_dist
+                    best_dist = dist;
+                    best_ix_start = ix_start;
+                    best_iz_start = iz_start;
+                end
             end
         end
     end
@@ -394,26 +434,34 @@ if isempty(best_ix_start)
         grid_pad_z_post = 0;
         fprintf('        [Sensor] No exclusion in X strip; centered Z=%d (no Z pad)\n', iz_start_orig);
     else
+        % HFS convention: higher iz = superior (cranial); lower iz = inferior
+        % (caudal). Prefer to sit INFERIOR to the exclusion (lower iz, toward
+        % feet) so the ribs above the abdomen do not block the signal. Only
+        % choose the superior side if the inferior side would push the sensor
+        % off the grid by more padding.
         excl_z_max = max(excl_z_indices);
         excl_z_min = min(excl_z_indices);
-        iz_start_inf  = excl_z_max + 1;
-        iz_end_inf    = iz_start_inf + sensor_nz - 1;
-        pad_z_post_inf = max(0, iz_end_inf - (Nz - pml_margin_z));
 
-        iz_end_sup    = excl_z_min - 1;
-        iz_start_sup  = iz_end_sup - sensor_nz + 1;
-        pad_z_pre_sup = max(0, (pml_margin_z + 1) - iz_start_sup);
+        % Inferior candidate: butt up just BEFORE excl_z_min (lower Z = feet).
+        iz_end_inf    = excl_z_min - 1;
+        iz_start_inf  = iz_end_inf - sensor_nz + 1;
+        pad_z_pre_inf = max(0, (pml_margin_z + 1) - iz_start_inf);
 
-        if pad_z_post_inf <= pad_z_pre_sup
+        % Superior candidate: butt up just AFTER excl_z_max (higher Z = head).
+        iz_start_sup  = excl_z_max + 1;
+        iz_end_sup    = iz_start_sup + sensor_nz - 1;
+        pad_z_post_sup = max(0, iz_end_sup - (Nz - pml_margin_z));
+
+        if pad_z_pre_inf <= pad_z_post_sup
             iz_start_orig   = iz_start_inf;
-            grid_pad_z_post = pad_z_post_inf;
-            fprintf('        [Sensor] Inferior to exclusion (Z=%d); padding Z+ by %d voxels (water)\n', ...
-                iz_start_orig, grid_pad_z_post);
+            grid_pad_z_pre  = pad_z_pre_inf;
+            fprintf('        [Sensor] Inferior to exclusion (Z=%d orig); padding Z- by %d voxels (water)\n', ...
+                iz_start_orig, grid_pad_z_pre);
         else
             iz_start_orig   = iz_start_sup;
-            grid_pad_z_pre  = pad_z_pre_sup;
-            fprintf('        [Sensor] Superior to exclusion (Z=%d orig); padding Z- by %d voxels (water)\n', ...
-                iz_start_orig, grid_pad_z_pre);
+            grid_pad_z_post = pad_z_post_sup;
+            fprintf('        [Sensor] Superior to exclusion (Z=%d); padding Z+ by %d voxels (water) — inferior would need more padding\n', ...
+                iz_start_orig, grid_pad_z_post);
         end
     end
 
