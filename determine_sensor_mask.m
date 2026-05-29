@@ -72,6 +72,12 @@ function [sensor_mask, sensor_info] = determine_sensor_mask(sct_resampled, field
 %           .sensor_placement     - Placement side: 'anterior' (default)
 %           .pml_size             - PML thickness in voxels (default: 10)
 %           .aim_at_iso           - Enable iso-aimed tilt (default: true)
+%           .force_turn_angle     - Forced tilt magnitude in degrees about
+%                                   the iso-aim axis. 0 = normal feasibility-
+%                                   limited binary search. Nonzero = apply
+%                                   exactly this angle regardless of body
+%                                   or grid; the grid is expanded to fit.
+%                                   (default: 30)
 %
 %   OUTPUTS:
 %       sensor_mask - 3D logical array (same size as dose grid), true at sensor voxels.
@@ -153,6 +159,7 @@ pml_size          = get_field(config, 'pml_size', 10);
 pml_size = 1; % Hardcoded because script logic assumes pml inside.
 
 aim_at_iso        = get_field(config, 'aim_at_iso', true);
+force_turn_angle_deg = get_field(config, 'force_turn_angle', 30);
 
 % Kerf is derived; never accepted from config.
 kerf_mm = element_pitch_mm - element_size_mm;
@@ -572,7 +579,24 @@ if aim_at_iso
     c_mm = [sensor_center_x, sensor_center_y, sensor_center_z];
     [~, tilt_alpha, tilt_axis_candidate] = build_aim_rotation(c_mm, iso_mm);
 
-    if abs(tilt_alpha) < 1e-6
+    if force_turn_angle_deg ~= 0
+        % --- FORCED TILT ---
+        % Apply exactly the requested angle about the iso-aim axis; ignore
+        % body collision and grid bounds. The grid is expanded later (Step
+        % 4.6) to fit the rotated sensor.
+        force_rad = force_turn_angle_deg * pi / 180;
+        tilt_axis  = tilt_axis_candidate;
+        tilt_alpha = force_rad;   % store applied angle in alpha
+        tilt_theta = 1;           % theta=1 => tilt_angle_deg == force_turn_angle
+        tilt_R     = rodrigues(tilt_axis, force_rad);
+        d = c_mm - iso_mm;
+        nd = norm(d);
+        if nd > eps
+            aim_normal_used = d / nd;
+        end
+        fprintf('        [Sensor] FORCED tilt: %.2f deg about iso-aim axis (config.force_turn_angle); feasibility checks bypassed\n', ...
+            force_turn_angle_deg);
+    elseif abs(tilt_alpha) < 1e-6
         fprintf('        [Sensor] Sensor center already aligned with iso direction; no tilt needed.\n');
     else
         theta_max = binary_search_theta_max(c_mm, tilt_axis_candidate, tilt_alpha, ...
