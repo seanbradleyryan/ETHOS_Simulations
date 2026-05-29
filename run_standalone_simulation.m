@@ -421,7 +421,20 @@ switch CONFIG.sensor_placement_method
     case 'spherical'
         sph_radius  = floor(min([Nx, Ny, Nz]) / 2) - CONFIG.pml_size;
         sensor.mask = makeSphere(Nx, Ny, Nz, sph_radius);
-        fprintf('       Sensor: spherical, radius %d voxels\n', sph_radius);
+        % Anything outside the enclosing sphere is unobservable by this
+        % sensor geometry — zero p0 there so it doesn't pollute the forward
+        % simulation or downstream pressure scaling.
+        sph_cx = floor(Nx/2) + 1;
+        sph_cy = floor(Ny/2) + 1;
+        sph_cz = floor(Nz/2) + 1;
+        [Xg_sph, Yg_sph, Zg_sph] = ndgrid(1:Nx, 1:Ny, 1:Nz);
+        ball_mask = (Xg_sph - sph_cx).^2 + (Yg_sph - sph_cy).^2 + ...
+                    (Zg_sph - sph_cz).^2 <= sph_radius^2;
+        n_zeroed = nnz(p0 ~= 0 & ~ball_mask);
+        p0 = p0 .* ball_mask;
+        clear Xg_sph Yg_sph Zg_sph
+        fprintf('       Sensor: spherical, radius %d voxels (zeroed %d p0 voxels outside sphere)\n', ...
+            sph_radius, n_zeroed);
     case 'box'
         % Six-face bounding box enclosing the pressure: planes at index 3
         % and (N-3) on each axis.

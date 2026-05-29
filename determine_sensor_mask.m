@@ -30,13 +30,17 @@ function [sensor_mask, sensor_info] = determine_sensor_mask(sct_resampled, field
 %   5. Tilt toward iso (only if aim_at_iso): build the full Rodrigues
 %      rotation from coronal normal [0, -1, 0] to (c - iso)/|c - iso|,
 %      then binary-search the largest theta in [0, 1] for which every
-%      rotated element is outside body, outside exclusion projection,
-%      and inside grid + PML margin.
+%      rotated element stays outside the body. Grid bounds and the dose
+%      exclusion projection do NOT limit the search — PML is outside the
+%      grid and an in-air element above the skin does not interact with
+%      the dose volume.
+%   5b. Expand the grid (water padding) if the chosen tilt pushes any
+%      element past the original grid edge in X, Y, or Z, so the rotated
+%      sensor fits entirely inside the simulation grid.
 %   6. Voxelize: if theta > 0, round each rotated element center to its
 %      nearest voxel (single-voxel-per-element). Otherwise voxelize the
 %      flat sensor with multi-voxel-per-element element footprints.
-%   7. Validate: drop sensor voxels that fell inside body, in the exclusion
-%      XZ projection, or inside the PML margin.
+%   7. Validate: drop sensor voxels that fell inside the body.
 %   8. Element diagnostics: count voxels per element, fill factor, etc.
 %
 %   INPUTS:
@@ -295,13 +299,10 @@ end
 % Available region: on body surface AND not in exclusion zone
 available = surface_valid & ~exclusion_zone;
 
-% Also exclude PML boundary regions
-pml_margin_x = pml_size + 2;
-pml_margin_z = pml_size + 2;
-available(1:pml_margin_x, :) = false;
-available(end-pml_margin_x+1:end, :) = false;
-available(:, 1:pml_margin_z) = false;
-available(:, end-pml_margin_z+1:end) = false;
+% PML lives outside the grid: no edge buffer is required. If the placed (or
+% later tilted) sensor extends past the grid, the grid is expanded to fit.
+pml_margin_x = 0;
+pml_margin_z = 0;
 
 if sum(available(:)) < sensor_nx * sensor_nz
     warning('determine_sensor_mask:InsufficientSpace', ...
@@ -549,12 +550,8 @@ if isnan(min_anterior_y)
     fprintf('        [Sensor] No body under footprint; using median surface Y=%d\n', min_anterior_y);
 end
 sensor_y_index = max(1, min_anterior_y - standoff_voxels);
-if sensor_y_index <= pml_size
-    warning('determine_sensor_mask:SensorNearPML', ...
-        'Sensor Y index (%d) is within PML region (size %d). Adjusting.', ...
-        sensor_y_index, pml_size);
-    sensor_y_index = pml_size + 1;
-end
+% PML is outside the grid; sensor may sit at vy = 1. If a tilted sensor
+% later needs more anterior room, the grid is expanded below.
 
 sensor_center_x = origin(1) + (mean(sensor_x_range) - 1) * dx;
 sensor_center_y = origin(2) + (sensor_y_index - 1) * dy;
@@ -598,6 +595,97 @@ if aim_at_iso
         else
             fprintf('        [Sensor] Tilt search: max feasible theta=0; keeping flat placement.\n');
         end
+    end
+end
+
+%% ======================== STEP 4.6: GRID EXPANSION TO FIT TILT ========================
+% Rotation feasibility is body-only (PML is outside the grid). After the
+% tilt is chosen, some elements may have rotated past the original grid
+% edge in any of X, Y, or Z. Expand the grid (water padding) so every
+% rotated element center voxelizes inside the grid.
+
+if tilt_theta > 0
+    c_mm_for_tilt = [sensor_center_x, sensor_center_y, sensor_center_z];
+    half_span_pad = (elements_per_side - 1) / 2;
+    elem_vx_all = zeros(N_total_elements, 1);
+    elem_vy_all = zeros(N_total_elements, 1);
+    elem_vz_all = zeros(N_total_elements, 1);
+    ee = 0;
+    for ex = 1:elements_per_side
+        u_off = (ex - 1 - half_span_pad) * element_pitch_mm;
+        for ez = 1:elements_per_side
+            v_off = (ez - 1 - half_span_pad) * element_pitch_mm;
+            ee = ee + 1;
+            p_local = [u_off; v_off; 0];
+            p_w = (tilt_R * p_local)' + c_mm_for_tilt;
+            elem_vx_all(ee) = round((p_w(1) - origin(1)) / dx) + 1;
+            elem_vy_all(ee) = round((p_w(2) - origin(2)) / dy) + 1;
+            elem_vz_all(ee) = round((p_w(3) - origin(3)) / dz) + 1;
+        end
+    end
+
+    pad_x_pre_tilt  = max(0, 1 - min(elem_vx_all));
+    pad_x_post_tilt = max(0, max(elem_vx_all) - Nx);
+    pad_y_pre_tilt  = max(0, 1 - min(elem_vy_all));
+    pad_y_post_tilt = max(0, max(elem_vy_all) - Ny);
+    pad_z_pre_tilt  = max(0, 1 - min(elem_vz_all));
+    pad_z_post_tilt = max(0, max(elem_vz_all) - Nz);
+
+    tilt_pad_total = pad_x_pre_tilt + pad_x_post_tilt + ...
+                     pad_y_pre_tilt + pad_y_post_tilt + ...
+                     pad_z_pre_tilt + pad_z_post_tilt;
+
+    if tilt_pad_total > 0
+        fprintf('        [Sensor] Tilt pushes elements past grid; expanding by [X -%d/+%d, Y -%d/+%d, Z -%d/+%d] voxels (water)\n', ...
+            pad_x_pre_tilt, pad_x_post_tilt, ...
+            pad_y_pre_tilt, pad_y_post_tilt, ...
+            pad_z_pre_tilt, pad_z_post_tilt);
+
+        new_Nx = Nx + pad_x_pre_tilt + pad_x_post_tilt;
+        new_Ny = Ny + pad_y_pre_tilt + pad_y_post_tilt;
+        new_Nz = Nz + pad_z_pre_tilt + pad_z_post_tilt;
+
+        body_expanded = false(new_Ny, new_Nx, new_Nz);
+        body_expanded(pad_y_pre_tilt + (1:Ny), ...
+                      pad_x_pre_tilt + (1:Nx), ...
+                      pad_z_pre_tilt + (1:Nz)) = body;
+        body = body_expanded;
+
+        exclusion_zone_expanded = false(new_Nx, new_Nz);
+        exclusion_zone_expanded(pad_x_pre_tilt + (1:Nx), ...
+                                pad_z_pre_tilt + (1:Nz)) = exclusion_zone;
+        exclusion_zone = exclusion_zone_expanded;
+
+        anterior_surface_expanded = NaN(new_Nx, new_Nz);
+        anterior_surface_expanded(pad_x_pre_tilt + (1:Nx), ...
+                                  pad_z_pre_tilt + (1:Nz)) = anterior_surface;
+        anterior_surface = anterior_surface_expanded;
+
+        % Shift voxel-space bookkeeping; mm coordinates are unchanged after
+        % the origin shift below.
+        sensor_x_range = sensor_x_range + pad_x_pre_tilt;
+        sensor_z_range = sensor_z_range + pad_z_pre_tilt;
+        sensor_y_index = sensor_y_index + pad_y_pre_tilt;
+        dose_centroid_ix = dose_centroid_ix + pad_x_pre_tilt;
+        dose_centroid_iz = dose_centroid_iz + pad_z_pre_tilt;
+
+        % Origin = mm position of voxel (1,1,1); pre-padding moves it back.
+        origin(1) = origin(1) - pad_x_pre_tilt * dx;
+        origin(2) = origin(2) - pad_y_pre_tilt * dy;
+        origin(3) = origin(3) - pad_z_pre_tilt * dz;
+
+        Nx = new_Nx; Ny = new_Ny; Nz = new_Nz;
+        grid_dims = [Ny, Nx, Nz];
+        sensor_mask = false(grid_dims);
+        sensor_element_label = zeros(grid_dims, 'uint32');
+
+        grid_pad_x_pre  = grid_pad_x_pre  + pad_x_pre_tilt;
+        grid_pad_x_post = grid_pad_x_post + pad_x_post_tilt;
+        grid_pad_y_pre  = grid_pad_y_pre  + pad_y_pre_tilt;
+        grid_pad_y_post = grid_pad_y_post + pad_y_post_tilt;
+        grid_pad_z_pre  = grid_pad_z_pre  + pad_z_pre_tilt;
+        grid_pad_z_post = grid_pad_z_post + pad_z_post_tilt;
+        grid_was_expanded = true;
     end
 end
 
@@ -717,7 +805,10 @@ end
 
 placement_valid = true;
 
-% Check 1: No sensor voxels inside body
+% The only post-placement constraint is "no sensor voxel inside the body."
+% PML is outside the grid and the dose-exclusion projection is intentionally
+% allowed under the tilted sensor (elements in air above the skin do not
+% interact with the dose).
 overlap_body = sensor_mask & body;
 if any(overlap_body(:))
     num_overlap = sum(overlap_body(:));
@@ -726,39 +817,6 @@ if any(overlap_body(:))
     sensor_mask = sensor_mask & ~body;
     sensor_element_label(overlap_body) = 0;
     placement_valid = false;
-end
-
-% Check 2: No sensor voxels project into exclusion zone
-sensor_lin = find(sensor_mask);
-if ~isempty(sensor_lin)
-    [sv_y, sv_x, sv_z] = ind2sub(size(sensor_mask), sensor_lin);
-    excl_lookup_lin = sub2ind(size(exclusion_zone), sv_x, sv_z);
-    in_excl = exclusion_zone(excl_lookup_lin);
-    if any(in_excl)
-        warning('determine_sensor_mask:ExclusionOverlap', ...
-            '%d sensor voxels overlap exclusion zone projection. Removing.', sum(in_excl));
-        bad_lin = sensor_lin(in_excl);
-        sensor_mask(bad_lin) = false;
-        sensor_element_label(bad_lin) = 0;
-        placement_valid = false;
-    end
-end
-
-% Check 3: Sensor within grid bounds (accounting for PML)
-sensor_lin = find(sensor_mask);
-if ~isempty(sensor_lin)
-    [sv_y, sv_x, sv_z] = ind2sub(size(sensor_mask), sensor_lin);
-    bad = (sv_x <= pml_size) | (sv_x > Nx - pml_size) | ...
-          (sv_z <= pml_size) | (sv_z > Nz - pml_size) | ...
-          (sv_y <= pml_size) | (sv_y > Ny - pml_size);
-    if any(bad)
-        warning('determine_sensor_mask:PMLOverlap', ...
-            '%d sensor voxels lie inside PML margin. Removing.', sum(bad));
-        bad_lin = sensor_lin(bad);
-        sensor_mask(bad_lin) = false;
-        sensor_element_label(bad_lin) = 0;
-        placement_valid = false;
-    end
 end
 
 num_sensor_voxels_final = sum(sensor_mask(:));
@@ -1031,13 +1089,18 @@ end
 
 function [feasible, P_world, vox_idx] = check_placement(c_mm, R, ...
         elements_per_side, element_pitch_mm, origin, dx, dy, dz, ...
-        body, exclusion_zone, pml_size, Nx, Ny, Nz)
-%CHECK_PLACEMENT Evaluate whether ALL elements at (c, R) are inside grid,
-%   outside body, outside exclusion projection, and clear of PML.
+        body, ~, ~, Nx, Ny, Nz)
+%CHECK_PLACEMENT Evaluate whether ALL elements at (c, R) stay outside the body.
+%   PML lives outside the grid, so PML is NOT checked. Grid bounds are NOT
+%   enforced either: any element that rotates past the grid edge is assumed
+%   to be in air/water, and the caller will expand the grid to fit it. The
+%   dose-exclusion XZ projection is also ignored — an element in air above
+%   the skin does not interact with the dose volume even when its column
+%   sits in an irradiated Z slab.
 %   Returns:
-%     feasible - logical
+%     feasible - logical (true iff no rotated element falls inside body)
 %     P_world  - [N x 3] world positions (mm) for each element
-%     vox_idx  - [N x 3] voxel indices (y, x, z) for each element (NaN if out of grid)
+%     vox_idx  - [N x 3] voxel indices (y, x, z) for each element
 
     N2 = elements_per_side * elements_per_side;
     P_world = zeros(N2, 3);
@@ -1059,22 +1122,16 @@ function [feasible, P_world, vox_idx] = check_placement(c_mm, R, ...
             vx = round((p_w(1) - origin(1)) / dx) + 1;
             vy = round((p_w(2) - origin(2)) / dy) + 1;
             vz = round((p_w(3) - origin(3)) / dz) + 1;
-
-            if vx <= pml_size || vx > Nx - pml_size || ...
-               vy <= pml_size || vy > Ny - pml_size || ...
-               vz <= pml_size || vz > Nz - pml_size
-                feasible = false;
-                return;
-            end
-            if body(vy, vx, vz)
-                feasible = false;
-                return;
-            end
-            if exclusion_zone(vx, vz)
-                feasible = false;
-                return;
-            end
             vox_idx(e, :) = [vy, vx, vz];
+
+            % Only body collision limits rotation. Out-of-grid elements are
+            % handled by post-tilt grid expansion in the caller.
+            if vx >= 1 && vx <= Nx && vy >= 1 && vy <= Ny && vz >= 1 && vz <= Nz
+                if body(vy, vx, vz)
+                    feasible = false;
+                    return;
+                end
+            end
         end
     end
 end
