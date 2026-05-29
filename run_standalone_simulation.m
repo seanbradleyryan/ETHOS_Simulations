@@ -77,6 +77,16 @@ CONFIG.save_results = true;
 CONFIG.output_file  = 'standalone_recon_results.mat';
 CONFIG.plot_results = true;
 
+% Normalize: divide original and reconstructed dose by their own max before
+% comparison / gamma so both peak at 1.0.
+CONFIG.normalize = false;
+
+% Gamma logging: append CONFIG + gamma pass rates to gamma_log.mat (in
+% working_dir) after each run. Keeps a running record of the best gamma per
+% criterion and the CONFIG that produced it.
+CONFIG.log_gamma = false;
+CONFIG.gamma_log_file = 'gamma_log.mat';
+
 % Diagnostic plot: three anatomical views (transverse, sagittal, coronal) of
 % the beam exclusion zone over the body. Useful to sanity-check that the
 % projected jaw rectangles aren't unrealistically large.
@@ -412,6 +422,25 @@ switch CONFIG.sensor_placement_method
         sph_radius  = floor(min([Nx, Ny, Nz]) / 2) - CONFIG.pml_size;
         sensor.mask = makeSphere(Nx, Ny, Nz, sph_radius);
         fprintf('       Sensor: spherical, radius %d voxels\n', sph_radius);
+    case 'box'
+        % Six-face bounding box enclosing the pressure: planes at index 3
+        % and (N-3) on each axis.
+        bx_lo   = 3;
+        bx_hi_x = Nx - 3;
+        bx_hi_y = Ny - 3;
+        bx_hi_z = Nz - 3;
+        if bx_hi_x <= bx_lo || bx_hi_y <= bx_lo || bx_hi_z <= bx_lo
+            error('run_standalone_simulation:BoxTooSmall', ...
+                'Grid [%d %d %d] too small for box sensor (need each dim > 6).', Nx, Ny, Nz);
+        end
+        sensor.mask(bx_lo,   bx_lo:bx_hi_y, bx_lo:bx_hi_z) = 1;
+        sensor.mask(bx_hi_x, bx_lo:bx_hi_y, bx_lo:bx_hi_z) = 1;
+        sensor.mask(bx_lo:bx_hi_x, bx_lo,   bx_lo:bx_hi_z) = 1;
+        sensor.mask(bx_lo:bx_hi_x, bx_hi_y, bx_lo:bx_hi_z) = 1;
+        sensor.mask(bx_lo:bx_hi_x, bx_lo:bx_hi_y, bx_lo)   = 1;
+        sensor.mask(bx_lo:bx_hi_x, bx_lo:bx_hi_y, bx_hi_z) = 1;
+        fprintf('       Sensor: box faces at x=[%d,%d], y=[%d,%d], z=[%d,%d]\n', ...
+            bx_lo, bx_hi_x, bx_lo, bx_hi_y, bx_lo, bx_hi_z);
     case 'determine_sensor_mask'
         % Automatic placement via determine_sensor_mask: tilts a 2D array
         % toward the beam isocenter (or places it flat when CONFIG.aim_at_iso
@@ -1169,6 +1198,27 @@ if did_pad
     p0 = p0(1:Nx_orig, 1:Ny_orig, 1:Nz_orig);
 end
 
+%% ========================= NORMALIZE DOSES ===============================
+% When enabled, divide original and reconstructed doses by their respective
+% maxima so both peak at 1.0. Affects downstream RESULTS SUMMARY, gamma, and
+% plotting.
+
+if isfield(CONFIG, 'normalize') && CONFIG.normalize
+    dg_max = max(doseGrid(:));
+    rd_max = max(recon_dose(:));
+    fprintf('\n[NORM] Normalizing doses by their max:\n');
+    fprintf('       Original max:      %.4f Gy\n', dg_max);
+    fprintf('       Reconstructed max: %.4f Gy\n', rd_max);
+    if dg_max > 0
+        doseGrid = doseGrid / dg_max;
+    end
+    if rd_max > 0
+        recon_dose = recon_dose / rd_max;
+    end
+    % Re-derive the low-dose threshold relative to the (now-normalized) original
+    doseThreshold = 0.01 * max(doseGrid(:));
+end
+
 %% ========================= RESULTS SUMMARY ===============================
 
 fprintf('\n========= RESULTS =========\n');
@@ -1248,6 +1298,90 @@ if exist('CalcGamma', 'file') == 2
 else
     warning('CalcGamma not found. Skipping gamma analysis.');
     gamma_results = [];
+end
+
+%% ========================= GAMMA LOG ====================================
+% Append CONFIG + gamma pass rates to a running .mat log. Maintains a
+% per-criterion best record (highest pass rate and the CONFIG that produced
+% it). Skipped when gamma analysis failed or produced no results.
+
+if isfield(CONFIG, 'log_gamma') && CONFIG.log_gamma && ...
+        ~isempty(gamma_results) && isfield(gamma_results, 'pass_rates')
+
+    if isfield(CONFIG, 'gamma_log_file') && ~isempty(CONFIG.gamma_log_file)
+        log_path = CONFIG.gamma_log_file;
+    else
+        log_path = 'gamma_log.mat';
+    end
+    if ~isfolder(fileparts(log_path)) && ~isempty(fileparts(log_path))
+        log_path = fullfile(CONFIG.working_dir, log_path);
+    elseif isempty(fileparts(log_path))
+        log_path = fullfile(CONFIG.working_dir, log_path);
+    end
+
+    entry = struct();
+    entry.timestamp     = datestr(now, 'yyyy-mm-dd HH:MM:SS');
+    entry.config        = CONFIG;
+    entry.dose_filename = CONFIG.dose_filename;
+    entry.criteria      = gamma_results.criteria(:, 3);
+    entry.pass_rates    = gamma_results.pass_rates(:);
+
+    n_crit = numel(entry.pass_rates);
+
+    if isfile(log_path)
+        L = load(log_path);
+        if isfield(L, 'log_entries')
+            log_entries = L.log_entries;
+        else
+            log_entries = struct([]);
+        end
+        if isfield(L, 'best')
+            best = L.best;
+        else
+            best = repmat(struct('criterion', '', 'pass_rate', -Inf, ...
+                'config', [], 'timestamp', ''), n_crit, 1);
+            for gc = 1:n_crit
+                best(gc).criterion = entry.criteria{gc};
+            end
+        end
+    else
+        log_entries = struct([]);
+        best = repmat(struct('criterion', '', 'pass_rate', -Inf, ...
+            'config', [], 'timestamp', ''), n_crit, 1);
+        for gc = 1:n_crit
+            best(gc).criterion = entry.criteria{gc};
+        end
+    end
+
+    if isempty(log_entries)
+        log_entries = entry;
+    else
+        log_entries(end+1) = entry;
+    end
+
+    for gc = 1:n_crit
+        pr = entry.pass_rates(gc);
+        if ~isnan(pr) && pr > best(gc).pass_rate
+            best(gc).criterion = entry.criteria{gc};
+            best(gc).pass_rate = pr;
+            best(gc).config    = CONFIG;
+            best(gc).timestamp = entry.timestamp;
+        end
+    end
+
+    save(log_path, 'log_entries', 'best', '-v7.3');
+
+    fprintf('\n[GammaLog] Appended run to %s (%d total entries).\n', ...
+        log_path, numel(log_entries));
+    fprintf('           Best pass rates so far:\n');
+    for gc = 1:n_crit
+        if isfinite(best(gc).pass_rate)
+            fprintf('             %-12s  %.2f%%   (%s)\n', ...
+                best(gc).criterion, best(gc).pass_rate, best(gc).timestamp);
+        else
+            fprintf('             %-12s  (none)\n', best(gc).criterion);
+        end
+    end
 end
 
 %% ========================= SAVE RESULTS =================================
