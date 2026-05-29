@@ -210,6 +210,10 @@ for i = 1:num_files
             fd.dose_Gy = reshape(full(fd.dose_Gy), fd.dose_dims);
         end
 
+        % Expose the source .mat filename so downstream consumers can name
+        % derived outputs after the input (e.g. <basename>_sim.mat).
+        fd.source_mat_filename = field_files(idx).name;
+
         field_doses{i} = fd;
         loaded_count = loaded_count + 1;
 

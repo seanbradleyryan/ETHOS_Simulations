@@ -239,6 +239,8 @@ for p_idx = 1:length(CONFIG.patients)
                         recon_doses{f} = gather(recon_doses{f});
                         save_field_reconstruction(recon_doses{f}, fi, ...
                             patient_id, session, CONFIG);
+                        save_simulated_dose(recon_doses{f}, field_doses{fi}, ...
+                            patient_id, session, CONFIG);
                     end
                     elapsed_parfor   = toc(t_parfor);
                     elapsed_per_field = elapsed_parfor / max(num_pending, 1);
@@ -268,6 +270,8 @@ for p_idx = 1:length(CONFIG.patients)
                             beam_metadata, CONFIG, psf_filter);
                         total_recon = total_recon + recon_dose;
                         save_field_reconstruction(recon_dose, fi, patient_id, session, CONFIG);
+                        save_simulated_dose(recon_dose, field_doses{fi}, ...
+                            patient_id, session, CONFIG);
                         elapsed_f  = toc(t_field);
                         cache_manifest = update_manifest_field(cache_manifest, fi, ...
                             field_doses{fi}.gantry_angle, elapsed_f);
@@ -422,6 +426,33 @@ function save_field_reconstruction(recon_dose, field_idx, patient_id, session, c
     sim_dir  = get_simulation_directory(patient_id, session, config);
     filename = sprintf('field_recon_%03d.mat', field_idx);
     save(fullfile(sim_dir, filename), 'recon_dose', '-v7.3');
+end
+
+function save_simulated_dose(recon_dose, field_dose, patient_id, session, config)
+    %SAVE_SIMULATED_DOSE Save per-field reconstruction next to the processed
+    %  input dose files, named <input_basename>_sim.mat. Variable inside is
+    %  sim_dose. Falls back to a synthetic name if the source filename was
+    %  not propagated by load_processed_data.
+    sim_dose_dir = fullfile(config.working_dir, 'RayStationFiles', ...
+        patient_id, session, 'processed', 'simulated_doses');
+    if ~exist(sim_dose_dir, 'dir')
+        mkdir(sim_dose_dir);
+    end
+
+    if isfield(field_dose, 'source_mat_filename') && ~isempty(field_dose.source_mat_filename)
+        [~, base, ~] = fileparts(field_dose.source_mat_filename);
+    else
+        if isfield(field_dose, 'beam_index') && ~isempty(field_dose.beam_index)
+            base = sprintf('dose_%s_%s_field_%03d', patient_id, session, ...
+                field_dose.beam_index);
+        else
+            base = sprintf('dose_%s_%s_field', patient_id, session);
+        end
+    end
+
+    out_path = fullfile(sim_dose_dir, [base '_sim.mat']);
+    sim_dose = recon_dose;  %#ok<NASGU>  saved variable name
+    save(out_path, 'sim_dose', '-v7.3');
 end
 
 function save_total_reconstruction(total_recon, metadata, patient_id, session, config)
