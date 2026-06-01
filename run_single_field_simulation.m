@@ -875,8 +875,15 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
             fprintf('        Running Delay-And-Sum reconstruction...\n');
             try
                 das_tic = tic;
-                reconPressure = run_das_recon(sensorData, sensor, medium, ...
-                                              Nx, Ny, Nz, dx, dy, dz, dt);
+                das_opts = struct( ...
+                    'use_elements', safe_config(config, 'das_use_elements', true), ...
+                    'envelope',     safe_config(config, 'das_envelope',     true), ...
+                    'use_aperture', safe_config(config, 'das_use_aperture', true), ...
+                    'aperture_cos', safe_config(config, 'das_aperture_cos', 0.997), ...
+                    'depth_weight', safe_config(config, 'das_depth_weight', true), ...
+                    'interp',       safe_config(config, 'das_interp',       'nearest'));
+                reconPressure = das_reconstruct(sensorData, sensor, sensor_info, medium, ...
+                                                Nx, Ny, Nz, dx, dy, dz, dt, das_opts);
                 reconPressure = reconPressure * correction_factor;
                 conv_max_pressure(1) = max(reconPressure(:));
                 num_iters_done       = 1;
@@ -1092,60 +1099,6 @@ function [medium, p0] = pad_medium_and_p0(medium, p0, Nx_src, Ny_src, Nz_src, Nx
     medium.alpha_coeff = alphaCoeff_pad;
     medium.gruneisen   = gruneisen_pad;
     p0 = p0_pad;
-end
-
-
-function reconPressure = run_das_recon(sensorData, sensor, medium, ...
-                                       Nx, Ny, Nz, dx, dy, dz, dt)
-%RUN_DAS_RECON Delay-And-Sum back-projection at homogeneous sound speed.
-%  Returns reconPressure on the padded grid, max(.,0)-clipped, in DAS units.
-%  No correction_factor scaling applied - the caller decides when to apply it.
-
-    sensor_lin = find(sensor.mask);
-    [sx_i, sy_i, sz_i] = ind2sub([Nx, Ny, Nz], sensor_lin);
-    sx_pos = (double(sx_i) - 1) * dx;
-    sy_pos = (double(sy_i) - 1) * dy;
-    sz_pos = (double(sz_i) - 1) * dz;
-    nSens  = numel(sensor_lin);
-
-    [Xg, Yg, Zg] = ndgrid((0:Nx-1)*dx, (0:Ny-1)*dy, (0:Nz-1)*dz);
-    Xg = single(Xg);  Yg = single(Yg);  Zg = single(Zg);
-
-    nonzero_c = medium.sound_speed(medium.sound_speed > 0);
-    c_das = double(mean(nonzero_c, 'all'));
-
-    sd    = single(gather(sensorData));
-    Nt_sd = size(sd, 2);
-
-    reconPressure = zeros(Nx, Ny, Nz, 'single');
-    dx_min        = single(min([dx, dy, dz]));
-
-    fprintf('          DAS: %d sensors, c = %.1f m/s\n', nSens, c_das);
-
-    for s = 1:nSens
-        d_s   = sqrt((Xg - single(sx_pos(s))).^2 + ...
-                     (Yg - single(sy_pos(s))).^2 + ...
-                     (Zg - single(sz_pos(s))).^2);
-        idx_f = d_s / single(c_das * dt) + 1;
-        idx0  = floor(idx_f);
-        frac  = idx_f - idx0;
-        valid = idx0 >= 1 & idx0 < Nt_sd;
-
-        samp = zeros(size(idx0), 'single');
-        i0   = idx0(valid);
-        v0   = sd(s, i0);
-        v1   = sd(s, i0 + 1);
-        samp(valid) = (1 - frac(valid)) .* v0(:) + frac(valid) .* v1(:);
-
-        w = single(1) ./ max(d_s, dx_min);
-        reconPressure = reconPressure + w .* samp;
-
-        if mod(s, max(1, round(nSens/10))) == 0
-            fprintf('          DAS sensor %d/%d\n', s, nSens);
-        end
-    end
-
-    reconPressure = max(double(reconPressure), 0);
 end
 
 

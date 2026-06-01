@@ -799,6 +799,22 @@ end
 
 %% ========================= RECONSTRUCTION ================================
 
+% Options for the shared Delay-And-Sum reconstruction (das_reconstruct.m).
+% Defaults are faithful to the IRAI sample code; override any via CONFIG.das_*.
+das_opts = struct();
+if isfield(CONFIG, 'das_use_elements'), das_opts.use_elements = CONFIG.das_use_elements; end
+if isfield(CONFIG, 'das_envelope'),     das_opts.envelope     = CONFIG.das_envelope;     end
+if isfield(CONFIG, 'das_use_aperture'), das_opts.use_aperture = CONFIG.das_use_aperture; end
+if isfield(CONFIG, 'das_aperture_cos'), das_opts.aperture_cos = CONFIG.das_aperture_cos; end
+if isfield(CONFIG, 'das_depth_weight'), das_opts.depth_weight = CONFIG.das_depth_weight; end
+if isfield(CONFIG, 'das_interp'),       das_opts.interp       = CONFIG.das_interp;       end
+
+% Element metadata for per-element DAS. Guarantee a valid struct even for
+% sensor methods that don't populate it (das_reconstruct falls back per-voxel).
+if ~exist('sensor_info_orig', 'var') || ~isstruct(sensor_info_orig)
+    sensor_info_orig = struct('num_elements', 0);
+end
+
 switch lower(CONFIG.reconstruction_method)
 case 'tr'
 
@@ -961,8 +977,8 @@ fprintf('       Running Delay-And-Sum reconstruction...\n');
 
 try
     das_tic = tic;
-    reconPressure = run_das_recon(sensorData, sensor, medium, ...
-                                  Nx, Ny, Nz, dx, dy, dz, dt);
+    reconPressure = das_reconstruct(sensorData, sensor, sensor_info_orig, medium, ...
+                                    Nx, Ny, Nz, dx, dy, dz, dt, das_opts);
     reconPressure = reconPressure * CONFIG.correction_factor;
 
     % Synthesize TR-style outputs so downstream plot/save code is reused
@@ -992,8 +1008,8 @@ try
 
     % ---- Iteration 1: DAS seed ----
     fprintf('       --- Iter 1/%d: DAS seed ---\n', N_iter);
-    reconPressure = run_das_recon(sensorData, sensor, medium, ...
-                                  Nx, Ny, Nz, dx, dy, dz, dt);
+    reconPressure = das_reconstruct(sensorData, sensor, sensor_info_orig, medium, ...
+                                    Nx, Ny, Nz, dx, dy, dz, dt, das_opts);
 
     % Initialize convergence tracking (same shape as TR branch)
     conv_max_pressure    = zeros(N_iter, 1);
@@ -1798,72 +1814,7 @@ function cmap = gamma_colormap_gyr()
 end
 
 
-function reconPressure = run_das_recon(sensorData, sensor, medium, ...
-                                       Nx, Ny, Nz, dx, dy, dz, dt)
-%RUN_DAS_RECON Delay-And-Sum back-projection at homogeneous sound speed.
-%  Returns reconPressure on the padded grid, max(.,0)-clipped, in DAS units.
-%  No correction_factor scaling applied  the caller decides when to apply it.
-%
-%  Algorithm:
-%    1. Sensor positions from sensor.mask
-%    2. Effective sound speed = mean of nonzero medium.sound_speed
-%    3. For each sensor: voxel-to-sensor distance, fractional sample index,
-%       linear time interpolation, 1/r spherical-spreading weighting
-%    4. Accumulate over sensors
-
-    % 1. Sensor positions in physical coords on the padded grid
-    sensor_lin = find(sensor.mask);
-    [sx_i, sy_i, sz_i] = ind2sub([Nx, Ny, Nz], sensor_lin);
-    sx_pos = (double(sx_i) - 1) * dx;
-    sy_pos = (double(sy_i) - 1) * dy;
-    sz_pos = (double(sz_i) - 1) * dz;
-    nSens  = numel(sensor_lin);
-
-    % 2. Voxel grid coords (padded grid)
-    [Xg, Yg, Zg] = ndgrid((0:Nx-1)*dx, (0:Ny-1)*dy, (0:Nz-1)*dz);
-    Xg = single(Xg);  Yg = single(Yg);  Zg = single(Zg);
-
-    % 3. Effective sound speed (homogeneous assumption)
-    nonzero_c = medium.sound_speed(medium.sound_speed > 0);
-    c_das = double(mean(nonzero_c, 'all'));
-
-    % 4. Move sensor data to CPU single (avoids GPU mem blowup with full grid)
-    sd     = single(gather(sensorData));
-    Nt_sd  = size(sd, 2);
-
-    reconPressure = zeros(Nx, Ny, Nz, 'single');
-    dx_min        = single(min([dx, dy, dz]));
-
-    fprintf('         DAS: %d sensors, c = %.1f m/s\n', nSens, c_das);
-
-    % 5. Loop over sensors (memory-bounded)
-    for s = 1:nSens
-        d_s   = sqrt((Xg - single(sx_pos(s))).^2 + ...
-                     (Yg - single(sy_pos(s))).^2 + ...
-                     (Zg - single(sz_pos(s))).^2);
-        idx_f = d_s / single(c_das * dt) + 1;     % fractional sample index
-        idx0  = floor(idx_f);
-        frac  = idx_f - idx0;
-        valid = idx0 >= 1 & idx0 < Nt_sd;
-
-        samp = zeros(size(idx0), 'single');
-        i0   = idx0(valid);
-        v0   = sd(s, i0);
-        v1   = sd(s, i0 + 1);
-        samp(valid) = (1 - frac(valid)) .* v0(:) + frac(valid) .* v1(:);
-
-        % 1/r weighting compensates spherical spreading
-        w = single(1) ./ max(d_s, dx_min);
-        reconPressure = reconPressure + w .* samp;
-
-        if mod(s, max(1, round(nSens/10))) == 0
-            fprintf('         DAS sensor %d/%d\n', s, nSens);
-        end
-    end
-
-    reconPressure = max(double(reconPressure), 0);
-end
-
+%  
 
 function [fig_live, ax_recon, hImg_recon, hLine_max] = ...
         setup_live_recon_figure(p0, Nx_orig, Ny_orig, cz_live, N_iter, CONFIG)

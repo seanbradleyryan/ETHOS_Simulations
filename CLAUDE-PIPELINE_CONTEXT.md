@@ -60,7 +60,9 @@ load('sct_resampled.mat');       % Contains: sct_resampled struct
 load('total_rs_dose.mat');       % Contains: total_rs_dose 3D array (Gy) — sum of all fields
 load('total_dose_CT_1.mat');     % Contains: ct_total / ct_total_sparse + ct_total_dims — total dose from CT_1 fields only
 load('total_dose_CT_3.mat');     % Same, for CT_3 fields (label matches ct_label in field filenames)
-load('total_recon_dose.mat');    % Contains: total_recon, metadata
+load('total_recon_dose_<hash8>.mat');  % Contains: total_recon, metadata, config_hash
+                                       % <hash8> = compute_sim_config_hash(CONFIG); per-hash file
+                                       % see SimulationResults/<id>/<session>/<method>/config_registry.json
 ```
 
 > **Per-CT totals** (`total_dose_CT_*.mat`) are written by `step15_process_doses` whenever NPZ-derived
