@@ -365,19 +365,35 @@ function [total_recon, recon_metadata] = load_total_reconstruction(patient_id, s
 %
 %   [total_recon, metadata] = load_total_reconstruction(patient_id, session, config)
 %
-%   Matches master pipeline stub signature (line 490).
+%   Step 2 writes one total reconstruction per config hash:
+%   total_recon_dose_<hash8>.mat.  The active hash is derived from CONFIG
+%   via compute_sim_config_hash so step 3 and step 2 always agree on which
+%   file is current.  The saved file embeds the same config_hash for a
+%   round-trip sanity check.
 
-    sim_dir = get_simulation_directory(patient_id, session, config);
-    recon_file = fullfile(sim_dir, 'total_recon_dose.mat');
-    
+    sim_dir    = get_simulation_directory(patient_id, session, config);
+    hash8      = compute_sim_config_hash(config);
+    recon_file = fullfile(sim_dir, sprintf('total_recon_dose_%s.mat', hash8));
+
     if ~isfile(recon_file)
         error('step3_analysis:FileNotFound', ...
-            'total_recon_dose.mat not found in: %s\nRun Step 2 (k-Wave simulation) first.', sim_dir);
+            ['total_recon_dose_%s.mat not found in: %s\n', ...
+             'Run Step 2 (k-Wave simulation) with the current CONFIG first.\n', ...
+             'See %s/config_registry.json for hashes that DO have outputs.'], ...
+            hash8, sim_dir, sim_dir);
     end
-    
-    data = load(recon_file);
+
+    data        = load(recon_file);
     total_recon = data.total_recon;
-    
+
+    if isfield(data, 'config_hash') && ~strcmp(data.config_hash, hash8)
+        warning('step3_analysis:HashMismatch', ...
+            ['Loaded file embeds config_hash %s but active CONFIG hashes to %s.\n', ...
+             'This usually means the file on disk was produced by a different\n', ...
+             'CONFIG that happens to share a filename -- check %s.'], ...
+            data.config_hash, hash8, recon_file);
+    end
+
     if isfield(data, 'metadata')
         recon_metadata = data.metadata;
     else

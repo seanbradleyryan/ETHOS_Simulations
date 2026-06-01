@@ -67,9 +67,6 @@ CONFIG.convolution_kernel  = 4e-6;   % Gaussian sigma in seconds (4 us)
 CONFIG.conv_noise_level    = 0.01;   % Noise amplitude as fraction of peak sensor signal
 CONFIG.conv_deconv_lambda  = 1e-4;   % Wiener regularization for deconvolution
 
-CONFIG.use_psf_correction      = false;
-CONFIG.regularization_lambda   = 0.05;
-
 CONFIG.downscale_factor = 1;
 CONFIG.use_grid_padding = true;
 
@@ -728,20 +725,6 @@ end
 inputArgs = {'Smooth', false, 'PMLInside', false, 'PMLSize', CONFIG.pml_size, ...
              'DataCast', dataCast, 'PlotSim', false};
 
-%% ========================= PSF CORRECTION FILTER =========================
-
-psf_filter = [];
-if CONFIG.use_psf_correction
-    fprintf('\n[PSF] Computing PSF correction filter...\n');
-    try
-        psf_filter = get_psf(doseGrid, sct, medium_orig, CONFIG);
-        fprintf('[PSF] Filter ready.\n');
-    catch ME
-        warning('get_psf failed: %s. Proceeding without PSF correction.', ME.message);
-        psf_filter = [];
-    end
-end
-
 %% ========================= FORWARD SIMULATION ============================
 
 fprintf('\n[7/7] Running k-Wave forward simulation...\n');
@@ -1157,20 +1140,6 @@ if did_pad
     sensor.mask = sensor.mask(1:Nx_orig, 1:Ny_orig, 1:Nz_orig);
 end
 
-%% ========================= PSF CORRECTION ================================
-
-psf_applied = false;
-if ~isempty(psf_filter) && isstruct(psf_filter) && isfield(psf_filter, 'F') ...
-        && ~isempty(psf_filter.F)
-    fprintf('       Applying PSF correction...\n');
-    P_field       = fftn(reconPressure);
-    corrected     = real(ifftn(P_field .* psf_filter.F));
-    reconPressure = max(corrected, 0);
-    psf_applied   = true;
-    fprintf('       Corrected pressure range: [%.2e, %.2e] Pa\n', ...
-        min(reconPressure(:)), max(reconPressure(:)));
-end
-
 %% ========================= PRESSURE SCALE CORRECTION ====================
 
 if CONFIG.use_pressure_scale_correction
@@ -1237,7 +1206,6 @@ end
 fprintf('\n========= RESULTS =========\n');
 fprintf('  Original dose:      [%.6f, %.4f] Gy\n', min(doseGrid(:)), max(doseGrid(:)));
 fprintf('  Reconstructed dose: [%.6f, %.4f] Gy\n', min(recon_dose(:)), max(recon_dose(:)));
-fprintf('  PSF correction:     %s\n', mat2str(psf_applied));
 
 dose_region = doseGrid > doseThreshold;
 if any(dose_region(:))
@@ -1416,7 +1384,6 @@ if CONFIG.save_results
     results.grid_size     = gridSize;
     results.fwd_time_sec  = fwd_time;
     results.tr_time_sec   = tr_time;
-    results.psf_applied   = psf_applied;
     if ~isempty(gamma_results)
         results.gamma = gamma_results;
     end

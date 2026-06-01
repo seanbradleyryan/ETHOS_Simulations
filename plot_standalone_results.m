@@ -15,7 +15,7 @@
 %    gamma            – struct with maps/pass_rates/criteria/eval_mask
 %    conv_max_pressure, conv_rel_change, num_iters_done  – convergence history
 %    density          – medium density volume for CT-style background
-%    fwd_time_sec, tr_time_sec, psf_applied
+%    fwd_time_sec, tr_time_sec
 %  =========================================================================
 
 function plot_standalone_results(results_file)
@@ -105,11 +105,7 @@ else
 end
 
 % Optional: metadata for display
-psf_applied  = '';
 timing_str   = '';
-if isfield(R, 'psf_applied')
-    psf_applied = mat2str(R.psf_applied);
-end
 if isfield(R, 'fwd_time_sec') && isfield(R, 'tr_time_sec')
     timing_str = sprintf('  Fwd: %.1f s   TR: %.1f s', R.fwd_time_sec, R.tr_time_sec);
 end
@@ -121,7 +117,6 @@ fprintf('Grid size:      [%d x %d x %d]\n', gridSize(1), gridSize(2), gridSize(3
 fprintf('Spacing (mm):   [%.2f x %.2f x %.2f]\n', spacing_mm);
 fprintf('Original dose:  [%.6f, %.4f] Gy\n', min(original_dose(:)), max(original_dose(:)));
 fprintf('Recon dose:     [%.6f, %.4f] Gy\n', min(recon_dose(:)), max(recon_dose(:)));
-if ~isempty(psf_applied),  fprintf('PSF applied:    %s\n',  psf_applied); end
 if ~isempty(timing_str),   fprintf('%s\n', timing_str); end
 
 doseThreshold = 0.01 * max(original_dose(:));

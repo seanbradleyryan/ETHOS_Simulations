@@ -1,4 +1,4 @@
-function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbct_resampled, medium, beam_metadata, config, psf_filter)
+function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbct_resampled, medium, beam_metadata, config)
 %RUN_SINGLE_FIELD_SIMULATION k-Wave forward + time-reversal for one field
 %
 %   [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbct_resampled, medium, beam_metadata, config)
@@ -78,8 +78,6 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
 %                                                  figure, post-sim dose panels +
 %                                                  convergence plot. Must remain false
 %                                                  when called under parfor.
-%       psf_filter - (OPTIONAL, 6th arg) Pre-computed PSF correction from get_psf():
-%           .F - 3D complex Wiener filter in Fourier domain. Pass [] to skip.
 %
 %   OUTPUTS:
 %       recon_dose  - 3D reconstructed dose array (Gy), cropped back to the
@@ -92,7 +90,6 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
 %           .num_pulses         - Number of LINAC pulses
 %           .p0_max             - Maximum initial pressure (Pa)
 %           .recon_max          - Maximum reconstructed pressure (Pa)
-%           .psf_applied        - Boolean
 %           .num_iters_done     - Iterations completed
 %           .conv_max_pressure  - Per-iteration max pressure
 %           .conv_rel_change    - Per-iteration relative change
@@ -115,7 +112,7 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
 %                 dose normalisation, downscale_factor, attenuation toggle,
 %                 force-uniform medium overrides, opt-in plotting)
 %
-%   See also: get_psf, determine_sensor_mask, determine_sensor_placement_fixed,
+%   See also: determine_sensor_mask, determine_sensor_placement_fixed,
 %             kspaceFirstOrder3D, run_standalone_simulation
 
     %% ======================== CONFIG DEFAULTS ========================
@@ -152,7 +149,6 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
 
     sensor_method = safe_config(config, 'sensor_placement_method', 'full_plane_anterior');
 
-    if nargin < 6, psf_filter = []; end
     if nargin < 4, beam_metadata = []; end
 
     % Initialize sim_results output
@@ -907,8 +903,8 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
     sim_results.conv_rel_change   = conv_rel_change(1:max(num_iters_done, 1));
 
     %% ======================== CROP TO ORIGINAL SIZE ========================
-    %  Remove FFT padding before PSF correction and dose conversion (which use
-    %  the original-size gruneisen/density).
+    %  Remove FFT padding before dose conversion (which uses the original-size
+    %  gruneisen/density).
 
     if did_pad
         fprintf('        Cropping reconstruction: [%d %d %d] -> [%d %d %d]\n', ...
@@ -921,21 +917,6 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
         gridSize    = gridSize_orig;
         medium      = medium_orig;
         sensor.mask = sensor.mask(1:Nx_orig, 1:Ny_orig, 1:Nz_orig);
-    end
-
-    %% ======================== PSF CORRECTION (OPTIONAL) ========================
-
-    if ~isempty(psf_filter) && isstruct(psf_filter) && isfield(psf_filter, 'F') ...
-            && ~isempty(psf_filter.F)
-        fprintf('        Applying pre-computed PSF correction...\n');
-        P_field = fftn(reconPressure);
-        corrected = real(ifftn(P_field .* psf_filter.F));
-        reconPressure = max(corrected, 0);
-        fprintf('        Corrected pressure range: [%.2e, %.2e] Pa\n', ...
-            min(reconPressure(:)), max(reconPressure(:)));
-        sim_results.psf_applied = true;
-    else
-        sim_results.psf_applied = false;
     end
 
     %% ======================== PRESSURE SCALE CORRECTION ========================
@@ -1021,7 +1002,6 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
     fprintf('\n        ========= RESULTS =========\n');
     fprintf('          Original dose:      [%.6f, %.4f]\n', min(doseGrid(:)), max(doseGrid(:)));
     fprintf('          Reconstructed dose: [%.6f, %.4f]\n', min(recon_dose(:)), max(recon_dose(:)));
-    fprintf('          PSF correction:     %s\n', mat2str(sim_results.psf_applied));
     dose_region = doseGrid > doseThreshold;
     if any(dose_region(:))
         abs_error = abs(recon_dose(dose_region) - doseGrid(dose_region));

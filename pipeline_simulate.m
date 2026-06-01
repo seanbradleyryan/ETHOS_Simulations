@@ -51,14 +51,12 @@ CONFIG.pml_size                 = 10;     % PML thickness (voxels)
 CONFIG.cfl_number               = 0.3;    % CFL stability criterion
 CONFIG.use_gpu                  = true;   % GPU acceleration
 CONFIG.num_time_reversal_iter   = 1;      % Time-reversal iterations per field
-CONFIG.enable_spherical_correction = false;    % Compute PSF filter via get_psf
-CONFIG.regularization_lambda       = 0.01;   % Wiener regularization for PSF
 
 % --- Sensor Placement ---
 % Controls the k-Wave sensor mask geometry used in every per-field simulation.
 %   'full_plane_anterior' : Full YZ plane at x = sensor_x_index.
 %   'full_plane_lateral'  : Full XZ plane at y = sensor_y_index.
-%   'spherical'           : Spherical shell (no PSF correction applied).
+%   'spherical'           : Spherical shell.
 CONFIG.sensor_placement_method = 'full_plane_lateral';
 CONFIG.sensor_x_index = 20;   % Used by 'full_plane_anterior'
 CONFIG.sensor_y_index = 20;   % Used by 'full_plane_lateral'
@@ -84,6 +82,16 @@ CONFIG.sensor_mode           = CONFIG.sensor_placement_method;  % passed to step
 % --- Parallel Processing ---
 CONFIG.use_parallel          = true;
 CONFIG.num_parallel_workers  = 8;
+
+% --- Multi-Instance Coordination ---
+% Multiple copies of this script (e.g. one per remote-desktop session, all
+% sharing working_dir) coordinate per-field through lock + status files under
+% SimulationResults/<patient>/<session>/<method>/field_status/. Before a field
+% is processed its lock is claimed atomically and an 'in_progress' status is
+% written so sibling instances skip it; on completion the status is overwritten
+% with 'complete'. A lock whose status file is older than stale_claim_minutes
+% is assumed orphaned (crashed sibling) and may be overtaken.
+CONFIG.stale_claim_minutes   = 120;
 
 % --- Pipeline Control Flags ---
 CONFIG.run_step2   = true;    % Step 2  : k-Wave simulation
@@ -111,11 +119,21 @@ if ~exist('kWaveGrid', 'file')
     error('k-Wave toolbox not found. Please add k-Wave to the MATLAB path.');
 end
 
+% Compute a stable hash of the sim-affecting CONFIG fields.  Every cached
+% artifact for this run is keyed on this hash, so flipping any sim-relevant
+% knob between runs yields a parallel set of files rather than silently
+% reusing stale ones.
+[CONFIG_HASH, CONFIG_CANONICAL] = compute_sim_config_hash(CONFIG);
+fprintf('  Config hash: %s\n', CONFIG_HASH);
+fprintf('=========================================================\n\n');
+
 % Initialize results structure
-RESULTS           = struct();
-RESULTS.timestamp = datetime('now');
-RESULTS.config    = CONFIG;
-RESULTS.patients  = struct();
+RESULTS                 = struct();
+RESULTS.timestamp       = datetime('now');
+RESULTS.config          = CONFIG;
+RESULTS.config_hash     = CONFIG_HASH;
+RESULTS.config_canonical = CONFIG_CANONICAL;
+RESULTS.patients        = struct();
 
 %% ========================= MAIN PROCESSING LOOP ==========================
 
@@ -131,8 +149,12 @@ for p_idx = 1:length(CONFIG.patients)
         RESULTS.patients.(result_key) = init_patient_result(patient_id, session);
 
         % Open per-session log file (appends across runs)
-        log_fid = open_simulation_log(patient_id, session, CONFIG);
-        log_msg(log_fid, 'Run started  patient %s, session %s', patient_id, session);
+        ensure_config_registry(CONFIG_HASH, CONFIG_CANONICAL, ...
+            patient_id, session, CONFIG);
+        log_fid = open_simulation_log(patient_id, session, CONFIG, ...
+            CONFIG_HASH, CONFIG_CANONICAL);
+        log_msg(log_fid, 'Run started  patient %s, session %s, config %s', ...
+            patient_id, session, CONFIG_HASH);
 
         try
 
@@ -178,35 +200,24 @@ for p_idx = 1:length(CONFIG.patients)
                 % Build acoustic medium from CT
                 medium = create_acoustic_medium(sct_resampled, CONFIG);
 
-                % Pre-compute PSF correction filter (once for all fields)
-                if CONFIG.enable_spherical_correction
-                    fprintf('         Computing PSF correction filter...\n');
-                    psf_filter = get_psf(total_rs_dose, sct_resampled, medium, CONFIG);
-                    fprintf('         PSF filter ready (%.1f s).\n', ...
-                        psf_filter.computation_time_s);
-                else
-                    psf_filter = [];
-                    fprintf('         PSF correction: disabled.\n');
-                end
-
                 valid_field_indices = find(~cellfun(@isempty, field_doses));
                 num_fields          = length(valid_field_indices);
                 grid_dims           = dose_metadata.dimensions;
 
                 fprintf('         Processing %d field(s)...\n', num_fields);
 
-                % --- Load cache manifest and cross-check against files on disk ---
-                sim_dir_cache  = get_simulation_directory(patient_id, session, CONFIG);
-                cache_manifest = load_cache_manifest(patient_id, session, CONFIG);
+                % --- Load per-hash cache manifest and cross-check against
+                %     reconstruction files on disk for the ACTIVE hash only.
+                %     Files belonging to a different config are invisible here.
+                cache_manifest = load_cache_manifest(patient_id, session, CONFIG, CONFIG_HASH);
                 completed_idxs = get_completed_from_manifest(cache_manifest);
 
-                % Cross-check: also scan files in case manifest is missing entries
-                existing_recon = dir(fullfile(sim_dir_cache, 'field_recon_*.mat'));
-                file_idxs      = [];
-                for ef = 1:numel(existing_recon)
-                    tok = regexp(existing_recon(ef).name, 'field_recon_(\d+)\.mat', 'tokens');
-                    if ~isempty(tok) && ~isempty(tok{1})
-                        file_idxs(end+1) = str2double(tok{1}{1}); %#ok<AGROW>
+                file_idxs = [];
+                for fi = valid_field_indices(:).'
+                    expected = expected_recon_path(field_doses{fi}, ...
+                        patient_id, session, CONFIG, CONFIG_HASH);
+                    if isfile(expected)
+                        file_idxs(end+1) = fi; %#ok<AGROW>
                     end
                 end
                 completed_idxs = union(completed_idxs, file_idxs);
@@ -215,9 +226,15 @@ for p_idx = 1:length(CONFIG.patients)
                 cached_idxs  = intersect(valid_field_indices, completed_idxs);
                 num_pending  = numel(pending_idxs);
 
-                print_cache_status(cache_manifest, cached_idxs, pending_idxs, field_doses, log_fid);
+                print_cache_status(cache_manifest, cached_idxs, pending_idxs, ...
+                    field_doses, log_fid, CONFIG_HASH);
 
-                total_recon = zeros(grid_dims);
+                % Ensure the cross-instance status directory exists and read the
+                % stale-claim threshold (minutes) used to overtake locks left
+                % behind by crashed sibling instances.
+                status_dir = get_status_directory(patient_id, session, CONFIG);
+                if ~exist(status_dir, 'dir'), mkdir(status_dir); end
+                stale_minutes = CONFIG.stale_claim_minutes;
 
                 if CONFIG.use_parallel && num_pending > 1
                     fprintf('         Using parallel processing (parfor)...\n');
@@ -227,72 +244,143 @@ for p_idx = 1:length(CONFIG.patients)
                         if ~isempty(pool), delete(pool); end
                         parpool(CONFIG.num_parallel_workers);
                     end
-                    recon_doses    = cell(num_pending, 1);
+                    field_computed = false(num_pending, 1);
+                    field_elapsed  = zeros(num_pending, 1);
                     t_parfor       = tic;
                     parfor f = 1:num_pending
                         fi = pending_idxs(f);
-                        fprintf('           Field %d (gantry: %.1f deg)...\n', ...
-                            fi, field_doses{fi}.gantry_angle);
-                        [recon_doses{f}, ~] = run_single_field_simulation(...
-                            field_doses{fi}, sct_resampled, medium, ...
-                            beam_metadata, CONFIG, psf_filter);
-                        recon_doses{f} = gather(recon_doses{f});
-                        save_field_reconstruction(recon_doses{f}, fi, ...
-                            patient_id, session, CONFIG);
-                        save_simulated_dose(recon_doses{f}, field_doses{fi}, ...
-                            patient_id, session, CONFIG);
+                        fd = field_doses{fi};
+                        recon_path  = expected_recon_path(fd, patient_id, session, CONFIG, CONFIG_HASH);
+                        lock_path   = field_lock_path(fd, patient_id, session, CONFIG, CONFIG_HASH);
+                        status_path = field_status_path(fd, patient_id, session, CONFIG, CONFIG_HASH);
+
+                        % A sibling instance may have finished this field after
+                        % the pending list was built -- skip if so.
+                        if isfile(recon_path)
+                            fprintf('           Field %d already on disk; skipping.\n', fi);
+                            continue;
+                        end
+
+                        % Atomically claim the field. If another instance holds a
+                        % live lock, leave it to them.
+                        [claimed, why] = claim_field(lock_path, status_path, stale_minutes);
+                        if ~claimed
+                            fprintf('           Field %d held by another instance; skipping.\n', fi);
+                            continue;
+                        end
+
+                        % First thing: announce IN PROGRESS so sibling instances
+                        % see this field is taken.
+                        write_field_status(status_path, 'in_progress', fi, fd.gantry_angle, CONFIG_HASH);
+                        fprintf('           Field %d (gantry: %.1f deg) [claim: %s]...\n', ...
+                            fi, fd.gantry_angle, why);
+
+                        t_field = tic;
+                        [rd, ~] = run_single_field_simulation(fd, sct_resampled, ...
+                            medium, beam_metadata, CONFIG);
+                        rd = gather(rd);
+                        save_field_reconstruction(rd, fd, patient_id, session, CONFIG, CONFIG_HASH);
+                        save_simulated_dose(rd, fd, patient_id, session, CONFIG, CONFIG_HASH);
+
+                        % Overwrite IN PROGRESS with COMPLETE.
+                        write_field_status(status_path, 'complete', fi, fd.gantry_angle, CONFIG_HASH);
+                        field_computed(f) = true;
+                        field_elapsed(f)  = toc(t_field);
                     end
-                    elapsed_parfor   = toc(t_parfor);
-                    elapsed_per_field = elapsed_parfor / max(num_pending, 1);
+                    elapsed_parfor = toc(t_parfor);
                     for f = 1:num_pending
+                        if ~field_computed(f), continue; end
                         fi = pending_idxs(f);
-                        total_recon    = total_recon + recon_doses{f};
                         cache_manifest = update_manifest_field(cache_manifest, fi, ...
-                            field_doses{fi}.gantry_angle, elapsed_per_field);
-                        log_msg(log_fid, 'Field %d complete (parallel, avg %.1f s/field)', ...
-                            fi, elapsed_per_field);
+                            field_doses{fi}, patient_id, session, field_elapsed(f));
+                        log_msg(log_fid, 'Field %d complete [%s] (parallel, %.1f s)', ...
+                            fi, CONFIG_HASH, field_elapsed(f));
                     end
-                    save_cache_manifest(cache_manifest, patient_id, session, CONFIG);
-                    fprintf('         Parallel block done in %.1f s (avg %.1f s/field).\n', ...
-                        elapsed_parfor, elapsed_per_field);
+                    save_cache_manifest(cache_manifest, patient_id, session, CONFIG, CONFIG_HASH);
+                    fprintf('         Parallel block done in %.1f s (%d field(s) computed here).\n', ...
+                        elapsed_parfor, nnz(field_computed));
                 else
                     fprintf('         Using serial processing...\n');
                     log_msg(log_fid, 'Serial mode: %d fields pending', num_pending);
                     for f = 1:num_pending
-                        fi       = pending_idxs(f);
-                        t_field  = tic;
-                        fprintf('           Field %d/%d (gantry: %.1f deg)...\n', ...
-                            f, num_pending, field_doses{fi}.gantry_angle);
-                        log_msg(log_fid, 'Field %d start (gantry %.1f deg)', ...
-                            fi, field_doses{fi}.gantry_angle);
-                        [recon_dose, ~] = run_single_field_simulation(...
-                            field_doses{fi}, sct_resampled, medium, ...
-                            beam_metadata, CONFIG, psf_filter);
-                        total_recon = total_recon + recon_dose;
-                        save_field_reconstruction(recon_dose, fi, patient_id, session, CONFIG);
-                        save_simulated_dose(recon_dose, field_doses{fi}, ...
-                            patient_id, session, CONFIG);
-                        elapsed_f  = toc(t_field);
+                        fi          = pending_idxs(f);
+                        fd          = field_doses{fi};
+                        recon_path  = expected_recon_path(fd, patient_id, session, CONFIG, CONFIG_HASH);
+                        lock_path   = field_lock_path(fd, patient_id, session, CONFIG, CONFIG_HASH);
+                        status_path = field_status_path(fd, patient_id, session, CONFIG, CONFIG_HASH);
+
+                        if isfile(recon_path)
+                            fprintf('           Field %d/%d already on disk; skipping.\n', f, num_pending);
+                            continue;
+                        end
+
+                        [claimed, why] = claim_field(lock_path, status_path, stale_minutes);
+                        if ~claimed
+                            fprintf('           Field %d/%d held by another instance; skipping.\n', f, num_pending);
+                            log_msg(log_fid, 'Field %d held by another instance; skipping.', fi);
+                            continue;
+                        end
+
+                        % First thing: announce IN PROGRESS to sibling instances.
+                        write_field_status(status_path, 'in_progress', fi, fd.gantry_angle, CONFIG_HASH);
+                        log_msg(log_fid, 'Field %d IN PROGRESS (gantry %.1f deg, host %s)', ...
+                            fi, fd.gantry_angle, get_hostname());
+                        fprintf('           Field %d/%d (gantry: %.1f deg) [claim: %s]...\n', ...
+                            f, num_pending, fd.gantry_angle, why);
+
+                        t_field = tic;
+                        [recon_dose, ~] = run_single_field_simulation(fd, sct_resampled, ...
+                            medium, beam_metadata, CONFIG);
+                        save_field_reconstruction(recon_dose, fd, patient_id, session, CONFIG, CONFIG_HASH);
+                        save_simulated_dose(recon_dose, fd, patient_id, session, CONFIG, CONFIG_HASH);
+
+                        % Overwrite IN PROGRESS with COMPLETE.
+                        write_field_status(status_path, 'complete', fi, fd.gantry_angle, CONFIG_HASH);
+                        elapsed_f = toc(t_field);
                         cache_manifest = update_manifest_field(cache_manifest, fi, ...
-                            field_doses{fi}.gantry_angle, elapsed_f);
-                        save_cache_manifest(cache_manifest, patient_id, session, CONFIG);
-                        log_msg(log_fid, 'Field %d complete (%.1f s)', fi, elapsed_f);
+                            fd, patient_id, session, elapsed_f);
+                        save_cache_manifest(cache_manifest, patient_id, session, CONFIG, CONFIG_HASH);
+                        log_msg(log_fid, 'Field %d complete [%s] (%.1f s)', ...
+                            fi, CONFIG_HASH, elapsed_f);
                         fprintf('             Done in %.1f s\n', elapsed_f);
                     end
                 end
 
-                % Accumulate cached field reconstructions
-                if ~isempty(cached_idxs)
-                    fprintf('         Loading %d cached reconstruction(s)...\n', numel(cached_idxs));
-                    for c = 1:numel(cached_idxs)
-                        cd_ = load(fullfile(sim_dir_cache, ...
-                            sprintf('field_recon_%03d.mat', cached_idxs(c))));
+                % --- Assemble the total reconstruction from every per-field
+                %     recon on disk for the active config hash. This picks up
+                %     fields completed by sibling instances, not just this one.
+                total_recon  = zeros(grid_dims);
+                missing_idxs = [];
+                for fi = valid_field_indices(:).'
+                    rp = expected_recon_path(field_doses{fi}, patient_id, session, CONFIG, CONFIG_HASH);
+                    if isfile(rp)
+                        cd_ = load(rp, 'recon_dose');
                         total_recon = total_recon + cd_.recon_dose;
+                    else
+                        missing_idxs(end+1) = fi; %#ok<AGROW>
                     end
                 end
 
+                % If any field is still unprocessed (a sibling instance owns it
+                % and hasn't finished), defer total assembly and analysis. Re-run
+                % once the siblings complete to pick the remaining fields up.
+                if ~isempty(missing_idxs)
+                    fprintf('\n[STEP 2] DEFERRED: %d field(s) still pending: %s\n', ...
+                        numel(missing_idxs), mat2str(missing_idxs));
+                    fprintf('         These are likely in progress on sibling instances.\n');
+                    fprintf('         Re-run this script once they finish to assemble the\n');
+                    fprintf('         total reconstruction and run the analysis steps.\n');
+                    log_msg(log_fid, ['Step 2 deferred: %d field(s) pending on sibling ' ...
+                        'instances %s -- total not assembled'], ...
+                        numel(missing_idxs), mat2str(missing_idxs));
+                    RESULTS.patients.(result_key).status = 'awaiting_siblings';
+                    close_simulation_log(log_fid);
+                    continue;
+                end
+
                 sim_time = toc(sim_start);
-                save_total_reconstruction(total_recon, dose_metadata, patient_id, session, CONFIG);
+                save_total_reconstruction(total_recon, dose_metadata, ...
+                    patient_id, session, CONFIG, CONFIG_HASH);
 
                 RESULTS.patients.(result_key).simulation_time_sec  = sim_time;
                 RESULTS.patients.(result_key).total_recon_max_Gy   = max(total_recon(:));
@@ -303,7 +391,7 @@ for p_idx = 1:length(CONFIG.patients)
                     sim_time, max(total_recon(:)));
             else
                 fprintf('\n[STEP 2] Loading previously computed reconstruction...\n');
-                [total_recon, ~] = load_total_reconstruction(patient_id, session, CONFIG);
+                [total_recon, ~] = load_total_reconstruction(patient_id, session, CONFIG, CONFIG_HASH);
             end
 
             %% ============================================================
@@ -422,47 +510,40 @@ end
 %  STEP 2 HELPER FUNCTIONS
 %% =========================================================================
 
-function save_field_reconstruction(recon_dose, field_idx, patient_id, session, config)
-    sim_dir  = get_simulation_directory(patient_id, session, config);
-    filename = sprintf('field_recon_%03d.mat', field_idx);
-    save(fullfile(sim_dir, filename), 'recon_dose', '-v7.3');
+function save_field_reconstruction(recon_dose, field_dose, patient_id, session, config, hash8)
+    % Save reconstruction as <input_basename>_recon_<hash8>.mat next to other
+    % per-config outputs.  Only the hash is embedded; the full config lives
+    % in <sim_dir>/config_registry.json.
+    out_path    = expected_recon_path(field_dose, patient_id, session, config, hash8);
+    config_hash = hash8;  %#ok<NASGU>  saved variable name
+    save(out_path, 'recon_dose', 'config_hash', '-v7.3');
 end
 
-function save_simulated_dose(recon_dose, field_dose, patient_id, session, config)
+function save_simulated_dose(recon_dose, field_dose, patient_id, session, config, hash8)
     %SAVE_SIMULATED_DOSE Save per-field reconstruction next to the processed
-    %  input dose files, named <input_basename>_sim.mat. Variable inside is
-    %  sim_dose. Falls back to a synthetic name if the source filename was
-    %  not propagated by load_processed_data.
+    %  input dose files, named <input_basename>_sim_<hash8>.mat. Variable inside
+    %  is sim_dose. Falls back to a synthetic name if the source filename was
+    %  not propagated by load_processed_data.  Only the hash is embedded.
     sim_dose_dir = fullfile(config.working_dir, 'RayStationFiles', ...
         patient_id, session, 'processed', 'simulated_doses');
     if ~exist(sim_dose_dir, 'dir')
         mkdir(sim_dose_dir);
     end
 
-    if isfield(field_dose, 'source_mat_filename') && ~isempty(field_dose.source_mat_filename)
-        [~, base, ~] = fileparts(field_dose.source_mat_filename);
-    else
-        if isfield(field_dose, 'beam_index') && ~isempty(field_dose.beam_index)
-            base = sprintf('dose_%s_%s_field_%03d', patient_id, session, ...
-                field_dose.beam_index);
-        else
-            base = sprintf('dose_%s_%s_field', patient_id, session);
-        end
-    end
-
-    out_path = fullfile(sim_dose_dir, [base '_sim.mat']);
-    sim_dose = recon_dose;  %#ok<NASGU>  saved variable name
-    save(out_path, 'sim_dose', '-v7.3');
+    out_path    = expected_sim_path(field_dose, patient_id, session, config, hash8);
+    sim_dose    = recon_dose;  %#ok<NASGU>  saved variable name
+    config_hash = hash8;       %#ok<NASGU>  saved variable name
+    save(out_path, 'sim_dose', 'config_hash', '-v7.3');
 end
 
-function save_total_reconstruction(total_recon, metadata, patient_id, session, config)
-    sim_dir = get_simulation_directory(patient_id, session, config);
-    save(fullfile(sim_dir, 'total_recon_dose.mat'), 'total_recon', 'metadata', '-v7.3');
+function save_total_reconstruction(total_recon, metadata, patient_id, session, config, hash8)
+    out_path    = expected_total_recon_path(patient_id, session, config, hash8);
+    config_hash = hash8;  %#ok<NASGU>  saved variable name
+    save(out_path, 'total_recon', 'metadata', 'config_hash', '-v7.3');
 end
 
-function [total_recon, metadata] = load_total_reconstruction(patient_id, session, config)
-    sim_dir = get_simulation_directory(patient_id, session, config);
-    data    = load(fullfile(sim_dir, 'total_recon_dose.mat'));
+function [total_recon, metadata] = load_total_reconstruction(patient_id, session, config, hash8)
+    data        = load(expected_total_recon_path(patient_id, session, config, hash8));
     total_recon = data.total_recon;
     metadata    = data.metadata;
 end
@@ -529,8 +610,10 @@ end
 %  LOGGING HELPERS
 %% =========================================================================
 
-function log_fid = open_simulation_log(patient_id, session, config)
-    % Opens (or creates) a per-session append-mode log file.
+function log_fid = open_simulation_log(patient_id, session, config, hash8, canonical)
+    % Opens (or creates) a per-session append-mode log file and writes a
+    % header that includes the active config hash and a dump of every
+    % sim-affecting CONFIG field.
     log_dir  = get_simulation_directory(patient_id, session, config);
     log_path = fullfile(log_dir, 'simulation_log.txt');
     log_fid  = fopen(log_path, 'a');
@@ -543,7 +626,41 @@ function log_fid = open_simulation_log(patient_id, session, config)
     fprintf(log_fid, 'Run started : %s\n', datestr(now, 'yyyy-mm-dd HH:MM:SS'));
     fprintf(log_fid, 'Patient     : %s\n', patient_id);
     fprintf(log_fid, 'Session     : %s\n', session);
+    if nargin >= 4 && ~isempty(hash8)
+        fprintf(log_fid, 'Config hash : %s\n', hash8);
+    end
+    if nargin >= 5 && isstruct(canonical)
+        fprintf(log_fid, 'Config used :\n');
+        names = fieldnames(canonical);
+        for i = 1:numel(names)
+            fprintf(log_fid, '  %-32s = %s\n', names{i}, ...
+                format_config_value(canonical.(names{i})));
+        end
+    end
     fprintf(log_fid, '========================================\n');
+end
+
+function s = format_config_value(v)
+    % Stringify a canonical config value for the log header.
+    if ischar(v) || isstring(v)
+        s = char(v);
+    elseif islogical(v)
+        if v, s = 'true'; else, s = 'false'; end
+    elseif isnumeric(v) && isscalar(v)
+        if v == fix(v) && abs(v) < 1e9
+            s = sprintf('%d', v);
+        else
+            s = sprintf('%.6g', v);
+        end
+    elseif isnumeric(v)
+        s = mat2str(v);
+    else
+        try
+            s = jsonencode(v);
+        catch
+            s = '<unprintable>';
+        end
+    end
 end
 
 function log_msg(log_fid, fmt, varargin)
@@ -562,37 +679,115 @@ end
 
 
 %% =========================================================================
-%  CACHE MANIFEST HELPERS
+%  CROSS-INSTANCE CLAIM / STATUS HELPERS
 %% =========================================================================
+%  Let several copies of this script (one per remote-desktop session, sharing
+%  working_dir) divide the per-field work without stepping on each other. Each
+%  field is gated by an atomically-created lock directory and described by a
+%  human-readable .status file that any instance can read.
 
-function manifest = load_cache_manifest(patient_id, session, config)
-    % Loads the per-session cache manifest (or creates a fresh one).
-    sim_dir       = get_simulation_directory(patient_id, session, config);
-    manifest_path = fullfile(sim_dir, 'cache_manifest.mat');
-    if exist(manifest_path, 'file')
-        data     = load(manifest_path, 'manifest');
-        manifest = data.manifest;
-    else
-        manifest              = struct();
-        manifest.fields       = struct();   % sub-struct keyed by 'f_NNN'
-        manifest.created      = datetime('now');
-        manifest.last_updated = datetime('now');
+function [claimed, reason] = claim_field(lock_path, status_path, stale_minutes)
+    % Atomically claim a field using directory creation, which is atomic on
+    % POSIX/NFS. Returns claimed=true only if THIS process created the lock.
+    % If a sibling holds the lock but its status file is older than
+    % stale_minutes (e.g. the sibling crashed mid-field), the lock is overtaken
+    % so the field is not orphaned forever.
+    [ok, ~, msgid] = mkdir(lock_path);
+    if ok && ~strcmpi(msgid, 'MATLAB:MKDIR:DirectoryExists')
+        claimed = true; reason = 'new';
+        return;
+    end
+    claimed = false; reason = 'held';
+    if stale_minutes > 0 && isfile(status_path)
+        info = dir(status_path);
+        if ~isempty(info)
+            age_min = (now - info(1).datenum) * 24 * 60;
+            if age_min > stale_minutes
+                claimed = true; reason = 'stale_overtake';
+            end
+        end
     end
 end
 
-function save_cache_manifest(manifest, patient_id, session, config)
-    sim_dir            = get_simulation_directory(patient_id, session, config);
-    manifest.last_updated = datetime('now');
-    save(fullfile(sim_dir, 'cache_manifest.mat'), 'manifest');
+function write_field_status(status_path, state, field_idx, gantry, hash8)
+    % Overwrite the per-field status file with the current state
+    % ('in_progress' | 'complete'). This file is the cross-instance signal
+    % board sibling processes read to see what is taken and what is done.
+    fid = fopen(status_path, 'w');
+    if fid < 0, return; end
+    fprintf(fid, 'status  = %s\n', state);
+    fprintf(fid, 'field   = %d\n', field_idx);
+    fprintf(fid, 'gantry  = %.1f\n', gantry);
+    fprintf(fid, 'config  = %s\n', hash8);
+    fprintf(fid, 'host    = %s\n', get_hostname());
+    fprintf(fid, 'pid     = %d\n', feature('getpid'));
+    fprintf(fid, 'updated = %s\n', datestr(now, 'yyyy-mm-dd HH:MM:SS'));
+    fclose(fid);
 end
 
-function manifest = update_manifest_field(manifest, field_idx, gantry_angle, elapsed_sec)
-    % Records a completed field in the manifest.
-    key                            = sprintf('f_%03d', field_idx);
-    manifest.fields.(key).field_idx    = field_idx;
-    manifest.fields.(key).gantry_angle = gantry_angle;
-    manifest.fields.(key).completed_at = datetime('now');
-    manifest.fields.(key).elapsed_sec  = elapsed_sec;
+function h = get_hostname()
+    % Best-effort machine name so a status file says which session owns a field.
+    h = getenv('HOSTNAME');
+    if isempty(h), h = getenv('COMPUTERNAME'); end
+    if isempty(h)
+        try
+            [st, out] = system('hostname');
+            if st == 0, h = strtrim(out); end
+        catch
+            h = '';
+        end
+    end
+    if isempty(h), h = 'unknown'; end
+end
+
+
+%% =========================================================================
+%  CACHE MANIFEST HELPERS
+%% =========================================================================
+
+function manifest = load_cache_manifest(patient_id, session, config, hash8)
+    % Loads the per-(session,config) cache manifest (or creates a fresh one).
+    manifest_path = expected_manifest_path(patient_id, session, config, hash8);
+    if exist(manifest_path, 'file')
+        data     = load(manifest_path, 'manifest');
+        manifest = data.manifest;
+        if ~isfield(manifest, 'config_hash') || ~strcmp(manifest.config_hash, hash8)
+            % Stale or migrated manifest -- treat as fresh.
+            manifest = fresh_manifest(hash8);
+        end
+        if ~isfield(manifest, 'fields')
+            manifest.fields = struct();
+        end
+    else
+        manifest = fresh_manifest(hash8);
+    end
+end
+
+function manifest = fresh_manifest(hash8)
+    manifest              = struct();
+    manifest.config_hash  = hash8;
+    manifest.fields       = struct();   % sub-struct keyed by 'f_NNN'
+    manifest.created      = datetime('now');
+    manifest.last_updated = datetime('now');
+end
+
+function save_cache_manifest(manifest, patient_id, session, config, hash8)
+    manifest.last_updated = datetime('now');
+    manifest.config_hash  = hash8;
+    save(expected_manifest_path(patient_id, session, config, hash8), 'manifest');
+end
+
+function manifest = update_manifest_field(manifest, field_idx, field_dose, ...
+        patient_id, session, elapsed_sec)
+    % Records a completed field in the manifest.  Stores gantry angle and
+    % source basename so the manifest is self-describing.
+    key  = sprintf('f_%03d', field_idx);
+    base = get_field_basename(field_dose, patient_id, session);
+    manifest.fields.(key).field_idx       = field_idx;
+    manifest.fields.(key).gantry_angle    = field_dose.gantry_angle;
+    manifest.fields.(key).source_basename = base;
+    manifest.fields.(key).completed_at    = datetime('now');
+    manifest.fields.(key).elapsed_sec     = elapsed_sec;
 end
 
 function completed = get_completed_from_manifest(manifest)
@@ -605,11 +800,12 @@ function completed = get_completed_from_manifest(manifest)
     end
 end
 
-function print_cache_status(manifest, cached_idxs, pending_idxs, field_doses, log_fid)
-    % Prints a formatted table of cached vs pending fields.
+function print_cache_status(manifest, cached_idxs, pending_idxs, field_doses, log_fid, hash8)
+    % Prints a formatted table of cached vs pending fields for the active hash.
     fprintf('\n         --- Cache / Resume Status ---\n');
+    fprintf('         Active config hash: %s\n', hash8);
     if ~isempty(cached_idxs)
-        fprintf('         Previously completed:\n');
+        fprintf('         Previously completed (this config):\n');
         for i = 1:numel(cached_idxs)
             fi  = cached_idxs(i);
             key = sprintf('f_%03d', fi);
@@ -618,11 +814,13 @@ function print_cache_status(manifest, cached_idxs, pending_idxs, field_doses, lo
                 fprintf('           [DONE] Field %3d  gantry %6.1f deg  completed %s  (%.0f s)\n', ...
                     fi, e.gantry_angle, ...
                     datestr(e.completed_at, 'yyyy-mm-dd HH:MM:SS'), e.elapsed_sec);
-                log_msg(log_fid, 'CACHE HIT  field %d (gantry %.1f deg), completed %s', ...
-                    fi, e.gantry_angle, datestr(e.completed_at, 'yyyy-mm-dd HH:MM:SS'));
+                log_msg(log_fid, 'CACHE HIT [%s] field %d (gantry %.1f deg), completed %s', ...
+                    hash8, fi, e.gantry_angle, ...
+                    datestr(e.completed_at, 'yyyy-mm-dd HH:MM:SS'));
             else
                 fprintf('           [DONE] Field %3d  (file on disk, no manifest entry)\n', fi);
-                log_msg(log_fid, 'CACHE HIT  field %d (file present, no manifest entry)', fi);
+                log_msg(log_fid, 'CACHE HIT [%s] field %d (file present, no manifest entry)', ...
+                    hash8, fi);
             end
         end
     end
@@ -677,4 +875,148 @@ function generate_simulation_summary(results)
             fprintf('  Error: %s\n', p.error.message);
         end
     end
+end
+
+
+%% =========================================================================
+%  HASH->CONFIG REGISTRY
+%% =========================================================================
+%  The compute_sim_config_hash helper (and its sim_config_fields allow-list)
+%  lives in a standalone file so step3_analysis.m and any future consumer
+%  can compute the same hash without duplicating the field list.
+
+function key = registry_key(hash_hex)
+    % Struct field names cannot start with a digit, so prefix the hash with
+    % 'h_' when used as a struct/JSON key.  The bare hash remains in filenames.
+    key = ['h_' hash_hex];
+end
+
+function p = config_registry_path(patient_id, session, config)
+    sim_dir = get_simulation_directory(patient_id, session, config);
+    p       = fullfile(sim_dir, 'config_registry.json');
+end
+
+function ensure_config_registry(hash_hex, canonical, patient_id, session, config)
+    % Append (or refresh) one hash->config entry in
+    % <sim_dir>/config_registry.json.  Existing entries are left intact
+    % except for last_updated, which is bumped to the current time.
+    registry = load_config_registry(patient_id, session, config);
+    key      = registry_key(hash_hex);
+    now_str  = datestr(now, 'yyyy-mm-dd HH:MM:SS');
+
+    if isfield(registry, key)
+        registry.(key).last_updated = now_str;
+    else
+        entry.first_seen   = now_str;
+        entry.last_updated = now_str;
+        entry.config       = canonical;
+        registry.(key)     = entry;
+    end
+
+    json          = jsonencode(registry, 'PrettyPrint', true);
+    registry_path = config_registry_path(patient_id, session, config);
+    fid           = fopen(registry_path, 'w');
+    if fid < 0
+        warning('pipeline_simulate:registry', ...
+            'Could not write config registry: %s', registry_path);
+        return;
+    end
+    fprintf(fid, '%s', json);
+    fclose(fid);
+end
+
+function registry = load_config_registry(patient_id, session, config)
+    % Read <sim_dir>/config_registry.json or return an empty struct.
+    registry      = struct();
+    registry_path = config_registry_path(patient_id, session, config);
+    if ~isfile(registry_path), return; end
+    fid = fopen(registry_path, 'r');
+    if fid < 0, return; end
+    raw = fread(fid, '*char')';
+    fclose(fid);
+    if isempty(strtrim(raw)), return; end
+    try
+        decoded = jsondecode(raw);
+        if isstruct(decoded)
+            registry = decoded;
+        end
+    catch ME
+        warning('pipeline_simulate:registry', ...
+            'Failed to parse %s: %s', registry_path, ME.message);
+    end
+end
+
+function canonical = decode_config_hash(hash_hex, patient_id, session, config)
+    % Look up the canonical config that produced the given hash by reading
+    % the per-session config_registry.json.  Returns [] when the hash is
+    % unknown.
+    canonical = [];
+    registry  = load_config_registry(patient_id, session, config);
+    key       = registry_key(hash_hex);
+    if isfield(registry, key) && isfield(registry.(key), 'config')
+        canonical = registry.(key).config;
+    end
+end
+
+
+%% =========================================================================
+%  PER-FIELD FILE NAMING (input/output paired by basename)
+%% =========================================================================
+
+function base = get_field_basename(field_dose, patient_id, session)
+    % Derive the stem used for <stem>_recon_<hash>.mat and <stem>_sim_<hash>.mat
+    % so reconstructions sit alongside their input dose by name.  Mirrors
+    % step15_process_doses naming via field_dose.source_mat_filename.
+    if isfield(field_dose, 'source_mat_filename') && ~isempty(field_dose.source_mat_filename)
+        [~, base, ~] = fileparts(field_dose.source_mat_filename);
+        return;
+    end
+    if isfield(field_dose, 'beam_index') && ~isempty(field_dose.beam_index)
+        base = sprintf('dose_%s_%s_field_%03d', patient_id, session, ...
+            field_dose.beam_index);
+    else
+        base = sprintf('dose_%s_%s_field', patient_id, session);
+    end
+end
+
+function p = expected_recon_path(field_dose, patient_id, session, config, hash8)
+    sim_dir = get_simulation_directory(patient_id, session, config);
+    base    = get_field_basename(field_dose, patient_id, session);
+    p       = fullfile(sim_dir, sprintf('%s_recon_%s.mat', base, hash8));
+end
+
+function p = expected_sim_path(field_dose, patient_id, session, config, hash8)
+    sim_dose_dir = fullfile(config.working_dir, 'RayStationFiles', ...
+        patient_id, session, 'processed', 'simulated_doses');
+    base = get_field_basename(field_dose, patient_id, session);
+    p    = fullfile(sim_dose_dir, sprintf('%s_sim_%s.mat', base, hash8));
+end
+
+function p = expected_total_recon_path(patient_id, session, config, hash8)
+    sim_dir = get_simulation_directory(patient_id, session, config);
+    p       = fullfile(sim_dir, sprintf('total_recon_dose_%s.mat', hash8));
+end
+
+function p = expected_manifest_path(patient_id, session, config, hash8)
+    sim_dir = get_simulation_directory(patient_id, session, config);
+    p       = fullfile(sim_dir, sprintf('cache_manifest_%s.mat', hash8));
+end
+
+function status_dir = get_status_directory(patient_id, session, config)
+    % Per-(session, config) directory holding the cross-instance lock dirs and
+    % .status files. The caller is responsible for creating it once.
+    status_dir = fullfile(get_simulation_directory(patient_id, session, config), ...
+        'field_status');
+end
+
+function p = field_status_path(field_dose, patient_id, session, config, hash8)
+    base = get_field_basename(field_dose, patient_id, session);
+    p    = fullfile(get_status_directory(patient_id, session, config), ...
+        sprintf('%s_%s.status', base, hash8));
+end
+
+function p = field_lock_path(field_dose, patient_id, session, config, hash8)
+    base = get_field_basename(field_dose, patient_id, session);
+    p    = fullfile(get_status_directory(patient_id, session, config), ...
+        sprintf('%s_%s.lock', base, hash8));
 end
