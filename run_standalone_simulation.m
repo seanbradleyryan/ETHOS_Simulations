@@ -745,6 +745,11 @@ catch ME
     return;
 end
 
+% Imitate the sensor frequency response by band-limiting the measured
+% time series (0.35 MHz centre, 100%% bandwidth Gaussian filter).
+FS         = 1 / kgrid.dt;
+sensorData = gaussianFilter(sensorData, FS, 0.35e6, 100, true);
+
 sensorData_measured = sensorData;
 
 %% ========================= PULSE CONVOLUTION / NOISE / DECONVOLUTION =====
