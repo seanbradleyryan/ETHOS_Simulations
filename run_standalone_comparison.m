@@ -84,11 +84,6 @@ CONFIG.save_results = true;
 CONFIG.output_file  = 'standalone_recon_results.mat';
 CONFIG.plot_results = true;
 
-% Smooth the forward-simulation time series with k-Wave's filterTimeSeries
-% (removes grid-unsupported high frequencies that otherwise show up as
-% speckle/graininess in the reconstruction). Set false to disable.
-CONFIG.smooth_time_series = true;
-
 % Gaussian sigma (in voxels) applied to dose slices for DISPLAY ONLY in the
 % dose comparison panels. Fills the speckle "pockets" left by a spotty recon
 % so the overlay reads continuously instead of letting CT show through.
@@ -810,14 +805,8 @@ catch ME
     return;
 end
 
-% Smooth the forward time series with k-Wave's temporal filter. Removes
-% high-frequency content the grid cannot support, which would otherwise
-% appear as speckle/graininess in the reconstruction.
-if ~isfield(CONFIG, 'smooth_time_series') || CONFIG.smooth_time_series
-    medium_ts  = struct('sound_speed', gather(kmedium.sound_speed));
-    sensorData = single(filterTimeSeries(kgrid, medium_ts, double(gather(sensorData)), 'ZeroPhase', true));
-    fprintf('       Time series smoothed (k-Wave filterTimeSeries).\n');
-end
+% Smooth the forward time series.
+sensorData = smooth(sensorData);
 
 % Imitate the sensor frequency response by band-limiting the measured
 % time series (0.35 MHz centre, 100%% bandwidth Gaussian filter).
