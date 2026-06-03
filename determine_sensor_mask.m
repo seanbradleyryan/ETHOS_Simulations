@@ -31,7 +31,7 @@ function [sensor_mask, sensor_info] = determine_sensor_mask(sct_resampled, field
 %      rotation from coronal normal [0, -1, 0] to (c - iso)/|c - iso|,
 %      then binary-search the largest theta in [0, 1] for which every
 %      rotated element stays outside the body. Grid bounds and the dose
-%      exclusion projection do NOT limit the search — PML is outside the
+%      exclusion projection do NOT limit the search  PML is outside the
 %      grid and an in-air element above the skin does not interact with
 %      the dose volume.
 %   5b. Expand the grid (water padding) if the chosen tilt pushes any
@@ -53,7 +53,7 @@ function [sensor_mask, sensor_info] = determine_sensor_mask(sct_resampled, field
 %       field_dose - Struct with:
 %           .dose_Gy        - 3D dose array (Gy). For session-level sensor
 %                             placement pass the SUMMED PLAN DOSE.
-%           .gantry_angle   - Gantry angle (degrees) — logged only.
+%           .gantry_angle   - Gantry angle (degrees)  logged only.
 %           .origin         - [x, y, z] mm
 %           .spacing        - [dx, dy, dz] mm
 %           .dimensions     - [ny, nx, nz]
@@ -159,7 +159,7 @@ pml_size          = get_field(config, 'pml_size', 10);
 pml_size = 1; % Hardcoded because script logic assumes pml inside.
 
 aim_at_iso        = get_field(config, 'aim_at_iso', true);
-force_turn_angle_deg = get_field(config, 'force_turn_angle', 30);
+force_turn_angle_deg = get_field(config, 'force_turn_angle', 315);
 
 % Kerf is derived; never accepted from config.
 kerf_mm = element_pitch_mm - element_size_mm;
@@ -347,7 +347,7 @@ N_total_elements = elements_per_side * elements_per_side;
 
 % Sweep candidate flat-sensor rectangles. Two-stage search to bias slides
 % toward the FEET (inferior) when the dose centroid Z is blocked by the
-% exclusion zone — sliding superior (toward the head) would put the sensor
+% exclusion zone  sliding superior (toward the head) would put the sensor
 % under the ribs, blocking the acoustic signal.
 %
 % HFS convention (see CLAUDE.md "Coordinate System"): higher Z voxel index
@@ -364,7 +364,7 @@ for ix_start = 1:(Nx - sensor_nx + 1)
     for iz_start = 1:(Nz - sensor_nz + 1)
         cz = iz_start + half_nz;
         if cz > dose_centroid_iz
-            continue;  % superior placement — skipped in stage 1
+            continue;  % superior placement  skipped in stage 1
         end
         ix_end = ix_start + sensor_nx - 1;
         iz_end = iz_start + sensor_nz - 1;
@@ -381,7 +381,7 @@ for ix_start = 1:(Nx - sensor_nx + 1)
     end
 end
 
-% Stage 2: only run if no inferior placement is feasible — then allow
+% Stage 2: only run if no inferior placement is feasible  then allow
 % superior placements (last resort).
 if isempty(best_ix_start)
     fprintf('        [Sensor] No inferior-of-dose placement; allowing superior.\n');
@@ -468,7 +468,7 @@ if isempty(best_ix_start)
         else
             iz_start_orig   = iz_start_sup;
             grid_pad_z_post = pad_z_post_sup;
-            fprintf('        [Sensor] Superior to exclusion (Z=%d); padding Z+ by %d voxels (water) — inferior would need more padding\n', ...
+            fprintf('        [Sensor] Superior to exclusion (Z=%d); padding Z+ by %d voxels (water)  inferior would need more padding\n', ...
                 iz_start_orig, grid_pad_z_post);
         end
     end
@@ -1118,7 +1118,7 @@ function [feasible, P_world, vox_idx] = check_placement(c_mm, R, ...
 %   PML lives outside the grid, so PML is NOT checked. Grid bounds are NOT
 %   enforced either: any element that rotates past the grid edge is assumed
 %   to be in air/water, and the caller will expand the grid to fit it. The
-%   dose-exclusion XZ projection is also ignored — an element in air above
+%   dose-exclusion XZ projection is also ignored  an element in air above
 %   the skin does not interact with the dose volume even when its column
 %   sits in an irradiated Z slab.
 %   Returns:

@@ -57,7 +57,7 @@ CONFIG.num_time_reversal_iter   = 1;      % Time-reversal iterations per field
 %   'full_plane_anterior' : Full YZ plane at x = sensor_x_index.
 %   'full_plane_lateral'  : Full XZ plane at y = sensor_y_index.
 %   'spherical'           : Spherical shell.
-CONFIG.sensor_placement_method = 'full_plane_lateral';
+CONFIG.sensor_placement_method = 'determine_sensor_mask';
 CONFIG.sensor_x_index = 20;   % Used by 'full_plane_anterior'
 CONFIG.sensor_y_index = 20;   % Used by 'full_plane_lateral'
 

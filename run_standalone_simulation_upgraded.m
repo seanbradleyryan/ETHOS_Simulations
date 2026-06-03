@@ -49,7 +49,9 @@ CONFIG.cbct_filename = 'CBCT1_resampled.mat';
 CONFIG.dose_file_override = '';
 CONFIG.cbct_file_override = '';
 
-CONFIG.sensor_placement_method = 'determine_sensor_mask';
+
+% 'determine_sensor_mask' 'full_plane_lateral' 'full_plane_anterior'
+CONFIG.sensor_placement_method = 'full_plane_anterior';
 CONFIG.sensor_x_index = 2;
 CONFIG.sensor_y_index = 4;
 
@@ -78,6 +80,9 @@ CONFIG.pml_size               = 10;
 CONFIG.cfl_number             = 0.3;
 CONFIG.use_gpu                = true;
 CONFIG.correction_factor           = 1.9;
+%CONFIG.correction_factor = .0228; 
+
+%CONFIG.correction_factor = .0229
 % Peak-pinning correction (DEFAULT FALSE in upgraded build). Divides
 % reconPressure by max(recon)/max(p0_truth). Disabled by default because it
 % destroys absolute calibration and biases gamma toward the peak voxel.
@@ -92,7 +97,7 @@ CONFIG.use_pressure_scale_correction = false;
 %   (S + eps*max(S)) before pressure->dose. Saved to results.sensitivity_map.
 %   This corrects for the spatially varying sensitivity of the sparse 2D
 %   array (near-detector overestimation / far underestimation bias).
-CONFIG.sensitivity_map_correction = false;
+CONFIG.sensitivity_map_correction = true;
 % When using full TR/forward to build S, this can be expensive. Optionally
 % reuse the same recon_method as the main inversion; otherwise force DAS for
 % the adjoint applied inside S.
@@ -149,9 +154,9 @@ CONFIG.inverse_crime_alpha_bias_factor = 1.0;   % multiplicative on alpha map
 %   'tr'     : iterative time-reversal (k-Wave back-propagation)
 %   'DAS'    : Delay-And-Sum back-projection (homogeneous c, non-iterative)
 %   'hybrid' : DAS for iter 1, k-Wave TR with residual correction for iters 2..N
-CONFIG.reconstruction_method = 'DAS';
+CONFIG.reconstruction_method = 'tr';
 
-CONFIG.num_time_reversal_iter = 30;
+CONFIG.num_time_reversal_iter = 10;
 CONFIG.convergence_tol        = 1e-3;
 
 % --- Pulse Convolution / Noise / Deconvolution ---
@@ -513,7 +518,7 @@ switch CONFIG.sensor_placement_method
         sph_radius  = floor(min([Nx, Ny, Nz]) / 2) - CONFIG.pml_size;
         sensor.mask = makeSphere(Nx, Ny, Nz, sph_radius);
         % Anything outside the enclosing sphere is unobservable by this
-        % sensor geometry — zero p0 there so it doesn't pollute the forward
+        % sensor geometry  zero p0 there so it doesn't pollute the forward
         % simulation or downstream pressure scaling.
         sph_cx = floor(Nx/2) + 1;
         sph_cy = floor(Ny/2) + 1;
@@ -556,7 +561,7 @@ switch CONFIG.sensor_placement_method
         %   field_dose_for_sensor.dose_Gy
         % so the exclusion zone reflects the full beam path from every field.
         % Passing a single field's dose here yields a per-field exclusion zone
-        % only — correct for per-field placement but not session-level reuse.
+        % only  correct for per-field placement but not session-level reuse.
         sct_for_sensor = sct;
         if ~isfield(sct_for_sensor, 'couchMask')
             sct_for_sensor.couchMask = false(size(sct_for_sensor.bodyMask));
@@ -728,7 +733,7 @@ switch CONFIG.sensor_placement_method
         end
 
         % Embed sensor mask. determine_sensor_mask preserves the caller's dim
-        % order — its dim 1 matches sct.bodyMask's dim 1 (which is Nx in this
+        % order  its dim 1 matches sct.bodyMask's dim 1 (which is Nx in this
         % script). No permute needed.
         m1 = min(Nx, size(sensor_mask_orig, 1));
         m2 = min(Ny, size(sensor_mask_orig, 2));
