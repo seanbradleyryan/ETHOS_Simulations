@@ -87,6 +87,7 @@ CONFIG.correction_factor           = 1.9;
 % reconPressure by max(recon)/max(p0_truth). Disabled by default because it
 % destroys absolute calibration and biases gamma toward the peak voxel.
 CONFIG.use_pressure_scale_correction = false;
+CONFIG.mask_recon_to_dose_region     = true;    % zero recon dose outside the dose mask (>1% of original max). Set false to keep the full reconstruction.
 
 %% ----------------- UPGRADED RECONSTRUCTION-FIDELITY FLAGS ---------------
 %  All default false so each can be validated independently against the
@@ -172,6 +173,17 @@ CONFIG.use_grid_padding = true;
 CONFIG.save_results = true;
 CONFIG.output_file  = 'standalone_recon_results.mat';
 CONFIG.plot_results = true;
+
+% Smooth the forward-simulation time series with k-Wave's filterTimeSeries
+% (removes grid-unsupported high frequencies that otherwise show up as
+% speckle/graininess in the reconstruction). Set false to disable.
+CONFIG.smooth_time_series = true;
+
+% Gaussian sigma (in voxels) applied to dose slices for DISPLAY ONLY in the
+% dose comparison panels. Fills the speckle "pockets" left by a spotty recon
+% so the overlay reads continuously instead of letting CT show through.
+% Set to 0 to disable display smoothing.
+CONFIG.viz_smooth_sigma = 1.0;
 
 % Normalize: divide original and reconstructed dose by their own max before
 % comparison / gamma so both peak at 1.0.
@@ -840,6 +852,15 @@ try
 catch ME
     fprintf('[ERROR] Forward simulation failed: %s\n', ME.message);
     return;
+end
+
+% Smooth the forward time series with k-Wave's temporal filter. Removes
+% high-frequency content the grid cannot support, which would otherwise
+% appear as speckle/graininess in the reconstruction.
+if ~isfield(CONFIG, 'smooth_time_series') || CONFIG.smooth_time_series
+    medium_ts  = struct('sound_speed', gather(kmedium.sound_speed));
+    sensorData = single(filterTimeSeries(kgrid, medium_ts, double(gather(sensorData)), 'ZeroPhase', true));
+    fprintf('       Time series smoothed (k-Wave filterTimeSeries).\n');
 end
 
 % Imitate the sensor frequency response by band-limiting the measured
@@ -1523,7 +1544,11 @@ body_mask_plot = ones(gridSize);
 if isfield(sct, 'bodyMask') && isequal(size(sct.bodyMask), gridSize)
     body_mask_plot = double(sct.bodyMask);
 end
-recon_dose = reconDosePerPulse * num_pulses .* double(doseMask) .* body_mask_plot;
+if isfield(CONFIG, 'mask_recon_to_dose_region') && ~CONFIG.mask_recon_to_dose_region
+    recon_dose = reconDosePerPulse * num_pulses .* body_mask_plot;
+else
+    recon_dose = reconDosePerPulse * num_pulses .* double(doseMask) .* body_mask_plot;
+end
 
 fprintf('       Reconstructed dose: [%.4f, %.4f] Gy\n', min(recon_dose(:)), max(recon_dose(:)));
 
@@ -1768,7 +1793,7 @@ if CONFIG.plot_results
     %            Coronal | Sagittal | Axial
     %            Isocenter = max-dose voxel; sensor contour in red
     plot_dose_panels(doseGrid, recon_dose, sensor.mask, medium_orig.density, spacing_mm, ...
-        'Dose Comparison: Original vs Reconstructed');
+        'Dose Comparison: Original vs Reconstructed', CONFIG.viz_smooth_sigma);
 
     % Figure 2  p0 convergence (max pressure + relative change)  TR & hybrid only
     if any(strcmpi(CONFIG.reconstruction_method, {'tr', 'hybrid'}))
@@ -1904,7 +1929,7 @@ function plot_sensor_dose_planes(dose_mask, sensor_mask, spacing_mm, density, co
 end
 
 
-function plot_dose_panels(original, recon, sensor_mask, density, spacing_mm, titleStr)
+function plot_dose_panels(original, recon, sensor_mask, density, spacing_mm, titleStr, smooth_sigma)
 %PLOT_DOSE_PANELS 2x3 dose comparison: coronal, sagittal, axial.
 %  Row 1 = original dose,  Row 2 = reconstructed dose.
 %  Dose (jet, semi-transparent) is overlaid on the density map (grayscale).
@@ -1912,8 +1937,12 @@ function plot_dose_panels(original, recon, sensor_mask, density, spacing_mm, tit
 %  Both rows share an identical dose colour range [0, max(original)]
 %  so magnitudes are directly comparable.
 %  Isocenter at max-dose voxel.  Sensor contour in red on every panel.
+%  smooth_sigma (voxels) Gaussian-smooths each slice for display only, to
+%  fill speckle gaps in a spotty recon. Pass 0 to disable.
 %
 %  Pass density=[] to show dose only with a black background.
+
+    if nargin < 7 || isempty(smooth_sigma), smooth_sigma = 0; end
 
     gridSize = size(original);
     if ~isequal(size(sensor_mask), gridSize)
@@ -1977,6 +2006,9 @@ function plot_dose_panels(original, recon, sensor_mask, density, spacing_mm, tit
         for col = 1:3
             ax         = subplot(2, 3, (row-1)*3 + col);
             dose_slice = double(dose_slices{col});
+            if smooth_sigma > 0
+                dose_slice = imgaussfilt(dose_slice, smooth_sigma);
+            end
             xv         = xvecs{col};
             yv         = yvecs{col};
 
