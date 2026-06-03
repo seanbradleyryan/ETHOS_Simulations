@@ -1,6 +1,10 @@
 %% =========================================================================
-%  RUN_STANDALONE_SIMULATION.m
-%  Standalone k-Wave Photoacoustic Forward + Time-Reversal Simulation
+%  RUN_STANDALONE_COMPARISON.m
+%  Two-dose k-Wave photoacoustic comparison.
+%  Runs the standalone forward + reconstruction pipeline (identical to
+%  run_standalone_simulation.m) on the listed dose file AND on its counterpart
+%  on the other CT image, then performs three gamma analyses (10%/10mm,
+%  5%/5mm, 3%/3mm) between the two reconstructed doses.
 %  =========================================================================
 
 clear; clc; close all;
@@ -12,10 +16,13 @@ CONFIG.patient_id     = '1194203';
 CONFIG.session        = 'Session_1';
 
 CONFIG.dose_filename = 'dose_1194203_Session_1_reference_CT_3_B15_112.mat';
-% TEMPORARY: standalone sim always uses CBCT1 (CT_1) geometry, regardless
-% of which CBCT the dose was actually computed on. Per-dose CBCT selection
-% lives in the multi-field driver, not here.
-CONFIG.cbct_filename = 'CBCT1_resampled.mat';
+
+% The two CT image indices to compare. The listed dose file above carries a
+% _CT_k token selecting one of these; this script automatically locates that
+% dose file's counterpart on the OTHER CT image, runs the identical forward +
+% reconstruction pipeline on both, and gamma-compares the two reconstructions.
+% Each dose is simulated on its OWN CBCT geometry (CBCT<k>_resampled.mat).
+CONFIG.ct_pair = [1, 3];
 
 CONFIG.dose_file_override = '';
 CONFIG.cbct_file_override = '';
@@ -91,25 +98,54 @@ CONFIG.gamma_log_file = 'gamma_log.mat';
 % projected jaw rectangles aren't unrealistically large.
 CONFIG.plot_exclusion_zone = false;
 
-%% ========================= RESOLVE FILE PATHS ============================
+%% ===================== RESOLVE DOSE PAIR & CBCT PATHS ====================
+%  Resolve the listed dose file (A), then derive its counterpart (B) on the
+%  other CT image by swapping the _CT_k token. Each dose is paired with its
+%  own CBCT geometry: CBCT<k>_resampled.mat.
 
 if ~isempty(CONFIG.dose_file_override)
-    dose_filepath = CONFIG.dose_file_override;
+    dose_filepath_A = CONFIG.dose_file_override;
+    [processed_dir, baseA, extA] = fileparts(dose_filepath_A);
+    dose_basename_A = [baseA, extA];
 else
-    processed_dir = fullfile(CONFIG.working_dir, 'RayStationFiles', ...
+    processed_dir   = fullfile(CONFIG.working_dir, 'RayStationFiles', ...
         CONFIG.patient_id, CONFIG.session, 'processed');
-    dose_filepath = fullfile(processed_dir, CONFIG.dose_filename);
+    dose_basename_A = CONFIG.dose_filename;
+    dose_filepath_A = fullfile(processed_dir, dose_basename_A);
 end
 
-if ~isempty(CONFIG.cbct_file_override)
-    cbct_filepath = CONFIG.cbct_file_override;
-else
-    if ~exist('processed_dir', 'var')
-        processed_dir = fullfile(CONFIG.working_dir, 'RayStationFiles', ...
-            CONFIG.patient_id, CONFIG.session, 'processed');
-    end
-    cbct_filepath = fullfile(processed_dir, CONFIG.cbct_filename);
+% Identify this dose's CT image index from the _CT_k token.
+ct_tok = regexp(dose_basename_A, '_CT_(\d+)_', 'tokens', 'once');
+if isempty(ct_tok)
+    error('run_standalone_comparison:NoCTtoken', ...
+        ['Dose filename "%s" has no _CT_k token; cannot locate its ' ...
+         'counterpart on the other CT image.'], dose_basename_A);
 end
+ct_a = str2double(ct_tok{1});
+if ~ismember(ct_a, CONFIG.ct_pair)
+    error('run_standalone_comparison:CTnotInPair', ...
+        'Dose CT index %d is not in CONFIG.ct_pair = [%s].', ...
+        ct_a, num2str(CONFIG.ct_pair));
+end
+ct_b_all = CONFIG.ct_pair(CONFIG.ct_pair ~= ct_a);
+ct_b     = ct_b_all(1);
+
+% Counterpart dose file: same name with the CT token swapped.
+dose_basename_B = regexprep(dose_basename_A, '_CT_\d+_', sprintf('_CT_%d_', ct_b));
+dose_filepath_B = fullfile(processed_dir, dose_basename_B);
+
+% CBCT geometry for each dose (per-dose, not the legacy CBCT1-always default).
+if ~isempty(CONFIG.cbct_file_override)
+    cbct_filepath_A = CONFIG.cbct_file_override;
+else
+    cbct_filepath_A = fullfile(processed_dir, sprintf('CBCT%d_resampled.mat', ct_a));
+end
+cbct_filepath_B = fullfile(processed_dir, sprintf('CBCT%d_resampled.mat', ct_b));
+
+dose_filepath_list = {dose_filepath_A, dose_filepath_B};
+cbct_filepath_list = {cbct_filepath_A, cbct_filepath_B};
+label_list         = {sprintf('CT_%d (listed)', ct_a), ...
+                      sprintf('CT_%d (counterpart)', ct_b)};
 
 %% ========================= LOAD PLAN BEAM METADATA =======================
 % determine_sensor_mask needs beam_metadata for ALL beams in the plan
@@ -147,11 +183,13 @@ end
 %% ========================= PRINT CONFIGURATION ===========================
 
 fprintf('=========================================================\n');
-fprintf('  Standalone k-Wave Photoacoustic Simulation  (v4.1)\n');
+fprintf('  Standalone k-Wave Photoacoustic Comparison  (v4.1)\n');
 fprintf('=========================================================\n');
 fprintf('  Patient:         %s / %s\n', CONFIG.patient_id, CONFIG.session);
-fprintf('  Dose file:       %s\n', dose_filepath);
-fprintf('  CBCT file:       %s  (TEMP: standalone always uses CBCT1/CT_1)\n', cbct_filepath);
+fprintf('  Dose A:          %s\n', dose_filepath_list{1});
+fprintf('    on CBCT:       %s\n', cbct_filepath_list{1});
+fprintf('  Dose B:          %s\n', dose_filepath_list{2});
+fprintf('    on CBCT:       %s\n', cbct_filepath_list{2});
 fprintf('  Sensor:          %s\n', CONFIG.sensor_placement_method);
 fprintf('  Tissue model:    %s\n', CONFIG.gruneisen_method);
 fprintf('  Recon method:    %s\n', CONFIG.reconstruction_method);
@@ -161,6 +199,21 @@ if CONFIG.downscale_factor ~= 1
     fprintf('  Downscale factor: %g\n', CONFIG.downscale_factor);
 end
 fprintf('=========================================================\n\n');
+
+%% ===================== PER-DOSE PIPELINE (RUN TWICE) =====================
+%  Iterate over the two dose files. Each iteration runs the full, identical
+%  forward + reconstruction pipeline and stores its reconstructed dose in
+%  RES(di). After the loop the two reconstructions are gamma-compared.
+
+for di = 1:2
+
+clearvars fd_gantry_angle step15_spacing_mm sensor_info_orig
+
+dose_filepath = dose_filepath_list{di};
+cbct_filepath = cbct_filepath_list{di};
+label         = label_list{di};
+
+fprintf('\n##################### PROCESSING DOSE %d/2: %s #####################\n', di, label);
 
 %% ========================= LOAD DATA ====================================
 
@@ -239,7 +292,7 @@ Nx = gridSize(1); Ny = gridSize(2); Nz = gridSize(3);
 fprintf('       Grid size: [%d x %d x %d]\n', Nx, Ny, Nz);
 fprintf('       Dose range: [%.6f, %.4f] Gy\n', min(doseGrid(:)), max(doseGrid(:)));
 
-fprintf('[2/7] Loading CBCT data (CBCT1 / CT_1  temporary standalone default)...\n');
+fprintf('[2/7] Loading CBCT data for %s...\n', label); %  CT_1  temporary standalone default)...\n');
 if ~isfile(cbct_filepath)
     error('CBCT file not found: %s', cbct_filepath);
 end
@@ -1198,61 +1251,91 @@ if did_pad
     p0 = p0(1:Nx_orig, 1:Ny_orig, 1:Nz_orig);
 end
 
+%% ===================== CAPTURE PER-DOSE RESULTS ==========================
+RES(di).recon_dose        = recon_dose;
+RES(di).doseGrid          = doseGrid;
+RES(di).spacing_mm        = spacing_mm;
+RES(di).sensor_mask       = sensor.mask;
+RES(di).density           = medium.density;
+RES(di).p0                = p0;
+RES(di).reconPressure     = reconPressure;
+RES(di).gridSize          = gridSize;
+RES(di).doseMask          = doseMask;
+RES(di).num_pulses        = num_pulses;
+RES(di).fwd_time          = fwd_time;
+RES(di).tr_time           = tr_time;
+RES(di).conv_max_pressure = conv_max_pressure;
+RES(di).conv_rel_change   = conv_rel_change;
+RES(di).num_iters_done    = num_iters_done;
+RES(di).label             = label;
+
+end   % di loop over the two dose files
+
+%% ===================== EXTRACT THE TWO RECON DOSES =======================
+
+recon_A    = RES(1).recon_dose;
+recon_B    = RES(2).recon_dose;
+spacing_mm = RES(1).spacing_mm;
+
+if ~isequal(RES(1).gridSize, RES(2).gridSize)
+    error('run_standalone_comparison:GridMismatch', ...
+        ['The two reconstructed doses are on different grids ([%s] vs [%s]).\n' ...
+         'A common grid is required for the gamma comparison.'], ...
+        num2str(RES(1).gridSize), num2str(RES(2).gridSize));
+end
+
 %% ========================= NORMALIZE DOSES ===============================
-% When enabled, divide original and reconstructed doses by their respective
-% maxima so both peak at 1.0. Affects downstream RESULTS SUMMARY, gamma, and
-% plotting.
+% When enabled, divide each reconstructed dose by its own max so both peak
+% at 1.0 before the comparison / gamma.
 
 if isfield(CONFIG, 'normalize') && CONFIG.normalize
-    dg_max = max(doseGrid(:));
-    rd_max = max(recon_dose(:));
-    fprintf('\n[NORM] Normalizing doses by their max:\n');
-    fprintf('       Original max:      %.4f Gy\n', dg_max);
-    fprintf('       Reconstructed max: %.4f Gy\n', rd_max);
-    if dg_max > 0
-        doseGrid = doseGrid / dg_max;
-    end
-    if rd_max > 0
-        recon_dose = recon_dose / rd_max;
-    end
-    % Re-derive the low-dose threshold relative to the (now-normalized) original
-    doseThreshold = 0.01 * max(doseGrid(:));
+    a_max = max(recon_A(:));
+    b_max = max(recon_B(:));
+    fprintf('\n[NORM] Normalizing both reconstructed doses by their max:\n');
+    fprintf('       %s max: %.4f Gy\n', RES(1).label, a_max);
+    fprintf('       %s max: %.4f Gy\n', RES(2).label, b_max);
+    if a_max > 0, recon_A = recon_A / a_max; end
+    if b_max > 0, recon_B = recon_B / b_max; end
 end
 
 %% ========================= RESULTS SUMMARY ===============================
 
-fprintf('\n========= RESULTS =========\n');
-fprintf('  Original dose:      [%.6f, %.4f] Gy\n', min(doseGrid(:)), max(doseGrid(:)));
-fprintf('  Reconstructed dose: [%.6f, %.4f] Gy\n', min(recon_dose(:)), max(recon_dose(:)));
+fprintf('\n========= COMPARISON RESULTS =========\n');
+fprintf('  %-22s [%.6f, %.4f] Gy\n', [RES(1).label ':'], min(recon_A(:)), max(recon_A(:)));
+fprintf('  %-22s [%.6f, %.4f] Gy\n', [RES(2).label ':'], min(recon_B(:)), max(recon_B(:)));
 
-dose_region = doseGrid > doseThreshold;
-if any(dose_region(:))
-    abs_error = abs(recon_dose(dose_region) - doseGrid(dose_region));
-    rel_error = abs_error ./ max(doseGrid(dose_region), 1e-10) * 100;
-    fprintf('  Mean abs err: %.6f Gy\n', mean(abs_error));
-    fprintf('  Mean rel err: %.2f%%\n',  mean(rel_error));
-    fprintf('  Max  rel err: %.2f%%\n',  max(rel_error));
+cmp_threshold = 0.01 * max(recon_A(:));
+cmp_region    = recon_A > cmp_threshold;
+if any(cmp_region(:))
+    abs_error = abs(recon_B(cmp_region) - recon_A(cmp_region));
+    rel_error = abs_error ./ max(recon_A(cmp_region), 1e-10) * 100;
+    fprintf('  Mean abs diff: %.6f Gy\n', mean(abs_error));
+    fprintf('  Mean rel diff: %.2f%%\n',  mean(rel_error));
+    fprintf('  Max  rel diff: %.2f%%\n',  max(rel_error));
 end
-fprintf('===========================\n');
+fprintf('=====================================\n');
 
 %% ========================= GAMMA ANALYSIS ================================
+% Three gamma analyses between the two reconstructed doses.
+%   Reference = dose A (listed),  Target = dose B (counterpart).
 
 gamma_results = struct();
 
 if exist('CalcGamma', 'file') == 2
 
-    fprintf('\n[Gamma] Running gamma analysis...\n');
+    fprintf('\n[Gamma] Running gamma analysis between the two reconstructed doses...\n');
+    fprintf('        Reference: %s   |   Target: %s\n', RES(1).label, RES(2).label);
 
     ref_struct.start = [0, 0, 0];
     ref_struct.width = spacing_mm;
-    ref_struct.data  = double(doseGrid);
+    ref_struct.data  = double(recon_A);
 
     tgt_struct.start = [0, 0, 0];
     tgt_struct.width = spacing_mm;
-    tgt_struct.data  = double(recon_dose);
+    tgt_struct.data  = double(recon_B);
 
-    low_dose_cutoff = 0.10 * max(doseGrid(:));
-    gamma_eval_mask = doseGrid >= low_dose_cutoff;
+    low_dose_cutoff = 0.10 * max(recon_A(:));
+    gamma_eval_mask = recon_A >= low_dose_cutoff;
 
     gamma_criteria = {10, 10, '10%/10mm'; 5, 5, '5%/5mm'; 3, 3, '3%/3mm'};
     gamma_maps     = cell(size(gamma_criteria, 1), 1);
@@ -1286,7 +1369,8 @@ if exist('CalcGamma', 'file') == 2
     gamma_results.cutoff_Gy   = low_dose_cutoff;
     gamma_results.eval_mask   = gamma_eval_mask;
 
-    fprintf('\n  ------ Gamma Pass Rates (10%% low-dose cutoff) ------\n');
+    fprintf('\n  ------ Gamma Pass Rates: %s vs %s (10%% low-dose cutoff) ------\n', ...
+        RES(1).label, RES(2).label);
     for gc = 1:size(gamma_criteria, 1)
         if isnan(pass_rates(gc))
             fprintf('  %-12s  FAILED\n', gamma_criteria{gc, 3});
@@ -1387,21 +1471,28 @@ end
 
 if CONFIG.save_results
     % Build filename from configuration parameters
-    output_fname = sprintf('standalone_results_%s_%s_%s_%d.mat', ...
+    output_fname = sprintf('standalone_comparison_%s_%s_%s_%d.mat', ...
         CONFIG.reconstruction_method, ...
         CONFIG.sensor_placement_method, CONFIG.gruneisen_method, ...
         CONFIG.num_time_reversal_iter);
 
-    results.recon_dose    = recon_dose;
-    results.original_dose = doseGrid;
-    results.p0            = p0;
-    results.reconPressure = reconPressure;
-    results.sensor_mask   = sensor.mask;
-    results.config        = CONFIG;
-    results.spacing_mm    = spacing_mm;
-    results.grid_size     = gridSize;
-    results.fwd_time_sec  = fwd_time;
-    results.tr_time_sec   = tr_time;
+    results.recon_dose_A    = recon_A;
+    results.recon_dose_B    = recon_B;
+    results.label_A         = RES(1).label;
+    results.label_B         = RES(2).label;
+    results.original_dose_A = RES(1).doseGrid;
+    results.original_dose_B = RES(2).doseGrid;
+    results.p0_A            = RES(1).p0;
+    results.p0_B            = RES(2).p0;
+    results.reconPressure_A = RES(1).reconPressure;
+    results.reconPressure_B = RES(2).reconPressure;
+    results.sensor_mask_A   = RES(1).sensor_mask;
+    results.sensor_mask_B   = RES(2).sensor_mask;
+    results.config          = CONFIG;
+    results.spacing_mm      = spacing_mm;
+    results.grid_size       = RES(1).gridSize;
+    results.fwd_time_sec    = [RES(1).fwd_time, RES(2).fwd_time];
+    results.tr_time_sec     = [RES(1).tr_time,  RES(2).tr_time];
     if ~isempty(gamma_results)
         results.gamma = gamma_results;
     end
@@ -1416,27 +1507,27 @@ if CONFIG.plot_results
     % Figure 1  2x3 dose comparison (original top, recon bottom)
     %            Coronal | Sagittal | Axial
     %            Isocenter = max-dose voxel; sensor contour in red
-    plot_dose_panels(doseGrid, recon_dose, sensor.mask, medium_orig.density, spacing_mm, ...
-        'Dose Comparison: Original vs Reconstructed');
+    plot_dose_panels(recon_A, recon_B, RES(1).sensor_mask, RES(1).density, spacing_mm, ...
+        'Dose Comparison: Two Reconstructed Doses', {RES(1).label, RES(2).label});
 
     % Figure 2  p0 convergence (max pressure + relative change)  TR & hybrid only
     if any(strcmpi(CONFIG.reconstruction_method, {'tr', 'hybrid'}))
-        p0_max_for_plot = max(p0(:));
-        plot_convergence_history(conv_max_pressure, conv_rel_change, ...
-            num_iters_done, CONFIG.convergence_tol, p0_max_for_plot);
+        p0_max_for_plot = max(RES(1).p0(:));
+        plot_convergence_history(RES(1).conv_max_pressure, RES(1).conv_rel_change, ...
+            RES(1).num_iters_done, CONFIG.convergence_tol, p0_max_for_plot);
     end
 
     % Figure 3  Axial gamma (3 criteria) + absolute error
     if ~isempty(gamma_results) && isfield(gamma_results, 'maps')
-        [~, max_dose_idx] = max(doseGrid(:));
-        [~, ~, cz_gamma]  = ind2sub(gridSize, max_dose_idx);
-        plot_gamma_and_error_axial(gamma_results, doseGrid, recon_dose, ...
-            sensor.mask, cz_gamma);
+        [~, max_dose_idx] = max(recon_A(:));
+        [~, ~, cz_gamma]  = ind2sub(RES(1).gridSize, max_dose_idx);
+        plot_gamma_and_error_axial(gamma_results, recon_A, recon_B, ...
+            RES(1).sensor_mask, cz_gamma);
     end
 
 end
 
-fprintf('\nStandalone simulation complete.\n');
+fprintf('\nStandalone comparison complete.\n');
 
 
 %% =========================================================================
@@ -1545,7 +1636,7 @@ function plot_sensor_dose_planes(dose_mask, sensor_mask, spacing_mm, density, co
 end
 
 
-function plot_dose_panels(original, recon, sensor_mask, density, spacing_mm, titleStr)
+function plot_dose_panels(original, recon, sensor_mask, density, spacing_mm, titleStr, rowLabels)
 %PLOT_DOSE_PANELS 2x3 dose comparison: coronal, sagittal, axial.
 %  Row 1 = original dose,  Row 2 = reconstructed dose.
 %  Dose (jet, semi-transparent) is overlaid on the density map (grayscale).
@@ -1590,7 +1681,11 @@ function plot_dose_panels(original, recon, sensor_mask, density, spacing_mm, tit
     sgtitle(sprintf('%s\nIsocenter (max dose): X=%d  Y=%d  Z=%d voxel  |  Dose clim [0, %.4f] Gy', ...
         titleStr, cx, cy, cz, max_dose), 'FontWeight', 'bold', 'FontSize', 11);
 
-    row_labels = {'Original', 'Reconstructed'};
+    if nargin < 7 || isempty(rowLabels)
+        row_labels = {'Original', 'Reconstructed'};
+    else
+        row_labels = rowLabels;
+    end
     doses      = {original, recon};
 
     for row = 1:2
