@@ -108,6 +108,23 @@ CONFIG.gamma_log_file = 'gamma_log.mat';
 % projected jaw rectangles aren't unrealistically large.
 CONFIG.plot_exclusion_zone = false;
 
+% --- Noise ensemble (gamma pass-rate error bars) ---------------------------
+% Estimates how much measurement noise perturbs the gamma pass-rate curve.
+% The expensive k-Wave forward simulation runs ONCE per dose; only the noise
+% draw + Wiener deconvolution + reconstruction are repeated across
+% num_realizations realizations, each with an independent noise seed. The
+% pass-rate spread (std across realizations) becomes the error bar.
+%
+% The realizations are distributed across all available GPUs (one worker per
+% GPU, each pinned to a distinct device). Requires the pulse model to be active
+% (CONFIG.convolution_kernel > 0), since that is where electronic noise enters.
+CONFIG.noise_ensemble.enable           = true;
+CONFIG.noise_ensemble.num_realizations = 8;        % ensemble size N
+CONFIG.noise_ensemble.recompute        = true;     % false -> load saved results if present
+CONFIG.noise_ensemble.results_file     = 'gamma_noise_ensemble.mat';
+CONFIG.noise_ensemble.num_iters        = [];       % [] -> use CONFIG.num_time_reversal_iter
+CONFIG.noise_ensemble.base_seed        = 20260604; % RNG base; per-realization seeds derive from it
+
 %% ===================== RESOLVE DOSE PAIR & CBCT PATHS ====================
 %  Resolve the listed dose file (A), then derive its counterpart (B) on the
 %  other CT image by swapping the _CT_k token. Each dose is paired with its
@@ -209,6 +226,43 @@ if CONFIG.downscale_factor ~= 1
     fprintf('  Downscale factor: %g\n', CONFIG.downscale_factor);
 end
 fprintf('=========================================================\n\n');
+
+%% ===================== RESOLVE NOISE-ENSEMBLE PLAN ======================
+%  Decide whether the noise ensemble is computed fresh or loaded from a saved
+%  results file, and whether the per-dose forward bundles must be captured
+%  during the nominal run (only needed when recomputing).
+
+ne          = CONFIG.noise_ensemble;
+ne_file     = ne.results_file;
+if isempty(fileparts(ne_file))
+    ne_file = fullfile(CONFIG.working_dir, ne_file);
+end
+
+do_ensemble      = ne.enable;
+load_ensemble    = do_ensemble && ~ne.recompute && isfile(ne_file);
+compute_ensemble = do_ensemble && ~load_ensemble;
+
+% Noise only enters the chain through the pulse model; without it the ensemble
+% has nothing to vary, so disable the (re)computation in that case.
+if compute_ensemble && CONFIG.convolution_kernel <= 0
+    warning(['Noise ensemble requires CONFIG.convolution_kernel > 0 (electronic ' ...
+        'noise is injected in the pulse model). Disabling ensemble computation.']);
+    compute_ensemble = false;
+    do_ensemble      = load_ensemble;   % only a prior saved file could still be shown
+end
+
+capture_fwd_bundle = compute_ensemble;
+FWD = struct([]);   % per-dose forward bundles (populated when capturing)
+
+if do_ensemble
+    if load_ensemble
+        ne_mode_str = 'LOAD from file';
+    else
+        ne_mode_str = 'COMPUTE fresh';
+    end
+    fprintf('[NoiseEnsemble] %s  (N=%d, file=%s)\n', ...
+        ne_mode_str, ne.num_realizations, ne_file);
+end
 
 %% ===================== PER-DOSE PIPELINE (RUN TWICE) =====================
 %  Iterate over the two dose files. Each iteration runs the full, identical
@@ -897,6 +951,65 @@ if ~exist('sensor_info_orig', 'var') || ~isstruct(sensor_info_orig)
     sensor_info_orig = struct('num_elements', 0);
 end
 
+%% ----------------- CAPTURE FORWARD BUNDLE (noise ensemble) --------------
+% Snapshot everything the noise ensemble needs to re-reconstruct this dose
+% from a fresh noise draw WITHOUT re-running the forward simulation. Captured
+% here (post-noise, pre-reconstruction) so the padded grid/medium/sensor and
+% the pre-noise sensor response sensorData_resp are all still in scope.
+if capture_fwd_bundle
+    if CONFIG.noise_ensemble.enable && ~isempty(CONFIG.noise_ensemble.num_iters)
+        bundle_num_iters = CONFIG.noise_ensemble.num_iters;
+    else
+        bundle_num_iters = CONFIG.num_time_reversal_iter;
+    end
+
+    B = struct();
+    % Reconstruction inputs on the padded grid
+    B.kgrid                = kgrid;
+    B.kmedium              = kmedium;
+    B.sensor               = sensor;            % padded mask
+    B.inputArgs            = inputArgs;
+    B.p0                   = p0;                 % padded
+    B.gridSize             = gridSize;          % padded
+    B.gridSize_orig        = gridSize_orig;
+    B.did_pad              = did_pad;
+    B.Nx_orig              = Nx_orig;
+    B.Ny_orig              = Ny_orig;
+    B.Nz_orig              = Nz_orig;
+    B.dx                   = dx; B.dy = dy; B.dz = dz; B.dt = dt;
+    B.medium_pad           = medium;            % padded medium (DAS uses this)
+    B.medium_orig          = medium_orig;       % cropped medium (pressure->dose)
+    B.doseMask             = doseMask;           % original-size mask
+    B.num_pulses           = num_pulses;
+    B.sensor_info_orig     = sensor_info_orig;
+    B.das_opts             = das_opts;
+    % Body mask at cropped (original) grid for the final dose masking
+    if isfield(sct, 'bodyMask') && isequal(size(sct.bodyMask), gridSize_orig)
+        B.bodyMask = double(sct.bodyMask);
+    else
+        B.bodyMask = [];
+    end
+    % Reconstruction control (iteration count may be overridden for the ensemble)
+    B.reconstruction_method         = CONFIG.reconstruction_method;
+    B.num_time_reversal_iter        = bundle_num_iters;
+    B.convergence_tol               = CONFIG.convergence_tol;
+    B.correction_factor             = CONFIG.correction_factor;
+    B.use_pressure_scale_correction = CONFIG.use_pressure_scale_correction;
+    B.mask_recon_to_dose_region     = isfield(CONFIG, 'mask_recon_to_dose_region') && ...
+                                      CONFIG.mask_recon_to_dose_region;
+    % Pre-noise sensor response + pulse/deconv transfer functions (CPU doubles)
+    B.sensorData_resp      = double(gather(sensorData_resp));
+    B.H_conj               = H_conj;
+    B.H_power              = H_power;
+    B.conv_deconv_lambda   = conv_deconv_lambda;
+    B.noise_amp            = noise_amp;
+    B.label                = label;
+
+    FWD(di).bundle = B;   %#ok<SAGROW>
+    clear B
+    fprintf('       [NoiseEnsemble] Captured forward bundle for dose %d.\n', di);
+end
+
 switch lower(CONFIG.reconstruction_method)
 case 'tr'
 
@@ -1433,13 +1546,140 @@ else
     gamma_results = [];
 end
 
+%% ===================== NOISE ENSEMBLE (ERROR BARS) =====================
+% Estimate the noise-driven spread of the gamma pass-rate curve. The forward
+% simulation already ran once per dose; here we only re-draw noise, deconvolve,
+% reconstruct, and gamma-sweep, repeated over num_realizations realizations.
+% Realizations are distributed across all available GPUs (one worker per GPU).
+% Results are saved so a later run can load them instead of recomputing.
+
+ens = struct('available', false);
+
+if load_ensemble
+    fprintf('\n[NoiseEnsemble] Loading saved ensemble from %s ...\n', ne_file);
+    S = load(ne_file);
+    if isfield(S, 'pass_rates_ens') && isfield(S, 'criterion_n')
+        if isequal(S.criterion_n(:), gamma_n(:))
+            ens.pass_rates  = S.pass_rates_ens;
+            ens.criterion_n = S.criterion_n(:);
+            ens.available   = true;
+            fprintf('   Loaded %d realizations x %d criteria.\n', ...
+                size(ens.pass_rates, 1), size(ens.pass_rates, 2));
+        else
+            warning('Saved ensemble criteria do not match current sweep; ignoring file.');
+        end
+    else
+        warning('Saved ensemble file missing expected variables; ignoring.');
+    end
+
+elseif compute_ensemble && numel(FWD) >= 2 && isfield(FWD, 'bundle')
+    N         = CONFIG.noise_ensemble.num_realizations;
+    K         = numel(gamma_n);
+    base_seed = CONFIG.noise_ensemble.base_seed;
+    fprintf('\n[NoiseEnsemble] Computing %d realizations over %d criteria ...\n', N, K);
+
+    % --- Multi-GPU pool setup: one worker per GPU, each pinned to a device ---
+    ngpu = 0;
+    try
+        ngpu = gpuDeviceCount;
+    catch
+        ngpu = 0;
+    end
+    desired_workers = max(1, ngpu);
+
+    pool = gcp('nocreate');
+    if isempty(pool) && exist('parpool', 'file') == 2
+        try
+            parpool('local', desired_workers);
+            pool = gcp('nocreate');
+        catch ME
+            fprintf('   [WARN] parpool failed (%s); running serially.\n', ME.message);
+            pool = [];
+        end
+    end
+    if ngpu >= 1 && ~isempty(pool)
+        % Pin each worker to a distinct GPU. The selection persists on the
+        % worker for the subsequent parfor, so each realization reconstructs on
+        % its own device.
+        spmd
+            gpuDevice(mod(labindex - 1, ngpu) + 1);
+        end
+        fprintf('   Pinned %d worker(s) across %d GPU(s).\n', pool.NumWorkers, ngpu);
+    elseif ngpu == 0
+        fprintf('   No GPU detected; reconstructions run on CPU worker(s).\n');
+    end
+
+    bundleA     = FWD(1).bundle;
+    bundleB     = FWD(2).bundle;
+    crit_vec    = gamma_n(:);
+    spacing_loc = spacing_mm;
+
+    pass_rates_ens = nan(N, K);
+    ens_tic = tic;
+    parfor r = 1:N
+        seedA = base_seed + 2*(r-1) + 1;
+        seedB = base_seed + 2*(r-1) + 2;
+
+        sdA = redraw_noisy_deconv(bundleA, seedA);
+        sdB = redraw_noisy_deconv(bundleB, seedB);
+
+        recA = reconstruct_recon_dose(bundleA, sdA);
+        recB = reconstruct_recon_dose(bundleB, sdB);
+
+        pass_rates_ens(r, :) = gamma_sweep_pass_rates(recA, recB, crit_vec, spacing_loc);
+        fprintf('   [NoiseEnsemble] realization %d/%d complete.\n', r, N);
+    end
+    fprintf('   Ensemble compute time: %.1f s\n', toc(ens_tic));
+
+    ens.pass_rates  = pass_rates_ens;
+    ens.criterion_n = crit_vec;
+    ens.available   = true;
+
+    % --- Save the noise calculation for later reuse ---
+    criterion_n   = crit_vec;   %#ok<NASGU>
+    ensemble_meta = struct( ...
+        'num_realizations',      N, ...
+        'base_seed',             base_seed, ...
+        'num_iters',             bundleA.num_time_reversal_iter, ...
+        'reconstruction_method', CONFIG.reconstruction_method, ...
+        'conv_noise_level',      CONFIG.conv_noise_level, ...
+        'convolution_kernel',    CONFIG.convolution_kernel, ...
+        'conv_deconv_lambda',    CONFIG.conv_deconv_lambda, ...
+        'label_A',               RES(1).label, ...
+        'label_B',               RES(2).label, ...
+        'spacing_mm',            spacing_mm, ...
+        'timestamp',             datestr(now, 'yyyy-mm-dd HH:MM:SS'));   %#ok<NASGU>
+    save(ne_file, 'pass_rates_ens', 'criterion_n', 'ensemble_meta', '-v7.3');
+    fprintf('   Saved ensemble results to %s\n', ne_file);
+end
+
+% --- Summary statistics (mean / std across realizations) ---
+if ens.available
+    ens.mean = mean(ens.pass_rates, 1, 'omitnan');
+    ens.std  = std(ens.pass_rates, 0, 1, 'omitnan');
+    fprintf('\n  ----- Noise-ensemble pass rates (mean +/- std, %d realizations) -----\n', ...
+        size(ens.pass_rates, 1));
+    for k = 1:numel(gamma_n)
+        fprintf('  %-12s  %.2f%%  +/- %.2f%%\n', ...
+            sprintf('%g%%/%gmm', gamma_n(k), gamma_n(k)), ens.mean(k), ens.std(k));
+    end
+end
+
 %% ===================== GAMMA PASS-RATE CHART ============================
 % Pass rate as a function of the gamma criterion (1D), with a red reference
-% line at the 90% pass rate.
+% line at the 90% pass rate. When the noise ensemble is available, error bars
+% (mean +/- std over realizations) are overlaid.
 
 if ~isempty(gamma_results) && isfield(gamma_results, 'pass_rates')
-    plot_gamma_pass_rate_curve(gamma_results.criterion_n, ...
-        gamma_results.pass_rates, RES(1).label, RES(2).label, CONFIG.patient_id);
+    if ens.available
+        ens_mean_in = ens.mean;
+        ens_std_in  = ens.std;
+    else
+        ens_mean_in = [];
+        ens_std_in  = [];
+    end
+    plot_gamma_pass_rate_curve(gamma_results.criterion_n, gamma_results.pass_rates, ...
+        RES(1).label, RES(2).label, CONFIG.patient_id, ens_mean_in, ens_std_in);
 end
 
 %% ========================= GAMMA LOG ====================================
@@ -1588,37 +1828,73 @@ fprintf('\nGamma pass-rate study complete.\n');
 %  LOCAL FUNCTIONS
 %% =========================================================================
 
-function plot_gamma_pass_rate_curve(crit_n, pass_rates, label_ref, label_tgt, patient_id)
+function plot_gamma_pass_rate_curve(crit_n, pass_rates, label_ref, label_tgt, patient_id, ens_mean, ens_std)
 %PLOT_GAMMA_PASS_RATE_CURVE  Pass rate vs gamma criterion (n%/n mm).
-%  crit_n      column vector of criterion indices (1..10)
-%  pass_rates  matching pass rates in percent (NaN entries are skipped)
+%  crit_n      column vector of criterion values
+%  pass_rates  nominal (single-draw) pass rates in percent (NaN entries skipped)
+%  ens_mean,ens_std  optional noise-ensemble mean and std per criterion. When
+%                    provided (non-empty), error bars are overlaid as the
+%                    primary series and the nominal curve is shown faintly.
 %  A red horizontal reference line is drawn at the 90% pass rate.
+
+    if nargin < 6, ens_mean = []; end
+    if nargin < 7, ens_std  = []; end
 
     crit_n     = crit_n(:);
     pass_rates = pass_rates(:);
+    have_ens   = ~isempty(ens_mean) && ~isempty(ens_std);
 
     figure('Name', 'Gamma Pass Rate vs Criterion', 'Color', 'w', ...
         'NumberTitle', 'off', 'Position', [120, 120, 760, 470]);
+    hold on;
+
+    legend_handles = gobjects(0);
+    legend_labels  = {};
 
     valid = ~isnan(pass_rates);
-    plot(crit_n(valid), pass_rates(valid), 'b-o', 'LineWidth', 1.8, ...
-        'MarkerSize', 6, 'MarkerFaceColor', [0.2, 0.4, 1.0]);
-    hold on;
+    if have_ens
+        % Nominal single-draw curve shown faintly for reference.
+        h_nom = plot(crit_n(valid), pass_rates(valid), '--o', ...
+            'Color', [0.6, 0.6, 0.6], 'LineWidth', 1.0, 'MarkerSize', 4);
+        legend_handles(end+1) = h_nom; %#ok<AGROW>
+        legend_labels{end+1}  = 'Nominal (single draw)';
+
+        % Ensemble mean +/- std error bars (primary series).
+        em = ens_mean(:); es = ens_std(:);
+        vv = ~isnan(em);
+        h_ens = errorbar(crit_n(vv), em(vv), es(vv), 'b-o', 'LineWidth', 1.8, ...
+            'MarkerSize', 6, 'MarkerFaceColor', [0.2, 0.4, 1.0], 'CapSize', 8);
+        legend_handles(end+1) = h_ens; %#ok<AGROW>
+        legend_labels{end+1}  = 'Ensemble mean \pm std';
+
+        % Annotate ensemble points with mean +/- std
+        for k = 1:numel(crit_n)
+            if vv(k)
+                text(crit_n(k), em(k) + es(k) + 1.5, ...
+                    sprintf('%.1f\\pm%.1f', em(k), es(k)), ...
+                    'HorizontalAlignment', 'center', 'FontSize', 8);
+            end
+        end
+    else
+        h_nom = plot(crit_n(valid), pass_rates(valid), 'b-o', 'LineWidth', 1.8, ...
+            'MarkerSize', 6, 'MarkerFaceColor', [0.2, 0.4, 1.0]);
+        legend_handles(end+1) = h_nom; %#ok<AGROW>
+        legend_labels{end+1}  = 'Pass rate';
+
+        for k = 1:numel(crit_n)
+            if valid(k)
+                text(crit_n(k), pass_rates(k) + 1.5, sprintf('%.1f%%', pass_rates(k)), ...
+                    'HorizontalAlignment', 'center', 'FontSize', 8);
+            end
+        end
+    end
 
     % 90% pass-rate reference line (red)
     yline(90, 'r-', '90% pass rate', 'LineWidth', 1.8, ...
         'LabelHorizontalAlignment', 'left', ...
         'LabelVerticalAlignment', 'bottom', 'FontSize', 9);
 
-    % Annotate each point with its pass rate
-    for k = 1:numel(crit_n)
-        if valid(k)
-            text(crit_n(k), pass_rates(k) + 1.5, sprintf('%.1f%%', pass_rates(k)), ...
-                'HorizontalAlignment', 'center', 'FontSize', 8);
-        end
-    end
     hold off;
-
     grid on;
     xlim([min(crit_n) - 0.5, max(crit_n) + 0.5]);
     ylim([0, 105]);
@@ -1627,7 +1903,202 @@ function plot_gamma_pass_rate_curve(crit_n, pass_rates, label_ref, label_tgt, pa
     ylabel('Gamma pass rate (%)');
     title(sprintf('Gamma Pass Rate vs Criterion   |   Patient %s\n%s vs %s', ...
         patient_id, label_ref, label_tgt), 'FontWeight', 'bold', 'FontSize', 11);
+    legend(legend_handles, legend_labels, 'Location', 'southeast', 'FontSize', 8);
     drawnow;
+end
+
+
+function sd = redraw_noisy_deconv(B, seed)
+%REDRAW_NOISY_DECONV  Re-apply a fresh electronic-noise realization to the
+%  cached pre-noise sensor response, then Wiener-deconvolve the pulse kernel.
+%  Reproduces steps 3-4 of the nominal pulse model with a seeded RNG so each
+%  realization is independent and reproducible.
+%    B.sensorData_resp   pre-noise, post-frequency-response signal (CPU double)
+%    B.noise_amp         noise amplitude (= conv_noise_level * max|resp|)
+%    B.H_conj, B.H_power kernel transfer function terms
+%    B.conv_deconv_lambda Wiener regularization
+    rng(seed);
+    noisy = B.sensorData_resp + B.noise_amp * randn(size(B.sensorData_resp));
+    deconv = real(ifft( ...
+        fft(noisy, [], 2) .* B.H_conj ./ (B.H_power + B.conv_deconv_lambda), [], 2));
+    sd = single(deconv);
+end
+
+
+function recon_dose = reconstruct_recon_dose(B, sensorData_measured)
+%RECONSTRUCT_RECON_DOSE  Reconstruct a dose from a (noisy, deconvolved) sensor
+%  trace using the cached forward bundle B. Mirrors the nominal pipeline's
+%  reconstruction -> crop -> pressure-scale -> pressure->dose stages WITHOUT any
+%  plotting or convergence bookkeeping, so it is safe to run inside parfor on a
+%  worker pinned to a GPU.
+
+    gridSize = B.gridSize;
+    Nx = gridSize(1); Ny = gridSize(2); Nz = gridSize(3);
+    inputArgs = B.inputArgs;
+    N_iter = B.num_time_reversal_iter;
+
+    switch lower(B.reconstruction_method)
+    case 'tr'
+        reconPressure      = zeros(gridSize);
+        reconPressure_prev = zeros(gridSize);
+        sd      = sensorData_measured;
+        sd_meas = sensorData_measured;
+        for it = 1:N_iter
+            source_tr        = struct();
+            source_tr.p_mask = B.sensor.mask;
+            source_tr.p      = fliplr(sd);
+            source_tr.p_mode = 'dirichlet';
+
+            sensor_tr        = struct();
+            sensor_tr.mask   = ones(Nx, Ny, Nz);
+            sensor_tr.record = {'p_final'};
+
+            pr = kspaceFirstOrder3D(B.kgrid, B.kmedium, source_tr, sensor_tr, inputArgs{:});
+            if isstruct(pr) && isfield(pr, 'p_final')
+                reconPressure = reshape(pr.p_final, [Nx, Ny, Nz]);
+            else
+                reconPressure = reshape(pr, [Nx, Ny, Nz]);
+            end
+            reconPressure = max(reconPressure, 0);
+
+            if it > 1
+                np = norm(reconPressure_prev(:));
+                if np > 0
+                    rc = norm(reconPressure(:) - reconPressure_prev(:)) / np;
+                else
+                    rc = Inf;
+                end
+                if rc < B.convergence_tol
+                    break;
+                end
+            end
+            reconPressure_prev = reconPressure;
+
+            if it < N_iter
+                source_resid    = struct();
+                source_resid.p0 = reconPressure;
+                sdr = kspaceFirstOrder3D(B.kgrid, B.kmedium, source_resid, B.sensor, inputArgs{:});
+                sd  = sd + (sd_meas - sdr);
+            end
+        end
+        reconPressure = gather(reconPressure) * B.correction_factor;
+
+    case 'das'
+        reconPressure = das_reconstruct(sensorData_measured, B.sensor, B.sensor_info_orig, ...
+            B.medium_pad, Nx, Ny, Nz, B.dx, B.dy, B.dz, B.dt, B.das_opts);
+        reconPressure = reconPressure * B.correction_factor;
+
+    case 'hybrid'
+        % Iteration 1: DAS seed, then TR residual iterations 2..N.
+        reconPressure = das_reconstruct(sensorData_measured, B.sensor, B.sensor_info_orig, ...
+            B.medium_pad, Nx, Ny, Nz, B.dx, B.dy, B.dz, B.dt, B.das_opts);
+        reconPressure_prev = reconPressure;
+        sd      = sensorData_measured;
+        sd_meas = sensorData_measured;
+        if N_iter > 1
+            source_resid    = struct();
+            source_resid.p0 = reconPressure;
+            sdr = kspaceFirstOrder3D(B.kgrid, B.kmedium, source_resid, B.sensor, inputArgs{:});
+            sd  = sd + (sd_meas - sdr);
+        end
+        for it = 2:N_iter
+            source_tr        = struct();
+            source_tr.p_mask = B.sensor.mask;
+            source_tr.p      = fliplr(sd);
+            source_tr.p_mode = 'dirichlet';
+
+            sensor_tr        = struct();
+            sensor_tr.mask   = ones(Nx, Ny, Nz);
+            sensor_tr.record = {'p_final'};
+
+            pr = kspaceFirstOrder3D(B.kgrid, B.kmedium, source_tr, sensor_tr, inputArgs{:});
+            if isstruct(pr) && isfield(pr, 'p_final')
+                reconPressure = reshape(pr.p_final, [Nx, Ny, Nz]);
+            else
+                reconPressure = reshape(pr, [Nx, Ny, Nz]);
+            end
+            reconPressure = max(reconPressure, 0);
+
+            np = norm(reconPressure_prev(:));
+            if np > 0
+                rc = norm(reconPressure(:) - reconPressure_prev(:)) / np;
+            else
+                rc = Inf;
+            end
+            if rc < B.convergence_tol
+                break;
+            end
+            reconPressure_prev = reconPressure;
+
+            if it < N_iter
+                source_resid    = struct();
+                source_resid.p0 = reconPressure;
+                sdr = kspaceFirstOrder3D(B.kgrid, B.kmedium, source_resid, B.sensor, inputArgs{:});
+                sd  = sd + (sd_meas - sdr);
+            end
+        end
+        reconPressure = gather(reconPressure) * B.correction_factor;
+
+    otherwise
+        error('reconstruct_recon_dose:UnknownMethod', ...
+            'Unknown reconstruction_method: "%s"', B.reconstruction_method);
+    end
+
+    % --- Crop to original size ---
+    if B.did_pad
+        reconPressure = reconPressure(1:B.Nx_orig, 1:B.Ny_orig, 1:B.Nz_orig);
+    end
+
+    % --- Pressure scale correction (optional) ---
+    if B.use_pressure_scale_correction
+        p0_max_orig = max(B.p0(1:B.Nx_orig, 1:B.Ny_orig, 1:B.Nz_orig), [], 'all');
+        recon_max   = max(reconPressure(:));
+        if recon_max > 0
+            reconPressure = reconPressure * (p0_max_orig / recon_max);
+        end
+    end
+
+    % --- Pressure -> dose ---
+    conversionFactor = B.medium_orig.gruneisen .* B.medium_orig.density;
+    conversionFactor(conversionFactor == 0) = 1;
+    reconDosePerPulse = reconPressure ./ conversionFactor;
+
+    cropSize = B.gridSize_orig;
+    if ~isempty(B.bodyMask) && isequal(size(B.bodyMask), cropSize)
+        body_mask_plot = B.bodyMask;
+    else
+        body_mask_plot = ones(cropSize);
+    end
+
+    if ~B.mask_recon_to_dose_region
+        recon_dose = reconDosePerPulse * B.num_pulses .* body_mask_plot;
+    else
+        recon_dose = reconDosePerPulse * B.num_pulses .* double(B.doseMask) .* body_mask_plot;
+    end
+end
+
+
+function pr = gamma_sweep_pass_rates(reconA, reconB, crit_vec, spacing_mm)
+%GAMMA_SWEEP_PASS_RATES  Pass rate for each n%/n mm criterion between two doses.
+%  Serial over criteria (the realization loop is the parallel one). Reference =
+%  reconA, target = reconB, with a 10% low-dose cutoff on the reference.
+    ref_struct = struct('start', [0, 0, 0], 'width', spacing_mm, 'data', double(reconA));
+    tgt_struct = struct('start', [0, 0, 0], 'width', spacing_mm, 'data', double(reconB));
+
+    cutoff    = 0.10 * max(reconA(:));
+    eval_mask = reconA >= cutoff;
+
+    pr = nan(numel(crit_vec), 1);
+    for k = 1:numel(crit_vec)
+        c = crit_vec(k);
+        try
+            gmap  = CalcGamma(ref_struct, tgt_struct, c, c, ...
+                'local', 0, 'limit', c * 2, 'restrict', 1);
+            pr(k) = 100 * mean(gmap(eval_mask) <= 1);
+        catch
+            pr(k) = NaN;
+        end
+    end
 end
 
 
