@@ -3,10 +3,11 @@
 %  Two-dose k-Wave photoacoustic comparison + gamma pass-rate sweep.
 %  Runs the standalone forward + reconstruction pipeline (identical to
 %  run_standalone_comparison.m) on the listed dose file AND on its counterpart
-%  on the other CT image. It then sweeps the gamma criteria from 1%/1mm up to
-%  10%/10mm (i.e. n%/n mm for n = 1..10), computing every pass rate in PARALLEL
-%  across the available CPU cores, and plots the pass rate as a function of the
-%  gamma criterion with a red reference line at the 90% pass rate.
+%  on the other CT image. It then sweeps the gamma criteria from 0.5%/0.5mm up
+%  to 5%/5mm in half-integer steps (i.e. n%/n mm for n = 0.5..5), computing
+%  every pass rate in PARALLEL across the available CPU cores, and plots the
+%  pass rate as a function of the gamma criterion with a red reference line at
+%  the 90% pass rate.
 %  =========================================================================
 
 clear; clc; close all;
@@ -1346,25 +1347,27 @@ end
 fprintf('=====================================\n');
 
 %% ===================== GAMMA PASS-RATE SWEEP (PARALLEL) ==================
-% Sweep the gamma criteria n%/n mm for n = 1..10 between the two reconstructed
-% doses and record the pass rate at each. Each criterion is independent, so the
-% 10 CalcGamma evaluations are distributed across the CPU cores with parfor.
+% Sweep the gamma criteria n%/n mm for n = 0.5..5 (half-integer steps) between
+% the two reconstructed doses and record the pass rate at each. Each criterion
+% is independent, so the CalcGamma evaluations are distributed across the CPU
+% cores with parfor.
 %   Reference = dose A (listed),  Target = dose B (counterpart).
 
 gamma_results = struct();
 
-% Criterion sweep: percent and DTA are equal (1/1, 2/2, ..., 10/10).
-gamma_n        = (1:10)';                       % criterion index n
+% Criterion sweep: percent and DTA are equal (0.5/0.5, 1/1, ..., 5/5) in
+% half-integer increments.
+gamma_n        = (0.5:0.5:5)';                  % criterion value n
 gamma_criteria = cell(numel(gamma_n), 3);       % {pct, dta, label} for compatibility
 for gc = 1:numel(gamma_n)
     gamma_criteria{gc, 1} = gamma_n(gc);
     gamma_criteria{gc, 2} = gamma_n(gc);
-    gamma_criteria{gc, 3} = sprintf('%d%%/%dmm', gamma_n(gc), gamma_n(gc));
+    gamma_criteria{gc, 3} = sprintf('%g%%/%gmm', gamma_n(gc), gamma_n(gc));
 end
 
 if exist('CalcGamma', 'file') == 2
 
-    fprintf('\n[Gamma] Sweeping gamma pass rate over %d criteria (1/1 .. 10/10)...\n', numel(gamma_n));
+    fprintf('\n[Gamma] Sweeping gamma pass rate over %d criteria (0.5/0.5 .. 5/5)...\n', numel(gamma_n));
     fprintf('        Reference: %s   |   Target: %s\n', RES(1).label, RES(2).label);
 
     % Broadcast inputs (shared, read-only across all parfor workers).
@@ -1405,7 +1408,7 @@ if exist('CalcGamma', 'file') == 2
             eval_vals      = gmap(gamma_eval_mask);
             pass_rates(gc) = 100 * mean(eval_vals <= 1);
         catch ME
-            warning('Gamma [%d%%/%dmm] failed: %s', crit, crit, ME.message);
+            warning('Gamma [%g%%/%gmm] failed: %s', crit, crit, ME.message);
             pass_rates(gc) = NaN;
         end
     end
