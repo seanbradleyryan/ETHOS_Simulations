@@ -698,14 +698,18 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
         return;
     end
 
-    % Imitate the sensor frequency response by band-limiting the measured
-    % time series (0.35 MHz centre, 100%% bandwidth Gaussian filter).
+    % Sampling frequency for the sensor frequency-response filter, which is now
+    % applied below AFTER the pulse-profile convolution (see physical chain).
     FS         = 1 / kgrid.dt;
-    sensorData = gaussianFilter(sensorData, FS, 0.35e6, 100, true);
 
     sensorData_measured = sensorData;
 
-    %% ======================== PULSE CONVOLUTION / NOISE / DECONVOLUTION ========================
+    %% ================= PULSE CONVOLUTION / FREQUENCY RESPONSE / NOISE / DECONV =================
+    %  Physical measurement chain in acquisition order:
+    %    1. Convolve with the pulse profile (finite radiation pulse)
+    %    2. Apply the sensor frequency response (band-limit)
+    %    3. Add electronic noise (downstream of the transducer, after band-limit)
+    %    4. Wiener-deconvolve the pulse kernel to recover the broadband signal
 
     if conv_kernel_sigma > 0
         fprintf('        Pulse model: sigma=%.1f us, noise=%.1f%%, lambda=%.1e\n', ...
@@ -724,11 +728,17 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
         H_conj  = conj(H);
         H_power = abs(H).^2;
 
+        % 1. Convolve with the pulse profile
         sensorData_conv = real(ifft(fft(sensorData_cpu, [], 2) .* H, [], 2));
 
-        noise_amp        = conv_noise_level * max(abs(sensorData_conv(:)));
-        sensorData_noisy = sensorData_conv + noise_amp * randn(size(sensorData_conv));
+        % 2. Sensor frequency response (band-limit AFTER pulse convolution)
+        sensorData_resp = gaussianFilter(sensorData_conv, FS, 0.35e6, 100, true);
 
+        % 3. Add electronic noise (after frequency-response filtering)
+        noise_amp        = conv_noise_level * max(abs(sensorData_resp(:)));
+        sensorData_noisy = sensorData_resp + noise_amp * randn(size(sensorData_resp));
+
+        % 4. Wiener deconvolution of the pulse kernel
         sensorData_deconv = real(ifft( ...
             fft(sensorData_noisy, [], 2) .* H_conj ./ (H_power + conv_deconv_lambda), ...
             [], 2));
@@ -738,7 +748,10 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
 
         fprintf('        Pulse model complete. Noise amp: %.3e Pa\n', noise_amp);
     else
-        fprintf('        Pulse convolution disabled.\n');
+        % No pulse model: apply only the sensor frequency response.
+        sensorData          = gaussianFilter(sensorData, FS, 0.35e6, 100, true);
+        sensorData_measured = sensorData;
+        fprintf('        Pulse convolution disabled; frequency response applied.\n');
     end
 
     %% ======================== RECONSTRUCTION ========================
