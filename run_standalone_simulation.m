@@ -49,6 +49,7 @@ CONFIG.pml_size               = 10;
 CONFIG.cfl_number             = 0.3;
 CONFIG.use_gpu                = true;
 CONFIG.correction_factor           = 1.9;
+CONFIG.correction_factor = 20; 
 %CONFIG.correction_factor = .0229; 
 %CONFIG.correction_factor = 0; 
 CONFIG.use_pressure_scale_correction = false;   % divide max(p0) / max(recon_pressure) before dose conversion
@@ -67,7 +68,7 @@ CONFIG.convergence_tol        = 1e-3;
 % Mimics a finite transducer impulse response applied to forward sensor data.
 % Set convolution_kernel to 0 to disable the entire block.
 CONFIG.convolution_kernel  = 4e-6;   % Gaussian sigma in seconds (4 us)
-CONFIG.conv_noise_level    = 0.01;   % Noise amplitude as fraction of peak sensor signal
+CONFIG.conv_noise_level    = 0.05;   % Noise amplitude as fraction of peak sensor signal
 CONFIG.conv_deconv_lambda  = 1e-4;   % Wiener regularization for deconvolution
 
 CONFIG.downscale_factor = 1;
