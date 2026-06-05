@@ -37,8 +37,8 @@ CONFIG.sensor_y_index = 4;
 % Physical 2D ultrasound array geometry (sparse element mask).
 % Kerf is derived inside determine_sensor_mask as (pitch - size).
 CONFIG.elements_per_side = 32;
-CONFIG.element_pitch_mm  = 3.65;
-CONFIG.element_size_mm   = 2.43;
+CONFIG.element_pitch_mm  = 7.0;
+CONFIG.element_size_mm   = 3.64;
 
 CONFIG.gruneisen_method = 'threshold_2';
 
@@ -118,12 +118,12 @@ CONFIG.plot_exclusion_zone = false;
 % The realizations are distributed across all available GPUs (one worker per
 % GPU, each pinned to a distinct device). Requires the pulse model to be active
 % (CONFIG.convolution_kernel > 0), since that is where electronic noise enters.
-CONFIG.noise_ensemble.enable           = true;
+CONFIG.noise_ensemble.enable           = false;
 CONFIG.noise_ensemble.num_realizations = 8;        % ensemble size N
-CONFIG.noise_ensemble.recompute        = true;     % false -> load saved results if present
+CONFIG.noise_ensemble.recompute        = false;     % false -> load saved results if present
 CONFIG.noise_ensemble.results_file     = 'gamma_noise_ensemble.mat';
 CONFIG.noise_ensemble.num_iters        = [];       % [] -> use CONFIG.num_time_reversal_iter
-CONFIG.noise_ensemble.base_seed        = 20260604; % RNG base; per-realization seeds derive from it
+CONFIG.noise_ensemble.base_seed        = 42; % RNG base; per-realization seeds derive from it
 
 %% ===================== RESOLVE DOSE PAIR & CBCT PATHS ====================
 %  Resolve the listed dose file (A), then derive its counterpart (B) on the
@@ -1470,7 +1470,7 @@ gamma_results = struct();
 
 % Criterion sweep: percent and DTA are equal (0.5/0.5, 1/1, ..., 5/5) in
 % half-integer increments.
-gamma_n        = (0.5:0.5:5)';                  % criterion value n
+gamma_n        = (1:0.5:5)';                  % criterion value n
 gamma_criteria = cell(numel(gamma_n), 3);       % {pct, dta, label} for compatibility
 for gc = 1:numel(gamma_n)
     gamma_criteria{gc, 1} = gamma_n(gc);

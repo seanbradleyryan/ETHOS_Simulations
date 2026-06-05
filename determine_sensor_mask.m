@@ -150,7 +150,7 @@ function [sensor_mask, sensor_info] = determine_sensor_mask(sct_resampled, field
 %% ======================== CONFIG DEFAULTS ========================
 
 elements_per_side = get_field(config, 'elements_per_side', 32);
-element_pitch_mm  = get_field(config, 'element_pitch_mm', 3.65);
+element_pitch_mm  = get_field(config, 'element_pitch_mm', 7.00);
 element_size_mm   = get_field(config, 'element_size_mm', 2.43);
 standoff_mm       = get_field(config, 'sensor_standoff_mm', 5);
 jaw_margin_mm     = get_field(config, 'jaw_margin_mm', 10); %#ok<NASGU>
@@ -159,7 +159,7 @@ pml_size          = get_field(config, 'pml_size', 10);
 pml_size = 1; % Hardcoded because script logic assumes pml inside.
 
 aim_at_iso        = get_field(config, 'aim_at_iso', true);
-force_turn_angle_deg = get_field(config, 'force_turn_angle', 315);
+force_turn_angle_deg = get_field(config, 'force_turn_angle', 300);
 
 % Kerf is derived; never accepted from config.
 kerf_mm = element_pitch_mm - element_size_mm;

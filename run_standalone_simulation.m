@@ -27,7 +27,7 @@ CONFIG.sensor_y_index = 4;
 % Physical 2D ultrasound array geometry (sparse element mask).
 % Kerf is derived inside determine_sensor_mask as (pitch - size).
 CONFIG.elements_per_side = 32;
-CONFIG.element_pitch_mm  = 3.65;
+CONFIG.element_pitch_mm  = 7.00;
 CONFIG.element_size_mm   = 2.43;
 
 CONFIG.gruneisen_method = 'threshold_2';
@@ -806,6 +806,7 @@ if CONFIG.convolution_kernel > 0
     % 3. Add electronic noise (after frequency-response filtering)
     noise_amp        = conv_noise_level * max(abs(sensorData_resp(:)));
     sensorData_noisy = sensorData_resp + noise_amp * randn(size(sensorData_resp));
+    sensorData_noisy = wdenoise(sensorData_noisy)
 
     % 4. Wiener deconvolution of the pulse kernel
     sensorData_deconv = real(ifft( ...
