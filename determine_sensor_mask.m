@@ -162,7 +162,7 @@ pml_size          = get_field(config, 'pml_size', 10);
 pml_size = 1; % Hardcoded because script logic assumes pml inside.
 
 aim_at_iso        = get_field(config, 'aim_at_iso', true);
-force_turn_angle_deg = get_field(config, 'force_turn_angle', 300);
+force_turn_angle_deg = get_field(config, 'force_turn_angle', 290);
 
 % Kerf is derived; never accepted from config.
 kerf_mm = element_pitch_mm - element_size_mm;

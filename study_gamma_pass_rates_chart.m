@@ -37,7 +37,7 @@ CONFIG.sensor_y_index = 4;
 % Physical 2D ultrasound array geometry (sparse element mask).
 % Kerf is derived inside determine_sensor_mask as (pitch - size).
 CONFIG.elements_per_side = 32;
-CONFIG.element_pitch_mm  = 7.0;
+CONFIG.element_pitch_mm  = 4.35;
 CONFIG.element_size_mm   = 3.64;
 
 CONFIG.gruneisen_method = 'threshold_2';
@@ -77,7 +77,7 @@ CONFIG.convergence_tol        = 1e-3;
 % Mimics a finite transducer impulse response applied to forward sensor data.
 % Set convolution_kernel to 0 to disable the entire block.
 CONFIG.convolution_kernel  = 4e-6;   % Gaussian sigma in seconds (4 us)
-CONFIG.conv_noise_level    = 0.01;   % Noise amplitude as fraction of peak sensor signal
+CONFIG.conv_noise_level    = 0.125;   % Noise amplitude as fraction of peak sensor signal
 CONFIG.conv_deconv_lambda  = 1e-4;   % Wiener regularization for deconvolution
 
 CONFIG.downscale_factor = 1;
@@ -118,9 +118,9 @@ CONFIG.plot_exclusion_zone = false;
 % The realizations are distributed across all available GPUs (one worker per
 % GPU, each pinned to a distinct device). Requires the pulse model to be active
 % (CONFIG.convolution_kernel > 0), since that is where electronic noise enters.
-CONFIG.noise_ensemble.enable           = false;
+CONFIG.noise_ensemble.enable           = true;
 CONFIG.noise_ensemble.num_realizations = 8;        % ensemble size N
-CONFIG.noise_ensemble.recompute        = false;     % false -> load saved results if present
+CONFIG.noise_ensemble.recompute        = true;     % false -> load saved results if present
 CONFIG.noise_ensemble.results_file     = 'gamma_noise_ensemble.mat';
 CONFIG.noise_ensemble.num_iters        = [];       % [] -> use CONFIG.num_time_reversal_iter
 CONFIG.noise_ensemble.base_seed        = 42; % RNG base; per-realization seeds derive from it

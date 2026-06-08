@@ -11,7 +11,7 @@ CONFIG.working_dir    = '/mnt/weka/home/80030361/ETHOS_Simulations';
 CONFIG.patient_id     = '1194203';
 CONFIG.session        = 'Session_1';
 
-CONFIG.dose_filename = 'dose_1194203_Session_1_reference_CT_3_B15_112.mat';
+CONFIG.dose_filename = 'dose_1194203_Session_1_reference_CT_1_B15_112.mat';
 % TEMPORARY: standalone sim always uses CBCT1 (CT_1) geometry, regardless
 % of which CBCT the dose was actually computed on. Per-dose CBCT selection
 % lives in the multi-field driver, not here.
@@ -27,8 +27,8 @@ CONFIG.sensor_y_index = 4;
 % Physical 2D ultrasound array geometry (sparse element mask).
 % Kerf is derived inside determine_sensor_mask as (pitch - size).
 CONFIG.elements_per_side = 32;
-CONFIG.element_pitch_mm  = 7.00;
-CONFIG.element_size_mm   = 2.43;
+CONFIG.element_pitch_mm  = 4.35; % Kerf is .7mm ?
+CONFIG.element_size_mm   = 3.65;
 
 CONFIG.gruneisen_method = 'threshold_2';
 
@@ -68,7 +68,7 @@ CONFIG.convergence_tol        = 1e-3;
 % Mimics a finite transducer impulse response applied to forward sensor data.
 % Set convolution_kernel to 0 to disable the entire block.
 CONFIG.convolution_kernel  = 4e-6;   % Gaussian sigma in seconds (4 us)
-CONFIG.conv_noise_level    = 0.05;   % Noise amplitude as fraction of peak sensor signal
+CONFIG.conv_noise_level    = 0.125;   % Noise amplitude as fraction of peak sensor signal
 CONFIG.conv_deconv_lambda  = 1e-4;   % Wiener regularization for deconvolution
 
 CONFIG.downscale_factor = 1;
@@ -806,7 +806,7 @@ if CONFIG.convolution_kernel > 0
     % 3. Add electronic noise (after frequency-response filtering)
     noise_amp        = conv_noise_level * max(abs(sensorData_resp(:)));
     sensorData_noisy = sensorData_resp + noise_amp * randn(size(sensorData_resp));
-    sensorData_noisy = wdenoise(sensorData_noisy)
+    %sensorData_noisy = wdenoise(sensorData_noisy)
 
     % 4. Wiener deconvolution of the pulse kernel
     sensorData_deconv = real(ifft( ...
