@@ -65,6 +65,9 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
 %           .use_pressure_scale_correction [false]
 %                                                  Rescale reconPressure by max(p0)/max(recon)
 %           .normalize                  [false]  - Divide doseGrid and recon_dose by their max
+%           .mask_recon_to_dose_region  [true]   - Zero recon dose outside the
+%                                                  >1% dose mask. False keeps the
+%                                                  full reconstruction.
 %           .downscale_factor           [1]      - imresize3 grids by 1/df before sim
 %           .force_uniform_density      [false]
 %           .force_uniform_sound_speed  [false]
@@ -132,6 +135,7 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
     recon_method            = lower(safe_config(config, 'reconstruction_method', 'tr'));
     use_pressure_scale_corr = safe_config(config, 'use_pressure_scale_correction', false);
     normalize_doses         = safe_config(config, 'normalize', false);
+    mask_recon_to_dose      = safe_config(config, 'mask_recon_to_dose_region', true);
     use_attenuation         = safe_config(config, 'use_attenuation', true);
     alpha_power_value       = safe_config(config, 'alpha_power', 1.1);
     downscale_factor        = safe_config(config, 'downscale_factor', 1);
@@ -973,7 +977,11 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
     if isfield(cbct_resampled, 'bodyMask') && isequal(size(cbct_resampled.bodyMask), gridSize)
         body_mask_plot = double(cbct_resampled.bodyMask);
     end
-    recon_dose = reconDosePerPulse * num_pulses .* double(doseMask) .* body_mask_plot;
+    if mask_recon_to_dose
+        recon_dose = reconDosePerPulse * num_pulses .* double(doseMask) .* body_mask_plot;
+    else
+        recon_dose = reconDosePerPulse * num_pulses .* body_mask_plot;
+    end
 
     fprintf('        Reconstructed dose: [%.4f, %.4f] Gy\n', ...
         min(recon_dose(:)), max(recon_dose(:)));
