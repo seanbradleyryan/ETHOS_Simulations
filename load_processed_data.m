@@ -142,23 +142,26 @@ end
 fprintf('    Total dose max: %.4f Gy\n', max(total_rs_dose(:)));
 
 %% ======================== LOAD SCT RESAMPLED ========================
+% Optional: the simulation pipeline now drives geometry from the per-dose
+% CBCTs (CBCT1/CBCT3_resampled). sct_resampled.mat may be absent; return []
+% rather than erroring so SCT-free runs work.
 
 fprintf('  Loading sct_resampled...\n');
 
 sct_file = fullfile(processed_dir, 'sct_resampled.mat');
 
 if ~isfile(sct_file)
-    error('load_processed_data:FileNotFound', ...
-        'sct_resampled.mat not found in: %s', processed_dir);
+    sct_resampled = [];
+    fprintf('    [INFO] sct_resampled.mat not present; skipping (CBCT geometry is used instead).\n');
+else
+    loaded = load(sct_file);
+    sct_resampled = loaded.sct_resampled;
+
+    fprintf('    SCT HU range: [%.0f, %.0f]\n', ...
+        min(sct_resampled.cubeHU(:)), max(sct_resampled.cubeHU(:)));
+    fprintf('    SCT density range: [%.0f, %.0f] kg/m³\n', ...
+        min(sct_resampled.cubeDensity(:)), max(sct_resampled.cubeDensity(:)));
 end
-
-loaded = load(sct_file);
-sct_resampled = loaded.sct_resampled;
-
-fprintf('    SCT HU range: [%.0f, %.0f]\n', ...
-    min(sct_resampled.cubeHU(:)), max(sct_resampled.cubeHU(:)));
-fprintf('    SCT density range: [%.0f, %.0f] kg/m³\n', ...
-    min(sct_resampled.cubeDensity(:)), max(sct_resampled.cubeDensity(:)));
 
 %% ======================== LOAD FIELD DOSES ========================
 

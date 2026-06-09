@@ -178,8 +178,13 @@ for p_idx = 1:length(CONFIG.patients)
             %            on the Windows work laptop before this step)
             %% ============================================================
             fprintf('\n[STEP 1.5] Loading previously processed data...\n');
-            [field_doses, sct_resampled, total_rs_dose, dose_metadata] = ...
+            [field_doses, ~, total_rs_dose, dose_metadata] = ...
                 load_processed_data(patient_id, session, CONFIG);
+
+            % Load the per-dose CBCT geometries (CT_1 / CT_3). Each field's
+            % simulation uses the CBCT the dose was actually computed on
+            % (field_dose.ct_label) -- the SCT is not used anywhere.
+            cbct_by_label = load_cbct_resampled(patient_id, session, CONFIG);
 
             % Extract beam metadata for sensor placement
             if isfield(dose_metadata, 'beam_metadata') && ~isempty(dose_metadata.beam_metadata)
@@ -197,8 +202,15 @@ for p_idx = 1:length(CONFIG.patients)
                 fprintf('\n[STEP 2] Running k-Wave simulations...\n');
                 sim_start = tic;
 
-                % Build acoustic medium from CT
-                medium = create_acoustic_medium(sct_resampled, CONFIG);
+                % Build one acoustic medium per CBCT geometry (CT_1 / CT_3).
+                % Each field picks the medium matching field_dose.ct_label.
+                medium_by_label = struct();
+                cbct_labels = fieldnames(cbct_by_label);
+                for li = 1:numel(cbct_labels)
+                    lbl = cbct_labels{li};
+                    fprintf('         Building acoustic medium for %s...\n', lbl);
+                    medium_by_label.(lbl) = create_acoustic_medium(cbct_by_label.(lbl), CONFIG);
+                end
 
                 valid_field_indices = find(~cellfun(@isempty, field_doses));
                 num_fields          = length(valid_field_indices);
@@ -276,8 +288,10 @@ for p_idx = 1:length(CONFIG.patients)
                             fi, fd.gantry_angle, why);
 
                         t_field = tic;
-                        [rd, ~] = run_single_field_simulation(fd, sct_resampled, ...
-                            medium, beam_metadata, CONFIG);
+                        [cbct_fd, medium_fd] = select_cbct_for_field(fd, ...
+                            cbct_by_label, medium_by_label);
+                        [rd, ~] = run_single_field_simulation(fd, cbct_fd, ...
+                            medium_fd, beam_metadata, CONFIG);
                         rd = gather(rd);
                         save_field_reconstruction(rd, fd, patient_id, session, CONFIG, CONFIG_HASH);
                         save_simulated_dose(rd, fd, patient_id, session, CONFIG, CONFIG_HASH);
@@ -329,8 +343,10 @@ for p_idx = 1:length(CONFIG.patients)
                             f, num_pending, fd.gantry_angle, why);
 
                         t_field = tic;
-                        [recon_dose, ~] = run_single_field_simulation(fd, sct_resampled, ...
-                            medium, beam_metadata, CONFIG);
+                        [cbct_fd, medium_fd] = select_cbct_for_field(fd, ...
+                            cbct_by_label, medium_by_label);
+                        [recon_dose, ~] = run_single_field_simulation(fd, cbct_fd, ...
+                            medium_fd, beam_metadata, CONFIG);
                         save_field_reconstruction(recon_dose, fd, patient_id, session, CONFIG, CONFIG_HASH);
                         save_simulated_dose(recon_dose, fd, patient_id, session, CONFIG, CONFIG_HASH);
 
@@ -509,6 +525,54 @@ end
 %% =========================================================================
 %  STEP 2 HELPER FUNCTIONS
 %% =========================================================================
+
+function cbct_by_label = load_cbct_resampled(patient_id, session, config)
+    % Load the per-dose CBCT geometries (CBCT1/CBCT3_resampled) produced by
+    % step15_process_doses, keyed by CT label ('CT_1' / 'CT_3'). These are
+    % already resampled to the dose grid and carry cubeHU, cubeDensity,
+    % bodyMask, couchMask, origin, spacing and dimensions.
+    processed_dir = fullfile(config.working_dir, 'RayStationFiles', ...
+        patient_id, session, 'processed');
+
+    specs = { 'CBCT1_resampled.mat', 'CBCT1_resampled'; ...
+              'CBCT3_resampled.mat', 'CBCT3_resampled' };
+
+    cbct_by_label = struct();
+    for k = 1:size(specs, 1)
+        fpath = fullfile(processed_dir, specs{k, 1});
+        if ~isfile(fpath)
+            error('pipeline_simulate:CBCTNotFound', ...
+                'Required CBCT geometry file not found: %s', fpath);
+        end
+        loaded = load(fpath, specs{k, 2});
+        cbct   = loaded.(specs{k, 2});
+        if isfield(cbct, 'ct_label') && ~isempty(cbct.ct_label)
+            lbl = strrep(cbct.ct_label, '-', '_');
+        else
+            error('pipeline_simulate:CBCTNoLabel', ...
+                '%s is missing a ct_label field.', specs{k, 1});
+        end
+        cbct_by_label.(lbl) = cbct;
+        fprintf('           Loaded CBCT geometry %s from %s\n', lbl, specs{k, 1});
+    end
+end
+
+function [cbct, medium] = select_cbct_for_field(field_dose, cbct_by_label, medium_by_label)
+    % Pick the CBCT geometry + acoustic medium matching the CBCT the dose was
+    % computed on (field_dose.ct_label).
+    if ~isfield(field_dose, 'ct_label') || isempty(field_dose.ct_label)
+        error('pipeline_simulate:NoCtLabel', ...
+            'Field dose (gantry %.1f deg) has no ct_label; cannot select CBCT.', ...
+            field_dose.gantry_angle);
+    end
+    lbl = strrep(field_dose.ct_label, '-', '_');
+    if ~isfield(cbct_by_label, lbl) || ~isfield(medium_by_label, lbl)
+        error('pipeline_simulate:CtLabelUnmatched', ...
+            'No CBCT/medium loaded for ct_label "%s".', field_dose.ct_label);
+    end
+    cbct   = cbct_by_label.(lbl);
+    medium = medium_by_label.(lbl);
+end
 
 function save_field_reconstruction(recon_dose, field_dose, patient_id, session, config, hash8)
     % Save reconstruction as <input_basename>_recon_<hash8>.mat next to other
