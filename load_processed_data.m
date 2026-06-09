@@ -205,17 +205,9 @@ for i = 1:num_files
     field_filepath = fullfile(processed_dir, field_files(idx).name);
     
     try
-        loaded = load(field_filepath);
-        fd = loaded.field_dose;
-
-        % Reconstruct dense 3D dose_Gy if it was saved in sparse 2D format
-        if isfield(fd, 'is_sparse') && fd.is_sparse
-            fd.dose_Gy = reshape(full(fd.dose_Gy), fd.dose_dims);
-        end
-
-        % Expose the source .mat filename so downstream consumers can name
-        % derived outputs after the input (e.g. <basename>_sim.mat).
-        fd.source_mat_filename = field_files(idx).name;
+        % Single-file load + sparse reconstruction + source_mat_filename is
+        % shared with the per-worker path so the two cannot diverge.
+        fd = load_field_dose_file(field_filepath);
 
         field_doses{i} = fd;
         loaded_count = loaded_count + 1;

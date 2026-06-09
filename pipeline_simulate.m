@@ -177,9 +177,13 @@ for p_idx = 1:length(CONFIG.patients)
             %  STEP 1.5: Load Processed Field Doses (run pipeline_compress.m
             %            on the Windows work laptop before this step)
             %% ============================================================
-            fprintf('\n[STEP 1.5] Loading previously processed data...\n');
-            [field_doses, ~, total_rs_dose, dose_metadata] = ...
-                load_processed_data(patient_id, session, CONFIG);
+            fprintf('\n[STEP 1.5] Indexing previously processed field doses...\n');
+            % Index the dose files WITHOUT loading the heavy dose arrays. Each
+            % field's dose is loaded on demand inside the simulation loop (one
+            % dose per worker via load_field_dose_file) so the full set is never
+            % broadcast into every parfor worker.
+            [field_index, dose_metadata] = ...
+                list_processed_field_doses(patient_id, session, CONFIG);
 
             % Load the per-dose CBCT geometries (CT_1 / CT_3). Each field's
             % simulation uses the CBCT the dose was actually computed on
@@ -212,7 +216,7 @@ for p_idx = 1:length(CONFIG.patients)
                     medium_by_label.(lbl) = create_acoustic_medium(cbct_by_label.(lbl), CONFIG);
                 end
 
-                valid_field_indices = find(~cellfun(@isempty, field_doses));
+                valid_field_indices = 1:numel(field_index);
                 num_fields          = length(valid_field_indices);
                 grid_dims           = dose_metadata.dimensions;
 
@@ -226,7 +230,7 @@ for p_idx = 1:length(CONFIG.patients)
 
                 file_idxs = [];
                 for fi = valid_field_indices(:).'
-                    expected = expected_recon_path(field_doses{fi}, ...
+                    expected = expected_recon_path(field_index(fi), ...
                         patient_id, session, CONFIG, CONFIG_HASH);
                     if isfile(expected)
                         file_idxs(end+1) = fi; %#ok<AGROW>
@@ -239,7 +243,7 @@ for p_idx = 1:length(CONFIG.patients)
                 num_pending  = numel(pending_idxs);
 
                 print_cache_status(cache_manifest, cached_idxs, pending_idxs, ...
-                    field_doses, log_fid, CONFIG_HASH);
+                    field_index, log_fid, CONFIG_HASH);
 
                 % Ensure the cross-instance status directory exists and read the
                 % stale-claim threshold (minutes) used to overtake locks left
@@ -256,15 +260,22 @@ for p_idx = 1:length(CONFIG.patients)
                         if ~isempty(pool), delete(pool); end
                         parpool(CONFIG.num_parallel_workers);
                     end
+                    % Pre-slice the lightweight per-field metadata so parfor
+                    % ships one small struct per iteration. The heavy dose_Gy is
+                    % NOT held here -- each worker loads its own dose from disk
+                    % (load_field_dose_file) rather than broadcasting all doses.
+                    pending_meta = field_index(pending_idxs);
+
                     field_computed = false(num_pending, 1);
                     field_elapsed  = zeros(num_pending, 1);
+                    field_gantry   = nan(num_pending, 1);
                     t_parfor       = tic;
                     parfor f = 1:num_pending
-                        fi = pending_idxs(f);
-                        fd = field_doses{fi};
-                        recon_path  = expected_recon_path(fd, patient_id, session, CONFIG, CONFIG_HASH);
-                        lock_path   = field_lock_path(fd, patient_id, session, CONFIG, CONFIG_HASH);
-                        status_path = field_status_path(fd, patient_id, session, CONFIG, CONFIG_HASH);
+                        fi   = pending_idxs(f);
+                        meta = pending_meta(f);
+                        recon_path  = expected_recon_path(meta, patient_id, session, CONFIG, CONFIG_HASH);
+                        lock_path   = field_lock_path(meta, patient_id, session, CONFIG, CONFIG_HASH);
+                        status_path = field_status_path(meta, patient_id, session, CONFIG, CONFIG_HASH);
 
                         % A sibling instance may have finished this field after
                         % the pending list was built -- skip if so.
@@ -281,8 +292,23 @@ for p_idx = 1:length(CONFIG.patients)
                             continue;
                         end
 
-                        % First thing: announce IN PROGRESS so sibling instances
-                        % see this field is taken.
+                        % Load THIS field's dose from disk (one dose in this
+                        % worker, not the whole set). On a load failure release
+                        % the claim so a corrupt file neither orphans the lock nor
+                        % aborts the patient.
+                        try
+                            fd = load_field_dose_file(meta.file);
+                        catch loadME
+                            fprintf('           Field %d load failed (%s); releasing claim.\n', ...
+                                fi, loadME.message);
+                            if isfile(status_path), delete(status_path);   end
+                            if isfolder(lock_path), rmdir(lock_path, 's'); end
+                            continue;
+                        end
+                        field_gantry(f) = fd.gantry_angle;
+
+                        % First thing after load: announce IN PROGRESS so sibling
+                        % instances see this field is taken.
                         write_field_status(status_path, 'in_progress', fi, fd.gantry_angle, CONFIG_HASH);
                         fprintf('           Field %d (gantry: %.1f deg) [claim: %s]...\n', ...
                             fi, fd.gantry_angle, why);
@@ -305,8 +331,12 @@ for p_idx = 1:length(CONFIG.patients)
                     for f = 1:num_pending
                         if ~field_computed(f), continue; end
                         fi = pending_idxs(f);
+                        % Merge the real gantry (read in the worker) into the
+                        % lightweight metadata for the manifest entry.
+                        mi = field_index(fi);
+                        mi.gantry_angle = field_gantry(f);
                         cache_manifest = update_manifest_field(cache_manifest, fi, ...
-                            field_doses{fi}, patient_id, session, field_elapsed(f));
+                            mi, patient_id, session, field_elapsed(f));
                         log_msg(log_fid, 'Field %d complete [%s] (parallel, %.1f s)', ...
                             fi, CONFIG_HASH, field_elapsed(f));
                     end
@@ -318,10 +348,10 @@ for p_idx = 1:length(CONFIG.patients)
                     log_msg(log_fid, 'Serial mode: %d fields pending', num_pending);
                     for f = 1:num_pending
                         fi          = pending_idxs(f);
-                        fd          = field_doses{fi};
-                        recon_path  = expected_recon_path(fd, patient_id, session, CONFIG, CONFIG_HASH);
-                        lock_path   = field_lock_path(fd, patient_id, session, CONFIG, CONFIG_HASH);
-                        status_path = field_status_path(fd, patient_id, session, CONFIG, CONFIG_HASH);
+                        meta        = field_index(fi);
+                        recon_path  = expected_recon_path(meta, patient_id, session, CONFIG, CONFIG_HASH);
+                        lock_path   = field_lock_path(meta, patient_id, session, CONFIG, CONFIG_HASH);
+                        status_path = field_status_path(meta, patient_id, session, CONFIG, CONFIG_HASH);
 
                         if isfile(recon_path)
                             fprintf('           Field %d/%d already on disk; skipping.\n', f, num_pending);
@@ -332,6 +362,20 @@ for p_idx = 1:length(CONFIG.patients)
                         if ~claimed
                             fprintf('           Field %d/%d held by another instance; skipping.\n', f, num_pending);
                             log_msg(log_fid, 'Field %d held by another instance; skipping.', fi);
+                            continue;
+                        end
+
+                        % Load this field's dose from disk (one dose at a time).
+                        % Release the claim on a load failure so a corrupt file
+                        % neither orphans the lock nor aborts the patient.
+                        try
+                            fd = load_field_dose_file(meta.file);
+                        catch loadME
+                            fprintf('           Field %d/%d load failed (%s); releasing claim.\n', ...
+                                f, num_pending, loadME.message);
+                            log_msg(log_fid, 'Field %d load failed: %s', fi, loadME.message);
+                            if isfile(status_path), delete(status_path);   end
+                            if isfolder(lock_path), rmdir(lock_path, 's'); end
                             continue;
                         end
 
@@ -368,7 +412,7 @@ for p_idx = 1:length(CONFIG.patients)
                 total_recon  = zeros(grid_dims);
                 missing_idxs = [];
                 for fi = valid_field_indices(:).'
-                    rp = expected_recon_path(field_doses{fi}, patient_id, session, CONFIG, CONFIG_HASH);
+                    rp = expected_recon_path(field_index(fi), patient_id, session, CONFIG, CONFIG_HASH);
                     if isfile(rp)
                         cd_ = load(rp, 'recon_dose');
                         total_recon = total_recon + cd_.recon_dose;
@@ -864,8 +908,10 @@ function completed = get_completed_from_manifest(manifest)
     end
 end
 
-function print_cache_status(manifest, cached_idxs, pending_idxs, field_doses, log_fid, hash8)
+function print_cache_status(manifest, cached_idxs, pending_idxs, field_index, log_fid, hash8)
     % Prints a formatted table of cached vs pending fields for the active hash.
+    % field_index is the lightweight struct array from list_processed_field_doses;
+    % its gantry_angle may be NaN (the real value is read when the dose loads).
     fprintf('\n         --- Cache / Resume Status ---\n');
     fprintf('         Active config hash: %s\n', hash8);
     if ~isempty(cached_idxs)
@@ -892,9 +938,10 @@ function print_cache_status(manifest, cached_idxs, pending_idxs, field_doses, lo
         fprintf('         Pending:\n');
         for i = 1:numel(pending_idxs)
             fi = pending_idxs(i);
-            if ~isempty(field_doses) && numel(field_doses) >= fi && ~isempty(field_doses{fi})
+            if ~isempty(field_index) && numel(field_index) >= fi && ...
+                    ~isnan(field_index(fi).gantry_angle)
                 fprintf('           [TODO] Field %3d  gantry %6.1f deg\n', ...
-                    fi, field_doses{fi}.gantry_angle);
+                    fi, field_index(fi).gantry_angle);
             else
                 fprintf('           [TODO] Field %3d\n', fi);
             end
