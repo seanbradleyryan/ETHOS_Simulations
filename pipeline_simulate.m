@@ -50,7 +50,7 @@ CONFIG.dose_per_pulse_cGy       = 0.16;   % cGy per LINAC pulse
 CONFIG.pml_size                 = 10;     % PML thickness (voxels)
 CONFIG.cfl_number               = 0.3;    % CFL stability criterion
 CONFIG.use_gpu                  = true;   % GPU acceleration
-CONFIG.num_time_reversal_iter   = 1;      % Time-reversal iterations per field
+CONFIG.num_time_reversal_iter   = 10;      % Time-reversal iterations per field
 
 % --- Sensor Placement ---
 % Controls the k-Wave sensor mask geometry used in every per-field simulation.
@@ -64,7 +64,7 @@ CONFIG.sensor_y_index = 20;   % Used by 'full_plane_lateral'
 % --- Pulse Convolution / Noise / Deconvolution ---
 % Mimics a finite transducer impulse response applied to forward sensor data.
 % Set convolution_kernel to 0 to disable the entire block.
-CONFIG.convolution_kernel  = 0;   % Gaussian sigma in seconds (4 us)
+CONFIG.convolution_kernel  = 4e-6;   % Gaussian sigma in seconds (4 us)
 CONFIG.conv_noise_level    = 0.01;   % Noise amplitude as fraction of peak sensor signal
 CONFIG.conv_deconv_lambda  = 1e-4;   % Wiener regularization for deconvolution
 
@@ -95,7 +95,7 @@ CONFIG.stale_claim_minutes   = 120;
 
 % --- Pipeline Control Flags ---
 CONFIG.run_step2   = true;    % Step 2  : k-Wave simulation
-CONFIG.run_step3   = true;    % Step 3  : Gamma analysis
+CONFIG.run_step3   = false;    % Step 3  : Gamma analysis
 
 % --- Define Tissue Property Tables ---
 CONFIG.tissue_tables = define_tissue_tables();
