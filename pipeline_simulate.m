@@ -91,7 +91,12 @@ CONFIG.num_parallel_workers  = 16;
 % written so sibling instances skip it; on completion the status is overwritten
 % with 'complete'. A lock whose status file is older than stale_claim_minutes
 % is assumed orphaned (crashed sibling) and may be overtaken.
-CONFIG.stale_claim_minutes   = 120;
+% NOTE: there is no heartbeat -- the 'in_progress' status is stamped once
+% when a field starts and only rewritten as 'complete' at the end, so this
+% age is measured from when the dose STARTED, not from last progress. Keep
+% it above the worst-case single-dose runtime (~30 min) so a slow but live
+% sibling field is never overtaken and recomputed in duplicate.
+CONFIG.stale_claim_minutes   = 30;
 
 % --- Pipeline Control Flags ---
 CONFIG.run_step2   = true;    % Step 2  : k-Wave simulation
@@ -280,6 +285,18 @@ for p_idx = 1:length(CONFIG.patients)
                     field_computed = false(num_pending, 1);
                     field_elapsed  = zeros(num_pending, 1);
                     field_gantry   = nan(num_pending, 1);
+
+                    % Route per-field progress through a DataQueue so the only
+                    % console output from the parfor block is one clean line per
+                    % field as it starts ("currently processing") plus a live
+                    % count of how many pending fields are still outstanding. The
+                    % per-worker fprintf chatter -- jumbled and out of order under
+                    % parfor -- is suppressed: workers send a message instead, and
+                    % report_field_progress prints it serialized on the client.
+                    progress_queue = parallel.pool.DataQueue;
+                    afterEach(progress_queue, @report_field_progress);
+                    report_field_progress(num_pending);   % reset the countdown
+
                     t_parfor       = tic;
                     parfor f = 1:num_pending
                         fi   = pending_idxs(f);
@@ -289,17 +306,17 @@ for p_idx = 1:length(CONFIG.patients)
                         status_path = field_status_path(meta, patient_id, session, CONFIG, CONFIG_HASH);
 
                         % A sibling instance may have finished this field after
-                        % the pending list was built -- skip if so.
+                        % the pending list was built -- skip if so (silent).
                         if isfile(recon_path)
-                            fprintf('           Field %d already on disk; skipping.\n', fi);
+                            send(progress_queue, struct('kind','skip','field_idx',fi,'gantry',NaN,'message',''));
                             continue;
                         end
 
                         % Atomically claim the field. If another instance holds a
-                        % live lock, leave it to them.
+                        % live lock, leave it to them (silent).
                         [claimed, why] = claim_field(lock_path, status_path, stale_minutes);
                         if ~claimed
-                            fprintf('           Field %d held by another instance; skipping.\n', fi);
+                            send(progress_queue, struct('kind','skip','field_idx',fi,'gantry',NaN,'message',''));
                             continue;
                         end
 
@@ -310,8 +327,7 @@ for p_idx = 1:length(CONFIG.patients)
                         try
                             fd = load_field_dose_file(meta.file);
                         catch loadME
-                            fprintf('           Field %d load failed (%s); releasing claim.\n', ...
-                                fi, loadME.message);
+                            send(progress_queue, struct('kind','fail','field_idx',fi,'gantry',NaN,'message',loadME.message));
                             if isfile(status_path), delete(status_path);   end
                             if isfolder(lock_path), rmdir(lock_path, 's'); end
                             continue;
@@ -319,10 +335,10 @@ for p_idx = 1:length(CONFIG.patients)
                         field_gantry(f) = fd.gantry_angle;
 
                         % First thing after load: announce IN PROGRESS so sibling
-                        % instances see this field is taken.
+                        % instances see this field is taken, and emit the single
+                        % "currently processing" progress line on the client.
                         write_field_status(status_path, 'in_progress', fi, fd.gantry_angle, CONFIG_HASH);
-                        fprintf('           Field %d (gantry: %.1f deg) [claim: %s]...\n', ...
-                            fi, fd.gantry_angle, why);
+                        send(progress_queue, struct('kind','process','field_idx',fi,'gantry',fd.gantry_angle,'message',''));
 
                         t_field = tic;
                         [cbct_fd, medium_fd] = select_cbct_for_field(fd, ...
@@ -995,6 +1011,34 @@ function h = get_hostname()
         end
     end
     if isempty(h), h = 'unknown'; end
+end
+
+function report_field_progress(msg)
+    % afterEach callback (runs serialized on the CLIENT) that turns the parfor
+    % block's per-worker chatter into a single clean line per field. Each parfor
+    % iteration sends exactly one DataQueue message; this prints only for fields
+    % actually being processed and keeps a live count of how many of the pending
+    % fields are still outstanding.
+    %
+    % A scalar numeric argument (re)initializes the outstanding counter to that
+    % many fields -- call it once on the client before the parfor begins.
+    persistent remaining
+    if isnumeric(msg)
+        remaining = msg;
+        return;
+    end
+    if isempty(remaining), remaining = 0; end
+    remaining = max(remaining - 1, 0);
+    switch msg.kind
+        case 'process'
+            fprintf('         Processing field %d (gantry %.1f deg)  --  %d remaining\n', ...
+                msg.field_idx, msg.gantry, remaining);
+        case 'fail'
+            fprintf('         Field %d load failed (%s); released claim  --  %d remaining\n', ...
+                msg.field_idx, msg.message, remaining);
+        % 'skip' is intentionally silent (field already done or owned by a
+        % sibling instance); it only advances the outstanding counter.
+    end
 end
 
 
