@@ -1,7 +1,7 @@
-function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbct_resampled, medium, beam_metadata, config)
+function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbct_resampled, medium, beam_metadata, config, precomputed_sensor)
 %RUN_SINGLE_FIELD_SIMULATION k-Wave forward + time-reversal for one field
 %
-%   [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbct_resampled, medium, beam_metadata, config)
+%   [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbct_resampled, medium, beam_metadata, config, precomputed_sensor)
 %
 %   Converts a single radiation field dose to initial acoustic pressure
 %   (p0 = D * Gamma * rho), runs the k-Wave forward simulation to generate
@@ -81,6 +81,17 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
 %                                                  figure, post-sim dose panels +
 %                                                  convergence plot. Must remain false
 %                                                  when called under parfor.
+%       precomputed_sensor - (Optional) Struct holding a plan-level sensor mask
+%           computed ONCE by the caller (pipeline_simulate) and reused for every
+%           field, so determine_sensor_mask is not re-run per field. Fields:
+%           .sensor_mask  - Sensor mask returned by determine_sensor_mask, on
+%                           the original (possibly grid-expanded) dose grid.
+%           .sensor_info  - Companion diagnostics struct (carries .grid_pad,
+%                           which drives the grid-expansion handling below).
+%           Honored ONLY for sensor_placement_method='determine_sensor_mask',
+%           and only when its base grid matches this field's grid (e.g. it is
+%           ignored under a non-unity downscale_factor). Pass [] or omit to
+%           compute the mask inline per field as before.
 %
 %   OUTPUTS:
 %       recon_dose  - 3D reconstructed dose array (Gy), cropped back to the
@@ -108,6 +119,9 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
 %         to determine_sensor_mask for computing the exclusion zone.
 %       - For backwards compatibility, beam_metadata can be omitted (pass []),
 %         in which case the legacy sensor placement is used.
+%       - precomputed_sensor lets the caller compute the determine_sensor_mask
+%         placement once for a whole plan and reuse it for every field. When it
+%         is absent or its grid does not match, the mask is computed inline.
 %
 %   AUTHOR: ETHOS Pipeline Team
 %   DATE: May 2026
@@ -154,6 +168,7 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
     sensor_method = safe_config(config, 'sensor_placement_method', 'full_plane_anterior');
 
     if nargin < 4, beam_metadata = []; end
+    if nargin < 6, precomputed_sensor = []; end
 
     % Initialize sim_results output
     sim_results              = struct();
@@ -434,8 +449,18 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
             field_dose_for_sensor.spacing    = spacing_mm;
             field_dose_for_sensor.dimensions = [Nx_orig, Ny_orig, Nz_orig];
 
-            [sensor_mask_orig, sensor_info_orig] = determine_sensor_mask( ...
-                sct_for_sensor, field_dose_for_sensor, beam_metadata, config);
+            if precomputed_sensor_fits(precomputed_sensor, [Nx_orig, Ny_orig, Nz_orig])
+                % Reuse the plan-level sensor mask computed once by the caller
+                % (deterministic placement from the summed plan dose), instead
+                % of re-running determine_sensor_mask for every field/segment.
+                sensor_mask_orig = precomputed_sensor.sensor_mask;
+                sensor_info_orig = precomputed_sensor.sensor_info;
+                fprintf('        Sensor: using precomputed plan sensor mask (%d active points)\n', ...
+                    sum(sensor_mask_orig(:)));
+            else
+                [sensor_mask_orig, sensor_info_orig] = determine_sensor_mask( ...
+                    sct_for_sensor, field_dose_for_sensor, beam_metadata, config);
+            end
 
             sensor_info = sensor_info_orig;
 
@@ -1093,6 +1118,33 @@ function val = safe_config(config, field_name, default_val)
     else
         val = default_val;
     end
+end
+
+
+function tf = precomputed_sensor_fits(precomputed_sensor, base_dims)
+%PRECOMPUTED_SENSOR_FITS True when a caller-supplied sensor mask can be reused.
+%  Requires a struct with .sensor_mask and .sensor_info whose un-expanded base
+%  grid (mask size minus any determine_sensor_mask grid_pad) equals this
+%  field's grid base_dims = [Nx_orig, Ny_orig, Nz_orig]. This guards against
+%  a mismatch (e.g. a non-unity downscale_factor shrank this field's grid),
+%  in which case the caller's mask is ignored and the mask is computed inline.
+    tf = false;
+    if isempty(precomputed_sensor) || ~isstruct(precomputed_sensor) || ...
+            ~isfield(precomputed_sensor, 'sensor_mask') || ...
+            ~isfield(precomputed_sensor, 'sensor_info')
+        return;
+    end
+    sm = precomputed_sensor.sensor_mask;
+    info = precomputed_sensor.sensor_info;
+    if isstruct(info) && isfield(info, 'grid_pad') && isstruct(info.grid_pad)
+        gp = info.grid_pad;
+        b1 = size(sm, 1) - (gp.y_pre + gp.y_post);   % grid_pad y_* -> dim 1
+        b2 = size(sm, 2) - (gp.x_pre + gp.x_post);   % grid_pad x_* -> dim 2
+        b3 = size(sm, 3) - (gp.z_pre + gp.z_post);   % grid_pad z_* -> dim 3
+    else
+        b1 = size(sm, 1); b2 = size(sm, 2); b3 = size(sm, 3);
+    end
+    tf = isequal([b1, b2, b3], base_dims(:)');
 end
 
 

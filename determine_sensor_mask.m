@@ -944,6 +944,41 @@ sensor_info.grid_pad = struct( ...
     'expanded', grid_was_expanded);
 
 fprintf('        [Sensor] Surface-to-dose distance: %.1f mm\n', surface_to_dose_distance_mm);
+
+%% ======================== STEP 8: ELEMENT-IN-BODY CHECK ========================
+% Final sanity check: no element center should land inside the body mask.
+% Step 6 removes sensor VOXELS that overlap the body, but an element center
+% can still resolve to a body voxel (e.g. a tilted element pushed into the
+% skin). Warn so the placement can be inspected; this is non-fatal.
+if ~isempty(element_positions_mm)
+    elem_vx = round((element_positions_mm(:, 1) - origin(1)) / dx) + 1;
+    elem_vy = round((element_positions_mm(:, 2) - origin(2)) / dy) + 1;
+    elem_vz = round((element_positions_mm(:, 3) - origin(3)) / dz) + 1;
+
+    in_grid = elem_vx >= 1 & elem_vx <= Nx & ...
+              elem_vy >= 1 & elem_vy <= Ny & ...
+              elem_vz >= 1 & elem_vz <= Nz;
+
+    elem_in_body = false(size(element_positions_mm, 1), 1);
+    grid_idx = find(in_grid);
+    for k = 1:numel(grid_idx)
+        ei = grid_idx(k);
+        elem_in_body(ei) = body(elem_vy(ei), elem_vx(ei), elem_vz(ei));
+    end
+
+    num_elem_in_body = sum(elem_in_body);
+    if num_elem_in_body > 0
+        warning('determine_sensor_mask:ElementInBody', ...
+            '%d of %d element centers fall inside the body mask.', ...
+            num_elem_in_body, numel(elem_in_body));
+        placement_valid = false;
+        sensor_info.placement_valid = placement_valid;
+    end
+    sensor_info.num_elements_in_body = num_elem_in_body;
+else
+    sensor_info.num_elements_in_body = 0;
+end
+
 fprintf('        [Sensor] Placement complete.\n');
 
 end

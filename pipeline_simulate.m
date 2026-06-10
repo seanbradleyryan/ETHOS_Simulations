@@ -50,7 +50,7 @@ CONFIG.dose_per_pulse_cGy       = 0.16;   % cGy per LINAC pulse
 CONFIG.pml_size                 = 10;     % PML thickness (voxels)
 CONFIG.cfl_number               = 0.3;    % CFL stability criterion
 CONFIG.use_gpu                  = true;   % GPU acceleration
-CONFIG.num_time_reversal_iter   = 10;      % Time-reversal iterations per field
+CONFIG.num_time_reversal_iter   = 5;      % Time-reversal iterations per field
 
 % --- Sensor Placement ---
 % Controls the k-Wave sensor mask geometry used in every per-field simulation.
@@ -65,7 +65,7 @@ CONFIG.sensor_y_index = 20;   % Used by 'full_plane_lateral'
 % Mimics a finite transducer impulse response applied to forward sensor data.
 % Set convolution_kernel to 0 to disable the entire block.
 CONFIG.convolution_kernel  = 4e-6;   % Gaussian sigma in seconds (4 us)
-CONFIG.conv_noise_level    = 0.01;   % Noise amplitude as fraction of peak sensor signal
+CONFIG.conv_noise_level    = 0.125;   % Noise amplitude as fraction of peak sensor signal
 CONFIG.conv_deconv_lambda  = 1e-4;   % Wiener regularization for deconvolution
 
 % --- Gamma Analysis Parameters ---
@@ -81,7 +81,7 @@ CONFIG.sensor_mode           = CONFIG.sensor_placement_method;  % passed to step
 
 % --- Parallel Processing ---
 CONFIG.use_parallel          = true;
-CONFIG.num_parallel_workers  = 8;
+CONFIG.num_parallel_workers  = 16;
 
 % --- Multi-Instance Coordination ---
 % Multiple copies of this script (e.g. one per remote-desktop session, all
@@ -216,6 +216,17 @@ for p_idx = 1:length(CONFIG.patients)
                     medium_by_label.(lbl) = create_acoustic_medium(cbct_by_label.(lbl), CONFIG);
                 end
 
+                % Compute the sensor mask ONCE for the whole plan and reuse it
+                % for every field, instead of recomputing determine_sensor_mask
+                % inside each run_single_field_simulation call. The mask is
+                % saved to disk (SimulationResults/<method>/sensor_mask_<hash>.mat)
+                % so the exact sensor geometry can be recovered for analysis.
+                % Returns [] for non-determine_sensor_mask methods (or when no
+                % summed plan dose is available), in which case each field falls
+                % back to its inline placement.
+                precomputed_sensor = compute_plan_sensor_mask(patient_id, session, ...
+                    cbct_by_label, dose_metadata, beam_metadata, CONFIG, CONFIG_HASH);
+
                 valid_field_indices = 1:numel(field_index);
                 num_fields          = length(valid_field_indices);
                 grid_dims           = dose_metadata.dimensions;
@@ -317,7 +328,7 @@ for p_idx = 1:length(CONFIG.patients)
                         [cbct_fd, medium_fd] = select_cbct_for_field(fd, ...
                             cbct_by_label, medium_by_label);
                         [rd, ~] = run_single_field_simulation(fd, cbct_fd, ...
-                            medium_fd, beam_metadata, CONFIG);
+                            medium_fd, beam_metadata, CONFIG, precomputed_sensor);
                         rd = gather(rd);
                         save_field_reconstruction(rd, fd, patient_id, session, CONFIG, CONFIG_HASH);
                         save_simulated_dose(rd, fd, patient_id, session, CONFIG, CONFIG_HASH);
@@ -390,7 +401,7 @@ for p_idx = 1:length(CONFIG.patients)
                         [cbct_fd, medium_fd] = select_cbct_for_field(fd, ...
                             cbct_by_label, medium_by_label);
                         [recon_dose, ~] = run_single_field_simulation(fd, cbct_fd, ...
-                            medium_fd, beam_metadata, CONFIG);
+                            medium_fd, beam_metadata, CONFIG, precomputed_sensor);
                         save_field_reconstruction(recon_dose, fd, patient_id, session, CONFIG, CONFIG_HASH);
                         save_simulated_dose(recon_dose, fd, patient_id, session, CONFIG, CONFIG_HASH);
 
@@ -650,10 +661,148 @@ function save_total_reconstruction(total_recon, metadata, patient_id, session, c
     save(out_path, 'total_recon', 'metadata', 'config_hash', '-v7.3');
 end
 
+function save_plan_sensor_mask(precomp, patient_id, session, config, hash8)
+    % Save the plan-level sensor mask (computed once, reused for every field)
+    % next to the per-config simulation outputs so analysis can recover the
+    % exact sensor geometry without re-running k-Wave.
+    out_path           = expected_sensor_mask_path(patient_id, session, config, hash8);
+    precomputed_sensor = precomp;  %#ok<NASGU>  saved variable name
+    config_hash        = hash8;    %#ok<NASGU>  saved variable name
+    save(out_path, 'precomputed_sensor', 'config_hash', '-v7.3');
+    fprintf('         Saved plan sensor mask: %s\n', out_path);
+end
+
 function [total_recon, metadata] = load_total_reconstruction(patient_id, session, config, hash8)
     data        = load(expected_total_recon_path(patient_id, session, config, hash8));
     total_recon = data.total_recon;
     metadata    = data.metadata;
+end
+
+
+function precomp = compute_plan_sensor_mask(patient_id, session, cbct_by_label, ...
+        dose_metadata, beam_metadata, config, hash8)
+    % COMPUTE_PLAN_SENSOR_MASK  Build the sensor mask ONCE for the whole plan.
+    %   Only the 'determine_sensor_mask' placement method is precomputed here:
+    %   its placement is meant to be deterministic across every field/segment
+    %   (driven by the SUMMED plan dose), so recomputing it per field is pure
+    %   waste. The other methods build trivial grid-dependent masks inline.
+    %
+    %   Single-mask policy: one geometry for the whole plan (CT_1 preferred)
+    %   and the summed plan dose (total_rs_dose) for placement; the resulting
+    %   mask is reused for every field regardless of its ct_label.
+    %
+    %   Caches to <sim_dir>/sensor_mask_<hash>.mat and reuses it on later runs.
+    %   Returns [] when not applicable (wrong method, no CBCT, or no summed
+    %   dose), so run_single_field_simulation computes the mask inline instead.
+    precomp = [];
+
+    if ~isfield(config, 'sensor_placement_method') || ...
+            ~strcmp(config.sensor_placement_method, 'determine_sensor_mask')
+        return;
+    end
+
+    % Reuse a previously saved mask for this config hash.
+    sensor_path = expected_sensor_mask_path(patient_id, session, config, hash8);
+    if isfile(sensor_path)
+        loaded = load(sensor_path, 'precomputed_sensor');
+        if isfield(loaded, 'precomputed_sensor') && ~isempty(loaded.precomputed_sensor)
+            precomp = loaded.precomputed_sensor;
+            fprintf('         Reusing saved plan sensor mask: %s\n', sensor_path);
+            return;
+        end
+    end
+
+    % Single-mask decision: one geometry for the whole plan, CT_1 preferred.
+    labels = fieldnames(cbct_by_label);
+    if isempty(labels)
+        warning('pipeline_simulate:NoCBCTForSensor', ...
+            'No CBCT geometry available; sensor will be computed per field.');
+        return;
+    end
+    if any(strcmp(labels, 'CT_1'))
+        chosen = 'CT_1';
+    else
+        chosen = labels{1};
+    end
+    cbct = cbct_by_label.(chosen);
+
+    % Summed plan dose -> deterministic placement. Validate against the CBCT
+    % grid (the array determine_sensor_mask actually indexes). Without it we
+    % cannot build a single representative mask, so fall back to per-field.
+    total_dose = load_total_rs_dose(patient_id, session, config, size(cbct.bodyMask));
+    if isempty(total_dose)
+        warning('pipeline_simulate:NoSummedDose', ...
+            ['total_rs_dose.mat unavailable or size-mismatched; sensor will be ' ...
+             'computed per field inside run_single_field_simulation.']);
+        return;
+    end
+
+    % Build the SCT-like struct determine_sensor_mask expects (mirrors the
+    % inline construction in run_single_field_simulation).
+    sct = struct();
+    if isfield(cbct, 'cubeHU'),   sct.cubeHU   = cbct.cubeHU;   end
+    if isfield(cbct, 'bodyMask'), sct.bodyMask = cbct.bodyMask; end
+    if isfield(cbct, 'couchMask') && ~isempty(cbct.couchMask)
+        sct.couchMask = cbct.couchMask;
+    else
+        sct.couchMask = false(size(cbct.bodyMask));
+    end
+    if isfield(cbct, 'origin') && ~isempty(cbct.origin)
+        sct.origin = cbct.origin;
+    else
+        sct.origin = [0, 0, 0];
+    end
+    sct.spacing = dose_metadata.spacing;
+
+    % field_dose stand-in: placement uses total_dose_Gy (summed plan dose).
+    fd = struct();
+    fd.dose_Gy       = total_dose;     % fallback if summed source is rejected
+    fd.total_dose_Gy = total_dose;     % preferred placement-dose source
+    fd.gantry_angle  = 0;              % logged only by determine_sensor_mask
+    fd.origin        = sct.origin;
+    fd.spacing       = dose_metadata.spacing;
+    fd.dimensions    = dose_metadata.dimensions;
+
+    fprintf('         Computing plan sensor mask once (geometry %s, summed plan dose)...\n', chosen);
+    [sensor_mask, sensor_info] = determine_sensor_mask(sct, fd, beam_metadata, config);
+
+    precomp                 = struct();
+    precomp.sensor_mask     = sensor_mask;
+    precomp.sensor_info     = sensor_info;
+    precomp.ct_label        = chosen;
+    precomp.base_dimensions = size(cbct.bodyMask);
+    precomp.config_hash     = hash8;
+
+    save_plan_sensor_mask(precomp, patient_id, session, config, hash8);
+end
+
+
+function dose = load_total_rs_dose(patient_id, session, config, expected_dims)
+    % LOAD_TOTAL_RS_DOSE  Load the step15 summed plan dose (total_rs_dose.mat),
+    %   densifying the sparse form. Returns [] when the file is absent or the
+    %   array does not match expected_dims (the placement grid).
+    dose = [];
+    processed_dir = fullfile(config.working_dir, 'RayStationFiles', ...
+        patient_id, session, 'processed');
+    fpath = fullfile(processed_dir, 'total_rs_dose.mat');
+    if ~isfile(fpath)
+        return;
+    end
+    S = load(fpath);
+    if isfield(S, 'total_rs_dose')
+        dose = S.total_rs_dose;
+    elseif isfield(S, 'total_rs_dose_sparse') && isfield(S, 'total_rs_dose_dims')
+        dose = reshape(full(S.total_rs_dose_sparse), S.total_rs_dose_dims(:)');
+    else
+        return;
+    end
+    dose = double(dose);
+    if ~isequal(size(dose), expected_dims(:)')
+        warning('pipeline_simulate:SummedDoseSizeMismatch', ...
+            'total_rs_dose size %s ~= placement grid %s; not using it for sensor placement.', ...
+            mat2str(size(dose)), mat2str(expected_dims(:)'));
+        dose = [];
+    end
 end
 
 
@@ -1106,6 +1255,11 @@ end
 function p = expected_total_recon_path(patient_id, session, config, hash8)
     sim_dir = get_simulation_directory(patient_id, session, config);
     p       = fullfile(sim_dir, sprintf('total_recon_dose_%s.mat', hash8));
+end
+
+function p = expected_sensor_mask_path(patient_id, session, config, hash8)
+    sim_dir = get_simulation_directory(patient_id, session, config);
+    p       = fullfile(sim_dir, sprintf('sensor_mask_%s.mat', hash8));
 end
 
 function p = expected_manifest_path(patient_id, session, config, hash8)
