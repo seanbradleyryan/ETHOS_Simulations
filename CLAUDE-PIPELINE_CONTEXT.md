@@ -37,6 +37,7 @@
 | `plot_standalone_results.m` | Visualization helper for standalone runs |
 | `CalcGamma.m` | Gamma index calculation (external dependency) |
 | `load_processed_data.m` | Loads previously processed dose/CT data |
+| `load_recon_dose_data.m` | Loads computed recon doses (single/set/total) + RS, ETHOS truth, CBCT, RTPLAN stats — no re-sim. See CLAUDE.md "Analysis Utilities" |
 
 ## Full Workflow (Common Operations)
 

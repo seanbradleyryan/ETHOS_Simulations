@@ -100,6 +100,62 @@ fprintf('  Grid dimensions: [%d x %d x %d]\n', dims);
 
 **Documentation header** (every function): PURPOSE, INPUTS (with field descriptions), OUTPUTS, ALGORITHM steps, EXAMPLE usage, DEPENDENCIES, See also.
 
+## Analysis Utilities
+
+### `load_recon_dose_data.m` — load computed recon doses for analysis
+
+Reusable loader that pulls **already-computed** reconstructed doses from the pipeline outputs so the
+standalone-simulation / comparison / study analyses can be re-run **without re-running k-Wave**. Each
+dose is associated with its RayStation "truth" field dose, the ETHOS RTDOSE truth (resampled onto the
+dose grid), the CBCT geometry, and the RTPLAN statistics.
+
+**Signature:** `out = load_recon_dose_data(patient_id, session, config, Name, Value, ...)`
+
+- `config` — needs `.working_dir`; uses `.treatment_site` (default `'Pancreas'`) and
+  `.gruneisen_method` (auto-detected when a single method folder exists). May also carry the full
+  simulation CONFIG so the config hash can be computed exactly.
+
+**Name/value options:**
+
+| Option | Values | Notes |
+|---|---|---|
+| `'Mode'` | `'total'` (default) \| `'set'` \| `'single'` | total recon, filtered set, or one field |
+| `'Beam'` | scalar | required for `'single'`; filters `'set'` |
+| `'Segment'` | scalar | optional filter; narrows `'single'` when a beam has several segments |
+| `'PlanType'` | `'any'` (default) \| `'adapted'` \| `'reference'` | filter |
+| `'CTLabel'` | `'any'` (default) \| `'CT_1'` \| `'CT_3'` | filter |
+| `'Hash'` | 8-char hex | explicit config-hash override |
+| `'IncludeRS'` / `'IncludeEthos'` / `'IncludeCBCT'` | logical (default `true`) | skip heavy items for speed |
+
+**Config hash:** auto-discovers the recon hash on disk; otherwise uses the hash computed from CONFIG;
+`'Hash'` overrides. Errors (listing the available hashes / method folders) on ambiguity or when nothing
+matches, and warns on an embedded-hash mismatch.
+
+**Returns** `out` with common `.patient_id/.session/.gruneisen_method/.config_hash`, `.metadata`
+(grid `dimensions`/`spacing`/`origin` + `beam_metadata`), and `.ethos_truth` (when `IncludeEthos`):
+- **`'total'`**: `.recon_dose`, `.rs_dose`, `.cbct.CT_1` / `.cbct.CT_3`.
+- **`'set'` / `'single'`**: `.fields` struct array (1 element per matched field), each with
+  `.recon_dose`, `.rs_dose`, `.cbct`, `.rtplan` (`beam_num`, `seg_num`, `plan_type`, `ct_label`,
+  `beam_name`, `gantry_angle`, `meterset`, `isocenter`, `jaw_x`, `jaw_y`), `.source_mat_filename`,
+  `.recon_file`.
+
+`recon_dose`, `rs_dose`, and `ethos_truth` all share the dose grid (`metadata.dimensions`), so results
+drop straight into gamma/SSIM with no further resampling.
+
+```matlab
+config.working_dir      = '/mnt/weka/home/80030361/ETHOS_Simulations';
+config.treatment_site   = 'Pancreas';
+config.gruneisen_method = 'threshold_2';
+
+T = load_recon_dose_data('1194203','Session_1',config);                                          % summed total
+S = load_recon_dose_data('1194203','Session_1',config,'Mode','single','Beam',15,'Segment',112);  % one field
+A = load_recon_dose_data('1194203','Session_1',config,'Mode','set','PlanType','adapted','CTLabel','CT_3'); % filtered set
+```
+
+Reuses `compute_sim_config_hash`, `list_processed_field_doses`, and `load_field_dose_file`. Reads
+recon outputs from `SimulationResults/[PatientID]/[Session]/[method]/` (`<base>_recon_<hash>.mat`,
+`total_recon_dose_<hash>.mat`) and RayStation/CBCT inputs from `RayStationFiles/[PatientID]/[Session]/processed/`.
+
 ## Visualization Preferences
 
 - Subplots: **maximum 3 rows** on screen; 3–4 columns fine.
