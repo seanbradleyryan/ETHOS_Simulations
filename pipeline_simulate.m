@@ -343,8 +343,8 @@ for p_idx = 1:length(CONFIG.patients)
                         t_field = tic;
                         [cbct_fd, medium_fd] = select_cbct_for_field(fd, ...
                             cbct_by_label, medium_by_label);
-                        [rd, ~] = run_single_field_simulation(fd, cbct_fd, ...
-                            medium_fd, beam_metadata, CONFIG, precomputed_sensor);
+                        rd = run_field_quietly(fd, cbct_fd, medium_fd, ...
+                            beam_metadata, CONFIG, precomputed_sensor);
                         rd = gather(rd);
                         save_field_reconstruction(rd, fd, patient_id, session, CONFIG, CONFIG_HASH);
                         save_simulated_dose(rd, fd, patient_id, session, CONFIG, CONFIG_HASH);
@@ -416,8 +416,8 @@ for p_idx = 1:length(CONFIG.patients)
                         t_field = tic;
                         [cbct_fd, medium_fd] = select_cbct_for_field(fd, ...
                             cbct_by_label, medium_by_label);
-                        [recon_dose, ~] = run_single_field_simulation(fd, cbct_fd, ...
-                            medium_fd, beam_metadata, CONFIG, precomputed_sensor);
+                        recon_dose = run_field_quietly(fd, cbct_fd, medium_fd, ...
+                            beam_metadata, CONFIG, precomputed_sensor);
                         save_field_reconstruction(recon_dose, fd, patient_id, session, CONFIG, CONFIG_HASH);
                         save_simulated_dose(recon_dose, fd, patient_id, session, CONFIG, CONFIG_HASH);
 
@@ -643,6 +643,23 @@ function [cbct, medium] = select_cbct_for_field(field_dose, cbct_by_label, mediu
     end
     cbct   = cbct_by_label.(lbl);
     medium = medium_by_label.(lbl);
+end
+
+function recon_dose = run_field_quietly(field_dose, cbct_resampled, medium, ...
+        beam_metadata, config, precomputed_sensor)
+    % Run one field's k-Wave simulation but swallow ALL of its console output
+    % (the k-Wave forward/time-reversal banners plus run_single_field_simulation's
+    % own per-field diagnostics). evalc captures everything the call prints and
+    % discards it, keeping pipeline_simulate's console limited to the high-level
+    % per-field progress line. This suppression is local to THIS script: other
+    % callers invoke run_single_field_simulation directly and keep their logging.
+    %
+    % Wrapping the evalc here (rather than at the parfor call site) keeps every
+    % argument a normal function input, so parfor's variable classification still
+    % ships beam_metadata / precomputed_sensor to the workers -- a bare evalc
+    % string in the loop body would hide those uses and break the broadcast.
+    [~, recon_dose] = evalc(['run_single_field_simulation(field_dose, ' ...
+        'cbct_resampled, medium, beam_metadata, config, precomputed_sensor)']);
 end
 
 function save_field_reconstruction(recon_dose, field_dose, patient_id, session, config, hash8)
