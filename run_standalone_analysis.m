@@ -188,6 +188,24 @@ else
     fprintf('  [WARN] No CBCT cubeHU available; plotting without density background.\n');
 end
 
+%% ============= SUMMED PLAN DOSE FOR SENSOR PLACEMENT ====================
+% Sensor placement uses the step15 SUMMED PLAN DOSE (total_rs_dose.mat) so the
+% exclusion zone and array center are DETERMINISTIC and identical across every
+% field/segment, instead of shifting with whichever single recon is loaded.
+% determine_sensor_mask reads this path via config.total_dose_file.
+processed_dir   = fullfile(CONFIG.working_dir, 'RayStationFiles', ...
+    CONFIG.patient_id, CONFIG.session, 'processed');
+total_dose_file = fullfile(processed_dir, 'total_rs_dose.mat');
+if isfile(total_dose_file)
+    CONFIG.total_dose_file = total_dose_file;
+    fprintf('  Sensor placement dose: %s (summed plan dose)\n', total_dose_file);
+else
+    CONFIG.total_dose_file = '';
+    fprintf(['  [WARN] total_rs_dose.mat not found in %s;\n' ...
+             '         sensor placement falls back to the per-field dose.\n'], ...
+             processed_dir);
+end
+
 %% ========================= SENSOR PLACEMENT =============================
 % Geometric placement only (no k-Wave). Cropped to the dose grid for overlay.
 

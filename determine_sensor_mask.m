@@ -19,8 +19,12 @@ function [sensor_mask, sensor_info] = determine_sensor_mask(sct_resampled, field
 %   ALGORITHM:
 %   1. Compute anterior surface height map from body mask (excluding couch).
 %   2. Compute dose-based Z exclusion zone (>= 10% of peak per Z slice).
-%      Caller should pass the SUMMED PLAN DOSE in field_dose.dose_Gy when
-%      computing a session-level sensor.
+%      Placement (this exclusion zone AND the Step 3 centroid) uses the SUMMED
+%      PLAN DOSE from step15 when supplied (field_dose.total_dose_Gy,
+%      config.placement_dose_Gy, or config.total_dose_file), so the sensor is
+%      DETERMINISTIC and identical for every field/segment of a plan. It falls
+%      back to the per-field field_dose.dose_Gy only when no summed dose is
+%      provided.
 %   3. Find the flat sensor center: sweep candidate rectangles on the
 %      anterior surface outside the exclusion zone; pick the one closest
 %      to the dose centroid in XZ. Placement is restricted to be at or
@@ -54,8 +58,12 @@ function [sensor_mask, sensor_info] = determine_sensor_mask(sct_resampled, field
 %           .spacing        - [dx, dy, dz] mm
 %           .dimensions     - [ny, nx, nz] (rows=Y, cols=X, slices=Z)
 %       field_dose - Struct with:
-%           .dose_Gy        - 3D dose array (Gy). For session-level sensor
-%                             placement pass the SUMMED PLAN DOSE.
+%           .dose_Gy        - 3D dose array (Gy) for THIS field/segment.
+%           .total_dose_Gy  - (Optional) SUMMED PLAN DOSE (step15 total_rs_dose)
+%                             on the same grid as .dose_Gy. When present it
+%                             drives the exclusion zone + centroid so placement
+%                             is deterministic across all fields. Falls back to
+%                             .dose_Gy when absent.
 %           .gantry_angle   - Gantry angle (degrees) - logged only.
 %           .origin         - [x, y, z] mm
 %           .spacing        - [dx, dy, dz] mm
@@ -75,6 +83,13 @@ function [sensor_mask, sensor_info] = determine_sensor_mask(sct_resampled, field
 %           .sensor_placement     - Placement side: 'anterior' (default)
 %           .pml_size             - PML thickness in voxels (default: 10)
 %           .aim_at_iso           - Enable iso-aimed tilt (default: true)
+%           .placement_dose_Gy    - (Optional) SUMMED PLAN DOSE array used for
+%                                   placement (alternative to
+%                                   field_dose.total_dose_Gy).
+%           .total_dose_file      - (Optional) Path to a step15 total dose .mat
+%                                   (total_rs_dose.mat or total_dose_<CT>.mat);
+%                                   loaded for placement when no summed dose
+%                                   array is passed directly.
 %           .force_turn_angle     - Forced tilt magnitude in degrees about
 %                                   the iso-aim axis. 0 = normal feasibility-
 %                                   limited binary search. Nonzero = apply
@@ -247,10 +262,20 @@ if num_surface_pts == 0
     return;
 end
 
+%% ======================== RESOLVE PLACEMENT DOSE ========================
+% Sensor placement (the Z exclusion zone in Step 2 and the centroid targeting
+% in Step 3) must be DETERMINISTIC and identical for every field/segment of a
+% plan. It therefore uses the SUMMED PLAN DOSE from step15 (total_rs_dose)
+% rather than the single per-segment dose in field_dose.dose_Gy. The summed
+% dose is supplied by the caller as field_dose.total_dose_Gy (preferred) or
+% config.placement_dose_Gy, or is loaded from config.total_dose_file. When none
+% is available it falls back to the per-field dose for backward compatibility.
+placement_dose = resolve_placement_dose(field_dose, config, [Ny, Nx, Nz]);
+
 %% ======================== STEP 2: DOSE-BASED EXCLUSION ZONE ========================
 
 exclusion_zone = false(Nx, Nz);
-dose = field_dose.dose_Gy;
+dose = placement_dose;
 dose_max = max(dose(:));
 
 if ~isempty(dose) && dose_max > 0
@@ -320,8 +345,12 @@ if sum(available(:)) < sensor_nx * sensor_nz
         sum(available(:)), sensor_nx * sensor_nz);
 end
 
-% Compute dose centroid in X-Z (proximity targeting for the flat sweep)
-dose_centroid_mm = compute_dose_centroid_mm(field_dose, origin, dx, dy, dz);
+% Compute dose centroid in X-Z (proximity targeting for the flat sweep).
+% Use the SAME summed placement dose as the exclusion zone so the center is
+% deterministic across all fields of the plan.
+centroid_src = field_dose;
+centroid_src.dose_Gy = placement_dose;
+dose_centroid_mm = compute_dose_centroid_mm(centroid_src, origin, dx, dy, dz);
 dose_centroid_ix = round((dose_centroid_mm(1) - origin(1)) / dx) + 1;
 dose_centroid_iz = round((dose_centroid_mm(3) - origin(3)) / dz) + 1;
 fprintf('        [Sensor] Dose centroid (voxel): X=%d, Z=%d\n', dose_centroid_ix, dose_centroid_iz);
@@ -923,6 +952,93 @@ end
 %% ========================================================================
 %  LOCAL HELPER FUNCTIONS
 %% ========================================================================
+
+function dose = resolve_placement_dose(field_dose, config, expected_dims)
+%RESOLVE_PLACEMENT_DOSE Dose used for sensor placement (exclusion zone + centroid).
+%   Prefers the SUMMED PLAN DOSE (step15 total_rs_dose) so placement is
+%   deterministic across every field/segment of a plan, rather than depending on
+%   the single per-segment dose passed in. Resolution order:
+%       1. field_dose.total_dose_Gy  - preloaded summed plan dose (preferred)
+%       2. config.placement_dose_Gy  - preloaded summed plan dose
+%       3. config.total_dose_file    - path to step15 total_rs_dose.mat (loaded)
+%       4. field_dose.dose_Gy        - per-field fallback (back-compat)
+%   The summed dose must share the field-dose grid size [Ny Nx Nz]; a
+%   mismatched array is rejected (warning) and the next source is tried.
+
+    dose = [];
+
+    % 1) Preloaded summed dose on the field_dose struct.
+    if isfield(field_dose, 'total_dose_Gy') && ~isempty(field_dose.total_dose_Gy)
+        dose = accept_if_matches(field_dose.total_dose_Gy, expected_dims, ...
+            'field_dose.total_dose_Gy');
+    end
+
+    % 2) Preloaded summed dose on config.
+    if isempty(dose) && isfield(config, 'placement_dose_Gy') && ...
+            ~isempty(config.placement_dose_Gy)
+        dose = accept_if_matches(config.placement_dose_Gy, expected_dims, ...
+            'config.placement_dose_Gy');
+    end
+
+    % 3) Load the step15 summed dose from disk.
+    if isempty(dose) && isfield(config, 'total_dose_file') && ...
+            ~isempty(config.total_dose_file) && isfile(config.total_dose_file)
+        loaded = load_total_dose_file(config.total_dose_file);
+        dose   = accept_if_matches(loaded, expected_dims, config.total_dose_file);
+    end
+
+    % 4) Fall back to the per-field dose (original behavior).
+    if isempty(dose)
+        dose = field_dose.dose_Gy;
+        fprintf(['        [Sensor] Placement dose: per-field dose ' ...
+                 '(no summed plan dose supplied; placement is per-field).\n']);
+    else
+        fprintf(['        [Sensor] Placement dose: SUMMED PLAN DOSE ' ...
+                 '(deterministic across all fields).\n']);
+    end
+end
+
+
+function out = accept_if_matches(arr, expected_dims, label)
+%ACCEPT_IF_MATCHES Return arr (as double) if its size matches expected_dims.
+%   Returns [] and warns on a size mismatch so the caller can try the next
+%   placement-dose source.
+    out = [];
+    if isempty(arr)
+        return;
+    end
+    if isequal(size(arr), expected_dims)
+        out = double(arr);
+    else
+        warning('determine_sensor_mask:PlacementDoseSizeMismatch', ...
+            '%s size %s ~= field grid %s; ignoring it for sensor placement.', ...
+            label, mat2str(size(arr)), mat2str(expected_dims));
+    end
+end
+
+
+function dose = load_total_dose_file(fpath)
+%LOAD_TOTAL_DOSE_FILE Load a step15 total dose (sparse or full) into a 3D array.
+%   Handles total_rs_dose.mat (total_rs_dose, or total_rs_dose_sparse +
+%   total_rs_dose_dims) and total_dose_<CT>.mat (ct_total, or ct_total_sparse +
+%   ct_total_dims), matching how step15_process_doses saves them.
+    dose = [];
+    S = load(fpath);
+    if isfield(S, 'total_rs_dose')
+        dose = S.total_rs_dose;
+    elseif isfield(S, 'total_rs_dose_sparse') && isfield(S, 'total_rs_dose_dims')
+        dose = reshape(full(S.total_rs_dose_sparse), S.total_rs_dose_dims(:)');
+    elseif isfield(S, 'ct_total')
+        dose = S.ct_total;
+    elseif isfield(S, 'ct_total_sparse') && isfield(S, 'ct_total_dims')
+        dose = reshape(full(S.ct_total_sparse), S.ct_total_dims(:)');
+    else
+        warning('determine_sensor_mask:UnknownTotalDoseFile', ...
+            'No recognized total-dose variable found in %s.', fpath);
+    end
+    dose = double(dose);
+end
+
 
 function centroid_mm = compute_dose_centroid_mm(field_dose, origin, dx, dy, dz)
 %COMPUTE_DOSE_CENTROID_MM Compute the physical centroid of the dose distribution
