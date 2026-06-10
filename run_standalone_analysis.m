@@ -94,36 +94,61 @@ fprintf('=========================================================\n');
 
 switch lower(CONFIG.analysis_mode)
     case 'single'
-        fld = resolve_and_load(CONFIG, '');         % first matched field, any CT
+        % Pick the first field (or the CONFIG-specified beam/segment) and load
+        % it via Mode='set' (no single-match requirement). A given beam/segment
+        % may exist for both CT_1 and CT_3; for single mode we just take the
+        % first returned field ("any dose").
+        if isempty(CONFIG.beam)
+            [beam, seg] = pick_first_field(CONFIG);
+        else
+            beam = CONFIG.beam;
+            seg  = CONFIG.segment;
+        end
+
+        out = load_field_set(CONFIG, beam, seg);
+        fld = out.fields(1);
+
         refDose      = double(fld.rs_dose);
         tgtDose      = double(fld.recon_dose);
         cbct         = fld.cbct;
-        metadata     = fld.metadata;
+        metadata     = out.metadata;
         gantry_angle = getfield_def(fld.rtplan, 'gantry_angle', 0);
         labelRef     = 'RayStation (truth)';
-        labelTgt     = 'Reconstructed';
+        labelTgt     = sprintf('Reconstructed (%s)', field_ct_label(fld));
         panelTitle   = sprintf('Dose Comparison: %s vs %s', labelRef, labelTgt);
 
     case {'comparison', 'sweep'}
         ct1 = sprintf('CT_%d', CONFIG.ct_pair(1));
         ct2 = sprintf('CT_%d', CONFIG.ct_pair(2));
 
-        % Resolve beam/segment/plan-type from the CT_1 field (or CONFIG).
+        % Find a beam/segment that has BOTH CT recons, then load that set and
+        % select each CT field by its own ct_label (robust to filename quirks).
         if isempty(CONFIG.beam)
-            [beam, seg, ptype, ~] = pick_first_field(CONFIG, ct1);
+            [beam, seg] = pick_first_paired_field(CONFIG, ct1, ct2);
         else
-            beam  = CONFIG.beam;
-            seg   = CONFIG.segment;
-            ptype = 'any';
+            beam = CONFIG.beam;
+            seg  = CONFIG.segment;
         end
 
-        fldA = load_one(CONFIG, beam, seg, ptype, ct1);
-        fldB = load_one(CONFIG, beam, seg, ptype, ct2);
+        out = load_field_set(CONFIG, beam, seg);
+        iA  = find_field_by_ct(out.fields, ct1);
+        iB  = find_field_by_ct(out.fields, ct2);
+        if isempty(iA) || isempty(iB)
+            found = strjoin(arrayfun(@(f) field_ct_label(f), out.fields, ...
+                'UniformOutput', false), ', ');
+            error('run_standalone_analysis:NoPair', ...
+                ['Beam %s / segment %s does not have both %s and %s recon ', ...
+                 'doses (found CT labels: %s). Set CONFIG.beam/segment to a ', ...
+                 'field reconstructed on both CTs.'], ...
+                mat2str(beam), mat2str(seg), ct1, ct2, found);
+        end
+        fldA = out.fields(iA);
+        fldB = out.fields(iB);
 
         refDose      = double(fldA.recon_dose);
         tgtDose      = double(fldB.recon_dose);
         cbct         = fldA.cbct;
-        metadata     = fldA.metadata;
+        metadata     = out.metadata;
         gantry_angle = getfield_def(fldA.rtplan, 'gantry_angle', 0);
         labelRef     = sprintf('%s recon', ct1);
         labelTgt     = sprintf('%s recon', ct2);
@@ -208,69 +233,88 @@ fprintf('\n[run_standalone_analysis] Done.\n');
 %  LOADING HELPERS
 %% =========================================================================
 
-function fld = resolve_and_load(CONFIG, want_ct)
-%RESOLVE_AND_LOAD Pick a field (auto or from CONFIG) and load exactly one recon.
-    if isempty(CONFIG.beam)
-        [beam, seg, ptype, ctlbl] = pick_first_field(CONFIG, want_ct);
-    else
-        beam  = CONFIG.beam;
-        seg   = CONFIG.segment;
-        ptype = 'any';
-        ctlbl = want_ct;
-        if isempty(ctlbl), ctlbl = 'any'; end
-    end
-    fld = load_one(CONFIG, beam, seg, ptype, ctlbl);
-end
-
-function fld = load_one(CONFIG, beam, seg, ptype, ctlbl)
-%LOAD_ONE Load a single reconstructed field via load_recon_dose_data.
-    if isempty(ptype), ptype = 'any'; end
-    if isempty(ctlbl), ctlbl = 'any'; end
-
-    args = {'Mode', 'single', 'Beam', beam};
-    if ~isempty(seg)
-        args = [args, {'Segment', seg}];
-    end
-    args = [args, {'PlanType', ptype, 'CTLabel', ctlbl, 'IncludeEthos', false}];
+function out = load_field_set(CONFIG, beam, seg)
+%LOAD_FIELD_SET Load matched fields via load_recon_dose_data (Mode='set').
+%  'set' does NOT require a unique match, so a beam/segment present for several
+%  CTs / plan types loads them all; the caller selects which to use.
+    args = {'Mode', 'set', 'IncludeEthos', false};
+    if ~isempty(beam), args = [args, {'Beam', beam}]; end
+    if ~isempty(seg),  args = [args, {'Segment', seg}]; end
     if isfield(CONFIG, 'config_hash') && ~isempty(CONFIG.config_hash)
         args = [args, {'Hash', CONFIG.config_hash}];
     end
-
     out = load_recon_dose_data(CONFIG.patient_id, CONFIG.session, CONFIG, args{:});
-    fld = out.fields(1);
-    fld.metadata = out.metadata;
 end
 
-function [beam, seg, ptype, ctlbl] = pick_first_field(CONFIG, want_ct)
-%PICK_FIRST_FIELD First indexed field (optionally matching a CT label).
+function [beam, seg] = pick_first_field(CONFIG)
+%PICK_FIRST_FIELD Beam/segment of the first indexed processed field dose.
     ldcfg.working_dir = CONFIG.working_dir;
     fidx = list_processed_field_doses(CONFIG.patient_id, CONFIG.session, ldcfg);
-    for i = 1:numel(fidx)
-        [pt, ct] = parse_name_tokens(fidx(i).source_mat_filename);
-        if ~isempty(want_ct) && ~strcmpi(ct, want_ct)
-            continue;
-        end
-        beam  = fidx(i).beam_index;
-        seg   = fidx(i).segment;
-        ptype = pt;
-        ctlbl = ct;
-        return;
-    end
-    error('run_standalone_analysis:NoField', ...
-        'No processed field dose matches CT label ''%s''.', want_ct);
+    beam = fidx(1).beam_index;
+    seg  = fidx(1).segment;
 end
 
-function [plan_type, ct_label] = parse_name_tokens(name)
-%PARSE_NAME_TOKENS Parse plan-type and CT label from a dose filename.
-    plan_type = 'any';
-    ct_label  = 'any';
-    tok = regexp(name, ...
-        '_(adapted|reference)(?:_CT_(\d+))?_B\d+_\d+\.mat$', 'tokens', 'once');
-    if ~isempty(tok)
-        plan_type = tok{1};
-        if numel(tok) >= 2 && ~isempty(tok{2})
-            ct_label = sprintf('CT_%s', tok{2});
+function [beam, seg] = pick_first_paired_field(CONFIG, ct1, ct2)
+%PICK_FIRST_PAIRED_FIELD First beam/segment present on BOTH ct1 and ct2.
+%  Uses the lightweight file index (no array loads) and a lenient CT parse, so
+%  it does not depend on the strict dose-filename regex.
+    ldcfg.working_dir = CONFIG.working_dir;
+    fidx = list_processed_field_doses(CONFIG.patient_id, CONFIG.session, ldcfg);
+
+    n = numel(fidx);
+    keys = strings(1, n);          % "beam|seg" identity per file
+    cts  = strings(1, n);          % CT label per file
+    for i = 1:n
+        keys(i) = sprintf('%d|%d', fidx(i).beam_index, fidx(i).segment);
+        cts(i)  = string(ct_label_from_name(fidx(i).source_mat_filename));
+    end
+
+    seen = unique(keys, 'stable');
+    for k = 1:numel(seen)
+        m = keys == seen(k);
+        if any(cts(m) == ct1) && any(cts(m) == ct2)
+            idx  = find(m, 1);
+            beam = fidx(idx).beam_index;
+            seg  = fidx(idx).segment;
+            return;
         end
+    end
+
+    error('run_standalone_analysis:NoPairedField', ...
+        ['No field is reconstructed on both %s and %s. Set CONFIG.beam / ', ...
+         'CONFIG.segment, or adjust CONFIG.ct_pair.'], ct1, ct2);
+end
+
+function idx = find_field_by_ct(fields, want_ct)
+%FIND_FIELD_BY_CT Index of the first loaded field whose CT label is want_ct.
+    idx = [];
+    for i = 1:numel(fields)
+        if strcmpi(field_ct_label(fields(i)), want_ct)
+            idx = i;
+            return;
+        end
+    end
+end
+
+function lbl = field_ct_label(fld)
+%FIELD_CT_LABEL CT label of a loaded field: rtplan.ct_label, else filename.
+    lbl = '';
+    if isfield(fld, 'rtplan') && isfield(fld.rtplan, 'ct_label') ...
+            && ~isempty(fld.rtplan.ct_label)
+        lbl = strrep(char(fld.rtplan.ct_label), '-', '_');
+    end
+    if isempty(lbl) && isfield(fld, 'source_mat_filename')
+        lbl = ct_label_from_name(fld.source_mat_filename);
+    end
+    if isempty(lbl), lbl = 'unknown'; end
+end
+
+function ct_label = ct_label_from_name(name)
+%CT_LABEL_FROM_NAME Lenient CT-label parse: matches CT_1, CT-1, CT1, ...
+    ct_label = '';
+    tok = regexp(char(name), 'CT[_-]?(\d+)', 'tokens', 'once');
+    if ~isempty(tok)
+        ct_label = sprintf('CT_%s', tok{1});
     end
 end
 
