@@ -68,7 +68,7 @@ CONFIG.jaw_margin_mm      = 10;
 CONFIG.sensor_placement   = 'anterior';
 CONFIG.pml_size           = 10;
 CONFIG.aim_at_iso         = true;
-CONFIG.force_turn_angle   = 30;
+CONFIG.force_turn_angle   = 290;
 
 % --- Visualization ---
 % Gaussian sigma (voxels) applied to dose slices for DISPLAY ONLY in the dose
