@@ -42,7 +42,7 @@ CONFIG.dose_filename = 'dose_1194203_Session_1_reference_CT_3_B15_112.mat';
 CONFIG.ct_pair = [1, 3];
 
 % Explicit recon config-hash override ('' => auto-discover on disk via loader).
-CONFIG.config_hash = '';
+CONFIG.config_hash = '505ae853';
 
 CONFIG.sensor_placement_method = 'determine_sensor_mask';
 CONFIG.sensor_x_index = 2;
@@ -87,7 +87,7 @@ CONFIG.mask_recon_to_dose_region     = true;    % zero recon dose outside the do
 %   'hybrid' : DAS for iter 1, k-Wave TR with residual correction for iters 2..N
 CONFIG.reconstruction_method = 'tr';
 
-CONFIG.num_time_reversal_iter = 10;
+CONFIG.num_time_reversal_iter = 5;
 CONFIG.convergence_tol        = 1e-3;
 
 % --- Pulse Convolution / Noise / Deconvolution ---
@@ -136,9 +136,9 @@ CONFIG.gamma_log_file = 'gamma_log.mat';
 % The realizations are distributed across all available GPUs (one worker per
 % GPU, each pinned to a distinct device). Requires the pulse model to be active
 % (CONFIG.convolution_kernel > 0), since that is where electronic noise enters.
-CONFIG.noise_ensemble.enable           = true;
+CONFIG.noise_ensemble.enable           = false;
 CONFIG.noise_ensemble.num_realizations = 8;        % ensemble size N
-CONFIG.noise_ensemble.recompute        = true;     % false -> load saved results if present
+CONFIG.noise_ensemble.recompute        = false;     % false -> load saved results if present
 CONFIG.noise_ensemble.results_file     = 'gamma_noise_ensemble.mat';
 CONFIG.noise_ensemble.num_iters        = [];       % [] -> use CONFIG.num_time_reversal_iter
 CONFIG.noise_ensemble.base_seed        = 42;       % RNG base; per-realization seeds derive from it
