@@ -117,6 +117,12 @@ CONFIG.viz_smooth_sigma = 1.0;
 %                magnitudes are directly comparable.
 CONFIG.dose_panel_scale = 'relative';
 
+% Percentile (0-100) of the dose used to anchor the TOP of the colour scale,
+% so a few hotspots don't dominate the window and wash out the rest of the
+% dose. Voxels above this percentile saturate at the top colour. 95 widens the
+% visible window noticeably; set to 100 to anchor on the true max (old behavior).
+CONFIG.dose_panel_clip_pct = 95;
+
 % Normalize: divide both reconstructed doses by their own max before
 % comparison / gamma so each peaks at 1.0.
 CONFIG.normalize = false;
@@ -751,7 +757,7 @@ if CONFIG.plot_results
     plot_dose_panels(rs_A, recon_A, sensor_disp, density_disp, spacing_mm, ...
         sprintf('RayStation Truth vs Reconstruction  |  %s', label_A), ...
         {'RayStation truth', 'Reconstruction'}, CONFIG.viz_smooth_sigma, ...
-        CONFIG.dose_panel_scale);
+        CONFIG.dose_panel_scale, CONFIG.dose_panel_clip_pct);
 
     % (gamma pass-rate chart is produced unconditionally above)
 
@@ -1537,17 +1543,20 @@ function plot_gamma_pass_rate_curve(crit_n, pass_rates, label_ref, label_tgt, pa
     drawnow;
 end
 
-function plot_dose_panels(original, recon, sensor_mask, density, spacing_mm, titleStr, rowLabels, smooth_sigma, scale_mode)
+function plot_dose_panels(original, recon, sensor_mask, density, spacing_mm, titleStr, rowLabels, smooth_sigma, scale_mode, clip_pct)
 %PLOT_DOSE_PANELS 2x3 dose comparison: coronal, sagittal, axial.
 %  Row 1 = original dose,  Row 2 = reconstructed dose.
 %  Dose (jet, semi-transparent) is overlaid on the density map (grayscale).
 %  scale_mode controls the dose colour range (and the low-dose transparency
 %  threshold, which is always 10% of the relevant reference max):
-%    'relative' (default) - each row is normalized to its OWN max, so every
-%                panel peaks at 100% and shapes are compared independent of
-%                absolute magnitude. Colorbars read in % of that row's max.
-%    'absolute' - both rows share [0, max(original)] in Gy so magnitudes are
-%                directly comparable. Colorbars read in Gy.
+%    'relative' (default) - each row is normalized to its OWN reference max, so
+%                every panel peaks at 100% and shapes are compared independent
+%                of absolute magnitude. Colorbars read in % of that reference.
+%    'absolute' - both rows share [0, reference max of original] in Gy so
+%                magnitudes are directly comparable. Colorbars read in Gy.
+%  clip_pct (0-100, default 100) anchors the reference max at that percentile of
+%  the (nonzero) dose instead of the true max, so a few hotspots don't dominate
+%  the window; voxels above it saturate at the top colour. 100 = true max.
 %  Isocenter at max-dose voxel.  Sensor contour in red on every panel.
 %  smooth_sigma (voxels) Gaussian-smooths each slice for display only, to
 %  fill speckle gaps in a spotty recon. Pass 0 to disable.
@@ -1556,6 +1565,7 @@ function plot_dose_panels(original, recon, sensor_mask, density, spacing_mm, tit
 
     if nargin < 8 || isempty(smooth_sigma), smooth_sigma = 0; end
     if nargin < 9 || isempty(scale_mode), scale_mode = 'relative'; end
+    if nargin < 10 || isempty(clip_pct), clip_pct = 100; end
     use_relative = strcmpi(scale_mode, 'relative');
 
     gridSize = size(original);
@@ -1568,10 +1578,10 @@ function plot_dose_panels(original, recon, sensor_mask, density, spacing_mm, tit
     [~, max_idx] = max(original(:));
     [cx, cy, cz] = ind2sub(gridSize, max_idx);
 
-    % Absolute-mode colour scale anchored to original (reference) dose. In
-    % relative mode each row instead uses its own max (computed in the loop).
-    max_dose = max(original(:));
-    if max_dose == 0, max_dose = 1; end
+    % Absolute-mode colour scale anchored to the original (reference) dose,
+    % clipped at the clip_pct percentile so a few hotspots don't dominate the
+    % window. In relative mode each row uses its own clipped max (in the loop).
+    max_dose = robust_dose_max(original, clip_pct);
 
     x_ax = (1:gridSize(1)) * spacing_mm(1);
     y_ax = (1:gridSize(2)) * spacing_mm(2);
@@ -1586,10 +1596,15 @@ function plot_dose_panels(original, recon, sensor_mask, density, spacing_mm, tit
     wl_min    = wl_center - wl_width / 2;   % 875  kg/m^3
     wl_max    = wl_center + wl_width / 2;   % 1225 kg/m^3
 
-    if use_relative
-        clim_str = 'each row scaled to its own max (relative %)';
+    if clip_pct >= 100
+        clip_str = 'max';
     else
-        clim_str = sprintf('Dose clim [0, %.4f] Gy', max_dose);
+        clip_str = sprintf('%g%%ile', clip_pct);
+    end
+    if use_relative
+        clim_str = sprintf('each row scaled to its own %s (relative %%)', clip_str);
+    else
+        clim_str = sprintf('Dose clim [0, %.4f] Gy  (clip @ %s)', max_dose, clip_str);
     end
 
     figure('Name', titleStr, 'Color', 'w', 'NumberTitle', 'off', ...
@@ -1609,10 +1624,10 @@ function plot_dose_panels(original, recon, sensor_mask, density, spacing_mm, tit
         lbl = row_labels{row};
 
         % Reference max for this row's colour scale and 10% transparency
-        % threshold: own max in relative mode, shared original max otherwise.
+        % threshold: own clipped max in relative mode, shared original clipped
+        % max otherwise.
         if use_relative
-            row_max = max(d(:));
-            if row_max == 0, row_max = 1; end
+            row_max = robust_dose_max(d, clip_pct);
         else
             row_max = max_dose;
         end
@@ -1685,7 +1700,8 @@ function plot_dose_panels(original, recon, sensor_mask, density, spacing_mm, tit
             colormap(ax, cmap_jet);
             if use_relative
                 caxis(ax, [0, 100]);
-                cb = colorbar(ax); cb.Label.String = 'Relative dose (% of max)';
+                cb = colorbar(ax);
+                cb.Label.String = sprintf('Relative dose (%% of %s)', clip_str);
             else
                 caxis(ax, [0, row_max]);
                 cb = colorbar(ax); cb.Label.String = 'Dose (Gy)';
@@ -1696,6 +1712,27 @@ function plot_dose_panels(original, recon, sensor_mask, density, spacing_mm, tit
         end
     end
     drawnow;
+end
+
+function m = robust_dose_max(d, clip_pct)
+%ROBUST_DOSE_MAX  Colour-scale reference: the clip_pct percentile of the nonzero
+%  dose, so a few hotspots don't dominate the display window. clip_pct >= 100
+%  (or too few voxels) falls back to the true max. Toolbox-free (manual
+%  percentile via sort), returns >= eps.
+    if nargin < 2 || isempty(clip_pct), clip_pct = 100; end
+    vals = sort(double(d(d > 0)));
+    if isempty(vals)
+        m = 1;
+        return;
+    end
+    if clip_pct >= 100
+        m = vals(end);
+    else
+        k = max(1, min(numel(vals), ceil(clip_pct / 100 * numel(vals))));
+        m = vals(k);
+    end
+    if ~(m > 0), m = vals(end); end
+    if ~(m > 0), m = 1; end
 end
 
 % -------------------------------------------------------------------------
