@@ -109,6 +109,14 @@ CONFIG.plot_results = true;
 % dose comparison panels. Set to 0 to disable display smoothing.
 CONFIG.viz_smooth_sigma = 1.0;
 
+% Colour scaling for the final reconstructed-vs-original dose panels:
+%   'relative' - each dose (original, reconstruction) is normalized to its OWN
+%                maximum, so every panel peaks at 100% and the spatial shapes
+%                are compared independent of absolute magnitude.
+%   'absolute' - both rows share the absolute Gy range [0, max(original)] so
+%                magnitudes are directly comparable.
+CONFIG.dose_panel_scale = 'relative';
+
 % Normalize: divide both reconstructed doses by their own max before
 % comparison / gamma so each peaks at 1.0.
 CONFIG.normalize = false;
@@ -742,7 +750,8 @@ if CONFIG.plot_results
     sensor_disp  = zeros(size(rs_A));
     plot_dose_panels(rs_A, recon_A, sensor_disp, density_disp, spacing_mm, ...
         sprintf('RayStation Truth vs Reconstruction  |  %s', label_A), ...
-        {'RayStation truth', 'Reconstruction'}, CONFIG.viz_smooth_sigma);
+        {'RayStation truth', 'Reconstruction'}, CONFIG.viz_smooth_sigma, ...
+        CONFIG.dose_panel_scale);
 
     % (gamma pass-rate chart is produced unconditionally above)
 
@@ -1528,13 +1537,17 @@ function plot_gamma_pass_rate_curve(crit_n, pass_rates, label_ref, label_tgt, pa
     drawnow;
 end
 
-function plot_dose_panels(original, recon, sensor_mask, density, spacing_mm, titleStr, rowLabels, smooth_sigma)
+function plot_dose_panels(original, recon, sensor_mask, density, spacing_mm, titleStr, rowLabels, smooth_sigma, scale_mode)
 %PLOT_DOSE_PANELS 2x3 dose comparison: coronal, sagittal, axial.
 %  Row 1 = original dose,  Row 2 = reconstructed dose.
 %  Dose (jet, semi-transparent) is overlaid on the density map (grayscale).
-%  Voxels with dose < 10% of max are fully transparent (masked out).
-%  Both rows share an identical dose colour range [0, max(original)]
-%  so magnitudes are directly comparable.
+%  scale_mode controls the dose colour range (and the low-dose transparency
+%  threshold, which is always 10% of the relevant reference max):
+%    'relative' (default) - each row is normalized to its OWN max, so every
+%                panel peaks at 100% and shapes are compared independent of
+%                absolute magnitude. Colorbars read in % of that row's max.
+%    'absolute' - both rows share [0, max(original)] in Gy so magnitudes are
+%                directly comparable. Colorbars read in Gy.
 %  Isocenter at max-dose voxel.  Sensor contour in red on every panel.
 %  smooth_sigma (voxels) Gaussian-smooths each slice for display only, to
 %  fill speckle gaps in a spotty recon. Pass 0 to disable.
@@ -1542,6 +1555,8 @@ function plot_dose_panels(original, recon, sensor_mask, density, spacing_mm, tit
 %  Pass density=[] to show dose only with a black background.
 
     if nargin < 8 || isempty(smooth_sigma), smooth_sigma = 0; end
+    if nargin < 9 || isempty(scale_mode), scale_mode = 'relative'; end
+    use_relative = strcmpi(scale_mode, 'relative');
 
     gridSize = size(original);
     if ~isequal(size(sensor_mask), gridSize)
@@ -1553,7 +1568,8 @@ function plot_dose_panels(original, recon, sensor_mask, density, spacing_mm, tit
     [~, max_idx] = max(original(:));
     [cx, cy, cz] = ind2sub(gridSize, max_idx);
 
-    % Shared colour scale anchored to original (reference) dose
+    % Absolute-mode colour scale anchored to original (reference) dose. In
+    % relative mode each row instead uses its own max (computed in the loop).
     max_dose = max(original(:));
     if max_dose == 0, max_dose = 1; end
 
@@ -1570,10 +1586,16 @@ function plot_dose_panels(original, recon, sensor_mask, density, spacing_mm, tit
     wl_min    = wl_center - wl_width / 2;   % 875  kg/m^3
     wl_max    = wl_center + wl_width / 2;   % 1225 kg/m^3
 
+    if use_relative
+        clim_str = 'each row scaled to its own max (relative %)';
+    else
+        clim_str = sprintf('Dose clim [0, %.4f] Gy', max_dose);
+    end
+
     figure('Name', titleStr, 'Color', 'w', 'NumberTitle', 'off', ...
         'Position', [50, 50, 1380, 700]);
-    sgtitle(sprintf('%s\nIsocenter (max dose): X=%d  Y=%d  Z=%d voxel  |  Dose clim [0, %.4f] Gy', ...
-        titleStr, cx, cy, cz, max_dose), 'FontWeight', 'bold', 'FontSize', 11);
+    sgtitle(sprintf('%s\nIsocenter (max dose): X=%d  Y=%d  Z=%d voxel  |  %s', ...
+        titleStr, cx, cy, cz, clim_str), 'FontWeight', 'bold', 'FontSize', 11);
 
     if nargin < 7 || isempty(rowLabels)
         row_labels = {'Original', 'Reconstructed'};
@@ -1585,6 +1607,15 @@ function plot_dose_panels(original, recon, sensor_mask, density, spacing_mm, tit
     for row = 1:2
         d   = doses{row};
         lbl = row_labels{row};
+
+        % Reference max for this row's colour scale and 10% transparency
+        % threshold: own max in relative mode, shared original max otherwise.
+        if use_relative
+            row_max = max(d(:));
+            if row_max == 0, row_max = 1; end
+        else
+            row_max = max_dose;
+        end
 
         % Slice data for the three views
         dose_slices   = { squeeze(d(:, cy, :))',  squeeze(d(cx, :, :))',  squeeze(d(:, :, cz))' };
@@ -1625,15 +1656,15 @@ function plot_dose_panels(original, recon, sensor_mask, density, spacing_mm, tit
             hold(ax, 'on');
 
             % --- Foreground: dose as jet RGB with alpha mask ---
-            %   mask: dose >= 10% of max_dose  (shared threshold)
-            norm_d   = max(0, min(1, dose_slice / max_dose));
+            %   mask: dose >= 10% of row_max
+            norm_d   = max(0, min(1, dose_slice / row_max));
             idx      = max(1, min(256, round(norm_d * 255) + 1));
             sz       = size(dose_slice);
             dose_rgb = reshape(cmap_jet(idx(:), :), [sz, 3]);
 
-            above      = dose_slice >= 0.10 * max_dose;
+            above      = dose_slice >= 0.10 * row_max;
             ramp       = 0.45 + 0.35 * min(1, ...
-                (dose_slice - 0.10*max_dose) / max(0.40*max_dose, 1e-12));
+                (dose_slice - 0.10*row_max) / max(0.40*row_max, 1e-12));
             dose_alpha = above .* ramp;
 
             h_dose           = image(ax, xv, yv, dose_rgb);
@@ -1648,10 +1679,17 @@ function plot_dose_panels(original, recon, sensor_mask, density, spacing_mm, tit
 
             axis(ax, 'xy'); axis(ax, 'image');
 
-            % Colorbar: attach jet LUT with shared dose clim
+            % Colorbar: attach jet LUT. In relative mode the manual RGB blend
+            % maps [0, row_max] onto [0, 100]% (norm_d), so the colorbar reads
+            % in percent; in absolute mode it reads in Gy over [0, row_max].
             colormap(ax, cmap_jet);
-            caxis(ax, [0, max_dose]);
-            cb = colorbar(ax); cb.Label.String = 'Dose (Gy)';
+            if use_relative
+                caxis(ax, [0, 100]);
+                cb = colorbar(ax); cb.Label.String = 'Relative dose (% of max)';
+            else
+                caxis(ax, [0, row_max]);
+                cb = colorbar(ax); cb.Label.String = 'Dose (Gy)';
+            end
 
             xlabel(ax, xlbls{col}); ylabel(ax, ylbls{col});
             title(ax, sprintf('%s  %s', lbl, tsuffs{col}));
