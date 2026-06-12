@@ -716,6 +716,40 @@ if isfield(CONFIG, 'log_gamma') && CONFIG.log_gamma && ...
     end
 end
 
+%% ===================== SENSOR PLACEMENT FOR DISPLAY =====================
+% Compute the ultrasound array mask (same method as build_forward_bundle) so it
+% can be overlaid on the dose panels and saved with the results. The forced
+% tilt may grid-expand the domain, so we also capture the offset needed to embed
+% the loaded (original-grid) doses onto the sensor's display grid. Placement
+% uses the summed plan dose (total_rs_dose.mat) when present so the array is
+% deterministic and identical for both CT images.
+
+sensor_disp = [];
+embed_off   = [0, 0, 0];
+disp_dims   = size(rs_A);
+
+if CONFIG.plot_results || CONFIG.save_results
+    cfg_sensor = CONFIG;
+    total_dose_file = fullfile(CONFIG.working_dir, 'RayStationFiles', ...
+        CONFIG.patient_id, CONFIG.session, 'processed', 'total_rs_dose.mat');
+    if isfile(total_dose_file)
+        cfg_sensor.total_dose_file = total_dose_file;
+    end
+    try
+        [sensor_disp, gp] = compute_display_sensor(fldA.cbct, rs_A, gantry_A, ...
+            beam_meta, cfg_sensor);
+        disp_dims = size(sensor_disp);
+        embed_off = [gp.y_pre, gp.x_pre, gp.z_pre];
+        fprintf('[Sensor] Display mask: %d voxels on grid [%s] (embed offset [%s]).\n', ...
+            nnz(sensor_disp), num2str(disp_dims), num2str(embed_off));
+    catch ME
+        warning('Sensor visualization unavailable (%s); using empty mask.', ME.message);
+        sensor_disp = zeros(size(rs_A));
+        disp_dims   = size(rs_A);
+        embed_off   = [0, 0, 0];
+    end
+end
+
 %% ========================= SAVE RESULTS =================================
 
 if CONFIG.save_results
@@ -742,6 +776,11 @@ if CONFIG.save_results
     if ens.available
         results.noise_ensemble = ens;
     end
+    if ~isempty(sensor_disp)
+        results.sensor_mask         = sensor_disp;
+        results.sensor_embed_offset = embed_off;
+        results.display_grid_size   = disp_dims;
+    end
     save(output_fname, '-struct', 'results', '-v7.3');
     fprintf('\nResults saved to: %s\n', output_fname);
 end
@@ -750,28 +789,38 @@ end
 
 if CONFIG.plot_results
 
+    % Embed the loaded (original-grid) doses and densities onto the sensor's
+    % display grid so the red sensor contour co-registers with the dose. When
+    % the sensor did not expand the grid these are no-ops (offset = 0).
+    density_A = get_display_density(fldA.cbct, CONFIG);
+    density_B = get_display_density(fldB.cbct, CONFIG);
+
+    rs_A_d  = embed_on_grid(rs_A,      disp_dims, embed_off, 0);
+    rs_B_d  = embed_on_grid(rs_B,      disp_dims, embed_off, 0);
+    recA_d  = embed_on_grid(recon_A,   disp_dims, embed_off, 0);
+    recB_d  = embed_on_grid(recon_B,   disp_dims, embed_off, 0);
+    densA_d = embed_on_grid(density_A, disp_dims, embed_off, CONFIG.uniform_density);
+    densB_d = embed_on_grid(density_B, disp_dims, embed_off, CONFIG.uniform_density);
+
     % 2x3 dose comparison: RayStation truth (rs_dose, "original") top row,
     % reconstruction bottom row, for the listed CT. Coronal | Sagittal | Axial.
-    density_A   = get_display_density(fldA.cbct, CONFIG);
-    sensor_disp = zeros(size(rs_A));
-    plot_dose_panels(rs_A, recon_A, sensor_disp, density_A, spacing_mm, ...
+    plot_dose_panels(rs_A_d, recA_d, sensor_disp, densA_d, spacing_mm, ...
         sprintf('RayStation Truth vs Reconstruction  |  %s', label_A), ...
         {'RayStation truth', 'Reconstruction'}, CONFIG.viz_smooth_sigma, ...
         CONFIG.dose_panel_scale, CONFIG.dose_panel_clip_pct);
 
-    % 1x4 axial comparison: truth vs reconstruction for BOTH CTs, ordered by
+    % 2x2 axial comparison: truth vs reconstruction for BOTH CTs, ordered by
     % ascending CT number (CT_<low> truth/recon, then CT_<high> truth/recon).
-    density_B = get_display_density(fldB.cbct, CONFIG);
     if ct_a <= ct_b
         ct_order = {ct_a_str, ct_b_str};
-        truths   = {rs_A, rs_B};
-        recons   = {recon_A, recon_B};
-        denss    = {density_A, density_B};
+        truths   = {rs_A_d, rs_B_d};
+        recons   = {recA_d, recB_d};
+        denss    = {densA_d, densB_d};
     else
         ct_order = {ct_b_str, ct_a_str};
-        truths   = {rs_B, rs_A};
-        recons   = {recon_B, recon_A};
-        denss    = {density_B, density_A};
+        truths   = {rs_B_d, rs_A_d};
+        recons   = {recB_d, recA_d};
+        denss    = {densB_d, densA_d};
     end
     plot_axial_recon_vs_truth(ct_order, truths, recons, denss, sensor_disp, ...
         spacing_mm, ...
@@ -883,6 +932,60 @@ function density = get_display_density(sct, config)
     end
     medium  = create_medium(sct, config);
     density = medium.density;
+end
+
+function [sensor_mask, gp] = compute_display_sensor(sct, doseGrid, gantry_angle, beam_meta, config)
+%COMPUTE_DISPLAY_SENSOR  Ultrasound array mask for display via determine_sensor_mask.
+%  Mirrors build_forward_bundle's placement call. Returns the logical mask on
+%  the (possibly grid-expanded) display grid and gp = sensor_info.grid_pad, whose
+%  .y_pre/.x_pre/.z_pre give the offset to embed an original-grid dose so it
+%  co-registers with the mask. doseGrid is the (original-grid) dose used for the
+%  per-field exclusion zone; config.total_dose_file (when set) makes placement
+%  deterministic.
+    doseGrid   = double(doseGrid);
+    spacing_mm = sct.spacing(:)';
+    gridSize   = size(doseGrid);
+
+    if isfield(sct, 'bodyMask') && ~isempty(sct.bodyMask)
+        doseGrid = doseGrid .* double(sct.bodyMask);
+    end
+
+    sct_for_sensor = sct;
+    if ~isfield(sct_for_sensor, 'couchMask') || isempty(sct_for_sensor.couchMask)
+        sct_for_sensor.couchMask = false(size(sct_for_sensor.bodyMask));
+    end
+    if ~isfield(sct_for_sensor, 'origin') || isempty(sct_for_sensor.origin)
+        sct_for_sensor.origin = [0, 0, 0];
+    end
+    sct_for_sensor.spacing    = spacing_mm;
+    sct_for_sensor.dimensions = gridSize;
+
+    field_dose              = struct();
+    field_dose.dose_Gy      = doseGrid;
+    field_dose.gantry_angle = gantry_angle;
+    field_dose.origin       = sct_for_sensor.origin;
+    field_dose.spacing      = spacing_mm;
+    field_dose.dimensions   = gridSize;
+
+    [sensor_mask, sensor_info] = determine_sensor_mask( ...
+        sct_for_sensor, field_dose, beam_meta, config);
+    sensor_mask = logical(sensor_mask);
+    gp = sensor_info.grid_pad;
+end
+
+function v = embed_on_grid(vol, dims, off, fillval)
+%EMBED_ON_GRID  Place an original-grid volume into a (larger) display grid.
+%  dims = [d1 d2 d3] display grid; off = [o1 o2 o3] pre-pad per dim. Region
+%  outside the embedded volume is set to fillval (default 0). Empty/already-
+%  matching inputs are passed through unchanged.
+    if nargin < 4 || isempty(fillval), fillval = 0; end
+    if isempty(vol) || (isequal(size(vol), dims) && all(off == 0))
+        v = vol;
+        return;
+    end
+    v = fillval * ones(dims, 'like', double(vol));
+    s = size(vol);
+    v(off(1) + (1:s(1)), off(2) + (1:s(2)), off(3) + (1:s(3))) = vol;
 end
 
 % -------------------------------------------------------------------------
@@ -1683,9 +1786,9 @@ end
 
 function plot_axial_recon_vs_truth(ct_labels, truths, recons, densities, ...
         sensor_mask, spacing_mm, titleStr, smooth_sigma, scale_mode, clip_pct)
-%PLOT_AXIAL_RECON_VS_TRUTH  1x4 axial dose panels: truth & recon for two CTs.
-%  Layout (left->right): CT_a truth, CT_a recon, CT_b truth, CT_b recon. Each
-%  CT's axial slice is taken at that CT's OWN truth max-dose voxel. Rendering
+%PLOT_AXIAL_RECON_VS_TRUTH  2x2 axial dose panels: truth & recon for two CTs.
+%  Layout: row 1 = CT_a truth | CT_a recon, row 2 = CT_b truth | CT_b recon.
+%  Each CT's axial slice is taken at that CT's OWN truth max-dose voxel. Rendering
 %  (density background, jet dose overlay, colour scaling) is identical to
 %  plot_dose_panels via the shared render_dose_panel helper.
 %    ct_labels {1x2} cellstr, e.g. {'CT_1','CT_3'}
@@ -1720,7 +1823,7 @@ function plot_axial_recon_vs_truth(ct_labels, truths, recons, densities, ...
                      robust_dose_max(truths{2}, clip_pct));
 
     figure('Name', titleStr, 'Color', 'w', 'NumberTitle', 'off', ...
-        'Position', [60, 120, 1500, 460]);
+        'Position', [80, 80, 1100, 820]);
     if use_relative
         scale_note = sprintf('each panel scaled to its own %s (relative %%)', clip_str);
     else
@@ -1756,7 +1859,7 @@ function plot_axial_recon_vs_truth(ct_labels, truths, recons, densities, ...
                 row_max = shared_max;
             end
             panel = panel + 1;
-            ax = subplot(1, 4, panel);
+            ax = subplot(2, 2, panel);
             render_dose_panel(ax, squeeze(d(:, :, cz))', dens_sl, sensor_sl, ...
                 x_ax, y_ax, row_max, cmap_jet, wl_min, wl_width, ...
                 use_relative, clip_str, smooth_sigma, 'X (mm)', 'Y (mm)', ...
@@ -1807,7 +1910,7 @@ function render_dose_panel(ax, dose_slice, density_slice, sensor_slice, xv, yv, 
 
     % --- Sensor contour ---
     if ~isempty(sensor_slice) && any(sensor_slice(:))
-        contour(ax, xv, yv, sensor_slice, [0.5, 0.5], 'r-', 'LineWidth', 2);
+        contour(ax, xv, yv, double(sensor_slice), [0.5, 0.5], 'r-', 'LineWidth', 2);
     end
     hold(ax, 'off');
 
