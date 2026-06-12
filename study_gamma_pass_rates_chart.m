@@ -752,12 +752,31 @@ if CONFIG.plot_results
 
     % 2x3 dose comparison: RayStation truth (rs_dose, "original") top row,
     % reconstruction bottom row, for the listed CT. Coronal | Sagittal | Axial.
-    density_disp = get_display_density(fldA.cbct, CONFIG);
-    sensor_disp  = zeros(size(rs_A));
-    plot_dose_panels(rs_A, recon_A, sensor_disp, density_disp, spacing_mm, ...
+    density_A   = get_display_density(fldA.cbct, CONFIG);
+    sensor_disp = zeros(size(rs_A));
+    plot_dose_panels(rs_A, recon_A, sensor_disp, density_A, spacing_mm, ...
         sprintf('RayStation Truth vs Reconstruction  |  %s', label_A), ...
         {'RayStation truth', 'Reconstruction'}, CONFIG.viz_smooth_sigma, ...
         CONFIG.dose_panel_scale, CONFIG.dose_panel_clip_pct);
+
+    % 1x4 axial comparison: truth vs reconstruction for BOTH CTs, ordered by
+    % ascending CT number (CT_<low> truth/recon, then CT_<high> truth/recon).
+    density_B = get_display_density(fldB.cbct, CONFIG);
+    if ct_a <= ct_b
+        ct_order = {ct_a_str, ct_b_str};
+        truths   = {rs_A, rs_B};
+        recons   = {recon_A, recon_B};
+        denss    = {density_A, density_B};
+    else
+        ct_order = {ct_b_str, ct_a_str};
+        truths   = {rs_B, rs_A};
+        recons   = {recon_B, recon_A};
+        denss    = {density_B, density_A};
+    end
+    plot_axial_recon_vs_truth(ct_order, truths, recons, denss, sensor_disp, ...
+        spacing_mm, ...
+        sprintf('Axial Truth vs Reconstruction  |  %s & %s', ct_order{1}, ct_order{2}), ...
+        CONFIG.viz_smooth_sigma, CONFIG.dose_panel_scale, CONFIG.dose_panel_clip_pct);
 
     % (gamma pass-rate chart is produced unconditionally above)
 
@@ -1651,67 +1670,163 @@ function plot_dose_panels(original, recon, sensor_mask, density, spacing_mm, tit
         end
 
         for col = 1:3
-            ax         = subplot(2, 3, (row-1)*3 + col);
-            dose_slice = double(dose_slices{col});
-            if smooth_sigma > 0
-                dose_slice = imgaussfilt(dose_slice, smooth_sigma);
-            end
-            xv         = xvecs{col};
-            yv         = yvecs{col};
-
-            % --- Background: density as grayscale RGB ---
-            if have_density
-                dn     = (density_slices{col} - wl_min) / wl_width;
-                dn     = max(0, min(1, dn));   % clip to [0,1]
-                bg_rgb = repmat(dn, [1, 1, 3]);
-            else
-                bg_rgb = zeros([size(dose_slice), 3]);   % black
-            end
-            image(ax, xv, yv, bg_rgb);
-            hold(ax, 'on');
-
-            % --- Foreground: dose as jet RGB with alpha mask ---
-            %   mask: dose >= 10% of row_max
-            norm_d   = max(0, min(1, dose_slice / row_max));
-            idx      = max(1, min(256, round(norm_d * 255) + 1));
-            sz       = size(dose_slice);
-            dose_rgb = reshape(cmap_jet(idx(:), :), [sz, 3]);
-
-            above      = dose_slice >= 0.10 * row_max;
-            ramp       = 0.45 + 0.35 * min(1, ...
-                (dose_slice - 0.10*row_max) / max(0.40*row_max, 1e-12));
-            dose_alpha = above .* ramp;
-
-            h_dose           = image(ax, xv, yv, dose_rgb);
-            h_dose.AlphaData = dose_alpha;
-
-            % --- Sensor contour ---
-            s = sensor_slices{col};
-            if any(s(:))
-                contour(ax, xv, yv, s, [0.5, 0.5], 'r-', 'LineWidth', 2);
-            end
-            hold(ax, 'off');
-
-            axis(ax, 'xy'); axis(ax, 'image');
-
-            % Colorbar: attach jet LUT. In relative mode the manual RGB blend
-            % maps [0, row_max] onto [0, 100]% (norm_d), so the colorbar reads
-            % in percent; in absolute mode it reads in Gy over [0, row_max].
-            colormap(ax, cmap_jet);
-            if use_relative
-                caxis(ax, [0, 100]);
-                cb = colorbar(ax);
-                cb.Label.String = sprintf('Relative dose (%% of %s)', clip_str);
-            else
-                caxis(ax, [0, row_max]);
-                cb = colorbar(ax); cb.Label.String = 'Dose (Gy)';
-            end
-
-            xlabel(ax, xlbls{col}); ylabel(ax, ylbls{col});
-            title(ax, sprintf('%s  %s', lbl, tsuffs{col}));
+            ax = subplot(2, 3, (row-1)*3 + col);
+            if have_density, dens_sl = density_slices{col}; else, dens_sl = []; end
+            render_dose_panel(ax, dose_slices{col}, dens_sl, sensor_slices{col}, ...
+                xvecs{col}, yvecs{col}, row_max, cmap_jet, wl_min, wl_width, ...
+                use_relative, clip_str, smooth_sigma, xlbls{col}, ylbls{col}, ...
+                sprintf('%s  %s', lbl, tsuffs{col}));
         end
     end
     drawnow;
+end
+
+function plot_axial_recon_vs_truth(ct_labels, truths, recons, densities, ...
+        sensor_mask, spacing_mm, titleStr, smooth_sigma, scale_mode, clip_pct)
+%PLOT_AXIAL_RECON_VS_TRUTH  1x4 axial dose panels: truth & recon for two CTs.
+%  Layout (left->right): CT_a truth, CT_a recon, CT_b truth, CT_b recon. Each
+%  CT's axial slice is taken at that CT's OWN truth max-dose voxel. Rendering
+%  (density background, jet dose overlay, colour scaling) is identical to
+%  plot_dose_panels via the shared render_dose_panel helper.
+%    ct_labels {1x2} cellstr, e.g. {'CT_1','CT_3'}
+%    truths    {1x2} truth dose volumes (same grid)
+%    recons    {1x2} reconstructed dose volumes (same grid)
+%    densities {1x2} density maps for display ([] -> black background)
+%    scale_mode / clip_pct  as in plot_dose_panels.
+
+    if nargin < 8 || isempty(smooth_sigma), smooth_sigma = 0;   end
+    if nargin < 9 || isempty(scale_mode),   scale_mode  = 'relative'; end
+    if nargin < 10 || isempty(clip_pct),    clip_pct    = 100;  end
+    use_relative = strcmpi(scale_mode, 'relative');
+
+    cmap_jet  = jet(256);
+    wl_center = 1050;  wl_width = 350;
+    wl_min    = wl_center - wl_width / 2;
+
+    if clip_pct >= 100
+        clip_str = 'max';
+    else
+        clip_str = sprintf('%g%%ile', clip_pct);
+    end
+
+    gridSize = size(truths{1});
+    x_ax = (1:gridSize(1)) * spacing_mm(1);
+    y_ax = (1:gridSize(2)) * spacing_mm(2);
+
+    % Absolute mode shares one reference across all four panels (clipped max of
+    % both truths) so magnitudes are directly comparable; relative mode lets
+    % each panel use its own clipped max.
+    shared_max = max(robust_dose_max(truths{1}, clip_pct), ...
+                     robust_dose_max(truths{2}, clip_pct));
+
+    figure('Name', titleStr, 'Color', 'w', 'NumberTitle', 'off', ...
+        'Position', [60, 120, 1500, 460]);
+    if use_relative
+        scale_note = sprintf('each panel scaled to its own %s (relative %%)', clip_str);
+    else
+        scale_note = sprintf('shared clim [0, %.4f] Gy  (clip @ %s)', shared_max, clip_str);
+    end
+    sgtitle(sprintf('%s\nAxial slice at each CT''s truth max-dose voxel  |  %s', ...
+        titleStr, scale_note), 'FontWeight', 'bold', 'FontSize', 11);
+
+    panel = 0;
+    for i = 1:2
+        d_truth = double(truths{i});
+        d_recon = double(recons{i});
+        dens    = densities{i};
+
+        [~, midx]    = max(d_truth(:));
+        [~, ~, cz]   = ind2sub(gridSize, midx);
+
+        have_density = ~isempty(dens) && isequal(size(dens), gridSize);
+        if have_density
+            dens_sl = squeeze(dens(:, :, cz))';
+        else
+            dens_sl = [];
+        end
+        sensor_sl = squeeze(sensor_mask(:, :, cz))';
+
+        panels = { d_truth, 'truth'; d_recon, 'recon' };
+        for p = 1:2
+            d   = panels{p, 1};
+            tag = panels{p, 2};
+            if use_relative
+                row_max = robust_dose_max(d, clip_pct);
+            else
+                row_max = shared_max;
+            end
+            panel = panel + 1;
+            ax = subplot(1, 4, panel);
+            render_dose_panel(ax, squeeze(d(:, :, cz))', dens_sl, sensor_sl, ...
+                x_ax, y_ax, row_max, cmap_jet, wl_min, wl_width, ...
+                use_relative, clip_str, smooth_sigma, 'X (mm)', 'Y (mm)', ...
+                sprintf('%s %s  Axial (Z=%d)', strrep(ct_labels{i}, '_', ' '), tag, cz));
+        end
+    end
+    drawnow;
+end
+
+function render_dose_panel(ax, dose_slice, density_slice, sensor_slice, xv, yv, ...
+        row_max, cmap_jet, wl_min, wl_width, use_relative, clip_str, ...
+        smooth_sigma, xlbl, ylbl, ttl)
+%RENDER_DOSE_PANEL  Draw one dose panel: density grayscale background, jet dose
+%  overlay (alpha-masked at 10% of row_max with a ramp), optional sensor
+%  contour, and a colorbar in % (relative) or Gy (absolute). Shared by
+%  plot_dose_panels and plot_axial_recon_vs_truth so both use the same method.
+
+    dose_slice = double(dose_slice);
+    if smooth_sigma > 0
+        dose_slice = imgaussfilt(dose_slice, smooth_sigma);
+    end
+
+    % --- Background: density as grayscale RGB ---
+    have_density = ~isempty(density_slice) && isequal(size(density_slice), size(dose_slice));
+    if have_density
+        dn     = (density_slice - wl_min) / wl_width;
+        dn     = max(0, min(1, dn));   % clip to [0,1]
+        bg_rgb = repmat(dn, [1, 1, 3]);
+    else
+        bg_rgb = zeros([size(dose_slice), 3]);   % black
+    end
+    image(ax, xv, yv, bg_rgb);
+    hold(ax, 'on');
+
+    % --- Foreground: dose as jet RGB with alpha mask (>= 10% of row_max) ---
+    norm_d   = max(0, min(1, dose_slice / row_max));
+    idx      = max(1, min(256, round(norm_d * 255) + 1));
+    sz       = size(dose_slice);
+    dose_rgb = reshape(cmap_jet(idx(:), :), [sz, 3]);
+
+    above      = dose_slice >= 0.10 * row_max;
+    ramp       = 0.45 + 0.35 * min(1, ...
+        (dose_slice - 0.10*row_max) / max(0.40*row_max, 1e-12));
+    dose_alpha = above .* ramp;
+
+    h_dose           = image(ax, xv, yv, dose_rgb);
+    h_dose.AlphaData = dose_alpha;
+
+    % --- Sensor contour ---
+    if ~isempty(sensor_slice) && any(sensor_slice(:))
+        contour(ax, xv, yv, sensor_slice, [0.5, 0.5], 'r-', 'LineWidth', 2);
+    end
+    hold(ax, 'off');
+
+    axis(ax, 'xy'); axis(ax, 'image');
+
+    % Colorbar: jet LUT. Relative mode maps [0, row_max] onto [0, 100]% (norm_d)
+    % so the bar reads in percent; absolute mode reads in Gy over [0, row_max].
+    colormap(ax, cmap_jet);
+    if use_relative
+        caxis(ax, [0, 100]);
+        cb = colorbar(ax);
+        cb.Label.String = sprintf('Relative dose (%% of %s)', clip_str);
+    else
+        caxis(ax, [0, row_max]);
+        cb = colorbar(ax); cb.Label.String = 'Dose (Gy)';
+    end
+
+    xlabel(ax, xlbl); ylabel(ax, ylbl);
+    title(ax, ttl);
 end
 
 function m = robust_dose_max(d, clip_pct)
