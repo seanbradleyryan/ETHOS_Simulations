@@ -121,7 +121,7 @@ CONFIG.dose_panel_scale = 'relative';
 % so a few hotspots don't dominate the window and wash out the rest of the
 % dose. Voxels above this percentile saturate at the top colour. 95 widens the
 % visible window noticeably; set to 100 to anchor on the true max (old behavior).
-CONFIG.dose_panel_clip_pct = 95;
+CONFIG.dose_panel_clip_pct = 99.5;
 
 % Normalize: divide both reconstructed doses by their own max before
 % comparison / gamma so each peaks at 1.0.
