@@ -1,13 +1,27 @@
 %% =========================================================================
 %  STUDY_GAMMA_PASS_RATES_CHART.m
-%  Two-dose k-Wave photoacoustic comparison + gamma pass-rate sweep.
-%  Runs the standalone forward + reconstruction pipeline (identical to
-%  run_standalone_comparison.m) on the listed dose file AND on its counterpart
-%  on the other CT image. It then sweeps the gamma criteria from 0.5%/0.5mm up
-%  to 5%/5mm in half-integer steps (i.e. n%/n mm for n = 0.5..5), computing
-%  every pass rate in PARALLEL across the available CPU cores, and plots the
-%  pass rate as a function of the gamma criterion with a red reference line at
-%  the 90% pass rate.
+%  Two-dose photoacoustic comparison + gamma pass-rate sweep, driven by the
+%  ALREADY-RECONSTRUCTED doses on disk (no per-run k-Wave reconstruction).
+%
+%  The listed dose file selects a beam/segment on one CT image. This script
+%  loads that field's pre-computed reconstruction AND its counterpart on the
+%  OTHER CT image via load_recon_dose_data (Mode='set'), then sweeps the gamma
+%  criteria n%/n mm (n = 1..5 in half-integer steps) between the two
+%  reconstructions, computing every pass rate in PARALLEL across the CPU cores
+%  (parfor; CalcGamma is not natively parallel). A red reference line marks the
+%  90% pass rate.
+%
+%  The "original" dose used for the display panels and the gamma low-dose
+%  cutoff mask is the RayStation field dose rs_dose (a step15 output), loaded
+%  alongside each reconstruction.
+%
+%  When the noise ensemble is enabled, the expensive part (k-Wave forward
+%  simulation) is run ONCE per dose via build_forward_bundle to obtain the
+%  sensor response; only the noise draw + Wiener deconvolution + reconstruction
+%  are repeated across realizations (GPU-pinned) to produce the error bars.
+%
+%  NOTE: HIPAA / remote-execution - this file is WRITTEN here but must be RUN on
+%  the remote device. Do not execute locally.
 %  =========================================================================
 
 clear; clc; close all;
@@ -17,18 +31,18 @@ clear; clc; close all;
 CONFIG.working_dir    = '/mnt/weka/home/80030361/ETHOS_Simulations';
 CONFIG.patient_id     = '1194203';
 CONFIG.session        = 'Session_1';
+CONFIG.treatment_site = 'Pancreas';
 
 CONFIG.dose_filename = 'dose_1194203_Session_1_reference_CT_3_B15_112.mat';
 
 % The two CT image indices to compare. The listed dose file above carries a
 % _CT_k token selecting one of these; this script automatically locates that
-% dose file's counterpart on the OTHER CT image, runs the identical forward +
-% reconstruction pipeline on both, and gamma-compares the two reconstructions.
-% Each dose is simulated on its OWN CBCT geometry (CBCT<k>_resampled.mat).
+% field's counterpart on the OTHER CT image among the loaded set, and
+% gamma-compares the two reconstructions.
 CONFIG.ct_pair = [1, 3];
 
-CONFIG.dose_file_override = '';
-CONFIG.cbct_file_override = '';
+% Explicit recon config-hash override ('' => auto-discover on disk via loader).
+CONFIG.config_hash = '';
 
 CONFIG.sensor_placement_method = 'determine_sensor_mask';
 CONFIG.sensor_x_index = 2;
@@ -39,6 +53,11 @@ CONFIG.sensor_y_index = 4;
 CONFIG.elements_per_side = 32;
 CONFIG.element_pitch_mm  = 4.35;
 CONFIG.element_size_mm   = 3.64;
+CONFIG.sensor_standoff_mm = 5;
+CONFIG.jaw_margin_mm      = 10;
+CONFIG.sensor_placement   = 'anterior';
+CONFIG.aim_at_iso         = true;
+CONFIG.force_turn_angle   = 290;     % forced turn must be 290 deg (rotation-bug workaround)
 
 CONFIG.gruneisen_method = 'threshold_2';
 
@@ -54,17 +73,15 @@ CONFIG.uniform_alpha_power  = 1.1;
 CONFIG.uniform_gruneisen    = 1.0;
 
 CONFIG.dose_per_pulse_cGy     = 0.16;
-CONFIG.meterset               = 140;
+CONFIG.meterset               = 140;   % overridden per-dose from rtplan.meterset when available
 CONFIG.pml_size               = 10;
 CONFIG.cfl_number             = 0.3;
 CONFIG.use_gpu                = true;
 CONFIG.correction_factor           = 1.9;
-%CONFIG.correction_factor = .0229; 
-%CONFIG.correction_factor = 0; 
 CONFIG.use_pressure_scale_correction = false;   % divide max(p0) / max(recon_pressure) before dose conversion
-CONFIG.mask_recon_to_dose_region     = true;    % zero recon dose outside the dose mask (>1% of original max). Set false to keep the full reconstruction.
+CONFIG.mask_recon_to_dose_region     = true;    % zero recon dose outside the dose mask (>1% of original max).
 
-% --- Reconstruction method ---
+% --- Reconstruction method (noise ensemble only) ---
 %   'tr'     : iterative time-reversal (k-Wave back-propagation)
 %   'DAS'    : Delay-And-Sum back-projection (homogeneous c, non-iterative)
 %   'hybrid' : DAS for iter 1, k-Wave TR with residual correction for iters 2..N
@@ -75,9 +92,10 @@ CONFIG.convergence_tol        = 1e-3;
 
 % --- Pulse Convolution / Noise / Deconvolution ---
 % Mimics a finite transducer impulse response applied to forward sensor data.
-% Set convolution_kernel to 0 to disable the entire block.
+% Set convolution_kernel to 0 to disable the entire block (also disables the
+% noise ensemble, which has nothing to vary without it).
 CONFIG.convolution_kernel  = 4e-6;   % Gaussian sigma in seconds (4 us)
-CONFIG.conv_noise_level    = 0.125;   % Noise amplitude as fraction of peak sensor signal
+CONFIG.conv_noise_level    = 0.125;  % Noise amplitude as fraction of peak sensor signal
 CONFIG.conv_deconv_lambda  = 1e-4;   % Wiener regularization for deconvolution
 
 CONFIG.downscale_factor = 1;
@@ -88,25 +106,17 @@ CONFIG.output_file  = 'standalone_recon_results.mat';
 CONFIG.plot_results = true;
 
 % Gaussian sigma (in voxels) applied to dose slices for DISPLAY ONLY in the
-% dose comparison panels. Fills the speckle "pockets" left by a spotty recon
-% so the overlay reads continuously instead of letting CT show through.
-% Set to 0 to disable display smoothing.
+% dose comparison panels. Set to 0 to disable display smoothing.
 CONFIG.viz_smooth_sigma = 1.0;
 
-% Normalize: divide original and reconstructed dose by their own max before
-% comparison / gamma so both peak at 1.0.
+% Normalize: divide both reconstructed doses by their own max before
+% comparison / gamma so each peaks at 1.0.
 CONFIG.normalize = false;
 
 % Gamma logging: append CONFIG + gamma pass rates to gamma_log.mat (in
-% working_dir) after each run. Keeps a running record of the best gamma per
-% criterion and the CONFIG that produced it.
+% working_dir) after each run.
 CONFIG.log_gamma = false;
 CONFIG.gamma_log_file = 'gamma_log.mat';
-
-% Diagnostic plot: three anatomical views (transverse, sagittal, coronal) of
-% the beam exclusion zone over the body. Useful to sanity-check that the
-% projected jaw rectangles aren't unrealistically large.
-CONFIG.plot_exclusion_zone = false;
 
 % --- Noise ensemble (gamma pass-rate error bars) ---------------------------
 % Estimates how much measurement noise perturbs the gamma pass-rate curve.
@@ -123,114 +133,110 @@ CONFIG.noise_ensemble.num_realizations = 8;        % ensemble size N
 CONFIG.noise_ensemble.recompute        = true;     % false -> load saved results if present
 CONFIG.noise_ensemble.results_file     = 'gamma_noise_ensemble.mat';
 CONFIG.noise_ensemble.num_iters        = [];       % [] -> use CONFIG.num_time_reversal_iter
-CONFIG.noise_ensemble.base_seed        = 42; % RNG base; per-realization seeds derive from it
+CONFIG.noise_ensemble.base_seed        = 42;       % RNG base; per-realization seeds derive from it
+%
+% Null-hypothesis baseline: in addition to the signal comparison (reference CT
+% recon vs the counterpart CT recon), also reconstruct the REFERENCE dose a
+% second time under independent noise and gamma-compare it to itself. That
+% "reference vs itself" pass-rate band is the noise floor expected when there is
+% NO real dose change, so the signal band dropping below it means the CT
+% difference is detectable above noise. Adds one extra reconstruction per
+% realization. Meaningful only with the noise ensemble (no noise -> trivially
+% 100%).
+CONFIG.noise_ensemble.include_null     = true;
 
-%% ===================== RESOLVE DOSE PAIR & CBCT PATHS ====================
-%  Resolve the listed dose file (A), then derive its counterpart (B) on the
-%  other CT image by swapping the _CT_k token. Each dose is paired with its
-%  own CBCT geometry: CBCT<k>_resampled.mat.
+%% ===================== LOAD THE RECON DOSE PAIR =========================
+%  Parse the beam/segment/plan-type/CT from the listed dose filename, load the
+%  matched fields on BOTH CT images via load_recon_dose_data (Mode='set'), and
+%  pick the listed CT (A) and its counterpart (B). Each field carries its
+%  pre-computed reconstruction (recon_dose), the RayStation truth (rs_dose),
+%  the CBCT geometry (cbct) and the RTPLAN stats (rtplan).
 
-if ~isempty(CONFIG.dose_file_override)
-    dose_filepath_A = CONFIG.dose_file_override;
-    [processed_dir, baseA, extA] = fileparts(dose_filepath_A);
-    dose_basename_A = [baseA, extA];
-else
-    processed_dir   = fullfile(CONFIG.working_dir, 'RayStationFiles', ...
-        CONFIG.patient_id, CONFIG.session, 'processed');
-    dose_basename_A = CONFIG.dose_filename;
-    dose_filepath_A = fullfile(processed_dir, dose_basename_A);
+sel = parse_dose_selection(CONFIG.dose_filename);
+if isempty(sel.beam)
+    error('study_gamma_pass_rates:NoBeamToken', ...
+        'Dose filename "%s" has no _B<beam> token; cannot select a field.', ...
+        CONFIG.dose_filename);
 end
-
-% Identify this dose's CT image index from the _CT_k token.
-ct_tok = regexp(dose_basename_A, '_CT_(\d+)_', 'tokens', 'once');
-if isempty(ct_tok)
-    error('run_standalone_comparison:NoCTtoken', ...
+if isempty(sel.ct) || strcmpi(sel.ct, 'any')
+    error('study_gamma_pass_rates:NoCTtoken', ...
         ['Dose filename "%s" has no _CT_k token; cannot locate its ' ...
-         'counterpart on the other CT image.'], dose_basename_A);
+         'counterpart on the other CT image.'], CONFIG.dose_filename);
 end
-ct_a = str2double(ct_tok{1});
+
+ct_a = sscanf(sel.ct, 'CT_%d');
 if ~ismember(ct_a, CONFIG.ct_pair)
-    error('run_standalone_comparison:CTnotInPair', ...
-        'Dose CT index %d is not in CONFIG.ct_pair = [%s].', ...
-        ct_a, num2str(CONFIG.ct_pair));
+    error('study_gamma_pass_rates:CTnotInPair', ...
+        'Dose CT index %d is not in CONFIG.ct_pair = [%s].', ct_a, num2str(CONFIG.ct_pair));
 end
 ct_b_all = CONFIG.ct_pair(CONFIG.ct_pair ~= ct_a);
 ct_b     = ct_b_all(1);
+ct_a_str = sprintf('CT_%d', ct_a);
+ct_b_str = sprintf('CT_%d', ct_b);
 
-% Counterpart dose file: same name with the CT token swapped.
-dose_basename_B = regexprep(dose_basename_A, '_CT_\d+_', sprintf('_CT_%d_', ct_b));
-dose_filepath_B = fullfile(processed_dir, dose_basename_B);
+out = load_field_set(CONFIG, sel);
 
-% CBCT geometry for each dose (per-dose, not the legacy CBCT1-always default).
-if ~isempty(CONFIG.cbct_file_override)
-    cbct_filepath_A = CONFIG.cbct_file_override;
-else
-    cbct_filepath_A = fullfile(processed_dir, sprintf('CBCT%d_resampled.mat', ct_a));
+iA = find_field_by_ct(out.fields, ct_a_str);
+iB = find_field_by_ct(out.fields, ct_b_str);
+if isempty(iA) || isempty(iB)
+    found = strjoin(arrayfun(@(f) field_ct_label(f), out.fields, ...
+        'UniformOutput', false), ', ');
+    error('study_gamma_pass_rates:NoPair', ...
+        'Beam %s / segment %s does not have both %s and %s (found CT labels: %s).', ...
+        mat2str(sel.beam), mat2str(sel.segment), ct_a_str, ct_b_str, found);
 end
-cbct_filepath_B = fullfile(processed_dir, sprintf('CBCT%d_resampled.mat', ct_b));
+fldA = out.fields(iA);   % listed CT
+fldB = out.fields(iB);   % counterpart CT
 
-dose_filepath_list = {dose_filepath_A, dose_filepath_B};
-cbct_filepath_list = {cbct_filepath_A, cbct_filepath_B};
-label_list         = {sprintf('CT_%d (listed)', ct_a), ...
-                      sprintf('CT_%d (counterpart)', ct_b)};
+metadata   = out.metadata;
+spacing_mm = metadata.spacing(:)';
+hash8      = out.config_hash;
 
-%% ========================= LOAD PLAN BEAM METADATA =======================
-% determine_sensor_mask needs beam_metadata for ALL beams in the plan
-% (isocenter + jaw extents per beam) to compute the anterior-surface
-% exclusion zone. step15_process_doses saves this as metadata.beam_metadata
-% in <processed_dir>/metadata.mat. Load it here if not already set by the
-% caller via CONFIG.beam_metadata.
-
-if ~isfield(CONFIG, 'beam_metadata') || isempty(CONFIG.beam_metadata)
-    if exist('processed_dir', 'var')
-        metadata_filepath = fullfile(processed_dir, 'metadata.mat');
-    else
-        metadata_filepath = '';
-    end
-
-    if ~isempty(metadata_filepath) && isfile(metadata_filepath)
-        try
-            md = load(metadata_filepath, 'metadata');
-            if isfield(md, 'metadata') && isfield(md.metadata, 'beam_metadata') ...
-                    && ~isempty(md.metadata.beam_metadata)
-                CONFIG.beam_metadata = md.metadata.beam_metadata;
-                fprintf('  Loaded beam_metadata for %d beams from %s\n', ...
-                    length(CONFIG.beam_metadata), metadata_filepath);
-            else
-                fprintf('  [WARN] metadata.mat present but no beam_metadata field.\n');
-            end
-        catch ME
-            fprintf('  [WARN] Failed to load %s: %s\n', metadata_filepath, ME.message);
-        end
-    else
-        fprintf('  [WARN] No metadata.mat in processed_dir; sensor exclusion zone will be empty.\n');
-    end
+beam_meta = [];
+if isfield(metadata, 'beam_metadata') && ~isempty(metadata.beam_metadata)
+    beam_meta = metadata.beam_metadata;
 end
+
+recon_A = double(fldA.recon_dose);
+recon_B = double(fldB.recon_dose);
+rs_A    = double(fldA.rs_dose);     % step15 truth (display "original" + cutoff)
+rs_B    = double(fldB.rs_dose);
+
+gantry_A   = getfield_def(fldA.rtplan, 'gantry_angle', 0);
+gantry_B   = getfield_def(fldB.rtplan, 'gantry_angle', 0);
+meterset_A = getfield_def(fldA.rtplan, 'meterset', CONFIG.meterset);
+meterset_B = getfield_def(fldB.rtplan, 'meterset', CONFIG.meterset);
+
+label_A = sprintf('%s (listed)', ct_a_str);
+label_B = sprintf('%s (counterpart)', ct_b_str);
 
 %% ========================= PRINT CONFIGURATION ===========================
 
 fprintf('=========================================================\n');
-fprintf('  Standalone k-Wave Photoacoustic Comparison  (v4.1)\n');
+fprintf('  Gamma Pass-Rate Chart (loaded reconstructions)\n');
 fprintf('=========================================================\n');
 fprintf('  Patient:         %s / %s\n', CONFIG.patient_id, CONFIG.session);
-fprintf('  Dose A:          %s\n', dose_filepath_list{1});
-fprintf('    on CBCT:       %s\n', cbct_filepath_list{1});
-fprintf('  Dose B:          %s\n', dose_filepath_list{2});
-fprintf('    on CBCT:       %s\n', cbct_filepath_list{2});
-fprintf('  Sensor:          %s\n', CONFIG.sensor_placement_method);
+fprintf('  Dose file:       %s\n', CONFIG.dose_filename);
+fprintf('  Beam/segment:    %s / %s\n', mat2str(sel.beam), mat2str(sel.segment));
+fprintf('  Recon A:         %s  (%s)\n', label_A, fldA.source_mat_filename);
+fprintf('  Recon B:         %s  (%s)\n', label_B, fldB.source_mat_filename);
+fprintf('  Config hash:     %s\n', hash8);
+fprintf('  Grid:            [%d x %d x %d]  spacing [%.2f %.2f %.2f] mm\n', ...
+    size(recon_A,1), size(recon_A,2), size(recon_A,3), ...
+    spacing_mm(1), spacing_mm(2), spacing_mm(3));
 fprintf('  Tissue model:    %s\n', CONFIG.gruneisen_method);
-fprintf('  Recon method:    %s\n', CONFIG.reconstruction_method);
-fprintf('  TR iterations:   %d (tol: %.1e)\n', CONFIG.num_time_reversal_iter, CONFIG.convergence_tol);
-fprintf('  GPU:             %s\n', mat2str(CONFIG.use_gpu));
-if CONFIG.downscale_factor ~= 1
-    fprintf('  Downscale factor: %g\n', CONFIG.downscale_factor);
-end
 fprintf('=========================================================\n\n');
+
+if ~isequal(size(recon_A), size(recon_B))
+    error('study_gamma_pass_rates:GridMismatch', ...
+        ['The two loaded reconstructions are on different grids ([%s] vs [%s]).\n' ...
+         'A common grid is required for the gamma comparison.'], ...
+        num2str(size(recon_A)), num2str(size(recon_B)));
+end
 
 %% ===================== RESOLVE NOISE-ENSEMBLE PLAN ======================
 %  Decide whether the noise ensemble is computed fresh or loaded from a saved
-%  results file, and whether the per-dose forward bundles must be captured
-%  during the nominal run (only needed when recomputing).
+%  results file. The forward bundles are built only when recomputing.
 
 ne          = CONFIG.noise_ensemble;
 ne_file     = ne.results_file;
@@ -251,9 +257,6 @@ if compute_ensemble && CONFIG.convolution_kernel <= 0
     do_ensemble      = load_ensemble;   % only a prior saved file could still be shown
 end
 
-capture_fwd_bundle = compute_ensemble;
-FWD = struct([]);   % per-dose forward bundles (populated when capturing)
-
 if do_ensemble
     if load_ensemble
         ne_mode_str = 'LOAD from file';
@@ -264,1170 +267,6 @@ if do_ensemble
         ne_mode_str, ne.num_realizations, ne_file);
 end
 
-%% ===================== PER-DOSE PIPELINE (RUN TWICE) =====================
-%  Iterate over the two dose files. Each iteration runs the full, identical
-%  forward + reconstruction pipeline and stores its reconstructed dose in
-%  RES(di). After the loop the two reconstructions are gamma-compared.
-
-for di = 1:2
-
-clearvars fd_gantry_angle step15_spacing_mm sensor_info_orig
-
-dose_filepath = dose_filepath_list{di};
-cbct_filepath = cbct_filepath_list{di};
-label         = label_list{di};
-
-fprintf('\n##################### PROCESSING DOSE %d/2: %s #####################\n', di, label);
-
-%% ========================= LOAD DATA ====================================
-
-fprintf('[1/7] Loading dose data...\n');
-if ~isfile(dose_filepath)
-    error('Dose file not found: %s', dose_filepath);
-end
-dose_data = load(dose_filepath);
-
-dose_fields = fieldnames(dose_data);
-
-% --- Auto-detect step15_process_doses output formats ---
-if isfield(dose_data, 'field_dose')
-    % Individual field dose file from step15_process_doses.
-    % dose_Gy may be stored as sparse 2D: reshape(full(dose_Gy), dose_dims)
-    fd = dose_data.field_dose;
-    if ~isfield(fd, 'dose_Gy')
-        error('field_dose struct missing dose_Gy field.');
-    end
-    if (isfield(fd, 'is_sparse') && fd.is_sparse) || issparse(fd.dose_Gy)
-        if ~isfield(fd, 'dose_dims')
-            error('field_dose.dose_dims missing  cannot reconstruct sparse dose.');
-        end
-        doseGrid = reshape(full(fd.dose_Gy), fd.dose_dims);
-        fprintf('       Loaded: field_dose.dose_Gy (sparse -> [%d x %d x %d])\n', fd.dose_dims);
-    else
-        doseGrid = double(fd.dose_Gy);
-        fprintf('       Loaded: field_dose.dose_Gy (dense)\n');
-    end
-    % Pull embedded metadata: override CONFIG only when value is non-trivial
-    if isfield(fd, 'spacing') && ~isempty(fd.spacing)
-        step15_spacing_mm = fd.spacing(:)';
-        fprintf('       Spacing from file:  [%.3f %.3f %.3f] mm\n', step15_spacing_mm);
-    end
-    if isfield(fd, 'meterset') && ~isempty(fd.meterset) && fd.meterset > 0
-        if CONFIG.meterset ~= fd.meterset
-            fprintf('       [INFO] Overriding CONFIG.meterset: %.2f -> %.2f MU\n', ...
-                CONFIG.meterset, fd.meterset);
-            CONFIG.meterset = fd.meterset;
-        end
-    end
-    if isfield(fd, 'gantry_angle')
-        fd_gantry_angle = fd.gantry_angle;
-        fprintf('       Gantry angle: %.1f deg\n', fd_gantry_angle);
-    end
-
-elseif isfield(dose_data, 'total_rs_dose_sparse')
-    % Total dose file from step15_process_doses (sparse format).
-    if ~isfield(dose_data, 'total_rs_dose_dims')
-        error('total_rs_dose_dims missing  cannot reconstruct sparse total dose.');
-    end
-    doseGrid = reshape(full(dose_data.total_rs_dose_sparse), dose_data.total_rs_dose_dims);
-    fprintf('       Loaded: total_rs_dose_sparse (reconstructed [%d x %d x %d])\n', ...
-        dose_data.total_rs_dose_dims);
-
-elseif isfield(dose_data, 'total_rs_dose')
-    doseGrid = dose_data.total_rs_dose;
-    fprintf('       Loaded variable: total_rs_dose\n');
-elseif isfield(dose_data, 'dose_Gy')
-    doseGrid = dose_data.dose_Gy;
-    fprintf('       Loaded variable: dose_Gy\n');
-elseif length(dose_fields) == 1
-    doseGrid = dose_data.(dose_fields{1});
-    fprintf('       Loaded variable: %s\n', dose_fields{1});
-else
-    error('Cannot auto-detect dose variable. Fields found: %s', strjoin(dose_fields, ', '));
-end
-doseGrid = double(doseGrid);
-
-if ~isnumeric(doseGrid) || ndims(doseGrid) ~= 3
-    error('Dose data must be a 3D numeric array.');
-end
-
-gridSize = size(doseGrid);
-Nx = gridSize(1); Ny = gridSize(2); Nz = gridSize(3);
-fprintf('       Grid size: [%d x %d x %d]\n', Nx, Ny, Nz);
-fprintf('       Dose range: [%.6f, %.4f] Gy\n', min(doseGrid(:)), max(doseGrid(:)));
-
-fprintf('[2/7] Loading CBCT data for %s...\n', label); %  CT_1  temporary standalone default)...\n');
-if ~isfile(cbct_filepath)
-    error('CBCT file not found: %s', cbct_filepath);
-end
-cbct_data = load(cbct_filepath);
-if isfield(cbct_data, 'CBCT1_resampled')
-    sct = cbct_data.CBCT1_resampled;
-elseif isfield(cbct_data, 'CBCT3_resampled')
-    sct = cbct_data.CBCT3_resampled;
-else
-    error('CBCT1_resampled / CBCT3_resampled variable not found in %s', cbct_filepath);
-end
-
-if ~isfield(sct, 'cubeHU')
-    error('CBCT resampled struct missing required field: cubeHU');
-end
-
-% Spacing: prefer CBCT field; fall back to spacing embedded in step15 field_dose
-if isfield(sct, 'spacing') && ~isempty(sct.spacing)
-    spacing_mm = sct.spacing(:)';
-elseif exist('step15_spacing_mm', 'var')
-    spacing_mm = step15_spacing_mm;
-    fprintf('       [INFO] Using spacing from field_dose file: [%.3f %.3f %.3f] mm\n', spacing_mm);
-else
-    error('CBCT resampled struct missing required field: spacing');
-end
-dx = spacing_mm(1) / 1000;
-dy = spacing_mm(2) / 1000;
-dz = spacing_mm(3) / 1000;
-
-sctSize = size(sct.cubeHU);
-if ~isequal(gridSize, sctSize)
-    error(['Dose grid [%d %d %d] does not match CBCT grid [%d %d %d].\n' ...
-           'Ensure CBCT1_resampled.mat was produced by the same step15 run as the dose file.'], ...
-        Nx, Ny, Nz, sctSize(1), sctSize(2), sctSize(3));
-end
-
-fprintf('       Spacing: [%.2f, %.2f, %.2f] mm\n', spacing_mm);
-fprintf('       HU range: [%.0f, %.0f]\n', min(sct.cubeHU(:)), max(sct.cubeHU(:)));
-
-% Mask to body
-if isfield(sct, 'bodyMask')
-    doseGrid = doseGrid .* double(sct.bodyMask);
-end
-
-%% ========================= GRID DOWNSCALING ==============================
-
-if CONFIG.downscale_factor ~= 1
-    df     = CONFIG.downscale_factor;
-    new_Nx = max(1, round(Nx / df));
-    new_Ny = max(1, round(Ny / df));
-    new_Nz = max(1, round(Nz / df));
-
-    fprintf('[DS]  Downscaling: [%d x %d x %d] -> [%d x %d x %d]\n', ...
-        Nx, Ny, Nz, new_Nx, new_Ny, new_Nz);
-
-    doseGrid   = max(imresize3(doseGrid, [new_Nx, new_Ny, new_Nz]), 0);
-    sct.cubeHU = imresize3(sct.cubeHU, [new_Nx, new_Ny, new_Nz]);
-
-    if isfield(sct, 'bodyMask')
-        sct.bodyMask = imresize3(single(sct.bodyMask), [new_Nx, new_Ny, new_Nz], 'nearest') > 0.5;
-    end
-    if isfield(sct, 'couchMask')
-        sct.couchMask = imresize3(single(sct.couchMask), [new_Nx, new_Ny, new_Nz], 'nearest') > 0.5;
-    end
-    if isfield(sct, 'cubeDensity')
-        sct.cubeDensity = imresize3(sct.cubeDensity, [new_Nx, new_Ny, new_Nz]);
-    end
-
-    spacing_mm = spacing_mm .* ([Nx, Ny, Nz] ./ [new_Nx, new_Ny, new_Nz]);
-    dx = spacing_mm(1) / 1000;
-    dy = spacing_mm(2) / 1000;
-    dz = spacing_mm(3) / 1000;
-    sct.spacing = spacing_mm;
-
-    Nx = new_Nx; Ny = new_Ny; Nz = new_Nz;
-    gridSize = [Nx, Ny, Nz];
-end
-
-%% ========================= CREATE ACOUSTIC MEDIUM ========================
-
-fprintf('[3/7] Creating acoustic medium (method: %s)...\n', CONFIG.gruneisen_method);
-medium = create_medium(sct, CONFIG);
-
-fprintf('       Density range:     [%.0f, %.0f] kg/m^3\n', min(medium.density(:)), max(medium.density(:)));
-fprintf('       Sound speed range: [%.0f, %.0f] m/s\n',    min(medium.sound_speed(:)), max(medium.sound_speed(:)));
-fprintf('       Gruneisen range:   [%.4f, %.4f]\n',        min(medium.gruneisen(:)), max(medium.gruneisen(:)));
-
-%% ========================= INITIAL PRESSURE p0 ==========================
-
-% Apply body mask to dose before p0 calculation
-if isfield(sct, 'bodyMask')
-    doseGrid = doseGrid .* double(sct.bodyMask);
-end
-
-fprintf('[4/7] Computing initial pressure...\n');
-
-meterset       = CONFIG.meterset;
-num_pulses     = ceil(meterset / CONFIG.dose_per_pulse_cGy);
-dose_per_pulse = doseGrid / num_pulses;
-
-p0 = dose_per_pulse .* medium.gruneisen .* medium.density;
-p0 = smooth(p0);
-
-fprintf('       Meterset: %.2f MU -> %d pulses\n', meterset, num_pulses);
-fprintf('       p0 range: [%.2e, %.2e] Pa\n', min(p0(:)), max(p0(:)));
-
-doseThreshold = 0.01 * max(doseGrid(:));
-doseMask      = doseGrid > doseThreshold;
-
-if ~any(doseMask(:)) || max(p0(:)) == 0
-    warning('No significant dose or zero initial pressure. Aborting.');
-    return;
-end
-
-%% ========================= OPTIMAL GRID PADDING ==========================
-
-fprintf('[PAD] Computing FFT-optimal padded dimensions...\n');
-
-Nx_orig = Nx; Ny_orig = Ny; Nz_orig = Nz;
-gridSize_orig = gridSize;
-medium_orig   = medium;
-
-if CONFIG.use_grid_padding
-    Nx_pad = find_optimal_kwave_size(Nx, CONFIG.pml_size);
-    Ny_pad = find_optimal_kwave_size(Ny, CONFIG.pml_size);
-    Nz_pad = find_optimal_kwave_size(Nz, CONFIG.pml_size);
-else
-    Nx_pad = Nx; Ny_pad = Ny; Nz_pad = Nz;
-end
-
-did_pad = ~isequal([Nx_pad, Ny_pad, Nz_pad], [Nx, Ny, Nz]);
-if did_pad
-    fprintf('[PAD] Padding grid: [%d %d %d] -> [%d %d %d]\n', Nx, Ny, Nz, Nx_pad, Ny_pad, Nz_pad);
-
-    density_pad    = ones(Nx_pad, Ny_pad, Nz_pad) * 1000;
-    soundSpeed_pad = ones(Nx_pad, Ny_pad, Nz_pad) * 1540;
-    alphaCoeff_pad = zeros(Nx_pad, Ny_pad, Nz_pad);
-    gruneisen_pad  = zeros(Nx_pad, Ny_pad, Nz_pad);
-
-    density_pad(1:Nx, 1:Ny, 1:Nz)    = medium.density;
-    soundSpeed_pad(1:Nx, 1:Ny, 1:Nz) = medium.sound_speed;
-    if numel(medium.alpha_coeff) > 1
-        alphaCoeff_pad(1:Nx, 1:Ny, 1:Nz) = medium.alpha_coeff;
-    else
-        alphaCoeff_pad(:) = medium.alpha_coeff;
-    end
-    gruneisen_pad(1:Nx, 1:Ny, 1:Nz) = medium.gruneisen;
-
-    medium.density     = density_pad;
-    medium.sound_speed = soundSpeed_pad;
-    medium.alpha_coeff = alphaCoeff_pad;
-    medium.gruneisen   = gruneisen_pad;
-
-    p0_pad = zeros(Nx_pad, Ny_pad, Nz_pad);
-    p0_pad(1:Nx, 1:Ny, 1:Nz) = p0;
-    p0 = p0_pad;
-
-    Nx = Nx_pad; Ny = Ny_pad; Nz = Nz_pad;
-    gridSize = [Nx, Ny, Nz];
-else
-    fprintf('[PAD] Grid [%d %d %d] already FFT-optimal.\n', Nx, Ny, Nz);
-end
-
-%% ========================= SENSOR PLACEMENT ==============================
-
-fprintf('[5/7] Placing sensor (method: %s)...\n', CONFIG.sensor_placement_method);
-
-sensor      = struct();
-sensor.mask = zeros(Nx, Ny, Nz);
-
-switch CONFIG.sensor_placement_method
-    case 'full_plane_anterior'
-        sensor.mask(CONFIG.sensor_x_index, :, :) = 1;
-        fprintf('       Sensor: YZ plane at x = %d\n', CONFIG.sensor_x_index);
-    case 'full_plane_lateral'
-        sensor.mask(:, CONFIG.sensor_y_index, :) = 1;
-        fprintf('       Sensor: XZ plane at y = %d\n', CONFIG.sensor_y_index);
-    case 'spherical'
-        sph_radius  = floor(min([Nx, Ny, Nz]) / 2) - CONFIG.pml_size;
-        sensor.mask = makeSphere(Nx, Ny, Nz, sph_radius);
-        % Anything outside the enclosing sphere is unobservable by this
-        % sensor geometry  zero p0 there so it doesn't pollute the forward
-        % simulation or downstream pressure scaling.
-        sph_cx = floor(Nx/2) + 1;
-        sph_cy = floor(Ny/2) + 1;
-        sph_cz = floor(Nz/2) + 1;
-        [Xg_sph, Yg_sph, Zg_sph] = ndgrid(1:Nx, 1:Ny, 1:Nz);
-        ball_mask = (Xg_sph - sph_cx).^2 + (Yg_sph - sph_cy).^2 + ...
-                    (Zg_sph - sph_cz).^2 <= sph_radius^2;
-        n_zeroed = nnz(p0 ~= 0 & ~ball_mask);
-        p0 = p0 .* ball_mask;
-        clear Xg_sph Yg_sph Zg_sph
-        fprintf('       Sensor: spherical, radius %d voxels (zeroed %d p0 voxels outside sphere)\n', ...
-            sph_radius, n_zeroed);
-    case 'box'
-        % Six-face bounding box enclosing the pressure: planes at index 3
-        % and (N-3) on each axis.
-        bx_lo   = 3;
-        bx_hi_x = Nx - 3;
-        bx_hi_y = Ny - 3;
-        bx_hi_z = Nz - 3;
-        if bx_hi_x <= bx_lo || bx_hi_y <= bx_lo || bx_hi_z <= bx_lo
-            error('run_standalone_simulation:BoxTooSmall', ...
-                'Grid [%d %d %d] too small for box sensor (need each dim > 6).', Nx, Ny, Nz);
-        end
-        sensor.mask(bx_lo,   bx_lo:bx_hi_y, bx_lo:bx_hi_z) = 1;
-        sensor.mask(bx_hi_x, bx_lo:bx_hi_y, bx_lo:bx_hi_z) = 1;
-        sensor.mask(bx_lo:bx_hi_x, bx_lo,   bx_lo:bx_hi_z) = 1;
-        sensor.mask(bx_lo:bx_hi_x, bx_hi_y, bx_lo:bx_hi_z) = 1;
-        sensor.mask(bx_lo:bx_hi_x, bx_lo:bx_hi_y, bx_lo)   = 1;
-        sensor.mask(bx_lo:bx_hi_x, bx_lo:bx_hi_y, bx_hi_z) = 1;
-        fprintf('       Sensor: box faces at x=[%d,%d], y=[%d,%d], z=[%d,%d]\n', ...
-            bx_lo, bx_hi_x, bx_lo, bx_hi_y, bx_lo, bx_hi_z);
-    case 'determine_sensor_mask'
-        % Automatic placement via determine_sensor_mask: tilts a 2D array
-        % toward the beam isocenter (or places it flat when CONFIG.aim_at_iso
-        % is false), avoiding beam exclusion zones.
-        %
-        % SESSION-LEVEL USAGE: because all beams in an ETHOS plan share one
-        % isocenter, the placement is reusable across fields. When using this
-        % once per session, pass the SUMMED PLAN DOSE as
-        %   field_dose_for_sensor.dose_Gy
-        % so the exclusion zone reflects the full beam path from every field.
-        % Passing a single field's dose here yields a per-field exclusion zone
-        % only  correct for per-field placement but not session-level reuse.
-        sct_for_sensor = sct;
-        if ~isfield(sct_for_sensor, 'couchMask')
-            sct_for_sensor.couchMask = false(size(sct_for_sensor.bodyMask));
-        end
-        if ~isfield(sct_for_sensor, 'origin')
-            sct_for_sensor.origin = [0, 0, 0];
-        end
-        sct_for_sensor.spacing = spacing_mm;
-
-        field_dose_for_sensor = struct();
-        field_dose_for_sensor.dose_Gy     = doseGrid;
-        if exist('fd_gantry_angle', 'var') && ~isempty(fd_gantry_angle)
-            field_dose_for_sensor.gantry_angle = fd_gantry_angle;
-        else
-            field_dose_for_sensor.gantry_angle = 0;
-        end
-        field_dose_for_sensor.origin      = sct_for_sensor.origin;
-        field_dose_for_sensor.spacing     = spacing_mm;
-        field_dose_for_sensor.dimensions  = [Nx_orig, Ny_orig, Nz_orig];
-
-        beam_meta = [];
-        if isfield(CONFIG, 'beam_metadata') && ~isempty(CONFIG.beam_metadata)
-            beam_meta = CONFIG.beam_metadata;
-        end
-
-        [sensor_mask_orig, sensor_info_orig] = determine_sensor_mask( ...
-            sct_for_sensor, field_dose_for_sensor, beam_meta, CONFIG);
-
-        % --- GRID EXPANSION HANDLING ---
-        % determine_sensor_mask may expand the grid in X/Z (or Y) to place the
-        % sensor outside the beam exclusion zone, filling the new region with
-        % water. Apply matching water padding to medium/p0 here so the sim
-        % grid coordinate system matches the sensor mask. Expansion is applied
-        % to the un-FFT-padded data, then FFT-optimal padding is re-run.
-        gp = sensor_info_orig.grid_pad;
-        if gp.expanded
-            fprintf('       [Sensor] Grid expansion: Y(+%d/+%d), X(+%d/+%d), Z(+%d/+%d). Re-padding with water.\n', ...
-                gp.y_pre, gp.y_post, gp.x_pre, gp.x_post, gp.z_pre, gp.z_post);
-
-            density_unp    = medium.density(1:Nx_orig, 1:Ny_orig, 1:Nz_orig);
-            soundSpeed_unp = medium.sound_speed(1:Nx_orig, 1:Ny_orig, 1:Nz_orig);
-            if numel(medium.alpha_coeff) > 1
-                alphaCoeff_unp = medium.alpha_coeff(1:Nx_orig, 1:Ny_orig, 1:Nz_orig);
-            else
-                alphaCoeff_unp = medium.alpha_coeff;
-            end
-            gruneisen_unp  = medium.gruneisen(1:Nx_orig, 1:Ny_orig, 1:Nz_orig);
-            p0_unp         = p0(1:Nx_orig, 1:Ny_orig, 1:Nz_orig);
-
-            % determine_sensor_mask labels dim 1=Y, dim 2=X, dim 3=Z, but it
-            % preserves the caller's actual dim order. Since this script passes
-            % bodyMask with dim 1=Nx, dim 2=Ny, dim 3=Nz, the function's
-            % grid_pad fields map as:
-            %   gp.y_*  -> script dim 1 (Nx)   [currently always 0]
-            %   gp.x_*  -> script dim 2 (Ny)
-            %   gp.z_*  -> script dim 3 (Nz)
-            Nx_exp = Nx_orig + gp.y_pre + gp.y_post;
-            Ny_exp = Ny_orig + gp.x_pre + gp.x_post;
-            Nz_exp = Nz_orig + gp.z_pre + gp.z_post;
-
-            density_exp    = ones(Nx_exp, Ny_exp, Nz_exp)  * 1000;
-            soundSpeed_exp = ones(Nx_exp, Ny_exp, Nz_exp)  * 1540;
-            alphaCoeff_exp = zeros(Nx_exp, Ny_exp, Nz_exp);
-            gruneisen_exp  = zeros(Nx_exp, Ny_exp, Nz_exp);
-            p0_exp         = zeros(Nx_exp, Ny_exp, Nz_exp);
-
-            xr = gp.y_pre + (1:Nx_orig);
-            yr = gp.x_pre + (1:Ny_orig);
-            zr = gp.z_pre + (1:Nz_orig);
-
-            density_exp(xr, yr, zr)    = density_unp;
-            soundSpeed_exp(xr, yr, zr) = soundSpeed_unp;
-            if numel(alphaCoeff_unp) > 1
-                alphaCoeff_exp(xr, yr, zr) = alphaCoeff_unp;
-            else
-                alphaCoeff_exp(:) = alphaCoeff_unp;
-            end
-            gruneisen_exp(xr, yr, zr)  = gruneisen_unp;
-            p0_exp(xr, yr, zr)         = p0_unp;
-
-            medium.density     = density_exp;
-            medium.sound_speed = soundSpeed_exp;
-            medium.alpha_coeff = alphaCoeff_exp;
-            medium.gruneisen   = gruneisen_exp;
-            p0 = p0_exp;
-
-            % medium_orig is restored after FFT-pad cropping (~line 1059), and
-            % feeds conversionFactor for pressure->dose. Update it to the
-            % expanded pre-FFT-pad medium so its size matches the expanded
-            % reconPressure after cropping.
-            medium_orig = struct( ...
-                'density',     density_exp, ...
-                'sound_speed', soundSpeed_exp, ...
-                'alpha_coeff', alphaCoeff_exp, ...
-                'gruneisen',   gruneisen_exp);
-
-            % Expand doseGrid / doseMask with zeros (no dose in water padding).
-            doseGrid_exp = zeros(Nx_exp, Ny_exp, Nz_exp);
-            doseGrid_exp(xr, yr, zr) = doseGrid;
-            doseGrid = doseGrid_exp;
-
-            doseMask_exp = false(Nx_exp, Ny_exp, Nz_exp);
-            doseMask_exp(xr, yr, zr) = doseMask;
-            doseMask = doseMask_exp;
-
-            % Expand sct.bodyMask with false in the water region so downstream
-            % visualizations and masking still align with the expanded grid.
-            if isfield(sct, 'bodyMask') && isequal(size(sct.bodyMask), [Nx_orig, Ny_orig, Nz_orig])
-                body_exp = false(Nx_exp, Ny_exp, Nz_exp);
-                body_exp(xr, yr, zr) = sct.bodyMask;
-                sct.bodyMask = body_exp;
-            end
-            if isfield(sct, 'couchMask') && ~isempty(sct.couchMask) && ...
-                    isequal(size(sct.couchMask), [Nx_orig, Ny_orig, Nz_orig])
-                couch_exp = false(Nx_exp, Ny_exp, Nz_exp);
-                couch_exp(xr, yr, zr) = sct.couchMask;
-                sct.couchMask = couch_exp;
-            end
-
-            Nx_orig = Nx_exp; Ny_orig = Ny_exp; Nz_orig = Nz_exp;
-            gridSize_orig = [Nx_orig, Ny_orig, Nz_orig];
-
-            % Re-run FFT-optimal padding on the expanded grid (water fills).
-            if CONFIG.use_grid_padding
-                Nx_pad2 = find_optimal_kwave_size(Nx_orig, CONFIG.pml_size);
-                Ny_pad2 = find_optimal_kwave_size(Ny_orig, CONFIG.pml_size);
-                Nz_pad2 = find_optimal_kwave_size(Nz_orig, CONFIG.pml_size);
-            else
-                Nx_pad2 = Nx_orig; Ny_pad2 = Ny_orig; Nz_pad2 = Nz_orig;
-            end
-
-            if ~isequal([Nx_pad2, Ny_pad2, Nz_pad2], [Nx_orig, Ny_orig, Nz_orig])
-                fprintf('       [Sensor] Re-pad to FFT-optimal: [%d %d %d] -> [%d %d %d]\n', ...
-                    Nx_orig, Ny_orig, Nz_orig, Nx_pad2, Ny_pad2, Nz_pad2);
-                density_pad    = ones(Nx_pad2, Ny_pad2, Nz_pad2)  * 1000;
-                soundSpeed_pad = ones(Nx_pad2, Ny_pad2, Nz_pad2)  * 1540;
-                alphaCoeff_pad = zeros(Nx_pad2, Ny_pad2, Nz_pad2);
-                gruneisen_pad  = zeros(Nx_pad2, Ny_pad2, Nz_pad2);
-                p0_pad2        = zeros(Nx_pad2, Ny_pad2, Nz_pad2);
-
-                density_pad(1:Nx_orig, 1:Ny_orig, 1:Nz_orig)    = medium.density;
-                soundSpeed_pad(1:Nx_orig, 1:Ny_orig, 1:Nz_orig) = medium.sound_speed;
-                if numel(medium.alpha_coeff) > 1
-                    alphaCoeff_pad(1:Nx_orig, 1:Ny_orig, 1:Nz_orig) = medium.alpha_coeff;
-                else
-                    alphaCoeff_pad(:) = medium.alpha_coeff;
-                end
-                gruneisen_pad(1:Nx_orig, 1:Ny_orig, 1:Nz_orig) = medium.gruneisen;
-                p0_pad2(1:Nx_orig, 1:Ny_orig, 1:Nz_orig)       = p0;
-
-                medium.density     = density_pad;
-                medium.sound_speed = soundSpeed_pad;
-                medium.alpha_coeff = alphaCoeff_pad;
-                medium.gruneisen   = gruneisen_pad;
-                p0 = p0_pad2;
-            end
-
-            Nx = Nx_pad2; Ny = Ny_pad2; Nz = Nz_pad2;
-            gridSize = [Nx, Ny, Nz];
-            sensor.mask = zeros(Nx, Ny, Nz);
-        end
-
-        % Optional diagnostic: three anatomical views of the exclusion zone.
-        % Placed after grid expansion so sct.bodyMask and the exclusion zone
-        % share the same coordinate system (both expanded if expansion ran).
-        if isfield(CONFIG, 'plot_exclusion_zone') && CONFIG.plot_exclusion_zone
-            plot_exclusion_zone_views(sct, sensor_info_orig, spacing_mm, ...
-                sprintf('Exclusion zone (gantry %.1f deg)', field_dose_for_sensor.gantry_angle));
-        end
-
-        % Embed sensor mask. determine_sensor_mask preserves the caller's dim
-        % order  its dim 1 matches sct.bodyMask's dim 1 (which is Nx in this
-        % script). No permute needed.
-        m1 = min(Nx, size(sensor_mask_orig, 1));
-        m2 = min(Ny, size(sensor_mask_orig, 2));
-        m3 = min(Nz, size(sensor_mask_orig, 3));
-        sensor.mask(1:m1, 1:m2, 1:m3) = double(sensor_mask_orig(1:m1, 1:m2, 1:m3));
-        fprintf('       Sensor: determine_sensor_mask  %d active points\n', sum(sensor_mask_orig(:)));
-    case 'fixed_anterior'
-        % Deterministic placement: anterior, inferior to beam field,
-        % laterally centered on isocenter X.
-        % Requires sct.bodyMask and either CONFIG.beam_metadata or the
-        % dose already loaded as CONFIG.total_dose / CONFIG.total_dose_file.
-        fixed_struct = struct();
-        if isfield(CONFIG, 'beam_metadata') && ~isempty(CONFIG.beam_metadata)
-            fixed_struct.beam_metadata = CONFIG.beam_metadata;
-        end
-        % Pass the pre-loaded dose (pre-padding, original grid size)
-        fixed_struct.total_dose = doseGrid;
-        % sct is at the current (downscaled if applicable, unpadded) grid
-        [sensor_mask_orig, ~] = determine_sensor_placement_fixed(CONFIG, sct, fixed_struct);
-        % Embed into the current (possibly padded) grid
-        m1 = min(Nx, size(sensor_mask_orig, 1));
-        m2 = min(Ny, size(sensor_mask_orig, 2));
-        m3 = min(Nz, size(sensor_mask_orig, 3));
-        sensor.mask(1:m1, 1:m2, 1:m3) = double(sensor_mask_orig(1:m1, 1:m2, 1:m3));
-        fprintf('       Sensor: fixed_anterior  %d active points\n', sum(sensor_mask_orig(:)));
-    otherwise
-        error('Unknown sensor_placement_method: "%s"', CONFIG.sensor_placement_method);
-end
-
-numSensorPts = sum(sensor.mask(:));
-fprintf('       Sensor: %d active points\n', numSensorPts);
-
-if numSensorPts == 0
-    warning('Sensor mask is empty. Aborting.');
-    return;
-end
-
-%% ========================= 3D SENSOR vs DOSE VISUALIZATION ==============
-%  Displayed before simulation starts  rotate to inspect geometry.
-
-if CONFIG.plot_results
-    sensor_vis    = logical(sensor.mask(1:Nx_orig, 1:Ny_orig, 1:Nz_orig));
-    dose_mask_vis = double(doseGrid) >= 0.10 * max(double(doseGrid(:)));
-    plot_sensor_dose_planes(dose_mask_vis, sensor_vis, spacing_mm, medium_orig.density, CONFIG);
-    fprintf('       [Sensor vs dose mask visualization displayed]\n');
-    drawnow;
-end
-
-%% ========================= k-WAVE GRID & MEDIUM SETUP ===================
-
-fprintf('[6/7] Setting up k-Wave grid...\n');
-
-kgrid = kWaveGrid(Nx, dx, Ny, dy, Nz, dz);
-
-maxC = max(medium.sound_speed(:));
-minC = min(medium.sound_speed(medium.sound_speed > 0));
-dt   = CONFIG.cfl_number * min([dx, dy, dz]) / maxC;
-
-gridDiag = sqrt((Nx*dx)^2 + (Ny*dy)^2 + (Nz*dz)^2);
-simTime  = 2.5 * gridDiag / minC;
-Nt       = ceil(simTime / dt);
-
-kgrid.dt = dt;
-kgrid.Nt = Nt;
-
-fprintf('       dt = %.2e s, Nt = %d, T_sim = %.2e s\n', dt, Nt, simTime);
-
-kmedium             = struct();
-kmedium.density     = medium.density;
-kmedium.sound_speed = medium.sound_speed;
-kmedium.alpha_coeff = medium.alpha_coeff;
-kmedium.alpha_power = 1.1;
-
-if CONFIG.use_gpu
-    try
-        gpuDevice;
-        dataCast = 'gpuArray-single';
-        fprintf('       Compute: GPU\n');
-    catch
-        dataCast = 'single';
-        fprintf('       Compute: CPU (GPU unavailable)\n');
-    end
-else
-    dataCast = 'single';
-    fprintf('       Compute: CPU\n');
-end
-
-inputArgs = {'Smooth', false, 'PMLInside', false, 'PMLSize', CONFIG.pml_size, ...
-             'DataCast', dataCast, 'PlotSim', false};
-
-%% ========================= FORWARD SIMULATION ============================
-
-fprintf('\n[7/7] Running k-Wave forward simulation...\n');
-
-source_fwd    = struct();
-source_fwd.p0 = p0;
-
-try
-    fwd_tic    = tic;
-    sensorData = kspaceFirstOrder3D(kgrid, kmedium, source_fwd, sensor, inputArgs{:});
-    fwd_time   = toc(fwd_tic);
-    fprintf('       Forward complete (%.1f s). Sensor data: [%d x %d]\n', ...
-        fwd_time, size(sensorData, 1), size(sensorData, 2));
-catch ME
-    fprintf('[ERROR] Forward simulation failed: %s\n', ME.message);
-    return;
-end
-
-% Smooth the forward time series.
-sensorData = smooth(sensorData);
-
-% Sampling frequency for the sensor frequency-response filter, which is now
-% applied below AFTER the pulse-profile convolution (see physical chain).
-FS         = 1 / kgrid.dt;
-
-sensorData_measured = sensorData;
-
-%% ============ PULSE CONVOLUTION / FREQUENCY RESPONSE / NOISE / DECONV =====
-%  Models the physical measurement chain in acquisition order:
-%    1. Convolve each sensor time series with a Gaussian pulse kernel
-%       (finite radiation pulse profile shaping the acoustic source)
-%    2. Apply the sensor frequency response (0.35 MHz centre, 100% bandwidth
-%       Gaussian band-limit of the acoustic-to-electrical conversion)
-%    3. Add white Gaussian noise (electronic noise injected downstream of the
-%       transducer -> added AFTER the frequency-response filter)
-%    4. Wiener-deconvolve the pulse kernel to recover the broadband signal
-%  Time reversal then proceeds on the deconvolved data as normal.
-
-if CONFIG.convolution_kernel > 0
-    conv_kernel_sigma  = CONFIG.convolution_kernel;
-    conv_noise_level   = CONFIG.conv_noise_level;
-    conv_deconv_lambda = CONFIG.conv_deconv_lambda;
-
-    fprintf('       Pulse model: sigma=%.1f us, noise=%.1f%%, lambda=%.1e\n', ...
-        conv_kernel_sigma * 1e6, conv_noise_level * 100, conv_deconv_lambda);
-
-    % Build normalized Gaussian kernel in time (truncated at 4 sigma)
-    sigma_samples = conv_kernel_sigma / dt;
-    kernel_half   = ceil(4 * sigma_samples);
-    t_kernel      = (-kernel_half : kernel_half)';
-    gauss_kernel  = exp(-t_kernel.^2 / (2 * sigma_samples^2));
-    gauss_kernel  = gauss_kernel / sum(gauss_kernel);   % unit-sum normalization
-
-    % Move to CPU for FFT operations
-    sensorData_cpu = double(gather(sensorData));
-    Nt_data        = size(sensorData_cpu, 2);
-
-    % Kernel transfer function (zero-padded to signal length)
-    H       = fft(gauss_kernel, Nt_data).';   % row vector [1 x Nt_data]
-    H_conj  = conj(H);
-    H_power = abs(H).^2;
-
-    % 1. Convolve with the pulse profile
-    sensorData_conv = real(ifft(fft(sensorData_cpu, [], 2) .* H, [], 2));
-
-    % 2. Sensor frequency response (band-limit AFTER pulse convolution)
-    sensorData_resp = gaussianFilter(sensorData_conv, FS, 0.35e6, 100, true);
-
-    % 3. Add electronic noise (after frequency-response filtering)
-    noise_amp        = conv_noise_level * max(abs(sensorData_resp(:)));
-    sensorData_noisy = sensorData_resp + noise_amp * randn(size(sensorData_resp));
-
-    % 4. Wiener deconvolution of the pulse kernel
-    sensorData_deconv = real(ifft( ...
-        fft(sensorData_noisy, [], 2) .* H_conj ./ (H_power + conv_deconv_lambda), ...
-        [], 2));
-
-    % Replace both working and reference sensor data with processed result
-    sensorData          = single(sensorData_deconv);
-    sensorData_measured = single(sensorData_deconv);
-
-    fprintf('       Pulse model complete. Noise amp: %.3e Pa\n', noise_amp);
-else
-    % No pulse model: apply only the sensor frequency response.
-    sensorData          = gaussianFilter(sensorData, FS, 0.35e6, 100, true);
-    sensorData_measured = sensorData;
-    fprintf('       Pulse convolution disabled; frequency response applied.\n');
-end
-
-%% ========================= RECONSTRUCTION ================================
-
-% Options for the shared Delay-And-Sum reconstruction (das_reconstruct.m).
-% Defaults are faithful to the IRAI sample code; override any via CONFIG.das_*.
-das_opts = struct();
-if isfield(CONFIG, 'das_use_elements'), das_opts.use_elements = CONFIG.das_use_elements; end
-if isfield(CONFIG, 'das_envelope'),     das_opts.envelope     = CONFIG.das_envelope;     end
-if isfield(CONFIG, 'das_use_aperture'), das_opts.use_aperture = CONFIG.das_use_aperture; end
-if isfield(CONFIG, 'das_aperture_cos'), das_opts.aperture_cos = CONFIG.das_aperture_cos; end
-if isfield(CONFIG, 'das_depth_weight'), das_opts.depth_weight = CONFIG.das_depth_weight; end
-if isfield(CONFIG, 'das_interp'),       das_opts.interp       = CONFIG.das_interp;       end
-
-% Element metadata for per-element DAS. Guarantee a valid struct even for
-% sensor methods that don't populate it (das_reconstruct falls back per-voxel).
-if ~exist('sensor_info_orig', 'var') || ~isstruct(sensor_info_orig)
-    sensor_info_orig = struct('num_elements', 0);
-end
-
-%% ----------------- CAPTURE FORWARD BUNDLE (noise ensemble) --------------
-% Snapshot everything the noise ensemble needs to re-reconstruct this dose
-% from a fresh noise draw WITHOUT re-running the forward simulation. Captured
-% here (post-noise, pre-reconstruction) so the padded grid/medium/sensor and
-% the pre-noise sensor response sensorData_resp are all still in scope.
-if capture_fwd_bundle
-    if CONFIG.noise_ensemble.enable && ~isempty(CONFIG.noise_ensemble.num_iters)
-        bundle_num_iters = CONFIG.noise_ensemble.num_iters;
-    else
-        bundle_num_iters = CONFIG.num_time_reversal_iter;
-    end
-
-    B = struct();
-    % Reconstruction inputs on the padded grid
-    B.kgrid                = kgrid;
-    B.kmedium              = kmedium;
-    B.sensor               = sensor;            % padded mask
-    B.inputArgs            = inputArgs;
-    B.p0                   = p0;                 % padded
-    B.gridSize             = gridSize;          % padded
-    B.gridSize_orig        = gridSize_orig;
-    B.did_pad              = did_pad;
-    B.Nx_orig              = Nx_orig;
-    B.Ny_orig              = Ny_orig;
-    B.Nz_orig              = Nz_orig;
-    B.dx                   = dx; B.dy = dy; B.dz = dz; B.dt = dt;
-    B.medium_pad           = medium;            % padded medium (DAS uses this)
-    B.medium_orig          = medium_orig;       % cropped medium (pressure->dose)
-    B.doseMask             = doseMask;           % original-size mask
-    B.num_pulses           = num_pulses;
-    B.sensor_info_orig     = sensor_info_orig;
-    B.das_opts             = das_opts;
-    % Body mask at cropped (original) grid for the final dose masking
-    if isfield(sct, 'bodyMask') && isequal(size(sct.bodyMask), gridSize_orig)
-        B.bodyMask = double(sct.bodyMask);
-    else
-        B.bodyMask = [];
-    end
-    % Reconstruction control (iteration count may be overridden for the ensemble)
-    B.reconstruction_method         = CONFIG.reconstruction_method;
-    B.num_time_reversal_iter        = bundle_num_iters;
-    B.convergence_tol               = CONFIG.convergence_tol;
-    B.correction_factor             = CONFIG.correction_factor;
-    B.use_pressure_scale_correction = CONFIG.use_pressure_scale_correction;
-    B.mask_recon_to_dose_region     = isfield(CONFIG, 'mask_recon_to_dose_region') && ...
-                                      CONFIG.mask_recon_to_dose_region;
-    % Pre-noise sensor response + pulse/deconv transfer functions (CPU doubles)
-    B.sensorData_resp      = double(gather(sensorData_resp));
-    B.H_conj               = H_conj;
-    B.H_power              = H_power;
-    B.conv_deconv_lambda   = conv_deconv_lambda;
-    B.noise_amp            = noise_amp;
-    B.label                = label;
-
-    FWD(di).bundle = B;   %#ok<SAGROW>
-    clear B
-    fprintf('       [NoiseEnsemble] Captured forward bundle for dose %d.\n', di);
-end
-
-switch lower(CONFIG.reconstruction_method)
-case 'tr'
-
-fprintf('       Running iterative time reversal (%d iterations, tol=%.1e)...\n', ...
-    CONFIG.num_time_reversal_iter, CONFIG.convergence_tol);
-
-reconPressure      = zeros(gridSize);
-reconPressure_prev = zeros(gridSize);
-
-% Convergence tracking
-conv_max_pressure = zeros(CONFIG.num_time_reversal_iter, 1);
-conv_rel_change   = nan(CONFIG.num_time_reversal_iter, 1);
-num_iters_done    = 0;
-
-% ---- Set up live TR figure ----
-% Axial slice through the max-dose voxel (in original, pre-pad coords).
-[~, dose_max_idx] = max(doseGrid(:));
-[cx_live, cy_live, cz_live] = ind2sub([Nx_orig, Ny_orig, Nz_orig], dose_max_idx);
-
-if CONFIG.plot_results
-    fig_live = figure('Name', 'Live TR Reconstruction', 'Color', 'w', ...
-        'NumberTitle', 'off', 'Position', [100, 100, 1060, 440]);
-
-    % Panel 1  initial p0 (axial slice, fixed reference)
-    ax_p0 = subplot(1, 3, 1);
-    p0_orig_slice = squeeze(p0(1:Nx_orig, 1:Ny_orig, cz_live))';
-    imagesc(ax_p0, p0_orig_slice);
-    axis(ax_p0, 'xy'); axis(ax_p0, 'image');
-    colormap(ax_p0, 'hot'); colorbar(ax_p0);
-    clim_p0 = [0, max(p0_orig_slice(:)) + eps];
-    caxis(ax_p0, clim_p0);
-    xlabel(ax_p0, 'X (voxel)'); ylabel(ax_p0, 'Y (voxel)');
-    title(ax_p0, sprintf('Initial p_0   (Z=%d)', cz_live), 'FontWeight', 'bold');
-
-    % Panel 2  current reconstructed p0 (updates each iteration)
-    ax_recon = subplot(1, 3, 2);
-    hImg_recon = imagesc(ax_recon, zeros(Ny_orig, Nx_orig));
-    axis(ax_recon, 'xy'); axis(ax_recon, 'image');
-    colormap(ax_recon, 'hot'); colorbar(ax_recon);
-    xlabel(ax_recon, 'X (voxel)'); ylabel(ax_recon, 'Y (voxel)');
-    title(ax_recon, 'Reconstructed p_0   (iter 0)', 'FontWeight', 'bold');
-
-    % Panel 3  live max-pressure convergence
-    ax_conv = subplot(1, 3, 3);
-    hLine_max = plot(ax_conv, NaN, NaN, 'b-o', 'LineWidth', 1.6, ...
-        'MarkerSize', 4, 'MarkerFaceColor', [0.2, 0.4, 1.0]);
-    xlabel(ax_conv, 'TR Iteration');
-    ylabel(ax_conv, 'Max Reconstructed p_0 (Pa)');
-    title(ax_conv, 'Convergence (live)', 'FontWeight', 'bold');
-    grid(ax_conv, 'on');
-    xlim(ax_conv, [0.5, CONFIG.num_time_reversal_iter + 0.5]);
-
-    sgtitle(fig_live, sprintf( ...
-        'Live TR Reconstruction  Axial Z=%d   |   Patient %s', ...
-        cz_live, CONFIG.patient_id), 'FontWeight', 'bold', 'FontSize', 11);
-    drawnow;
-end
-
-% ---- TR iteration loop ----
-try
-    tr_total_tic = tic;
-
-    for tr_iter = 1:CONFIG.num_time_reversal_iter
-
-        fprintf('       --- TR Iteration %d/%d ---\n', tr_iter, CONFIG.num_time_reversal_iter);
-
-        source_tr        = struct();
-        source_tr.p_mask = sensor.mask;
-        source_tr.p      = fliplr(sensorData);
-        source_tr.p_mode = 'dirichlet';
-
-        sensor_tr        = struct();
-        sensor_tr.mask   = ones(Nx, Ny, Nz);
-        sensor_tr.record = {'p_final'};
-
-        p0_recon = kspaceFirstOrder3D(kgrid, kmedium, source_tr, sensor_tr, inputArgs{:});
-
-        if isstruct(p0_recon) && isfield(p0_recon, 'p_final')
-            reconPressure = reshape(p0_recon.p_final, [Nx, Ny, Nz]);
-        else
-            reconPressure = reshape(p0_recon, [Nx, Ny, Nz]);
-        end
-
-        reconPressure = max(reconPressure, 0);
-
-        % Record convergence metrics
-        conv_max_pressure(tr_iter) = max(reconPressure(:));
-        num_iters_done = tr_iter;
-
-        fprintf('       Max pressure: %.4e Pa\n', conv_max_pressure(tr_iter));
-
-        % Convergence check (from iteration 2 onward)
-        converged = false;
-        if tr_iter > 1
-            norm_prev = norm(reconPressure_prev(:));
-            if norm_prev > 0
-                rel_change = norm(reconPressure(:) - reconPressure_prev(:)) / norm_prev;
-            else
-                rel_change = Inf;
-            end
-            conv_rel_change(tr_iter) = rel_change;
-            fprintf('       Rel change: %.4e\n', rel_change);
-            if rel_change < CONFIG.convergence_tol
-                fprintf('       *** Converged at iteration %d ***\n', tr_iter);
-                converged = true;
-            end
-        end
-
-        reconPressure_prev = reconPressure;
-
-        % ---- Update live figure ----
-        if CONFIG.plot_results && ishandle(fig_live)
-            recon_slice_crop = squeeze( ...
-                reconPressure(1:Nx_orig, 1:Ny_orig, cz_live))';
-            recon_slice_crop = gather(recon_slice_crop);
-            set(hImg_recon, 'CData', recon_slice_crop);
-            caxis(ax_recon, [0, max(recon_slice_crop(:)) + eps]);
-            if converged
-                title(ax_recon, ...
-                    sprintf('Reconstructed p_0   (iter %d  CONVERGED)', tr_iter), ...
-                    'FontWeight', 'bold', 'Color', [0, 0.55, 0]);
-            else
-                title(ax_recon, ...
-                    sprintf('Reconstructed p_0   (iter %d / %d)', ...
-                    tr_iter, CONFIG.num_time_reversal_iter), 'FontWeight', 'bold');
-            end
-            set(hLine_max, 'XData', 1:tr_iter, ...
-                'YData', conv_max_pressure(1:tr_iter));
-            drawnow;
-        end
-
-        if converged
-            break;
-        end
-
-        % Residual correction for next iteration
-        if tr_iter < CONFIG.num_time_reversal_iter
-            source_resid    = struct();
-            source_resid.p0 = reconPressure;
-            sensorDataRecon = kspaceFirstOrder3D(kgrid, kmedium, source_resid, sensor, inputArgs{:});
-            sensorData      = sensorData + (sensorData_measured - sensorDataRecon);
-        end
-    end
-
-    reconPressure = gather(reconPressure) * CONFIG.correction_factor;
-
-    tr_time = toc(tr_total_tic);
-    fprintf('       Time reversal complete (%.1f s).\n', tr_time);
-    fprintf('       Reconstructed pressure: [%.2e, %.2e] Pa\n', ...
-        min(reconPressure(:)), max(reconPressure(:)));
-
-catch ME
-    fprintf('[ERROR] Time reversal failed: %s\n', ME.message);
-    return;
-end
-
-case 'das'
-
-fprintf('       Running Delay-And-Sum reconstruction...\n');
-
-try
-    das_tic = tic;
-    reconPressure = das_reconstruct(sensorData, sensor, sensor_info_orig, medium, ...
-                                    Nx, Ny, Nz, dx, dy, dz, dt, das_opts);
-    reconPressure = reconPressure * CONFIG.correction_factor;
-
-    % Synthesize TR-style outputs so downstream plot/save code is reused
-    conv_max_pressure = max(reconPressure(:));
-    conv_rel_change   = NaN;
-    num_iters_done    = 1;
-    tr_time           = toc(das_tic);
-
-    fprintf('       DAS complete (%.1f s).\n', tr_time);
-    fprintf('       Reconstructed pressure: [%.2e, %.2e] Pa\n', ...
-        min(reconPressure(:)), max(reconPressure(:)));
-
-catch ME
-    fprintf('[ERROR] DAS reconstruction failed: %s\n', ME.message);
-    return;
-end
-
-case 'hybrid'
-
-fprintf('       Running HYBRID reconstruction (DAS seed + up to %d-1 TR iterations)...\n', ...
-    CONFIG.num_time_reversal_iter);
-
-try
-    hybrid_tic = tic;
-
-    N_iter = CONFIG.num_time_reversal_iter;
-
-    % ---- Iteration 1: DAS seed ----
-    fprintf('       --- Iter 1/%d: DAS seed ---\n', N_iter);
-    reconPressure = das_reconstruct(sensorData, sensor, sensor_info_orig, medium, ...
-                                    Nx, Ny, Nz, dx, dy, dz, dt, das_opts);
-
-    % Initialize convergence tracking (same shape as TR branch)
-    conv_max_pressure    = zeros(N_iter, 1);
-    conv_rel_change      = nan(N_iter, 1);
-    conv_max_pressure(1) = max(reconPressure(:));
-    num_iters_done       = 1;
-    reconPressure_prev   = reconPressure;
-
-    fprintf('       Max pressure (DAS seed): %.4e\n', conv_max_pressure(1));
-
-    % ---- Live recon figure setup ----
-    [~, dose_max_idx] = max(doseGrid(:));
-    [cx_live, cy_live, cz_live] = ind2sub([Nx_orig, Ny_orig, Nz_orig], dose_max_idx);
-
-    fig_live = []; hImg_recon = []; ax_recon = []; hLine_max = [];
-    if CONFIG.plot_results
-        [fig_live, ax_recon, hImg_recon, hLine_max] = ...
-            setup_live_recon_figure(p0, Nx_orig, Ny_orig, cz_live, N_iter, CONFIG);
-
-        % Show DAS recon as the iter-1 frame
-        recon_slice_crop = squeeze(reconPressure(1:Nx_orig, 1:Ny_orig, cz_live))';
-        recon_slice_crop = gather(recon_slice_crop);
-        set(hImg_recon, 'CData', recon_slice_crop);
-        caxis(ax_recon, [0, max(recon_slice_crop(:)) + eps]);
-        title(ax_recon, sprintf('Reconstructed p_0   (iter 1  DAS seed)'), ...
-            'FontWeight', 'bold');
-        set(hLine_max, 'XData', 1, 'YData', conv_max_pressure(1));
-        drawnow;
-    end
-
-    % ---- Residual update from DAS seed (only if more iterations remain) ----
-    if N_iter > 1
-        source_resid    = struct();
-        source_resid.p0 = reconPressure;
-        sensorDataRecon = kspaceFirstOrder3D(kgrid, kmedium, source_resid, sensor, inputArgs{:});
-        sensorData      = sensorData + (sensorData_measured - sensorDataRecon);
-    end
-
-    % ---- TR iterations 2..N (mirror the 'tr' loop body) ----
-    for tr_iter = 2:N_iter
-
-        fprintf('       --- TR Iteration %d/%d ---\n', tr_iter, N_iter);
-
-        source_tr        = struct();
-        source_tr.p_mask = sensor.mask;
-        source_tr.p      = fliplr(sensorData);
-        source_tr.p_mode = 'dirichlet';
-
-        sensor_tr        = struct();
-        sensor_tr.mask   = ones(Nx, Ny, Nz);
-        sensor_tr.record = {'p_final'};
-
-        p0_recon = kspaceFirstOrder3D(kgrid, kmedium, source_tr, sensor_tr, inputArgs{:});
-
-        if isstruct(p0_recon) && isfield(p0_recon, 'p_final')
-            reconPressure = reshape(p0_recon.p_final, [Nx, Ny, Nz]);
-        else
-            reconPressure = reshape(p0_recon, [Nx, Ny, Nz]);
-        end
-
-        reconPressure = max(reconPressure, 0);
-
-        conv_max_pressure(tr_iter) = max(reconPressure(:));
-        num_iters_done = tr_iter;
-
-        fprintf('       Max pressure: %.4e Pa\n', conv_max_pressure(tr_iter));
-
-        % Convergence check vs previous iteration
-        converged = false;
-        norm_prev = norm(reconPressure_prev(:));
-        if norm_prev > 0
-            rel_change = norm(reconPressure(:) - reconPressure_prev(:)) / norm_prev;
-        else
-            rel_change = Inf;
-        end
-        conv_rel_change(tr_iter) = rel_change;
-        fprintf('       Rel change: %.4e\n', rel_change);
-        if rel_change < CONFIG.convergence_tol
-            fprintf('       *** Converged at iteration %d ***\n', tr_iter);
-            converged = true;
-        end
-
-        reconPressure_prev = reconPressure;
-
-        % ---- Update live figure ----
-        if CONFIG.plot_results && ~isempty(fig_live) && ishandle(fig_live)
-            recon_slice_crop = squeeze( ...
-                reconPressure(1:Nx_orig, 1:Ny_orig, cz_live))';
-            recon_slice_crop = gather(recon_slice_crop);
-            set(hImg_recon, 'CData', recon_slice_crop);
-            caxis(ax_recon, [0, max(recon_slice_crop(:)) + eps]);
-            if converged
-                title(ax_recon, ...
-                    sprintf('Reconstructed p_0   (iter %d  CONVERGED)', tr_iter), ...
-                    'FontWeight', 'bold', 'Color', [0, 0.55, 0]);
-            else
-                title(ax_recon, ...
-                    sprintf('Reconstructed p_0   (iter %d / %d)', tr_iter, N_iter), ...
-                    'FontWeight', 'bold');
-            end
-            set(hLine_max, 'XData', 1:tr_iter, 'YData', conv_max_pressure(1:tr_iter));
-            drawnow;
-        end
-
-        if converged
-            break;
-        end
-
-        % Residual correction for next iteration
-        if tr_iter < N_iter
-            source_resid    = struct();
-            source_resid.p0 = reconPressure;
-            sensorDataRecon = kspaceFirstOrder3D(kgrid, kmedium, source_resid, sensor, inputArgs{:});
-            sensorData      = sensorData + (sensorData_measured - sensorDataRecon);
-        end
-    end
-
-    reconPressure = gather(reconPressure) * CONFIG.correction_factor;
-    tr_time = toc(hybrid_tic);
-
-    fprintf('       Hybrid complete (%.1f s, %d iterations).\n', tr_time, num_iters_done);
-    fprintf('       Reconstructed pressure: [%.2e, %.2e] Pa\n', ...
-        min(reconPressure(:)), max(reconPressure(:)));
-
-catch ME
-    fprintf('[ERROR] Hybrid reconstruction failed: %s\n', ME.message);
-    return;
-end
-
-otherwise
-    error('Unknown reconstruction_method: "%s" (use ''tr'', ''DAS'', or ''hybrid'')', ...
-        CONFIG.reconstruction_method);
-end
-
-%% ========================= CROP TO ORIGINAL SIZE =========================
-
-if did_pad
-    fprintf('\n[CROP] Restoring dimensions: [%d %d %d] -> [%d %d %d]\n', ...
-        Nx, Ny, Nz, Nx_orig, Ny_orig, Nz_orig);
-    reconPressure = reconPressure(1:Nx_orig, 1:Ny_orig, 1:Nz_orig);
-    Nx = Nx_orig; Ny = Ny_orig; Nz = Nz_orig;
-    gridSize    = gridSize_orig;
-    medium      = medium_orig;
-    sensor.mask = sensor.mask(1:Nx_orig, 1:Ny_orig, 1:Nz_orig);
-end
-
-%% ========================= PRESSURE SCALE CORRECTION ====================
-
-if CONFIG.use_pressure_scale_correction
-    p0_max_orig = max(p0(1:Nx_orig, 1:Ny_orig, 1:Nz_orig), [], 'all');
-    recon_max   = max(reconPressure(:));
-    if recon_max > 0
-        pressure_scale_cf = p0_max_orig / recon_max;
-        reconPressure     = reconPressure * pressure_scale_cf;
-        fprintf('       Pressure scale correction: %.4f  (p0_max = %.3e  /  recon_max = %.3e)\n', ...
-            pressure_scale_cf, p0_max_orig, recon_max);
-    else
-        pressure_scale_cf = 1;
-        warning('Reconstructed pressure max is zero; skipping pressure scale correction.');
-    end
-else
-    pressure_scale_cf = 1;
-end
-
-%% ========================= PRESSURE -> DOSE ==============================
-
-fprintf('\n[Post] Converting pressure to dose...\n');
-
-conversionFactor = medium.gruneisen .* medium.density;
-conversionFactor(conversionFactor == 0) = 1;
-
-reconDosePerPulse = reconPressure ./ conversionFactor;
-
-body_mask_plot = ones(gridSize);
-if isfield(sct, 'bodyMask') && isequal(size(sct.bodyMask), gridSize)
-    body_mask_plot = double(sct.bodyMask);
-end
-if isfield(CONFIG, 'mask_recon_to_dose_region') && ~CONFIG.mask_recon_to_dose_region
-    recon_dose = reconDosePerPulse * num_pulses .* body_mask_plot;
-else
-    recon_dose = reconDosePerPulse * num_pulses .* double(doseMask) .* body_mask_plot;
-end
-
-fprintf('       Reconstructed dose: [%.4f, %.4f] Gy\n', min(recon_dose(:)), max(recon_dose(:)));
-
-%% Crop p0 to original size (if padded)
-if did_pad
-    p0 = p0(1:Nx_orig, 1:Ny_orig, 1:Nz_orig);
-end
-
-%% ===================== CAPTURE PER-DOSE RESULTS ==========================
-RES(di).recon_dose        = recon_dose;
-RES(di).doseGrid          = doseGrid;
-RES(di).spacing_mm        = spacing_mm;
-RES(di).sensor_mask       = sensor.mask;
-RES(di).density           = medium.density;
-RES(di).p0                = p0;
-RES(di).reconPressure     = reconPressure;
-RES(di).gridSize          = gridSize;
-RES(di).doseMask          = doseMask;
-RES(di).num_pulses        = num_pulses;
-RES(di).fwd_time          = fwd_time;
-RES(di).tr_time           = tr_time;
-RES(di).conv_max_pressure = conv_max_pressure;
-RES(di).conv_rel_change   = conv_rel_change;
-RES(di).num_iters_done    = num_iters_done;
-RES(di).label             = label;
-
-end   % di loop over the two dose files
-
-%% ===================== EXTRACT THE TWO RECON DOSES =======================
-
-recon_A    = RES(1).recon_dose;
-recon_B    = RES(2).recon_dose;
-spacing_mm = RES(1).spacing_mm;
-
-if ~isequal(RES(1).gridSize, RES(2).gridSize)
-    error('run_standalone_comparison:GridMismatch', ...
-        ['The two reconstructed doses are on different grids ([%s] vs [%s]).\n' ...
-         'A common grid is required for the gamma comparison.'], ...
-        num2str(RES(1).gridSize), num2str(RES(2).gridSize));
-end
-
 %% ========================= NORMALIZE DOSES ===============================
 % When enabled, divide each reconstructed dose by its own max so both peak
 % at 1.0 before the comparison / gamma.
@@ -1436,8 +275,8 @@ if isfield(CONFIG, 'normalize') && CONFIG.normalize
     a_max = max(recon_A(:));
     b_max = max(recon_B(:));
     fprintf('\n[NORM] Normalizing both reconstructed doses by their max:\n');
-    fprintf('       %s max: %.4f Gy\n', RES(1).label, a_max);
-    fprintf('       %s max: %.4f Gy\n', RES(2).label, b_max);
+    fprintf('       %s max: %.4f Gy\n', label_A, a_max);
+    fprintf('       %s max: %.4f Gy\n', label_B, b_max);
     if a_max > 0, recon_A = recon_A / a_max; end
     if b_max > 0, recon_B = recon_B / b_max; end
 end
@@ -1445,8 +284,8 @@ end
 %% ========================= RESULTS SUMMARY ===============================
 
 fprintf('\n========= COMPARISON RESULTS =========\n');
-fprintf('  %-22s [%.6f, %.4f] Gy\n', [RES(1).label ':'], min(recon_A(:)), max(recon_A(:)));
-fprintf('  %-22s [%.6f, %.4f] Gy\n', [RES(2).label ':'], min(recon_B(:)), max(recon_B(:)));
+fprintf('  %-22s [%.6f, %.4f] Gy\n', [label_A ':'], min(recon_A(:)), max(recon_A(:)));
+fprintf('  %-22s [%.6f, %.4f] Gy\n', [label_B ':'], min(recon_B(:)), max(recon_B(:)));
 
 cmp_threshold = 0.01 * max(recon_A(:));
 cmp_region    = recon_A > cmp_threshold;
@@ -1460,18 +299,17 @@ end
 fprintf('=====================================\n');
 
 %% ===================== GAMMA PASS-RATE SWEEP (PARALLEL) ==================
-% Sweep the gamma criteria n%/n mm for n = 0.5..5 (half-integer steps) between
+% Sweep the gamma criteria n%/n mm for n = 1..5 (half-integer steps) between
 % the two reconstructed doses and record the pass rate at each. Each criterion
 % is independent, so the CalcGamma evaluations are distributed across the CPU
 % cores with parfor.
-%   Reference = dose A (listed),  Target = dose B (counterpart).
+%   Reference = recon A (listed),  Target = recon B (counterpart).
+%   Low-dose cutoff mask comes from the RayStation truth rs_dose (step15).
 
 gamma_results = struct();
 
-% Criterion sweep: percent and DTA are equal (0.5/0.5, 1/1, ..., 5/5) in
-% half-integer increments.
 gamma_n        = (1:0.5:5)';                  % criterion value n
-gamma_criteria = cell(numel(gamma_n), 3);       % {pct, dta, label} for compatibility
+gamma_criteria = cell(numel(gamma_n), 3);       % {pct, dta, label}
 for gc = 1:numel(gamma_n)
     gamma_criteria{gc, 1} = gamma_n(gc);
     gamma_criteria{gc, 2} = gamma_n(gc);
@@ -1480,8 +318,8 @@ end
 
 if exist('CalcGamma', 'file') == 2
 
-    fprintf('\n[Gamma] Sweeping gamma pass rate over %d criteria (0.5/0.5 .. 5/5)...\n', numel(gamma_n));
-    fprintf('        Reference: %s   |   Target: %s\n', RES(1).label, RES(2).label);
+    fprintf('\n[Gamma] Sweeping gamma pass rate over %d criteria (1/1 .. 5/5)...\n', numel(gamma_n));
+    fprintf('        Reference: %s   |   Target: %s\n', label_A, label_B);
 
     % Broadcast inputs (shared, read-only across all parfor workers).
     ref_struct.start = [0, 0, 0];
@@ -1492,8 +330,15 @@ if exist('CalcGamma', 'file') == 2
     tgt_struct.width = spacing_mm;
     tgt_struct.data  = double(recon_B);
 
-    low_dose_cutoff = 0.10 * max(recon_A(:));
-    gamma_eval_mask = recon_A >= low_dose_cutoff;
+    % Low-dose cutoff from the RayStation truth (step15 output). Fall back to
+    % the reference recon if the truth is degenerate.
+    if max(rs_A(:)) > 0
+        low_dose_cutoff = 0.10 * max(rs_A(:));
+        gamma_eval_mask = rs_A >= low_dose_cutoff;
+    else
+        low_dose_cutoff = 0.10 * max(recon_A(:));
+        gamma_eval_mask = recon_A >= low_dose_cutoff;
+    end
 
     % Ensure a parallel pool is running so the sweep uses the CPU cores.
     % If the Parallel Computing Toolbox is unavailable, parfor falls back to a
@@ -1532,8 +377,8 @@ if exist('CalcGamma', 'file') == 2
     gamma_results.cutoff_Gy     = low_dose_cutoff;
     gamma_results.eval_mask     = gamma_eval_mask;
 
-    fprintf('\n  ------ Gamma Pass Rates: %s vs %s (10%% low-dose cutoff) ------\n', ...
-        RES(1).label, RES(2).label);
+    fprintf('\n  ------ Gamma Pass Rates: %s vs %s (10%% rs_dose cutoff) ------\n', ...
+        label_A, label_B);
     for gc = 1:numel(gamma_n)
         if isnan(pass_rates(gc))
             fprintf('  %-12s  FAILED\n', gamma_criteria{gc, 3});
@@ -1548,10 +393,10 @@ end
 
 %% ===================== NOISE ENSEMBLE (ERROR BARS) =====================
 % Estimate the noise-driven spread of the gamma pass-rate curve. The forward
-% simulation already ran once per dose; here we only re-draw noise, deconvolve,
-% reconstruct, and gamma-sweep, repeated over num_realizations realizations.
-% Realizations are distributed across all available GPUs (one worker per GPU).
-% Results are saved so a later run can load them instead of recomputing.
+% simulation runs ONCE per dose (build_forward_bundle); here we re-draw noise,
+% deconvolve, reconstruct, and gamma-sweep, repeated over num_realizations
+% realizations distributed across all available GPUs. Results are saved so a
+% later run can load them instead of recomputing.
 
 ens = struct('available', false);
 
@@ -1563,8 +408,18 @@ if load_ensemble
             ens.pass_rates  = S.pass_rates_ens;
             ens.criterion_n = S.criterion_n(:);
             ens.available   = true;
-            fprintf('   Loaded %d realizations x %d criteria.\n', ...
-                size(ens.pass_rates, 1), size(ens.pass_rates, 2));
+            if isfield(S, 'null_pass_rates_ens') && ...
+                    ~isempty(S.null_pass_rates_ens) && ...
+                    ~all(isnan(S.null_pass_rates_ens(:)))
+                ens.null_pass_rates = S.null_pass_rates_ens;
+                ens.has_null        = true;
+            else
+                ens.null_pass_rates = [];
+                ens.has_null        = false;
+            end
+            fprintf('   Loaded %d realizations x %d criteria (null: %s).\n', ...
+                size(ens.pass_rates, 1), size(ens.pass_rates, 2), ...
+                mat2str(ens.has_null));
         else
             warning('Saved ensemble criteria do not match current sweep; ignoring file.');
         end
@@ -1572,7 +427,40 @@ if load_ensemble
         warning('Saved ensemble file missing expected variables; ignoring.');
     end
 
-elseif compute_ensemble && numel(FWD) >= 2 && isfield(FWD, 'bundle')
+elseif compute_ensemble
+
+    % Deterministic sensor placement: use the summed plan dose so the array
+    % geometry (and any grid expansion) is IDENTICAL for both CT images.
+    processed_dir   = fullfile(CONFIG.working_dir, 'RayStationFiles', ...
+        CONFIG.patient_id, CONFIG.session, 'processed');
+    total_dose_file = fullfile(processed_dir, 'total_rs_dose.mat');
+    if isfile(total_dose_file)
+        CONFIG.total_dose_file = total_dose_file;
+        fprintf('\n[NoiseEnsemble] Sensor placement dose: total_rs_dose.mat (deterministic)\n');
+    else
+        CONFIG.total_dose_file = '';
+        fprintf('\n[NoiseEnsemble] [WARN] total_rs_dose.mat missing; placement uses per-field dose.\n');
+    end
+
+    cfgA = CONFIG; cfgA.meterset = meterset_A;
+    cfgB = CONFIG; cfgB.meterset = meterset_B;
+    if ~isempty(ne.num_iters)
+        cfgA.num_time_reversal_iter = ne.num_iters;
+        cfgB.num_time_reversal_iter = ne.num_iters;
+    end
+
+    fprintf('[NoiseEnsemble] Building forward bundles (one k-Wave forward per dose)...\n');
+    bundleA = build_forward_bundle(rs_A, fldA.cbct, gantry_A, beam_meta, cfgA, label_A);
+    bundleB = build_forward_bundle(rs_B, fldB.cbct, gantry_B, beam_meta, cfgB, label_B);
+
+    if ~isequal(bundleA.gridSize_orig, bundleB.gridSize_orig)
+        error('study_gamma_pass_rates:BundleGridMismatch', ...
+            ['The two forward bundles ended on different grids ([%s] vs [%s]).\n' ...
+             'They must share a grid for the gamma comparison.\n' ...
+             'Ensure deterministic sensor placement (total_rs_dose.mat present).'], ...
+            num2str(bundleA.gridSize_orig), num2str(bundleB.gridSize_orig));
+    end
+
     N         = CONFIG.noise_ensemble.num_realizations;
     K         = numel(gamma_n);
     base_seed = CONFIG.noise_ensemble.base_seed;
@@ -1609,16 +497,17 @@ elseif compute_ensemble && numel(FWD) >= 2 && isfield(FWD, 'bundle')
         fprintf('   No GPU detected; reconstructions run on CPU worker(s).\n');
     end
 
-    bundleA     = FWD(1).bundle;
-    bundleB     = FWD(2).bundle;
-    crit_vec    = gamma_n(:);
-    spacing_loc = spacing_mm;
+    crit_vec     = gamma_n(:);
+    spacing_loc  = spacing_mm;
+    include_null = CONFIG.noise_ensemble.include_null;
 
-    pass_rates_ens = nan(N, K);
+    pass_rates_ens      = nan(N, K);
+    null_pass_rates_ens = nan(N, K);
     ens_tic = tic;
     parfor r = 1:N
-        seedA = base_seed + 2*(r-1) + 1;
-        seedB = base_seed + 2*(r-1) + 2;
+        seedA = base_seed + 3*(r-1) + 1;   % reference arm (signal + null share this)
+        seedB = base_seed + 3*(r-1) + 2;   % counterpart arm (signal)
+        seedC = base_seed + 3*(r-1) + 3;   % reference arm, independent draw (null)
 
         sdA = redraw_noisy_deconv(bundleA, seedA);
         sdB = redraw_noisy_deconv(bundleB, seedB);
@@ -1626,30 +515,44 @@ elseif compute_ensemble && numel(FWD) >= 2 && isfield(FWD, 'bundle')
         recA = reconstruct_recon_dose(bundleA, sdA);
         recB = reconstruct_recon_dose(bundleB, sdB);
 
+        % Signal: reference CT recon vs counterpart CT recon.
         pass_rates_ens(r, :) = gamma_sweep_pass_rates(recA, recB, crit_vec, spacing_loc);
+
+        % Null: reference CT recon vs a second independent-noise recon of the
+        % SAME reference dose. This is the pass-rate band expected when there is
+        % no real dose change (noise floor).
+        if include_null
+            sdC  = redraw_noisy_deconv(bundleA, seedC);
+            recC = reconstruct_recon_dose(bundleA, sdC);
+            null_pass_rates_ens(r, :) = gamma_sweep_pass_rates(recA, recC, crit_vec, spacing_loc);
+        end
+
         fprintf('   [NoiseEnsemble] realization %d/%d complete.\n', r, N);
     end
     fprintf('   Ensemble compute time: %.1f s\n', toc(ens_tic));
 
-    ens.pass_rates  = pass_rates_ens;
-    ens.criterion_n = crit_vec;
-    ens.available   = true;
+    ens.pass_rates      = pass_rates_ens;
+    ens.null_pass_rates = null_pass_rates_ens;
+    ens.has_null        = include_null;
+    ens.criterion_n     = crit_vec;
+    ens.available       = true;
 
     % --- Save the noise calculation for later reuse ---
     criterion_n   = crit_vec;   %#ok<NASGU>
     ensemble_meta = struct( ...
         'num_realizations',      N, ...
         'base_seed',             base_seed, ...
+        'include_null',          include_null, ...
         'num_iters',             bundleA.num_time_reversal_iter, ...
         'reconstruction_method', CONFIG.reconstruction_method, ...
         'conv_noise_level',      CONFIG.conv_noise_level, ...
         'convolution_kernel',    CONFIG.convolution_kernel, ...
         'conv_deconv_lambda',    CONFIG.conv_deconv_lambda, ...
-        'label_A',               RES(1).label, ...
-        'label_B',               RES(2).label, ...
+        'label_A',               label_A, ...
+        'label_B',               label_B, ...
         'spacing_mm',            spacing_mm, ...
         'timestamp',             datestr(now, 'yyyy-mm-dd HH:MM:SS'));   %#ok<NASGU>
-    save(ne_file, 'pass_rates_ens', 'criterion_n', 'ensemble_meta', '-v7.3');
+    save(ne_file, 'pass_rates_ens', 'null_pass_rates_ens', 'criterion_n', 'ensemble_meta', '-v7.3');
     fprintf('   Saved ensemble results to %s\n', ne_file);
 end
 
@@ -1657,18 +560,43 @@ end
 if ens.available
     ens.mean = mean(ens.pass_rates, 1, 'omitnan');
     ens.std  = std(ens.pass_rates, 0, 1, 'omitnan');
-    fprintf('\n  ----- Noise-ensemble pass rates (mean +/- std, %d realizations) -----\n', ...
-        size(ens.pass_rates, 1));
-    for k = 1:numel(gamma_n)
-        fprintf('  %-12s  %.2f%%  +/- %.2f%%\n', ...
-            sprintf('%g%%/%gmm', gamma_n(k), gamma_n(k)), ens.mean(k), ens.std(k));
+    has_null = isfield(ens, 'has_null') && ens.has_null && ...
+        isfield(ens, 'null_pass_rates') && ~isempty(ens.null_pass_rates);
+    if has_null
+        ens.null_mean = mean(ens.null_pass_rates, 1, 'omitnan');
+        ens.null_std  = std(ens.null_pass_rates, 0, 1, 'omitnan');
+    else
+        ens.null_mean = [];
+        ens.null_std  = [];
+    end
+
+    if has_null
+        fprintf(['\n  ----- Noise-ensemble pass rates (mean +/- std, %d realizations) -----\n' ...
+                 '  %-12s  %18s   %18s\n'], ...
+            size(ens.pass_rates, 1), 'criterion', 'signal', 'null (ref vs itself)');
+        for k = 1:numel(gamma_n)
+            fprintf('  %-12s  %7.2f%% +/- %5.2f%%   %7.2f%% +/- %5.2f%%\n', ...
+                sprintf('%g%%/%gmm', gamma_n(k), gamma_n(k)), ...
+                ens.mean(k), ens.std(k), ens.null_mean(k), ens.null_std(k));
+        end
+    else
+        fprintf('\n  ----- Noise-ensemble pass rates (mean +/- std, %d realizations) -----\n', ...
+            size(ens.pass_rates, 1));
+        for k = 1:numel(gamma_n)
+            fprintf('  %-12s  %.2f%%  +/- %.2f%%\n', ...
+                sprintf('%g%%/%gmm', gamma_n(k), gamma_n(k)), ens.mean(k), ens.std(k));
+        end
     end
 end
 
 %% ===================== GAMMA PASS-RATE CHART ============================
 % Pass rate as a function of the gamma criterion (1D), with a red reference
 % line at the 90% pass rate. When the noise ensemble is available, error bars
-% (mean +/- std over realizations) are overlaid.
+% (mean +/- std over realizations) are overlaid for the signal comparison
+% (reference CT vs counterpart CT). If the null hypothesis was computed, a
+% second band (reference CT recon vs an independent-noise recon of itself) is
+% overlaid as the no-change noise floor: the signal band dropping below the
+% null band marks where the CT difference is detectable above noise.
 
 if ~isempty(gamma_results) && isfield(gamma_results, 'pass_rates')
     if ens.available
@@ -1678,8 +606,16 @@ if ~isempty(gamma_results) && isfield(gamma_results, 'pass_rates')
         ens_mean_in = [];
         ens_std_in  = [];
     end
+    if ens.available && isfield(ens, 'null_mean') && ~isempty(ens.null_mean)
+        null_mean_in = ens.null_mean;
+        null_std_in  = ens.null_std;
+    else
+        null_mean_in = [];
+        null_std_in  = [];
+    end
     plot_gamma_pass_rate_curve(gamma_results.criterion_n, gamma_results.pass_rates, ...
-        RES(1).label, RES(2).label, CONFIG.patient_id, ens_mean_in, ens_std_in);
+        label_A, label_B, CONFIG.patient_id, ens_mean_in, ens_std_in, ...
+        null_mean_in, null_std_in);
 end
 
 %% ========================= GAMMA LOG ====================================
@@ -1769,7 +705,6 @@ end
 %% ========================= SAVE RESULTS =================================
 
 if CONFIG.save_results
-    % Build filename from configuration parameters
     output_fname = sprintf('standalone_comparison_%s_%s_%s_%d.mat', ...
         CONFIG.reconstruction_method, ...
         CONFIG.sensor_placement_method, CONFIG.gruneisen_method, ...
@@ -1777,23 +712,21 @@ if CONFIG.save_results
 
     results.recon_dose_A    = recon_A;
     results.recon_dose_B    = recon_B;
-    results.label_A         = RES(1).label;
-    results.label_B         = RES(2).label;
-    results.original_dose_A = RES(1).doseGrid;
-    results.original_dose_B = RES(2).doseGrid;
-    results.p0_A            = RES(1).p0;
-    results.p0_B            = RES(2).p0;
-    results.reconPressure_A = RES(1).reconPressure;
-    results.reconPressure_B = RES(2).reconPressure;
-    results.sensor_mask_A   = RES(1).sensor_mask;
-    results.sensor_mask_B   = RES(2).sensor_mask;
+    results.label_A         = label_A;
+    results.label_B         = label_B;
+    results.rs_dose_A       = rs_A;
+    results.rs_dose_B       = rs_B;
     results.config          = CONFIG;
     results.spacing_mm      = spacing_mm;
-    results.grid_size       = RES(1).gridSize;
-    results.fwd_time_sec    = [RES(1).fwd_time, RES(2).fwd_time];
-    results.tr_time_sec     = [RES(1).tr_time,  RES(2).tr_time];
+    results.grid_size       = size(recon_A);
+    results.config_hash     = hash8;
+    results.source_mat_A    = fldA.source_mat_filename;
+    results.source_mat_B    = fldB.source_mat_filename;
     if ~isempty(gamma_results)
         results.gamma = gamma_results;
+    end
+    if ens.available
+        results.noise_ensemble = ens;
     end
     save(output_fname, '-struct', 'results', '-v7.3');
     fprintf('\nResults saved to: %s\n', output_fname);
@@ -1803,19 +736,13 @@ end
 
 if CONFIG.plot_results
 
-    % Figure 1  2x3 dose comparison (original top, recon bottom)
-    %            Coronal | Sagittal | Axial
-    %            Isocenter = max-dose voxel; sensor contour in red
-    plot_dose_panels(recon_A, recon_B, RES(1).sensor_mask, RES(1).density, spacing_mm, ...
-        'Dose Comparison: Two Reconstructed Doses', {RES(1).label, RES(2).label}, ...
-        CONFIG.viz_smooth_sigma);
-
-    % Figure 2  p0 convergence (max pressure + relative change)  TR & hybrid only
-    if any(strcmpi(CONFIG.reconstruction_method, {'tr', 'hybrid'}))
-        p0_max_for_plot = max(RES(1).p0(:));
-        plot_convergence_history(RES(1).conv_max_pressure, RES(1).conv_rel_change, ...
-            RES(1).num_iters_done, CONFIG.convergence_tol, p0_max_for_plot);
-    end
+    % 2x3 dose comparison: RayStation truth (rs_dose, "original") top row,
+    % reconstruction bottom row, for the listed CT. Coronal | Sagittal | Axial.
+    density_disp = get_display_density(fldA.cbct, CONFIG);
+    sensor_disp  = zeros(size(rs_A));
+    plot_dose_panels(rs_A, recon_A, sensor_disp, density_disp, spacing_mm, ...
+        sprintf('RayStation Truth vs Reconstruction  |  %s', label_A), ...
+        {'RayStation truth', 'Reconstruction'}, CONFIG.viz_smooth_sigma);
 
     % (gamma pass-rate chart is produced unconditionally above)
 
@@ -1828,91 +755,483 @@ fprintf('\nGamma pass-rate study complete.\n');
 %  LOCAL FUNCTIONS
 %% =========================================================================
 
-function plot_gamma_pass_rate_curve(crit_n, pass_rates, label_ref, label_tgt, patient_id, ens_mean, ens_std)
-%PLOT_GAMMA_PASS_RATE_CURVE  Pass rate vs gamma criterion (n%/n mm).
-%  crit_n      column vector of criterion values
-%  pass_rates  nominal (single-draw) pass rates in percent (NaN entries skipped)
-%  ens_mean,ens_std  optional noise-ensemble mean and std per criterion. When
-%                    provided (non-empty), error bars are overlaid as the
-%                    primary series and the nominal curve is shown faintly.
-%  A red horizontal reference line is drawn at the 90% pass rate.
+% -------------------------------------------------------------------------
+%  LOADING HELPERS
+% -------------------------------------------------------------------------
 
-    if nargin < 6, ens_mean = []; end
-    if nargin < 7, ens_std  = []; end
-
-    crit_n     = crit_n(:);
-    pass_rates = pass_rates(:);
-    have_ens   = ~isempty(ens_mean) && ~isempty(ens_std);
-
-    figure('Name', 'Gamma Pass Rate vs Criterion', 'Color', 'w', ...
-        'NumberTitle', 'off', 'Position', [120, 120, 760, 470]);
-    hold on;
-
-    legend_handles = gobjects(0);
-    legend_labels  = {};
-
-    valid = ~isnan(pass_rates);
-    if have_ens
-        % Nominal single-draw curve shown faintly for reference.
-        h_nom = plot(crit_n(valid), pass_rates(valid), '--o', ...
-            'Color', [0.6, 0.6, 0.6], 'LineWidth', 1.0, 'MarkerSize', 4);
-        legend_handles(end+1) = h_nom; %#ok<AGROW>
-        legend_labels{end+1}  = 'Nominal (single draw)';
-
-        % Ensemble mean +/- std error bars (primary series).
-        em = ens_mean(:); es = ens_std(:);
-        vv = ~isnan(em);
-        h_ens = errorbar(crit_n(vv), em(vv), es(vv), 'b-o', 'LineWidth', 1.8, ...
-            'MarkerSize', 6, 'MarkerFaceColor', [0.2, 0.4, 1.0], 'CapSize', 8);
-        legend_handles(end+1) = h_ens; %#ok<AGROW>
-        legend_labels{end+1}  = 'Ensemble mean \pm std';
-
-        % Annotate ensemble points with mean +/- std
-        for k = 1:numel(crit_n)
-            if vv(k)
-                text(crit_n(k), em(k) + es(k) + 1.5, ...
-                    sprintf('%.1f\\pm%.1f', em(k), es(k)), ...
-                    'HorizontalAlignment', 'center', 'FontSize', 8);
-            end
-        end
-    else
-        h_nom = plot(crit_n(valid), pass_rates(valid), 'b-o', 'LineWidth', 1.8, ...
-            'MarkerSize', 6, 'MarkerFaceColor', [0.2, 0.4, 1.0]);
-        legend_handles(end+1) = h_nom; %#ok<AGROW>
-        legend_labels{end+1}  = 'Pass rate';
-
-        for k = 1:numel(crit_n)
-            if valid(k)
-                text(crit_n(k), pass_rates(k) + 1.5, sprintf('%.1f%%', pass_rates(k)), ...
-                    'HorizontalAlignment', 'center', 'FontSize', 8);
-            end
-        end
+function out = load_field_set(CONFIG, sel)
+%LOAD_FIELD_SET Load matched fields via load_recon_dose_data (Mode='set').
+%  Filters by beam/segment/plan-type parsed from the listed dose filename, but
+%  NOT by CT label, so both CT images load and can be picked individually.
+    args = {'Mode', 'set', 'Beam', sel.beam, 'IncludeEthos', false};
+    if ~isempty(sel.segment)
+        args = [args, {'Segment', sel.segment}];
     end
-
-    % 90% pass-rate reference line (red)
-    yline(90, 'r-', '90% pass rate', 'LineWidth', 1.8, ...
-        'LabelHorizontalAlignment', 'left', ...
-        'LabelVerticalAlignment', 'bottom', 'FontSize', 9);
-
-    hold off;
-    grid on;
-    xlim([min(crit_n) - 0.5, max(crit_n) + 0.5]);
-    ylim([0, 105]);
-    xticks(crit_n);
-    xlabel('Gamma criterion  (n%/n mm)');
-    ylabel('Gamma pass rate (%)');
-    title(sprintf('Gamma Pass Rate vs Criterion   |   Patient %s\n%s vs %s', ...
-        patient_id, label_ref, label_tgt), 'FontWeight', 'bold', 'FontSize', 11);
-    legend(legend_handles, legend_labels, 'Location', 'southeast', 'FontSize', 8);
-    drawnow;
+    if ~isempty(sel.plan_type) && ~strcmpi(sel.plan_type, 'any')
+        args = [args, {'PlanType', sel.plan_type}];
+    end
+    if isfield(CONFIG, 'config_hash') && ~isempty(CONFIG.config_hash)
+        args = [args, {'Hash', CONFIG.config_hash}];
+    end
+    out = load_recon_dose_data(CONFIG.patient_id, CONFIG.session, CONFIG, args{:});
 end
 
+function sel = parse_dose_selection(name)
+%PARSE_DOSE_SELECTION Parse plan_type / CT / beam / segment from a dose filename.
+%  Pattern: dose_<pid>_<session>_<plantype>_CT_<k>_B<beam>_<seg>.mat
+    name = char(name);
+    sel = struct('plan_type', 'any', 'ct', 'any', 'beam', [], 'segment', []);
+
+    t = regexp(name, '_(reference|adapted)_', 'tokens', 'once');
+    if ~isempty(t), sel.plan_type = t{1}; end
+
+    t = regexp(name, '_CT[_-]?(\d+)', 'tokens', 'once');
+    if ~isempty(t), sel.ct = sprintf('CT_%s', t{1}); end
+
+    t = regexp(name, '_B(\d+)_', 'tokens', 'once');
+    if ~isempty(t), sel.beam = str2double(t{1}); end
+
+    t = regexp(name, '_B\d+_(\d+)\.mat$', 'tokens', 'once');
+    if ~isempty(t), sel.segment = str2double(t{1}); end
+end
+
+function idx = find_field_by_ct(fields, want_ct)
+%FIND_FIELD_BY_CT Index of the first loaded field whose CT label is want_ct.
+    idx = [];
+    for i = 1:numel(fields)
+        if strcmpi(field_ct_label(fields(i)), want_ct)
+            idx = i;
+            return;
+        end
+    end
+end
+
+function lbl = field_ct_label(fld)
+%FIELD_CT_LABEL CT label of a loaded field: rtplan.ct_label, else filename.
+    lbl = '';
+    if isfield(fld, 'rtplan') && isfield(fld.rtplan, 'ct_label') ...
+            && ~isempty(fld.rtplan.ct_label)
+        lbl = strrep(char(fld.rtplan.ct_label), '-', '_');
+    end
+    if isempty(lbl) && isfield(fld, 'source_mat_filename')
+        lbl = ct_label_from_name(fld.source_mat_filename);
+    end
+    if isempty(lbl), lbl = 'unknown'; end
+end
+
+function ct_label = ct_label_from_name(name)
+%CT_LABEL_FROM_NAME Lenient CT-label parse: matches CT_1, CT-1, CT1, ...
+    ct_label = '';
+    tok = regexp(char(name), 'CT[_-]?(\d+)', 'tokens', 'once');
+    if ~isempty(tok)
+        ct_label = sprintf('CT_%s', tok{1});
+    end
+end
+
+function v = getfield_def(s, f, default)
+%GETFIELD_DEF Struct field value, or default when missing/empty/NaN.
+    v = default;
+    if isstruct(s) && isfield(s, f) && ~isempty(s.(f))
+        candidate = s.(f);
+        if isnumeric(candidate) && all(isnan(candidate(:)))
+            return;
+        end
+        v = candidate;
+    end
+end
+
+function density = get_display_density(sct, config)
+%GET_DISPLAY_DENSITY Density map (kg/m^3) from a CBCT struct for display only.
+%  Built on the same grid as the loaded recon/rs doses (size(sct.cubeHU)).
+    density = [];
+    if ~isstruct(sct) || ~isfield(sct, 'cubeHU') || isempty(sct.cubeHU)
+        return;
+    end
+    medium  = create_medium(sct, config);
+    density = medium.density;
+end
+
+% -------------------------------------------------------------------------
+%  FORWARD BUNDLE  (one k-Wave forward sim; captures everything needed to
+%  re-reconstruct from a fresh noise draw). Ported from study_gamma_sensitivity.
+% -------------------------------------------------------------------------
+
+function B = build_forward_bundle(truthDose, sct, gantry_angle, beam_meta, CONFIG, label)
+%BUILD_FORWARD_BUNDLE  Dose -> medium -> p0 -> sensor -> k-Wave forward -> pulse
+%  model, returning the reconstruction bundle B (see reconstruct_recon_dose).
+
+    fprintf('  [Bundle %s] forward simulation...\n', label);
+
+    doseGrid = double(truthDose);
+    if ~isfield(sct, 'cubeHU')
+        error('build_forward_bundle:NoHU', 'CBCT struct missing cubeHU.');
+    end
+    spacing_mm = sct.spacing(:)';
+    dx = spacing_mm(1) / 1000;
+    dy = spacing_mm(2) / 1000;
+    dz = spacing_mm(3) / 1000;
+
+    gridSize = size(doseGrid);
+    Nx = gridSize(1); Ny = gridSize(2); Nz = gridSize(3);
+
+    if isfield(sct, 'bodyMask')
+        doseGrid = doseGrid .* double(sct.bodyMask);
+    end
+
+    % --- Optional downscaling ---
+    if CONFIG.downscale_factor ~= 1
+        df     = CONFIG.downscale_factor;
+        new_Nx = max(1, round(Nx / df));
+        new_Ny = max(1, round(Ny / df));
+        new_Nz = max(1, round(Nz / df));
+        doseGrid   = max(imresize3(doseGrid, [new_Nx, new_Ny, new_Nz]), 0);
+        sct.cubeHU = imresize3(sct.cubeHU, [new_Nx, new_Ny, new_Nz]);
+        if isfield(sct, 'bodyMask')
+            sct.bodyMask = imresize3(single(sct.bodyMask), [new_Nx, new_Ny, new_Nz], 'nearest') > 0.5;
+        end
+        if isfield(sct, 'couchMask') && ~isempty(sct.couchMask)
+            sct.couchMask = imresize3(single(sct.couchMask), [new_Nx, new_Ny, new_Nz], 'nearest') > 0.5;
+        end
+        spacing_mm = spacing_mm .* ([Nx, Ny, Nz] ./ [new_Nx, new_Ny, new_Nz]);
+        dx = spacing_mm(1) / 1000; dy = spacing_mm(2) / 1000; dz = spacing_mm(3) / 1000;
+        sct.spacing = spacing_mm;
+        Nx = new_Nx; Ny = new_Ny; Nz = new_Nz;
+        gridSize = [Nx, Ny, Nz];
+    end
+
+    % --- Acoustic medium ---
+    medium = create_medium(sct, CONFIG);
+
+    if isfield(sct, 'bodyMask')
+        doseGrid = doseGrid .* double(sct.bodyMask);
+    end
+
+    % --- Initial pressure p0 ---
+    meterset       = CONFIG.meterset;
+    num_pulses     = ceil(meterset / CONFIG.dose_per_pulse_cGy);
+    dose_per_pulse = doseGrid / num_pulses;
+    p0 = dose_per_pulse .* medium.gruneisen .* medium.density;
+    p0 = smooth(p0);
+
+    doseThreshold = 0.01 * max(doseGrid(:));
+    doseMask      = doseGrid > doseThreshold;
+    if ~any(doseMask(:)) || max(p0(:)) == 0
+        error('build_forward_bundle:NoDose', 'No significant dose / zero p0 for %s.', label);
+    end
+
+    % --- FFT-optimal grid padding ---
+    Nx_orig = Nx; Ny_orig = Ny; Nz_orig = Nz;
+    gridSize_orig = gridSize;
+    medium_orig   = medium;
+
+    if CONFIG.use_grid_padding
+        Nx_pad = find_optimal_kwave_size(Nx, CONFIG.pml_size);
+        Ny_pad = find_optimal_kwave_size(Ny, CONFIG.pml_size);
+        Nz_pad = find_optimal_kwave_size(Nz, CONFIG.pml_size);
+    else
+        Nx_pad = Nx; Ny_pad = Ny; Nz_pad = Nz;
+    end
+
+    did_pad = ~isequal([Nx_pad, Ny_pad, Nz_pad], [Nx, Ny, Nz]);
+    if did_pad
+        [medium, p0] = pad_medium_p0(medium, p0, Nx, Ny, Nz, Nx_pad, Ny_pad, Nz_pad);
+        Nx = Nx_pad; Ny = Ny_pad; Nz = Nz_pad;
+        gridSize = [Nx, Ny, Nz];
+    end
+
+    % Track the pre-expansion recon-grid dims and the offset that sensor
+    % grid-expansion introduces.
+    dims_pre_expand = [Nx_orig, Ny_orig, Nz_orig];
+    embed_offset    = [0, 0, 0];
+
+    % --- Sensor placement ---
+    sensor      = struct();
+    sensor.mask = zeros(Nx, Ny, Nz);
+
+    switch CONFIG.sensor_placement_method
+        case 'full_plane_anterior'
+            sensor.mask(CONFIG.sensor_x_index, :, :) = 1;
+            sensor_info_orig = struct('num_elements', 0);
+
+        case 'determine_sensor_mask'
+            sct_for_sensor = sct;
+            if ~isfield(sct_for_sensor, 'couchMask') || isempty(sct_for_sensor.couchMask)
+                sct_for_sensor.couchMask = false(size(sct_for_sensor.bodyMask));
+            end
+            if ~isfield(sct_for_sensor, 'origin') || isempty(sct_for_sensor.origin)
+                sct_for_sensor.origin = [0, 0, 0];
+            end
+            sct_for_sensor.spacing = spacing_mm;
+
+            field_dose_for_sensor             = struct();
+            field_dose_for_sensor.dose_Gy     = doseGrid;
+            field_dose_for_sensor.gantry_angle = gantry_angle;
+            field_dose_for_sensor.origin      = sct_for_sensor.origin;
+            field_dose_for_sensor.spacing     = spacing_mm;
+            field_dose_for_sensor.dimensions  = [Nx_orig, Ny_orig, Nz_orig];
+
+            [sensor_mask_orig, sensor_info_orig] = determine_sensor_mask( ...
+                sct_for_sensor, field_dose_for_sensor, beam_meta, CONFIG);
+
+            % --- Grid expansion handling (water padding to clear the exclusion
+            % zone), then re-run FFT-optimal padding.
+            gp = sensor_info_orig.grid_pad;
+            if gp.expanded
+                [medium, p0, doseGrid, doseMask, sct, medium_orig, ...
+                 Nx_orig, Ny_orig, Nz_orig, Nx, Ny, Nz] = ...
+                    apply_grid_expansion(medium, p0, doseGrid, doseMask, sct, ...
+                        gp, Nx_orig, Ny_orig, Nz_orig, CONFIG);
+                gridSize_orig = [Nx_orig, Ny_orig, Nz_orig];
+                gridSize      = [Nx, Ny, Nz];
+                sensor.mask   = zeros(Nx, Ny, Nz);
+                embed_offset  = [gp.y_pre, gp.x_pre, gp.z_pre];
+            end
+
+            m1 = min(Nx, size(sensor_mask_orig, 1));
+            m2 = min(Ny, size(sensor_mask_orig, 2));
+            m3 = min(Nz, size(sensor_mask_orig, 3));
+            sensor.mask(1:m1, 1:m2, 1:m3) = double(sensor_mask_orig(1:m1, 1:m2, 1:m3));
+
+        otherwise
+            error('build_forward_bundle:Sensor', ...
+                'Unsupported sensor_placement_method: %s', CONFIG.sensor_placement_method);
+    end
+
+    if sum(sensor.mask(:)) == 0
+        error('build_forward_bundle:EmptySensor', 'Sensor mask is empty for %s.', label);
+    end
+
+    % --- k-Wave grid & medium ---
+    kgrid = kWaveGrid(Nx, dx, Ny, dy, Nz, dz);
+    maxC  = max(medium.sound_speed(:));
+    minC  = min(medium.sound_speed(medium.sound_speed > 0));
+    dt    = CONFIG.cfl_number * min([dx, dy, dz]) / maxC;
+    gridDiag = sqrt((Nx*dx)^2 + (Ny*dy)^2 + (Nz*dz)^2);
+    simTime  = 2.5 * gridDiag / minC;
+    Nt       = ceil(simTime / dt);
+    kgrid.dt = dt;
+    kgrid.Nt = Nt;
+
+    kmedium             = struct();
+    kmedium.density     = medium.density;
+    kmedium.sound_speed = medium.sound_speed;
+    kmedium.alpha_coeff = medium.alpha_coeff;
+    kmedium.alpha_power = 1.1;
+
+    if CONFIG.use_gpu
+        try
+            gpuDevice;
+            dataCast = 'gpuArray-single';
+        catch
+            dataCast = 'single';
+        end
+    else
+        dataCast = 'single';
+    end
+    inputArgs = {'Smooth', false, 'PMLInside', false, 'PMLSize', CONFIG.pml_size, ...
+                 'DataCast', dataCast, 'PlotSim', false};
+
+    % --- Forward simulation ---
+    source_fwd    = struct();
+    source_fwd.p0 = p0;
+    sensorData    = kspaceFirstOrder3D(kgrid, kmedium, source_fwd, sensor, inputArgs{:});
+    sensorData    = smooth(sensorData);
+    FS            = 1 / kgrid.dt;
+
+    % --- Pulse model: convolve, frequency response, noise, Wiener deconv ---
+    conv_kernel_sigma  = CONFIG.convolution_kernel;
+    conv_deconv_lambda = CONFIG.conv_deconv_lambda;
+
+    sigma_samples = conv_kernel_sigma / dt;
+    kernel_half   = ceil(4 * sigma_samples);
+    t_kernel      = (-kernel_half : kernel_half)';
+    gauss_kernel  = exp(-t_kernel.^2 / (2 * sigma_samples^2));
+    gauss_kernel  = gauss_kernel / sum(gauss_kernel);
+
+    sensorData_cpu = double(gather(sensorData));
+    Nt_data        = size(sensorData_cpu, 2);
+
+    H       = fft(gauss_kernel, Nt_data).';
+    H_conj  = conj(H);
+    H_power = abs(H).^2;
+
+    sensorData_conv = real(ifft(fft(sensorData_cpu, [], 2) .* H, [], 2));
+    sensorData_resp = gaussianFilter(sensorData_conv, FS, 0.35e6, 100, true);
+    noise_amp       = CONFIG.conv_noise_level * max(abs(sensorData_resp(:)));
+
+    fprintf('  [Bundle %s] forward done. Sensor [%d x %d], noise amp %.3e Pa\n', ...
+        label, size(sensorData,1), size(sensorData,2), noise_amp);
+
+    % --- Capture the bundle ---
+    bodyMask = [];
+    if isfield(sct, 'bodyMask') && isequal(size(sct.bodyMask), gridSize_orig)
+        bodyMask = double(sct.bodyMask);
+    end
+
+    B = struct();
+    B.kgrid                = kgrid;
+    B.kmedium              = kmedium;
+    B.sensor               = sensor;
+    B.inputArgs            = inputArgs;     % cell of k-Wave name/value args
+    B.p0                   = p0;
+    B.gridSize             = gridSize;
+    B.gridSize_orig        = gridSize_orig;
+    B.did_pad              = did_pad;
+    B.Nx_orig              = Nx_orig;
+    B.Ny_orig              = Ny_orig;
+    B.Nz_orig              = Nz_orig;
+    B.dx = dx; B.dy = dy; B.dz = dz; B.dt = dt;
+    B.medium_pad           = medium;
+    B.medium_orig          = medium_orig;
+    B.doseMask             = doseMask;
+    B.num_pulses           = num_pulses;
+    B.sensor_info_orig     = sensor_info_orig;
+    B.das_opts             = struct();
+    B.bodyMask             = bodyMask;
+    B.reconstruction_method         = CONFIG.reconstruction_method;
+    B.num_time_reversal_iter        = CONFIG.num_time_reversal_iter;
+    B.convergence_tol               = CONFIG.convergence_tol;
+    B.correction_factor             = CONFIG.correction_factor;
+    B.use_pressure_scale_correction = CONFIG.use_pressure_scale_correction;
+    B.mask_recon_to_dose_region     = CONFIG.mask_recon_to_dose_region;
+    B.sensorData_resp      = double(gather(sensorData_resp));
+    B.H_conj               = H_conj;
+    B.H_power              = H_power;
+    B.conv_deconv_lambda   = conv_deconv_lambda;
+    B.noise_amp            = noise_amp;
+    B.truth_dose           = doseGrid;     % on gridSize_orig, aligns with recon
+    B.spacing_mm           = spacing_mm;
+    B.gantry_angle         = gantry_angle;
+    B.pre_expand_dims      = dims_pre_expand;
+    B.embed_offset         = embed_offset;
+    B.label                = label;
+end
+
+function [medium, p0] = pad_medium_p0(medium, p0, Nx, Ny, Nz, Nx_pad, Ny_pad, Nz_pad)
+%PAD_MEDIUM_P0 Zero/water-pad medium + p0 from [Nx Ny Nz] to the padded size.
+    density_pad    = ones(Nx_pad, Ny_pad, Nz_pad) * 1000;
+    soundSpeed_pad = ones(Nx_pad, Ny_pad, Nz_pad) * 1540;
+    alphaCoeff_pad = zeros(Nx_pad, Ny_pad, Nz_pad);
+    gruneisen_pad  = zeros(Nx_pad, Ny_pad, Nz_pad);
+
+    density_pad(1:Nx, 1:Ny, 1:Nz)    = medium.density;
+    soundSpeed_pad(1:Nx, 1:Ny, 1:Nz) = medium.sound_speed;
+    if numel(medium.alpha_coeff) > 1
+        alphaCoeff_pad(1:Nx, 1:Ny, 1:Nz) = medium.alpha_coeff;
+    else
+        alphaCoeff_pad(:) = medium.alpha_coeff;
+    end
+    gruneisen_pad(1:Nx, 1:Ny, 1:Nz) = medium.gruneisen;
+
+    medium.density     = density_pad;
+    medium.sound_speed = soundSpeed_pad;
+    medium.alpha_coeff = alphaCoeff_pad;
+    medium.gruneisen   = gruneisen_pad;
+
+    p0_pad = zeros(Nx_pad, Ny_pad, Nz_pad);
+    p0_pad(1:Nx, 1:Ny, 1:Nz) = p0;
+    p0 = p0_pad;
+end
+
+function [medium, p0, doseGrid, doseMask, sct, medium_orig, ...
+          Nx_orig, Ny_orig, Nz_orig, Nx, Ny, Nz] = ...
+        apply_grid_expansion(medium, p0, doseGrid, doseMask, sct, gp, ...
+            Nx_orig, Ny_orig, Nz_orig, CONFIG)
+%APPLY_GRID_EXPANSION Water-pad the medium/p0/dose to the sensor-expanded grid,
+%  then re-run FFT-optimal padding.
+
+    density_unp    = medium.density(1:Nx_orig, 1:Ny_orig, 1:Nz_orig);
+    soundSpeed_unp = medium.sound_speed(1:Nx_orig, 1:Ny_orig, 1:Nz_orig);
+    if numel(medium.alpha_coeff) > 1
+        alphaCoeff_unp = medium.alpha_coeff(1:Nx_orig, 1:Ny_orig, 1:Nz_orig);
+    else
+        alphaCoeff_unp = medium.alpha_coeff;
+    end
+    gruneisen_unp  = medium.gruneisen(1:Nx_orig, 1:Ny_orig, 1:Nz_orig);
+    p0_unp         = p0(1:Nx_orig, 1:Ny_orig, 1:Nz_orig);
+
+    % Caller dim order: dim1=Nx, dim2=Ny, dim3=Nz -> gp.y_*->dim1, x_*->dim2, z_*->dim3.
+    Nx_exp = Nx_orig + gp.y_pre + gp.y_post;
+    Ny_exp = Ny_orig + gp.x_pre + gp.x_post;
+    Nz_exp = Nz_orig + gp.z_pre + gp.z_post;
+
+    density_exp    = ones(Nx_exp, Ny_exp, Nz_exp)  * 1000;
+    soundSpeed_exp = ones(Nx_exp, Ny_exp, Nz_exp)  * 1540;
+    alphaCoeff_exp = zeros(Nx_exp, Ny_exp, Nz_exp);
+    gruneisen_exp  = zeros(Nx_exp, Ny_exp, Nz_exp);
+    p0_exp         = zeros(Nx_exp, Ny_exp, Nz_exp);
+
+    xr = gp.y_pre + (1:Nx_orig);
+    yr = gp.x_pre + (1:Ny_orig);
+    zr = gp.z_pre + (1:Nz_orig);
+
+    density_exp(xr, yr, zr)    = density_unp;
+    soundSpeed_exp(xr, yr, zr) = soundSpeed_unp;
+    if numel(alphaCoeff_unp) > 1
+        alphaCoeff_exp(xr, yr, zr) = alphaCoeff_unp;
+    else
+        alphaCoeff_exp(:) = alphaCoeff_unp;
+    end
+    gruneisen_exp(xr, yr, zr)  = gruneisen_unp;
+    p0_exp(xr, yr, zr)         = p0_unp;
+
+    medium.density     = density_exp;
+    medium.sound_speed = soundSpeed_exp;
+    medium.alpha_coeff = alphaCoeff_exp;
+    medium.gruneisen   = gruneisen_exp;
+    p0 = p0_exp;
+
+    medium_orig = struct( ...
+        'density',     density_exp, ...
+        'sound_speed', soundSpeed_exp, ...
+        'alpha_coeff', alphaCoeff_exp, ...
+        'gruneisen',   gruneisen_exp);
+
+    doseGrid_exp = zeros(Nx_exp, Ny_exp, Nz_exp);
+    doseGrid_exp(xr, yr, zr) = doseGrid;
+    doseGrid = doseGrid_exp;
+
+    doseMask_exp = false(Nx_exp, Ny_exp, Nz_exp);
+    doseMask_exp(xr, yr, zr) = doseMask;
+    doseMask = doseMask_exp;
+
+    if isfield(sct, 'bodyMask') && isequal(size(sct.bodyMask), [Nx_orig, Ny_orig, Nz_orig])
+        body_exp = false(Nx_exp, Ny_exp, Nz_exp);
+        body_exp(xr, yr, zr) = sct.bodyMask;
+        sct.bodyMask = body_exp;
+    end
+    if isfield(sct, 'couchMask') && ~isempty(sct.couchMask) && ...
+            isequal(size(sct.couchMask), [Nx_orig, Ny_orig, Nz_orig])
+        couch_exp = false(Nx_exp, Ny_exp, Nz_exp);
+        couch_exp(xr, yr, zr) = sct.couchMask;
+        sct.couchMask = couch_exp;
+    end
+
+    Nx_orig = Nx_exp; Ny_orig = Ny_exp; Nz_orig = Nz_exp;
+
+    if CONFIG.use_grid_padding
+        Nx_pad2 = find_optimal_kwave_size(Nx_orig, CONFIG.pml_size);
+        Ny_pad2 = find_optimal_kwave_size(Ny_orig, CONFIG.pml_size);
+        Nz_pad2 = find_optimal_kwave_size(Nz_orig, CONFIG.pml_size);
+    else
+        Nx_pad2 = Nx_orig; Ny_pad2 = Ny_orig; Nz_pad2 = Nz_orig;
+    end
+
+    if ~isequal([Nx_pad2, Ny_pad2, Nz_pad2], [Nx_orig, Ny_orig, Nz_orig])
+        [medium, p0] = pad_medium_p0(medium, p0, Nx_orig, Ny_orig, Nz_orig, ...
+            Nx_pad2, Ny_pad2, Nz_pad2);
+    end
+
+    Nx = Nx_pad2; Ny = Ny_pad2; Nz = Nz_pad2;
+end
+
+% -------------------------------------------------------------------------
+%  NOISE REALIZATION + RECONSTRUCTION (parfor-safe; GPU-pinned by caller)
+% -------------------------------------------------------------------------
 
 function sd = redraw_noisy_deconv(B, seed)
 %REDRAW_NOISY_DECONV  Re-apply a fresh electronic-noise realization to the
 %  cached pre-noise sensor response, then Wiener-deconvolve the pulse kernel.
-%  Reproduces steps 3-4 of the nominal pulse model with a seeded RNG so each
-%  realization is independent and reproducible.
 %    B.sensorData_resp   pre-noise, post-frequency-response signal (CPU double)
 %    B.noise_amp         noise amplitude (= conv_noise_level * max|resp|)
 %    B.H_conj, B.H_power kernel transfer function terms
@@ -1923,7 +1242,6 @@ function sd = redraw_noisy_deconv(B, seed)
         fft(noisy, [], 2) .* B.H_conj ./ (B.H_power + B.conv_deconv_lambda), [], 2));
     sd = single(deconv);
 end
-
 
 function recon_dose = reconstruct_recon_dose(B, sensorData_measured)
 %RECONSTRUCT_RECON_DOSE  Reconstruct a dose from a (noisy, deconvolved) sensor
@@ -2077,7 +1395,6 @@ function recon_dose = reconstruct_recon_dose(B, sensorData_measured)
     end
 end
 
-
 function pr = gamma_sweep_pass_rates(reconA, reconB, crit_vec, spacing_mm)
 %GAMMA_SWEEP_PASS_RATES  Pass rate for each n%/n mm criterion between two doses.
 %  Serial over criteria (the realization loop is the parallel one). Reference =
@@ -2101,108 +1418,115 @@ function pr = gamma_sweep_pass_rates(reconA, reconB, crit_vec, spacing_mm)
     end
 end
 
+% -------------------------------------------------------------------------
+%  PLOTTING
+% -------------------------------------------------------------------------
 
-function plot_sensor_dose_planes(dose_mask, sensor_mask, spacing_mm, density, config)
-%PLOT_SENSOR_DOSE_PLANES  1x3 anatomical view of sensor geometry vs dose mask.
-%  Shows three orthogonal projections (coronal, sagittal, axial).
-%  CT density is rendered as a grayscale background (mean-projection).
-%  Dose mask (dose >= 10% max) drawn as a filled semi-transparent blue region.
-%  Sensor drawn as a solid red line/region  computed via max-projection so it
-%  always appears regardless of which slice the dose centroid falls on.
-%  This replaces the interactive 3-D isosurface view.
+function plot_gamma_pass_rate_curve(crit_n, pass_rates, label_ref, label_tgt, patient_id, ens_mean, ens_std, null_mean, null_std)
+%PLOT_GAMMA_PASS_RATE_CURVE  Pass rate vs gamma criterion (n%/n mm).
+%  crit_n      column vector of criterion values
+%  pass_rates  nominal (single-draw) pass rates in percent (NaN entries skipped)
+%  ens_mean,ens_std  optional noise-ensemble mean and std per criterion. When
+%                    provided (non-empty), error bars are overlaid as the
+%                    primary (signal) series and the nominal curve is shown
+%                    faintly.
+%  null_mean,null_std  optional null-hypothesis band (reference CT recon vs an
+%                    independent-noise recon of itself). Plotted in green as the
+%                    no-change noise floor: where the signal band falls below
+%                    the null band, the CT difference is detectable above noise.
+%  A red horizontal reference line is drawn at the 90% pass rate.
 
-    [Nx3, Ny3, Nz3] = size(dose_mask);
+    if nargin < 6, ens_mean  = []; end
+    if nargin < 7, ens_std   = []; end
+    if nargin < 8, null_mean = []; end
+    if nargin < 9, null_std  = []; end
 
-    x_ax = (1:Nx3) * spacing_mm(1);
-    y_ax = (1:Ny3) * spacing_mm(2);
-    z_ax = (1:Nz3) * spacing_mm(3);
+    crit_n     = crit_n(:);
+    pass_rates = pass_rates(:);
+    have_ens   = ~isempty(ens_mean)  && ~isempty(ens_std);
+    have_null  = ~isempty(null_mean) && ~isempty(null_std);
 
-    % Max-projections of dose mask and sensor (so features always appear)
-    dose_cor  = squeeze(any(dose_mask,   2));   % XZ  (Nx x Nz)
-    dose_sag  = squeeze(any(dose_mask,   1));   % YZ  (Ny x Nz)
-    dose_axi  = squeeze(any(dose_mask,   3));   % XY  (Nx x Ny)
+    figure('Name', 'Gamma Pass Rate vs Criterion', 'Color', 'w', ...
+        'NumberTitle', 'off', 'Position', [120, 120, 760, 470]);
+    hold on;
 
-    sens_cor  = squeeze(any(sensor_mask, 2));   % XZ
-    sens_sag  = squeeze(any(sensor_mask, 1));   % YZ
-    sens_axi  = squeeze(any(sensor_mask, 3));   % XY
+    legend_handles = gobjects(0);
+    legend_labels  = {};
 
-    % CT density background: mean-projection (DRR-like anatomical context).
-    % Soft-tissue window/level (kg/m^3) matches plot_dose_panels.
-    have_density = ~isempty(density) && isequal(size(density), size(dose_mask));
-    wl_center = 1050; wl_width = 350;
-    wl_min    = wl_center - wl_width / 2;
-    if have_density
-        ct_projs = {
-            squeeze(mean(double(density), 2))',   % Coronal  XZ
-            squeeze(mean(double(density), 1))',   % Sagittal YZ
-            squeeze(mean(double(density), 3))'    % Axial    XY
-        };
-    end
+    valid = ~isnan(pass_rates);
+    if have_ens
+        % Nominal single-draw curve shown faintly for reference.
+        h_nom = plot(crit_n(valid), pass_rates(valid), '--o', ...
+            'Color', [0.6, 0.6, 0.6], 'LineWidth', 1.0, 'MarkerSize', 4);
+        legend_handles(end+1) = h_nom; %#ok<AGROW>
+        legend_labels{end+1}  = 'Nominal (single draw)';
 
-    figure('Name', 'Sensor Placement vs Dose Mask', 'Color', 'w', ...
-        'NumberTitle', 'off', 'Position', [80, 80, 1300, 420]);
-    sgtitle(sprintf('Sensor Placement vs Dose Mask  (\\geq10%% max)   |   Sensor: %s', ...
-        config.sensor_placement_method), 'FontWeight', 'bold', 'FontSize', 11);
-
-    view_data = {
-        dose_cor', sens_cor', x_ax, z_ax, 'X (mm)', 'Z (mm)', 'Coronal  (mean-proj along Y)';
-        dose_sag', sens_sag', y_ax, z_ax, 'Y (mm)', 'Z (mm)', 'Sagittal  (mean-proj along X)';
-        dose_axi', sens_axi', x_ax, y_ax, 'X (mm)', 'Y (mm)', 'Axial  (mean-proj along Z)';
-    };
-
-    dose_color   = [0.20, 0.50, 0.90];   % blue
-    sensor_color = [0.90, 0.10, 0.10];   % red
-
-    for col = 1:3
-        ax  = subplot(1, 3, col);
-        d2d = double(view_data{col, 1});
-        s2d = double(view_data{col, 2});
-        xv  = view_data{col, 3};
-        yv  = view_data{col, 4};
-
-        % Background: CT density as grayscale, or white if unavailable
-        if have_density
-            dn     = (ct_projs{col} - wl_min) / wl_width;
-            dn     = max(0, min(1, dn));
-            bg_rgb = repmat(dn, [1, 1, 3]);
+        % Ensemble mean +/- std error bars (primary series).
+        em = ens_mean(:); es = ens_std(:);
+        vv = ~isnan(em);
+        h_ens = errorbar(crit_n(vv), em(vv), es(vv), 'b-o', 'LineWidth', 1.8, ...
+            'MarkerSize', 6, 'MarkerFaceColor', [0.2, 0.4, 1.0], 'CapSize', 8);
+        legend_handles(end+1) = h_ens; %#ok<AGROW>
+        if have_null
+            legend_labels{end+1} = sprintf('Signal: %s vs %s (mean \\pm std)', ...
+                label_ref, label_tgt);
         else
-            bg_rgb = ones([size(d2d), 3]);   % white fallback
-        end
-        image(ax, xv, yv, bg_rgb);
-        hold(ax, 'on');
-
-        % Dose mask: filled blue region
-        if any(d2d(:))
-            dose_rgb = repmat(reshape(dose_color, [1,1,3]), [size(d2d), 1]);
-            h_dose   = image(ax, xv, yv, dose_rgb);
-            h_dose.AlphaData = d2d * 0.45;
+            legend_labels{end+1} = 'Ensemble mean \pm std';
         end
 
-        % Sensor: filled red region (appears as line for planar sensors)
-        if any(s2d(:))
-            sens_rgb = repmat(reshape(sensor_color, [1,1,3]), [size(s2d), 1]);
-            h_sens   = image(ax, xv, yv, sens_rgb);
-            h_sens.AlphaData = s2d * 0.85;
+        % Annotate ensemble points with mean +/- std
+        for k = 1:numel(crit_n)
+            if vv(k)
+                text(crit_n(k), em(k) + es(k) + 1.5, ...
+                    sprintf('%.1f\\pm%.1f', em(k), es(k)), ...
+                    'HorizontalAlignment', 'center', 'FontSize', 8);
+            end
         end
+    else
+        h_nom = plot(crit_n(valid), pass_rates(valid), 'b-o', 'LineWidth', 1.8, ...
+            'MarkerSize', 6, 'MarkerFaceColor', [0.2, 0.4, 1.0]);
+        legend_handles(end+1) = h_nom; %#ok<AGROW>
+        legend_labels{end+1}  = 'Pass rate';
 
-        hold(ax, 'off');
-        axis(ax, 'xy'); axis(ax, 'image');
-        xlabel(ax, view_data{col, 5}); ylabel(ax, view_data{col, 6});
-        title(ax, view_data{col, 7}, 'FontSize', 10);
-
-        % Manual legend patches
-        hold(ax, 'on');
-        p1 = patch(ax, NaN, NaN, dose_color,   'FaceAlpha', 0.45, 'EdgeColor', 'none');
-        p2 = patch(ax, NaN, NaN, sensor_color,  'FaceAlpha', 0.85, 'EdgeColor', 'none');
-        hold(ax, 'off');
-        if col == 3
-            legend(ax, [p1, p2], {'Dose mask (>=10%)', 'Sensor'}, ...
-                'Location', 'southoutside', 'Orientation', 'horizontal', 'FontSize', 8);
+        for k = 1:numel(crit_n)
+            if valid(k)
+                text(crit_n(k), pass_rates(k) + 1.5, sprintf('%.1f%%', pass_rates(k)), ...
+                    'HorizontalAlignment', 'center', 'FontSize', 8);
+            end
         end
     end
+
+    % Null-hypothesis band: reference CT recon vs itself (independent noise).
+    % This is the no-change noise floor; the signal series dropping below it
+    % marks where the CT difference becomes detectable above noise.
+    if have_null
+        nm = null_mean(:); ns = null_std(:);
+        nv = ~isnan(nm);
+        null_color = [0.1, 0.6, 0.2];
+        h_null = errorbar(crit_n(nv), nm(nv), ns(nv), '-s', ...
+            'Color', null_color, 'LineWidth', 1.6, 'MarkerSize', 6, ...
+            'MarkerFaceColor', null_color, 'CapSize', 8);
+        legend_handles(end+1) = h_null; %#ok<AGROW>
+        legend_labels{end+1}  = sprintf('Null: %s vs itself (mean \\pm std)', label_ref);
+    end
+
+    % 90% pass-rate reference line (red)
+    yline(90, 'r-', '90% pass rate', 'LineWidth', 1.8, ...
+        'LabelHorizontalAlignment', 'left', ...
+        'LabelVerticalAlignment', 'bottom', 'FontSize', 9);
+
+    hold off;
+    grid on;
+    xlim([min(crit_n) - 0.5, max(crit_n) + 0.5]);
+    ylim([0, 105]);
+    xticks(crit_n);
+    xlabel('Gamma criterion  (n%/n mm)');
+    ylabel('Gamma pass rate (%)');
+    title(sprintf('Gamma Pass Rate vs Criterion   |   Patient %s\n%s vs %s', ...
+        patient_id, label_ref, label_tgt), 'FontWeight', 'bold', 'FontSize', 11);
+    legend(legend_handles, legend_labels, 'Location', 'southeast', 'FontSize', 8);
     drawnow;
 end
-
 
 function plot_dose_panels(original, recon, sensor_mask, density, spacing_mm, titleStr, rowLabels, smooth_sigma)
 %PLOT_DOSE_PANELS 2x3 dose comparison: coronal, sagittal, axial.
@@ -2241,8 +1565,6 @@ function plot_dose_panels(original, recon, sensor_mask, density, spacing_mm, tit
     cmap_jet = jet(256);
 
     % Soft-tissue window/level for the density background (kg/m^3).
-    % W=350 / L=1050 keeps soft tissue in the mid-grey band and clips
-    % bone (~1900 kg/m^3) to white, preventing bone from dominating the display.
     wl_center = 1050;          % kg/m^3  (soft tissue ~1000-1080)
     wl_width  = 350;           % kg/m^3
     wl_min    = wl_center - wl_width / 2;   % 875  kg/m^3
@@ -2338,201 +1660,9 @@ function plot_dose_panels(original, recon, sensor_mask, density, spacing_mm, tit
     drawnow;
 end
 
-function plot_convergence_history(conv_max_pressure, conv_rel_change, num_iters, tol, p0_max_orig)
-%PLOT_CONVERGENCE_HISTORY p0 convergence over TR iterations.
-%  Left axis:  max reconstructed p0 per iteration (blue).
-%              Dashed black line = max of original p0 distribution (reference).
-%  Right axis: relative change between iterations (red, log-scale).
-
-    iters   = 1:num_iters;
-    p_vals  = conv_max_pressure(iters);
-    rc_vals = conv_rel_change(iters);
-
-    figure('Name', 'p0 Convergence', 'Color', 'w', ...
-        'NumberTitle', 'off', 'Position', [150, 520, 720, 390]);
-
-    yyaxis left;
-    plot(iters, p_vals, 'b-o', 'LineWidth', 1.8, 'MarkerSize', 5, ...
-        'MarkerFaceColor', [0.2, 0.4, 1.0]);
-    hold on;
-    if nargin >= 5 && ~isempty(p0_max_orig) && p0_max_orig > 0
-        yline(p0_max_orig, 'k--', 'LineWidth', 1.8, ...
-            'Label', sprintf('p_{0}^{orig} max = %.2e Pa', p0_max_orig), ...
-            'LabelHorizontalAlignment', 'left', ...
-            'LabelVerticalAlignment', 'bottom', 'FontSize', 8);
-    end
-    hold off;
-    ylabel('Max Reconstructed p_0 (Pa)', 'Color', [0.2, 0.4, 1.0]);
-    top_val = max([max(p_vals), p0_max_orig]) * 1.20;
-    if top_val <= 0, top_val = 1; end
-    ylim([0, top_val]);
-
-    yyaxis right;
-    valid = ~isnan(rc_vals);
-    if any(valid)
-        semilogy(iters(valid), rc_vals(valid), 'r-s', 'LineWidth', 1.8, ...
-            'MarkerSize', 5, 'MarkerFaceColor', [0.9, 0.1, 0.1]);
-        hold on;
-        yline(tol, 'k--', sprintf('tol = %.0e', tol), 'LineWidth', 1.2, ...
-            'LabelHorizontalAlignment', 'right');
-        hold off;
-    end
-    ylabel('Relative Change ||p_n - p_{n-1}|| / ||p_{n-1}||', ...
-        'Color', [0.8, 0.1, 0.1]);
-
-    xlabel('TR Iteration');
-    title(sprintf('p_0 Convergence  (%d/%d iterations)', num_iters, numel(conv_max_pressure)), ...
-        'FontWeight', 'bold');
-    xlim([0.5, num_iters + 0.5]);
-    grid on;
-    drawnow;
-end
-
-
-function plot_gamma_and_error_axial(gamma_results, original, recon, sensor_mask, cz)
-%PLOT_GAMMA_AND_ERROR_AXIAL 1x4 axial figure:
-%  gamma 10/10 | gamma 5/5 | gamma 3/3 | absolute dose error.
-%  Sensor contour in red.  Slice at cz (max-dose axial index).
-
-    gridSize = size(original);
-    cz = max(1, min(gridSize(3), cz));
-
-    if ~isequal(size(sensor_mask), gridSize)
-        sensor_mask = sensor_mask(1:gridSize(1), 1:gridSize(2), 1:gridSize(3));
-    end
-
-    eval_mask  = gamma_results.eval_mask;
-    maps       = gamma_results.maps;
-    criteria   = gamma_results.criteria;
-    pass_rates = gamma_results.pass_rates;
-    nCrit      = size(criteria, 1);
-
-    figure('Name', 'Gamma & Absolute Error  Axial', 'Color', 'w', ...
-        'NumberTitle', 'off', 'Position', [50, 300, 1400, 370]);
-    sgtitle(sprintf('Axial Plane (Z = %d voxel)  Gamma Index & Absolute Error', cz), ...
-        'FontWeight', 'bold', 'FontSize', 11);
-
-    gamma_clim   = [0, 2];
-    sensor_slice = squeeze(sensor_mask(:, :, cz))';
-
-    % Gamma panels
-    for g = 1:nCrit
-        ax = subplot(1, 4, g);
-        gmap = maps{g};
-        if ~isempty(gmap)
-            gmap_disp = double(gmap);
-            gmap_disp(~eval_mask) = NaN;
-            slice2d = squeeze(gmap_disp(:, :, cz))';
-        else
-            slice2d = nan(gridSize(2), gridSize(1));
-        end
-
-        imagesc(ax, slice2d, gamma_clim);
-        axis(ax, 'xy'); axis(ax, 'image');
-        colormap(ax, gamma_colormap_gyr());
-        cb = colorbar(ax); cb.Label.String = '\gamma';
-        caxis(ax, gamma_clim);
-
-        hold(ax, 'on');
-        if any(sensor_slice(:))
-            contour(ax, sensor_slice, [0.5, 0.5], 'r-', 'LineWidth', 2);
-        end
-        hold(ax, 'off');
-
-        pr_str = 'FAILED';
-        if ~isnan(pass_rates(g))
-            pr_str = sprintf('%.1f%%', pass_rates(g));
-        end
-        xlabel(ax, 'X (voxel)'); ylabel(ax, 'Y (voxel)');
-        title(ax, sprintf('%s\nPass rate: %s', criteria{g, 3}, pr_str));
-    end
-
-    % Absolute error panel
-    ax = subplot(1, 4, 4);
-    orig_slice  = squeeze(original(:, :, cz))';
-    recon_slice = squeeze(recon(:, :, cz))';
-    err_slice   = abs(recon_slice - orig_slice);
-    max_err     = max(err_slice(:));
-    if max_err == 0, max_err = 1; end
-
-    imagesc(ax, err_slice, [0, max_err]);
-    axis(ax, 'xy'); axis(ax, 'image');
-    colormap(ax, 'hot');
-    cb = colorbar(ax); cb.Label.String = '|Error| (Gy)';
-
-    hold(ax, 'on');
-    if any(sensor_slice(:))
-        contour(ax, sensor_slice, [0.5, 0.5], 'r-', 'LineWidth', 2);
-    end
-    hold(ax, 'off');
-
-    xlabel(ax, 'X (voxel)'); ylabel(ax, 'Y (voxel)');
-    title(ax, sprintf('|Recon - Original|\nMax: %.4f Gy', max_err));
-
-    drawnow;
-end
-
-
-function cmap = gamma_colormap_gyr()
-%GAMMA_COLORMAP_GYR Green-yellow-red colormap for gamma index.
-%  Green = pass (gamma <= 1),  Red = fail (gamma > 1).
-    n    = 256;
-    half = round(n / 2);
-    rest = n - half;
-    r = [linspace(0, 1, half)'; ones(rest, 1)];
-    g = [linspace(0.85, 1, half)'; linspace(1, 0, rest)'];
-    b = zeros(n, 1);
-    cmap = [r, g, b];
-end
-
-
-%  
-
-function [fig_live, ax_recon, hImg_recon, hLine_max] = ...
-        setup_live_recon_figure(p0, Nx_orig, Ny_orig, cz_live, N_iter, CONFIG)
-%SETUP_LIVE_RECON_FIGURE  Build the 1x3 live reconstruction figure used by
-%  both the 'tr' and 'hybrid' branches.
-%  Panels: (1) initial p0 axial slice, (2) current recon p0, (3) live max-p convergence.
-
-    fig_live = figure('Name', 'Live Reconstruction', 'Color', 'w', ...
-        'NumberTitle', 'off', 'Position', [100, 100, 1060, 440]);
-
-    % Panel 1  initial p0 (axial slice, fixed reference)
-    ax_p0 = subplot(1, 3, 1);
-    p0_orig_slice = squeeze(p0(1:Nx_orig, 1:Ny_orig, cz_live))';
-    imagesc(ax_p0, p0_orig_slice);
-    axis(ax_p0, 'xy'); axis(ax_p0, 'image');
-    colormap(ax_p0, 'hot'); colorbar(ax_p0);
-    clim_p0 = [0, max(p0_orig_slice(:)) + eps];
-    caxis(ax_p0, clim_p0);
-    xlabel(ax_p0, 'X (voxel)'); ylabel(ax_p0, 'Y (voxel)');
-    title(ax_p0, sprintf('Initial p_0   (Z=%d)', cz_live), 'FontWeight', 'bold');
-
-    % Panel 2  current reconstructed p0 (updates each iteration)
-    ax_recon = subplot(1, 3, 2);
-    hImg_recon = imagesc(ax_recon, zeros(Ny_orig, Nx_orig));
-    axis(ax_recon, 'xy'); axis(ax_recon, 'image');
-    colormap(ax_recon, 'hot'); colorbar(ax_recon);
-    xlabel(ax_recon, 'X (voxel)'); ylabel(ax_recon, 'Y (voxel)');
-    title(ax_recon, 'Reconstructed p_0   (iter 0)', 'FontWeight', 'bold');
-
-    % Panel 3  live max-pressure convergence
-    ax_conv = subplot(1, 3, 3);
-    hLine_max = plot(ax_conv, NaN, NaN, 'b-o', 'LineWidth', 1.6, ...
-        'MarkerSize', 4, 'MarkerFaceColor', [0.2, 0.4, 1.0]);
-    xlabel(ax_conv, 'Iteration');
-    ylabel(ax_conv, 'Max Reconstructed p_0 (Pa)');
-    title(ax_conv, 'Convergence (live)', 'FontWeight', 'bold');
-    grid(ax_conv, 'on');
-    xlim(ax_conv, [0.5, N_iter + 0.5]);
-
-    sgtitle(fig_live, sprintf( ...
-        'Live Reconstruction (%s)   Axial Z=%d   |   Patient %s', ...
-        CONFIG.reconstruction_method, cz_live, CONFIG.patient_id), ...
-        'FontWeight', 'bold', 'FontSize', 11);
-    drawnow;
-end
-
+% -------------------------------------------------------------------------
+%  ACOUSTIC MEDIUM
+% -------------------------------------------------------------------------
 
 function medium = create_medium(sct, config)
 %CREATE_MEDIUM Build acoustic medium from SCT data and tissue model config.
@@ -2606,7 +1736,6 @@ function medium = create_medium(sct, config)
 
     medium.grid_size = gridSize;
 end
-
 
 function tables = define_tissue_tables()
 %DEFINE_TISSUE_TABLES Tissue property lookup tables for HU thresholding.
