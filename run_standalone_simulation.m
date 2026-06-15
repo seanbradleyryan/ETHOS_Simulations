@@ -329,7 +329,48 @@ end
 %% ========================= CREATE ACOUSTIC MEDIUM ========================
 
 fprintf('[3/7] Creating acoustic medium (method: %s)...\n', CONFIG.gruneisen_method);
-medium = create_medium(sct, CONFIG);
+
+% Tissue assignment comes from the shared create_acoustic_medium (the same
+% function the pipeline uses), which carries the threshold_2 air row.
+CONFIG.tissue_tables = define_tissue_tables();
+% Map the standalone uniform-medium config into the uniform table so the
+% 'uniform' method reproduces the previous create_medium behavior.
+CONFIG.tissue_tables.uniform = struct( ...
+    'density',     CONFIG.uniform_density, ...
+    'sound_speed', CONFIG.uniform_sound_speed, ...
+    'alpha_coeff', CONFIG.uniform_alpha_coeff, ...
+    'alpha_power', 1.1, ...
+    'gruneisen',   CONFIG.uniform_gruneisen);
+
+medium = create_acoustic_medium(sct, CONFIG);
+
+% Standalone-only overrides previously applied inside create_medium: the
+% force-uniform sensitivity toggles, then force the coupling bath (outside the
+% body / couch) to the uniform medium.
+gs = medium.grid_size;
+if CONFIG.force_uniform_density
+    medium.density = ones(gs) * CONFIG.uniform_density;
+end
+if CONFIG.force_uniform_sound_speed
+    medium.sound_speed = ones(gs) * CONFIG.uniform_sound_speed;
+end
+if CONFIG.force_uniform_attenuation
+    medium.alpha_coeff = ones(gs) * CONFIG.uniform_alpha_coeff;
+    medium.alpha_power = 1.1;
+end
+if CONFIG.force_uniform_gruneisen
+    medium.gruneisen = ones(gs) * CONFIG.uniform_gruneisen;
+end
+if isfield(sct, 'bodyMask')
+    outside_body = ~logical(sct.bodyMask);
+    if isfield(sct, 'couchMask')
+        outside_body = outside_body | logical(sct.couchMask);
+    end
+    medium.density(outside_body)     = CONFIG.uniform_density;
+    medium.sound_speed(outside_body) = CONFIG.uniform_sound_speed;
+    medium.alpha_coeff(outside_body) = CONFIG.uniform_alpha_coeff;
+    medium.gruneisen(outside_body)   = CONFIG.uniform_gruneisen;
+end
 
 fprintf('       Density range:     [%.0f, %.0f] kg/m^3\n', min(medium.density(:)), max(medium.density(:)));
 fprintf('       Sound speed range: [%.0f, %.0f] m/s\n',    min(medium.sound_speed(:)), max(medium.sound_speed(:)));
@@ -1221,6 +1262,11 @@ else
     recon_dose = reconDosePerPulse * num_pulses .* double(doseMask) .* body_mask_plot;
 end
 
+% Mask air pockets: air-classified voxels (density ~1.2 kg/m^3, assigned only
+% inside the body for threshold_2) carry no real PA dose signal and would
+% otherwise reconstruct as hotspots. Zero them from the final dose.
+recon_dose(medium.density < 100) = 0;
+
 fprintf('       Reconstructed dose: [%.4f, %.4f] Gy\n', min(recon_dose(:)), max(recon_dose(:)));
 
 %% Crop p0 to original size (if padded)
@@ -1901,80 +1947,6 @@ function [fig_live, ax_recon, hImg_recon, hLine_max] = ...
 end
 
 
-function medium = create_medium(sct, config)
-%CREATE_MEDIUM Build acoustic medium from SCT data and tissue model config.
-
-    HU       = double(sct.cubeHU);
-    gridSize = size(HU);
-    tables   = define_tissue_tables();
-
-    switch lower(config.gruneisen_method)
-        case 'uniform'
-            medium.density     = ones(gridSize) * config.uniform_density;
-            medium.sound_speed = ones(gridSize) * config.uniform_sound_speed;
-            medium.alpha_coeff = ones(gridSize) * config.uniform_alpha_coeff;
-            medium.alpha_power = 1.1;
-            medium.gruneisen   = ones(gridSize) * config.uniform_gruneisen;
-
-        case {'threshold_1', 'threshold_2'}
-            T          = tables.(config.gruneisen_method);
-            nTissues   = length(T.tissue_names);
-            boundaries = T.hu_boundaries;
-
-            medium.density     = ones(gridSize) * 1000;
-            medium.sound_speed = ones(gridSize) * 1540;
-            medium.alpha_coeff = ones(gridSize) * 0.5;
-            medium.alpha_power = 1.1;
-            medium.gruneisen   = ones(gridSize) * 0.11;
-
-            for t = 1:nTissues
-                mask = (HU >= boundaries(t)) & (HU < boundaries(t+1));
-                medium.density(mask)     = T.density(t);
-                medium.sound_speed(mask) = T.sound_speed(t);
-                medium.alpha_coeff(mask) = T.alpha_coeff(t);
-                medium.gruneisen(mask)   = T.gruneisen(t);
-            end
-
-            fprintf('       Tissue model: %s (%d tissues)\n', config.gruneisen_method, nTissues);
-            for t = 1:nTissues
-                mask = (HU >= boundaries(t)) & (HU < boundaries(t+1));
-                fprintf('         %-12s: %7d voxels (%.1f%%)\n', ...
-                    T.tissue_names{t}, sum(mask(:)), 100 * sum(mask(:)) / numel(HU));
-            end
-
-        otherwise
-            error('Unknown gruneisen_method: %s', config.gruneisen_method);
-    end
-
-    if config.force_uniform_density
-        medium.density = ones(gridSize) * config.uniform_density;
-    end
-    if config.force_uniform_sound_speed
-        medium.sound_speed = ones(gridSize) * config.uniform_sound_speed;
-    end
-    if config.force_uniform_attenuation
-        medium.alpha_coeff = ones(gridSize) * config.uniform_alpha_coeff;
-        medium.alpha_power = 1.1;
-    end
-    if config.force_uniform_gruneisen
-        medium.gruneisen = ones(gridSize) * config.uniform_gruneisen;
-    end
-
-    if isfield(sct, 'bodyMask')
-        outside_body = ~logical(sct.bodyMask);
-        if isfield(sct, 'couchMask')
-            outside_body = outside_body | logical(sct.couchMask);
-        end
-        medium.density(outside_body)     = config.uniform_density;
-        medium.sound_speed(outside_body) = config.uniform_sound_speed;
-        medium.alpha_coeff(outside_body) = config.uniform_alpha_coeff;
-        medium.gruneisen(outside_body)   = config.uniform_gruneisen;
-    end
-
-    medium.grid_size = gridSize;
-end
-
-
 function tables = define_tissue_tables()
 %DEFINE_TISSUE_TABLES Tissue property lookup tables for HU thresholding.
 
@@ -1995,4 +1967,14 @@ function tables = define_tissue_tables()
     tables.threshold_2.alpha_coeff   = [0.0022, 0.48, 0.5,         10];
     tables.threshold_2.alpha_power   = [2.0,    1.5,  1.1,         1.0];
     tables.threshold_2.gruneisen     = [0.11,   0.7,  1.0,         1.0];
+    % Real air row (applied only to low-HU voxels INSIDE the body contour;
+    % outside-body low-HU stays water for sensor coupling). gruneisen = 0 so
+    % air generates no PA signal; these voxels are masked from the recon dose.
+    tables.threshold_2.air_hu_threshold = -300;
+    tables.threshold_2.air = struct( ...
+        'density',     1.2, ...
+        'sound_speed', 343, ...
+        'alpha_coeff', 0, ...
+        'alpha_power', 1.0, ...
+        'gruneisen',   0);
 end

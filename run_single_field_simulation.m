@@ -1008,6 +1008,11 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
         recon_dose = reconDosePerPulse * num_pulses .* body_mask_plot;
     end
 
+    % Mask air pockets: air-classified voxels (density ~1.2 kg/m^3, assigned
+    % only inside the body for threshold_2) carry no real PA dose signal and
+    % would otherwise reconstruct as hotspots. Zero them from the final dose.
+    recon_dose(medium.density < 100) = 0;
+
     fprintf('        Reconstructed dose: [%.4f, %.4f] Gy\n', ...
         min(recon_dose(:)), max(recon_dose(:)));
 

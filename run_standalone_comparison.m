@@ -1272,6 +1272,11 @@ else
     recon_dose = reconDosePerPulse * num_pulses .* double(doseMask) .* body_mask_plot;
 end
 
+% Mask air pockets: air-classified voxels (density ~1.2 kg/m^3, assigned only
+% inside the body for threshold_2) carry no real PA dose signal and would
+% otherwise reconstruct as hotspots. Zero them from the final dose.
+recon_dose(medium.density < 100) = 0;
+
 fprintf('       Reconstructed dose: [%.4f, %.4f] Gy\n', min(recon_dose(:)), max(recon_dose(:)));
 
 %% Crop p0 to original size (if padded)
@@ -2036,6 +2041,19 @@ function medium = create_medium(sct, config)
                     T.tissue_names{t}, sum(mask(:)), 100 * sum(mask(:)) / numel(HU));
             end
 
+            % Air pockets (inside body only): assign real air acoustics to
+            % low-HU voxels within the body contour. Outside the body, low-HU
+            % stays water for sensor coupling. gruneisen = 0 -> no PA signal.
+            if isfield(T, 'air') && isfield(T, 'air_hu_threshold') && isfield(sct, 'bodyMask')
+                airMask = (HU < T.air_hu_threshold) & logical(sct.bodyMask);
+                medium.density(airMask)     = T.air.density;
+                medium.sound_speed(airMask) = T.air.sound_speed;
+                medium.alpha_coeff(airMask) = T.air.alpha_coeff;
+                medium.gruneisen(airMask)   = T.air.gruneisen;
+                fprintf('         %-12s: %7d voxels (HU < %.0f, in body)\n', ...
+                    'Air', sum(airMask(:)), T.air_hu_threshold);
+            end
+
         otherwise
             error('Unknown gruneisen_method: %s', config.gruneisen_method);
     end
@@ -2089,4 +2107,14 @@ function tables = define_tissue_tables()
     tables.threshold_2.alpha_coeff   = [0.0022, 0.48, 0.5,         10];
     tables.threshold_2.alpha_power   = [2.0,    1.5,  1.1,         1.0];
     tables.threshold_2.gruneisen     = [0.11,   0.7,  1.0,         1.0];
+    % Real air row (applied only to low-HU voxels INSIDE the body contour;
+    % outside-body low-HU stays water for sensor coupling). gruneisen = 0 so
+    % air generates no PA signal; these voxels are masked from the recon dose.
+    tables.threshold_2.air_hu_threshold = -300;
+    tables.threshold_2.air = struct( ...
+        'density',     1.2, ...
+        'sound_speed', 343, ...
+        'alpha_coeff', 0, ...
+        'alpha_power', 1.0, ...
+        'gruneisen',   0);
 end

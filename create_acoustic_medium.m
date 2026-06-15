@@ -13,10 +13,18 @@ function medium = create_acoustic_medium(sct_resampled, config)
 %           .cubeHU       - 3D array of Hounsfield Units
 %           .spacing      - [dx, dy, dz] in mm
 %           .dimensions   - [nx, ny, nz]
+%           .bodyMask     - 3D logical (optional). Required for the threshold_2
+%                           air row: air acoustics are assigned ONLY to low-HU
+%                           voxels inside the body. Outside the body, low-HU
+%                           voxels stay water for sensor coupling.
 %       config - Configuration struct:
 %           .gruneisen_method  - 'uniform' | 'threshold_1' | 'threshold_2'
 %           .tissue_tables     - Tissue property lookup tables (from
-%                                define_tissue_tables() in master pipeline)
+%                                define_tissue_tables() in master pipeline).
+%                                A threshold table may carry an '.air' row and
+%                                '.air_hu_threshold' scalar (threshold_2 does);
+%                                if so, in-body air pockets are assigned real
+%                                air properties (gruneisen 0 -> no PA signal).
 %
 %   OUTPUTS:
 %       medium - Struct with fields:
@@ -139,6 +147,30 @@ function medium = create_acoustic_medium(sct_resampled, config)
                 alphaCoeff(unassigned)    = 0.0022;
                 alphaPowerArr(unassigned) = 2.0;
                 gruneisenArr(unassigned)  = 0.11;
+            end
+
+            % --- Air pockets (inside body only) ---
+            % When the table carries an air row, assign real air acoustics to
+            % low-HU voxels INSIDE the body contour. Outside the body, low-HU
+            % voxels stay water so the sensor-coupling bath is not turned into
+            % air. Air gruneisen = 0, so air generates no forward PA signal.
+            if isfield(tables, 'air') && isfield(tables, 'air_hu_threshold')
+                if isfield(sct_resampled, 'bodyMask') && ~isempty(sct_resampled.bodyMask) ...
+                        && isequal(size(sct_resampled.bodyMask), gridSize)
+                    airMask = (ctCube < tables.air_hu_threshold) & logical(sct_resampled.bodyMask);
+                    nAir    = sum(airMask(:));
+                    if nAir > 0
+                        density(airMask)       = tables.air.density;
+                        soundSpeed(airMask)    = tables.air.sound_speed;
+                        alphaCoeff(airMask)    = tables.air.alpha_coeff;
+                        alphaPowerArr(airMask) = tables.air.alpha_power;
+                        gruneisenArr(airMask)  = tables.air.gruneisen;
+                        fprintf('      %-12s (HU < %5.0f, in body): %8d voxels (%5.1f%%)\n', ...
+                            'Air', tables.air_hu_threshold, nAir, 100 * nAir / numel(ctCube));
+                    end
+                else
+                    fprintf('      [Air] No matching bodyMask; low-HU voxels left as water (coupling).\n');
+                end
             end
 
             % k-Wave uses a scalar alpha_power; compute weighted mean

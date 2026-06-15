@@ -2,26 +2,23 @@
 
 ## Claude Code Context
 
-### Loading Rules
+### Context Loading (MANDATORY — check before every first response)
 
-When a user or file contents indicate a specific domain, load the relevant context based on the below description. 
-To load a context file, ask the user: "Should I load `claude-[domain].md` for better context?" 
-Or if it's obvious from the code/task, load it proactively and mention it.
-Then read and incorporate that file's guidelines into your responses.
+Scan the user's first message for these keywords. If matched, read that file BEFORE responding. Do NOT ask — just read it silently and proceed.
 
-### How to Trigger Loading
-
-You can:
-1. **Explicitly ask the user** ("Looks like Simulation work—should I load the simulation context?")
-2. **Load proactively** when you detect the domain (then say "I've loaded `claude-PIPELINE_CONTEXT.md` for context")
-3. **Have the user request it** ("Load the DICOM context")
+| Keywords in message | File to read |
+|---|---|
+| simulate, k-Wave, kgrid, sensor, acoustic, forward sim, run_single, run_standalone, pipeline_simulate | `CLAUDE-SIMULATION_CONTEXT.md` |
+| RayStation, RS script, scripting, IronPython | `CLAUDE-RayStation.md` |
+| DICOM, MLC, segment, RTPLAN, RT struct, sort, explode | `CLAUDE-DICOM_CONTEXT.md` |
+| pipeline, step table, orchestrator, workflow, load_recon | `CLAUDE-PIPELINE_CONTEXT.md` |
 
 ### Context Files
 
 > - `CLAUDE-PIPELINE_CONTEXT.md` — step table, orchestrators, supporting files, full workflow
 > - `CLAUDE-SIMULATION_CONTEXT.md` — k-Wave specifics, tissue models, sensor design (for simulation files)
 > - `CLAUDE-DICOM_CONTEXT.md` — DICOM reference chains, MLC correction, segment explosion (for DICOM steps)
-> - `CLAUDE-RayStation.md` — RayStation Scripting guidelines for step 1. 
+> - `CLAUDE-RayStation.md` — RayStation Scripting guidelines for step 1.
 
 ## MATLAB Editing Rules
 - Do NOT run Python scripts or bash commands to verify or analyze `.m` files
@@ -155,6 +152,26 @@ A = load_recon_dose_data('1194203','Session_1',config,'Mode','set','PlanType','a
 Reuses `compute_sim_config_hash`, `list_processed_field_doses`, and `load_field_dose_file`. Reads
 recon outputs from `SimulationResults/[PatientID]/[Session]/[method]/` (`<base>_recon_<hash>.mat`,
 `total_recon_dose_<hash>.mat`) and RayStation/CBCT inputs from `RayStationFiles/[PatientID]/[Session]/processed/`.
+
+### `study_pass_rates_individual.m` — per-dose batch gamma analysis
+
+Top-level script (editable `CONFIG` block) that runs gamma pass-rate analysis for an **arbitrary list**
+of dose files (`CONFIG.dose_filenames`). Each file selects a beam/segment; the script loads that field's
+pre-computed reconstruction on **both** CT images (CT_1 and CT_3) plus the RayStation truth via
+`load_recon_dose_data` (`Mode='set'`) — no k-Wave needed except for the optional ensemble. Per dose it
+runs two independently toggleable analyses:
+
+- **A1** — recon vs its own RayStation truth (CT_1): per-dose detector accuracy.
+- **A2** — CT_1 recon vs CT_3 recon: adapted-vs-reference change detection, with an optional
+  **noise-ensemble null** (forward sim once → redraw noise → reconstruct ×N → gamma vs the original
+  CT_1 recon) overlaid as the no-change noise floor.
+
+Each analysis emits (gated by `CONFIG.enable.{A1,A2,dose_panels,sensor_view,noise_ensemble}`): a gamma
+pass-rate vs `n%/n mm` chart, a 3-panel axial figure (volA | volB | signed difference) at the truth
+max-dose slice, and a 10%-dose-area + sensor-model view. Gamma sweeps run as one flattened `parfor` over
+all `(dose × analysis × criterion)` jobs; the ensemble runs `parfor` over realizations with one GPU per
+worker. Depends on `load_recon_dose_data`, `CalcGamma`, and `determine_sensor_mask`. See
+`CLAUDE-SIMULATION_CONTEXT.md` for the full method. (Remote/HIPAA execution; do not run locally.)
 
 ## Visualization Preferences
 

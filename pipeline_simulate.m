@@ -582,6 +582,16 @@ function tables = define_tissue_tables()
     tables.threshold_2.alpha_coeff   = [0.0022, 0.48, 0.5,         10];
     tables.threshold_2.alpha_power   = [2.0,    1.5,  1.1,         1.0];
     tables.threshold_2.gruneisen     = [0.11,   0.7,  1.0,         1.0];
+    % Real air row (applied only to low-HU voxels INSIDE the body contour;
+    % outside-body low-HU stays water for sensor coupling). gruneisen = 0 so
+    % air generates no PA signal; these voxels are masked from the recon dose.
+    tables.threshold_2.air_hu_threshold = -300;
+    tables.threshold_2.air = struct( ...
+        'density',     1.2, ...
+        'sound_speed', 343, ...
+        'alpha_coeff', 0, ...
+        'alpha_power', 1.0, ...
+        'gruneisen',   0);
 
     % UNIFORM: single water-like medium everywhere
     tables.uniform = struct();
