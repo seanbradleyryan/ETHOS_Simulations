@@ -49,6 +49,7 @@ CONFIG.gruneisen_method = 'threshold_2';
 CONFIG.dose_per_pulse_cGy       = 0.16;   % cGy per LINAC pulse
 CONFIG.pml_size                 = 10;     % PML thickness (voxels)
 CONFIG.cfl_number               = 0.3;    % CFL stability criterion
+CONFIG.Nt_scaling               = 6;      % >0: when air sets minC, divide Nt by this to shorten recording (0 = off)
 CONFIG.use_gpu                  = true;   % GPU acceleration
 CONFIG.num_time_reversal_iter   = 5;      % Time-reversal iterations per field
 

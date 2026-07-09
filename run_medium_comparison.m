@@ -37,6 +37,7 @@ CONFIG.meterset           = 140;    % Monitor units
 CONFIG.dose_per_pulse_cGy = 0.16;  % cGy per LINAC pulse
 CONFIG.pml_size           = 10;    % PML thickness in voxels
 CONFIG.cfl_number         = 0.3;   % CFL stability number
+CONFIG.Nt_scaling         = 6;     % >0: when air sets minC, divide Nt by this to shorten recording (0 = off)
 CONFIG.use_gpu            = true;  % GPU acceleration
 CONFIG.max_tr_iter        = 10;    % Max iterative TR iterations
 CONFIG.conv_tol           = 0.01;  % 1% relative-change convergence threshold
@@ -222,6 +223,20 @@ for m = 1:4
     dt      = CONFIG.cfl_number * min([dx, dy, dz]) / maxC;
     diagLen = sqrt((Nx*dx)^2 + (Ny*dy)^2 + (Nz*dz)^2);
     Nt      = ceil(2.5 * diagLen / minC / dt);
+
+    % Nt_scaling: air (~343 m/s) is the slowest tissue, so it sets minC and
+    % inflates Nt. When air drives minC, shorten the recording length by
+    % CONFIG.Nt_scaling (0 = disabled).
+    if isfield(CONFIG, 'Nt_scaling') && CONFIG.Nt_scaling ~= 0
+        air_c = 343;
+        if isfield(CONFIG, 'tissue_tables') && isfield(CONFIG.tissue_tables, 'threshold_2') ...
+                && isfield(CONFIG.tissue_tables.threshold_2, 'air')
+            air_c = CONFIG.tissue_tables.threshold_2.air.sound_speed;
+        end
+        if minC <= air_c
+            Nt = max(1, ceil(Nt / CONFIG.Nt_scaling));
+        end
+    end
 
     kgrid = kWaveGrid(Nx, dx, Ny, dy, Nz, dz);
     kgrid.dt = dt;

@@ -78,6 +78,7 @@ CONFIG.dose_per_pulse_cGy     = 0.16;
 CONFIG.meterset               = 140;
 CONFIG.pml_size               = 10;
 CONFIG.cfl_number             = 0.3;
+CONFIG.Nt_scaling             = 6;     % >0: when air sets minC, divide Nt by this to shorten the recording (0 = disabled)
 CONFIG.use_gpu                = true;
 CONFIG.correction_factor           = 1.9;
 %CONFIG.correction_factor = .0228; 
@@ -802,6 +803,20 @@ dt   = CONFIG.cfl_number * min([dx, dy, dz]) / maxC;
 gridDiag = sqrt((Nx*dx)^2 + (Ny*dy)^2 + (Nz*dz)^2);
 simTime  = 2.5 * gridDiag / minC;
 Nt       = ceil(simTime / dt);
+
+% Nt_scaling: air (~343 m/s) is the slowest tissue, so it sets minC and
+% inflates simTime/Nt. When air drives minC, shorten the recording length
+% by CONFIG.Nt_scaling (0 = disabled).
+if isfield(CONFIG, 'Nt_scaling') && CONFIG.Nt_scaling ~= 0
+    air_c = 343;
+    if isfield(CONFIG, 'tissue_tables') && isfield(CONFIG.tissue_tables, 'threshold_2') ...
+            && isfield(CONFIG.tissue_tables.threshold_2, 'air')
+        air_c = CONFIG.tissue_tables.threshold_2.air.sound_speed;
+    end
+    if minC <= air_c
+        Nt = max(1, ceil(Nt / CONFIG.Nt_scaling));
+    end
+end
 
 kgrid.dt = dt;
 kgrid.Nt = Nt;

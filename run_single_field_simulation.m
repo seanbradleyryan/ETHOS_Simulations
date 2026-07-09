@@ -664,6 +664,21 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
     simTime  = 2.5 * gridDiag / minC;
     Nt       = ceil(simTime / dt);
 
+    % Nt_scaling: air (~343 m/s) is the slowest tissue, so it sets minC and
+    % inflates simTime/Nt. When air drives minC, shorten the recording length
+    % by config.Nt_scaling (0 = disabled).
+    Nt_scaling = safe_config(config, 'Nt_scaling', 0);
+    if Nt_scaling ~= 0
+        air_c = 343;
+        if isfield(config, 'tissue_tables') && isfield(config.tissue_tables, 'threshold_2') ...
+                && isfield(config.tissue_tables.threshold_2, 'air')
+            air_c = config.tissue_tables.threshold_2.air.sound_speed;
+        end
+        if minC <= air_c
+            Nt = max(1, ceil(Nt / Nt_scaling));
+        end
+    end
+
     kgrid.dt = dt;
     kgrid.Nt = Nt;
 
