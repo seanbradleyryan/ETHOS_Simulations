@@ -8,8 +8,9 @@
 %  a beam/segment; this script loads that field's pre-computed reconstruction on
 %  BOTH CT images (CT_1 and CT_3) via load_recon_dose_data (Mode='set'), together
 %  with the RayStation truth (rs_dose), CBCT geometry and RTPLAN stats. It then
-%  runs, per dose, two independently toggleable analyses:
+%  runs, per dose, three independently toggleable analyses:
 %
+%    A0  RayStation truth CT_1 vs truth CT_3         - ground-truth change (no PA)
 %    A1  recon vs its own RayStation truth (CT_1)   - per-dose detector accuracy
 %    A2  CT_1 recon vs CT_3 recon                    - adapted-vs-reference change
 %
@@ -63,6 +64,7 @@ CONFIG.ct_pair = [1, 3];
 CONFIG.config_hash = '505ae853';
 
 % --- Per-analysis enable flags (requirement: each individually toggleable) ---
+CONFIG.enable.A0             = true;   % RayStation truth CT_1 vs truth CT_3
 CONFIG.enable.A1             = true;   % recon vs RayStation truth (CT_1)
 CONFIG.enable.A2             = true;   % CT_1 recon vs CT_3 recon
 CONFIG.enable.dose_panels    = true;   % volA | volB | difference axial figure
@@ -237,6 +239,7 @@ for i = 1:nDose
         end
     end
 
+    D.cA0_idx   = [];
     D.cA1_idx   = [];
     D.cA2_idx   = [];
     D.null_mean = [];
@@ -264,6 +267,16 @@ end
 cref = {}; ctgt = {}; cmask = {}; cspacing = {}; ckind = {}; cdose = [];
 nc = 0;
 for i = 1:nDose
+    if CONFIG.enable.A0
+        nc = nc + 1;
+        cref{nc}     = single(doses(i).rs_CT1);     %#ok<SAGROW>
+        ctgt{nc}     = single(doses(i).rs_CT3);     %#ok<SAGROW>
+        cmask{nc}    = doses(i).eval_mask;          %#ok<SAGROW>
+        cspacing{nc} = doses(i).spacing_mm;         %#ok<SAGROW>
+        ckind{nc}    = 'A0';                         %#ok<SAGROW>
+        cdose(nc)    = i;                            %#ok<SAGROW>
+        doses(i).cA0_idx = nc;
+    end
     if CONFIG.enable.A1
         nc = nc + 1;
         cref{nc}     = single(doses(i).recon_CT1);  %#ok<SAGROW>
@@ -431,6 +444,7 @@ for i = 1:nDose
     embed_off = D.embed_off;
 
     rs1_d  = embed_on_grid(D.rs_CT1,      disp_dims, embed_off, 0);
+    rs3_d  = embed_on_grid(D.rs_CT3,      disp_dims, embed_off, 0);
     rec1_d = embed_on_grid(D.recon_CT1,   disp_dims, embed_off, 0);
     rec3_d = embed_on_grid(D.recon_CT3,   disp_dims, embed_off, 0);
     dens_d = embed_on_grid(D.density_CT1, disp_dims, embed_off, CONFIG.uniform_density);
@@ -440,6 +454,28 @@ for i = 1:nDose
     RESULTS.doses(i).filename   = D.filename;
     RESULTS.doses(i).spacing_mm = D.spacing_mm;
     RESULTS.doses(i).cutoff_Gy  = D.cutoff;
+
+    % ----- A0: RayStation truth CT_1 vs truth CT_3 -----
+    if CONFIG.enable.A0
+        a0 = comp_pass(D.cA0_idx, :);
+        RESULTS.doses(i).A0.pass_rates = a0;
+
+        if has_gamma
+            plot_gamma_pass_rate_curve(gamma_n, a0(:), 'Truth CT\_1', ...
+                'Truth CT\_3', sprintf('%s | %s [A0]', CONFIG.patient_id, D.label), ...
+                [], [], [], []);
+        end
+        if CONFIG.enable.dose_panels
+            plot_truth_recon_diff_axial(rs1_d, rs3_d, rs1_d, dens_d, sens_d, ...
+                D.spacing_mm, {'Truth CT\_1', 'Truth CT\_3'}, ...
+                sprintf('A0  Truth CT_1 vs Truth CT_3  |  %s', D.label), ...
+                CONFIG.viz_smooth_sigma, CONFIG.dose_panel_scale, CONFIG.dose_panel_clip_pct);
+        end
+        if CONFIG.enable.sensor_view
+            dose_mask = rs1_d >= 0.10 * max(rs1_d(:));
+            plot_sensor_dose_planes(dose_mask, sens_d, D.spacing_mm, dens_d, CONFIG);
+        end
+    end
 
     % ----- A1: recon CT_1 vs RayStation truth -----
     if CONFIG.enable.A1
