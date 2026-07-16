@@ -212,6 +212,8 @@ for i = 1:nDose
 
     D = struct();
     D.label       = make_dose_label(sel);
+    D.beam        = sel.beam;
+    D.segment     = sel.segment;
     D.filename    = fn;
     D.spacing_mm  = out.metadata.spacing(:)';
     D.beam_meta   = bm;
@@ -397,16 +399,16 @@ if has_gamma && nComp > 0
         end
     end
 
-    % ---- Console summary, GROUPED BY COMPARISON TYPE ----
-    % One labeled block per comparison type; within it, one line per dose/beam.
+    % ---- Console summary, GROUPED BY BEAM ----
+    % One labeled block per dose/beam; within it, one line per comparison type.
     fprintf('\n==================== GAMMA PASS RATES ====================\n');
     fprintf('(global gamma, 10%% reference-dose cutoff)\n');
-    for d = 1:nCompDef
-        fprintf('\n----- [%s]  %s  vs  %s -----\n', ...
-            CONFIG.comparisons{d, 1}, CONFIG.comparisons{d, 2}, CONFIG.comparisons{d, 3});
-        for i = 1:nDose
+    for i = 1:nDose
+        fprintf('\n----- [%s] -----\n', doses(i).label);
+        for d = 1:nCompDef
             cidx = doses(i).comp_idx(d);
-            fprintf('  %-16s', doses(i).label);
+            fprintf('  %-18s (%s vs %s)', CONFIG.comparisons{d, 1}, ...
+                CONFIG.comparisons{d, 2}, CONFIG.comparisons{d, 3});
             for k = 1:K
                 if isnan(comp_pass(cidx, k))
                     fprintf('   %g%%/%gmm: FAILED', gamma_n(k), gamma_n(k));
@@ -496,6 +498,31 @@ for i = 1:nDose
     end
 end
 
+%% ===================== BEAM PASS-RATE SUMMARY ===========================
+%  One figure across all beams: x = beam number, y = pass rate (%). Three series
+%  at the first gamma criterion -- truth-vs-truth, recon_CT1-vs-truth (green),
+%  recon_CT3-vs-truth (red). For each beam a vertical connector joins the two
+%  recon points, coloured like whichever of the two is larger.
+
+if has_gamma && nDose > 0
+    kk    = 1;   % first gamma criterion (e.g. 3%/3mm)
+    beams = arrayfun(@(D) local_beam_num(D), doses);
+
+    d_tt = find_comp_row(CONFIG.comparisons, 'truth1_vs_truth3');
+    d_r1 = find_comp_row(CONFIG.comparisons, 'truth1_vs_recon1');
+    d_r3 = find_comp_row(CONFIG.comparisons, 'truth1_vs_recon3');
+
+    pr_tt = nan(1, nDose); pr_r1 = nan(1, nDose); pr_r3 = nan(1, nDose);
+    for i = 1:nDose
+        if ~isempty(d_tt), pr_tt(i) = comp_pass(doses(i).comp_idx(d_tt), kk); end
+        if ~isempty(d_r1), pr_r1(i) = comp_pass(doses(i).comp_idx(d_r1), kk); end
+        if ~isempty(d_r3), pr_r3(i) = comp_pass(doses(i).comp_idx(d_r3), kk); end
+    end
+
+    plot_beam_pass_rate_summary(beams, pr_r1, pr_r3, pr_tt, gamma_n(kk), ...
+        CONFIG.patient_id, CONFIG.session);
+end
+
 %% ========================= SAVE RESULTS =================================
 
 if CONFIG.save_results
@@ -546,6 +573,26 @@ function lbl = make_dose_label(sel)
         parts{end+1} = sel.plan_type; %#ok<AGROW>
     end
     if isempty(parts), lbl = 'dose'; else, lbl = strjoin(parts, ' '); end
+end
+
+function d = find_comp_row(comparisons, name)
+%FIND_COMP_ROW  Row index of the comparison whose name matches, or [] if absent.
+    d = [];
+    for r = 1:size(comparisons, 1)
+        if strcmpi(comparisons{r, 1}, name)
+            d = r;
+            return;
+        end
+    end
+end
+
+function b = local_beam_num(D)
+%LOCAL_BEAM_NUM  Numeric beam number of a dose, or NaN when unavailable.
+    if isfield(D, 'beam') && ~isempty(D.beam) && isnumeric(D.beam)
+        b = double(D.beam);
+    else
+        b = NaN;
+    end
 end
 
 function g = least_squares_gain(rs_truth, recon)
@@ -1333,6 +1380,62 @@ end
 % -------------------------------------------------------------------------
 %  PLOTTING
 % -------------------------------------------------------------------------
+
+function plot_beam_pass_rate_summary(beams, pr_r1, pr_r3, pr_tt, crit, patient_id, session)
+%PLOT_BEAM_PASS_RATE_SUMMARY  Pass rate (%) vs beam number across all beams.
+%  Three marker series at the given n%/n mm criterion:
+%    recon_CT1 vs truth_CT1 (green), recon_CT3 vs truth_CT1 (red),
+%    truth_CT1 vs truth_CT3 (blue). For each beam a vertical connector joins the
+%    two recon points, coloured like whichever of the two pass rates is greater.
+    green = [0.15, 0.60, 0.20];
+    red   = [0.80, 0.15, 0.15];
+    blue  = [0.20, 0.40, 0.80];
+
+    % Order by beam number for a clean axis.
+    [beams, ord] = sort(beams(:)');
+    pr_r1 = pr_r1(ord);
+    pr_r3 = pr_r3(ord);
+    pr_tt = pr_tt(ord);
+
+    figure('Name', 'Beam Pass-Rate Summary', 'Color', 'w', 'NumberTitle', 'off', ...
+        'Position', [100, 100, max(720, 55 * numel(beams) + 220), 480]);
+    hold on;
+
+    % Per-beam connector between the two recon points (colour = greater one).
+    for n = 1:numel(beams)
+        a = pr_r1(n);
+        b = pr_r3(n);
+        if isfinite(a) && isfinite(b)
+            if a >= b, lc = green; else, lc = red; end
+            plot([beams(n), beams(n)], [a, b], '-', 'Color', lc, 'LineWidth', 1.5);
+        end
+    end
+
+    h_r1 = plot(beams, pr_r1, 'o', 'MarkerSize', 8, 'LineStyle', 'none', ...
+        'MarkerFaceColor', green, 'MarkerEdgeColor', green * 0.6);
+    h_r3 = plot(beams, pr_r3, 'o', 'MarkerSize', 8, 'LineStyle', 'none', ...
+        'MarkerFaceColor', red, 'MarkerEdgeColor', red * 0.6);
+    h_tt = plot(beams, pr_tt, 'o', 'MarkerSize', 7, 'LineStyle', 'none', ...
+        'MarkerFaceColor', blue, 'MarkerEdgeColor', blue * 0.6);
+
+    yline(90, 'k--', '90%', 'LineWidth', 1.0, 'FontSize', 8, ...
+        'LabelHorizontalAlignment', 'left');
+
+    hold off; grid on; box on;
+    ylim([0, 105]);
+    if ~isempty(beams)
+        xlim([min(beams) - 0.5, max(beams) + 0.5]);
+        xticks(beams);
+    end
+    xlabel('Beam number');
+    ylabel(sprintf('Gamma pass rate (%%)  @ %g%%/%g mm', crit, crit));
+    title(sprintf('Beam Pass-Rate Summary   |   %s / %s', patient_id, session), ...
+        'FontWeight', 'bold', 'FontSize', 12, 'Interpreter', 'none');
+    legend([h_r1, h_r3, h_tt], ...
+        {'Recon CT\_1 vs Truth CT\_1', 'Recon CT\_3 vs Truth CT\_1', ...
+         'Truth CT\_1 vs Truth CT\_3'}, 'Location', 'best', 'FontSize', 9);
+    drawnow;
+end
 
 function plot_gamma_pass_rate_curve(crit_n, pass_rates, label_ref, label_tgt, patient_id, ens_mean, ens_std, null_mean, null_std)
 %PLOT_GAMMA_PASS_RATE_CURVE  Pass rate vs gamma criterion (n%/n mm).
