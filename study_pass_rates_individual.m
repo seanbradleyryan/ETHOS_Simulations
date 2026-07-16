@@ -17,6 +17,12 @@
 %    truth1_vs_recon1  RayStation truth CT_1 vs recon CT_1   - detector accuracy
 %    truth1_vs_recon3  RayStation truth CT_1 vs recon CT_3   - truth vs adapted recon
 %
+%  When CONFIG.normalize is true, each reconstruction is first rescaled by the
+%  single least-squares gain that best matches it to its OWN-CT RayStation truth
+%  (recon_CT1->rs_CT1, recon_CT3->rs_CT3) over that truth's 10% region. This
+%  cancels the stored absolute scale (CONFIG.correction_factor) so gamma reflects
+%  shape agreement; the RS truths are never rescaled.
+%
 %  For each comparison, the plots produced are a CONFIGURABLE subset (CONFIG.plots)
 %  of:
 %    - 'pass_rate'    gamma pass-rate marker vs n%/n mm criterion,
@@ -72,6 +78,20 @@ CONFIG.comparisons = { ...
 %  Any subset of {'pass_rate','dose_panels','sensor_view'}, applied to every
 %  comparison. Empty {} runs the gamma numbers with no figures.
 CONFIG.plots = {'pass_rate', 'dose_panels', 'sensor_view'};
+
+% --- Reconstruction normalization -------------------------------------------
+%  true : before any gamma/plotting, rescale each reconstruction by the single
+%         least-squares gain that best matches it to its OWN-CT RayStation truth
+%         over that truth's 10% low-dose region:
+%             g = sum(rs.*recon) / sum(recon.^2)   (over rs >= 10% max)
+%         recon_CT1 is fit to rs_CT1, recon_CT3 to rs_CT3. The RS truth volumes
+%         themselves are left untouched, so the truth-vs-truth comparison is
+%         unaffected. Because reconstruction is linear in CONFIG.correction_factor,
+%         this cancels the stored absolute scale (the recon becomes "relative"),
+%         maximizing dose agreement / gamma pass rate. The fitted gains are saved
+%         to RESULTS for transparency (a gain far from 1 flags a mis-scaled recon).
+%  false: use the reconstructions at their stored absolute scale.
+CONFIG.normalize = true;
 
 % --- Parallelization --------------------------------------------------------
 %  true  : parfor over (comparison x criterion) jobs (needs Parallel Computing TB)
@@ -213,6 +233,22 @@ for i = 1:nDose
         D.cutoff = 0.10 * max(D.rs_CT1(:));
     else
         D.cutoff = 0.10 * max(D.recon_CT1(:));
+    end
+
+    % --- Least-squares reconstruction normalization (CONFIG.normalize) --------
+    % Rescale each recon by the single gain that best matches it to its own-CT
+    % RS truth over that truth's 10% region. Removes the stored absolute scale
+    % (CONFIG.correction_factor) so gamma reflects shape agreement. Gains kept
+    % for the record; the RS truths are never rescaled.
+    D.norm_gain_CT1 = 1;
+    D.norm_gain_CT3 = 1;
+    if CONFIG.normalize
+        D.norm_gain_CT1 = least_squares_gain(D.rs_CT1, D.recon_CT1);
+        D.norm_gain_CT3 = least_squares_gain(D.rs_CT3, D.recon_CT3);
+        D.recon_CT1 = D.recon_CT1 * D.norm_gain_CT1;
+        D.recon_CT3 = D.recon_CT3 * D.norm_gain_CT3;
+        fprintf('  [Normalize] LS gains: recon_CT1 x%.4g (-> rs_CT1), recon_CT3 x%.4g (-> rs_CT3).\n', ...
+            D.norm_gain_CT1, D.norm_gain_CT3);
     end
 
     D.density_CT1 = get_display_density(D.cbct_CT1, CONFIG);
@@ -368,10 +404,13 @@ for i = 1:nDose
     dens_d = embed_on_grid(D.density_CT1, disp_dims, embed_off, CONFIG.uniform_density);
     sens_d = D.sensor_disp;
 
-    RESULTS.doses(i).label      = D.label;
-    RESULTS.doses(i).filename   = D.filename;
-    RESULTS.doses(i).spacing_mm = D.spacing_mm;
-    RESULTS.doses(i).cutoff_Gy  = D.cutoff;
+    RESULTS.doses(i).label        = D.label;
+    RESULTS.doses(i).filename     = D.filename;
+    RESULTS.doses(i).spacing_mm   = D.spacing_mm;
+    RESULTS.doses(i).cutoff_Gy    = D.cutoff;
+    RESULTS.doses(i).normalize    = CONFIG.normalize;
+    RESULTS.doses(i).norm_gain_CT1 = D.norm_gain_CT1;
+    RESULTS.doses(i).norm_gain_CT3 = D.norm_gain_CT3;
 
     for d = 1:nCompDef
         name   = CONFIG.comparisons{d, 1};
@@ -456,6 +495,30 @@ function lbl = make_dose_label(sel)
         parts{end+1} = sel.plan_type; %#ok<AGROW>
     end
     if isempty(parts), lbl = 'dose'; else, lbl = strjoin(parts, ' '); end
+end
+
+function g = least_squares_gain(rs_truth, recon)
+%LEAST_SQUARES_GAIN  Scalar gain aligning a recon to its RS truth (relative norm).
+%  Returns g = sum(rs.*recon) / sum(recon.^2) evaluated over the truth's 10%
+%  low-dose region (regression through the origin: the g minimizing
+%  ||rs - g*recon||^2 there). This is the single scale that best matches the
+%  recon to the truth, so g*recon maximizes dose agreement / gamma pass rate.
+%  Falls back to g = 1 when the truth is empty or the recon is all-zero.
+    rs_truth = double(rs_truth);
+    recon    = double(recon);
+    if max(rs_truth(:)) > 0
+        mask = rs_truth >= 0.10 * max(rs_truth(:));
+    else
+        mask = true(size(rs_truth));
+    end
+    t = rs_truth(mask);
+    r = recon(mask);
+    denom = sum(r .^ 2);
+    if denom > 0
+        g = sum(t .* r) / denom;
+    else
+        g = 1;
+    end
 end
 
 function v = get_dose_field(D, fieldname)
