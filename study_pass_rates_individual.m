@@ -1,40 +1,33 @@
 %% =========================================================================
 %  STUDY_PASS_RATES_INDIVIDUAL.m
 %  Batch, per-dose photoacoustic gamma analysis driven by the ALREADY-
-%  RECONSTRUCTED doses on disk (no per-run k-Wave reconstruction, except for the
-%  optional A2 noise ensemble).
+%  RECONSTRUCTED doses on disk (no per-run k-Wave reconstruction).
 %
 %  For an ARBITRARY list of dose files (CONFIG.dose_filenames), each file selects
 %  a beam/segment; this script loads that field's pre-computed reconstruction on
 %  BOTH CT images (CT_1 and CT_3) via load_recon_dose_data (Mode='set'), together
 %  with the RayStation truth (rs_dose), CBCT geometry and RTPLAN stats. It then
-%  runs, per dose, three independently toggleable analyses:
+%  runs, per dose, a CONFIGURABLE list of gamma comparisons (CONFIG.comparisons).
+%  Each comparison names a reference and a target volume drawn from:
+%    rs_CT1 | rs_CT3 | recon_CT1 | recon_CT3
+%  Gamma uses the reference distribution; the 10% low-dose eval mask is built from
+%  that reference. The default set is:
 %
-%    A0  RayStation truth CT_1 vs truth CT_3         - ground-truth change (no PA)
-%    A1  recon vs its own RayStation truth (CT_1)   - per-dose detector accuracy
-%    A2  CT_1 recon vs CT_3 recon                    - adapted-vs-reference change
+%    truth1_vs_truth3  RayStation truth CT_1 vs truth CT_3   - ground-truth change
+%    truth1_vs_recon1  RayStation truth CT_1 vs recon CT_1   - detector accuracy
+%    truth1_vs_recon3  RayStation truth CT_1 vs recon CT_3   - truth vs adapted recon
 %
-%  Each analysis produces (all individually gated by CONFIG.enable.*):
-%    - a gamma pass-rate vs n%/n mm chart (global gamma, 10% low-dose cutoff),
-%    - a 3-panel axial figure (volA | volB | signed difference) at the axial
-%      (constant-Z) slice containing the truth max, and
-%    - a 10%-dose-area + ultrasound-sensor visualization.
-%
-%  A2 optionally overlays a NOISE-ENSEMBLE NULL hypothesis: for the CBCT-1 dose,
-%  the k-Wave forward simulation runs ONCE (build_forward_bundle); then noise is
-%  redrawn + Wiener-deconvolved + reconstructed num_realizations times, and each
-%  noisy recalculation is gamma-compared to the ORIGINAL on-disk CT_1 recon. That
-%  "same anatomy, noise only" band is the noise floor: where the A2 signal curve
-%  sits above the null, the CT_1-vs-CT_3 change is real rather than noise.
+%  For each comparison, the plots produced are a CONFIGURABLE subset (CONFIG.plots)
+%  of:
+%    - 'pass_rate'    gamma pass-rate marker vs n%/n mm criterion,
+%    - 'dose_panels'  3-panel axial figure (ref | tgt | signed difference) at the
+%                     axial (constant-Z) slice containing the reference max,
+%    - 'sensor_view'  10%-dose-area + ultrasound-sensor visualization.
 %
 %  PARALLELIZATION
-%    - Gamma sweeps: ONE flattened parfor over every (dose x analysis x
-%      criterion) evaluation, so the CPU pool stays maximally busy.
-%    - Noise ensemble: parfor over realizations, one GPU per worker (spmd pin).
-%      The forward sim runs once per dose before the loop.
-%
-%  NOTE: the noise ensemble is inherently per-field (one gantry/sensor geometry),
-%  so it applies to single-field dose specs, not summed totals.
+%    - Gamma sweeps run as ONE flattened loop over every (comparison x criterion)
+%      job. CONFIG.use_parallel selects parfor (CPU pool) or a serial for-loop, so
+%      the script runs with or without the Parallel Computing Toolbox.
 %
 %  NOTE: HIPAA / remote-execution - this file is WRITTEN here but must be RUN on
 %  the remote device. Do not execute locally.
@@ -56,23 +49,37 @@ CONFIG.dose_filenames = { ...
     'dose_1194203_Session_1_reference_CT_3_B15_112.mat' ...
 };
 
-% The two CT image indices. A1 analyzes the LOWER index (CT_1); A2 compares the
-% lower (reference) against the higher (CT_3) reconstruction.
+% The two CT image indices. The LOWER index maps to the *_CT1 volumes and the
+% higher to the *_CT3 volumes referenced by CONFIG.comparisons.
 CONFIG.ct_pair = [1, 3];
 
 % Explicit recon config-hash override ('' => auto-discover on disk via loader).
 CONFIG.config_hash = '505ae853';
 
-% --- Per-analysis enable flags (requirement: each individually toggleable) ---
-CONFIG.enable.A0             = true;   % RayStation truth CT_1 vs truth CT_3
-CONFIG.enable.A1             = true;   % recon vs RayStation truth (CT_1)
-CONFIG.enable.A2             = true;   % CT_1 recon vs CT_3 recon
-CONFIG.enable.dose_panels    = true;   % volA | volB | difference axial figure
-CONFIG.enable.sensor_view    = true;   % 10% dose area + sensor model figure
-CONFIG.enable.noise_ensemble = false;  % A2 null hypothesis (k-Wave; expensive)
+% --- Comparisons to run (configurable list) ---------------------------------
+%  Each row: {name, ref_field, tgt_field, ref_label, tgt_label}. ref_field and
+%  tgt_field name a per-dose volume: 'rs_CT1' | 'rs_CT3' | 'recon_CT1' |
+%  'recon_CT3'. Gamma uses ref_field as the reference distribution and builds the
+%  10% low-dose eval mask from it. name must be a valid struct-field name (it
+%  keys the saved results). Add/remove rows freely.
+CONFIG.comparisons = { ...
+    'truth1_vs_truth3', 'rs_CT1', 'rs_CT3',    'Truth CT\_1', 'Truth CT\_3'; ...
+    'truth1_vs_recon1', 'rs_CT1', 'recon_CT1', 'Truth CT\_1', 'Recon CT\_1'; ...
+    'truth1_vs_recon3', 'rs_CT1', 'recon_CT3', 'Truth CT\_1', 'Recon CT\_3'  ...
+};
+
+% --- Plots to create (configurable list) ------------------------------------
+%  Any subset of {'pass_rate','dose_panels','sensor_view'}, applied to every
+%  comparison. Empty {} runs the gamma numbers with no figures.
+CONFIG.plots = {'pass_rate', 'dose_panels', 'sensor_view'};
+
+% --- Parallelization --------------------------------------------------------
+%  true  : parfor over (comparison x criterion) jobs (needs Parallel Computing TB)
+%  false : plain serial for-loop (no toolbox required)
+CONFIG.use_parallel = true;
 
 % Gamma sweep criteria n (each evaluated as n%/n mm).
-CONFIG.gamma_n = (1:0.5:5)';
+CONFIG.gamma_n = 3;   % 3%/3 mm only
 
 % --- Sensor geometry (placement + display) ---
 CONFIG.sensor_placement_method = 'determine_sensor_mask';
@@ -124,11 +131,6 @@ CONFIG.conv_deconv_lambda  = 1e-4;   % Wiener regularization for deconvolution
 CONFIG.downscale_factor = 1;
 CONFIG.use_grid_padding = true;
 
-% --- Noise ensemble (A2 null hypothesis) ---
-CONFIG.noise_ensemble.num_realizations = 10;   % ensemble size N (configurable)
-CONFIG.noise_ensemble.base_seed        = 42;   % RNG base; per-realization seeds derive from it
-CONFIG.noise_ensemble.num_iters        = [];   % [] -> use CONFIG.num_time_reversal_iter
-
 % --- Display options ---
 CONFIG.viz_smooth_sigma   = 1.0;        % Gaussian sigma (voxels) for display-only smoothing
 CONFIG.dose_panel_scale   = 'relative'; % 'relative' | 'absolute'
@@ -140,9 +142,9 @@ CONFIG.output_file  = 'pass_rates_individual_results.mat';
 
 %% ===================== RESOLVE THE DOSE LIST ============================
 %  For each dose filename: parse the beam/segment, load the matched fields on
-%  BOTH CT images, and pick CT_1 (A1 + A2 reference) and CT_3 (A2 target). Cache
-%  per-dose recon/truth volumes, geometry, the 10% eval mask, the display
-%  density, and the (possibly grid-expanded) sensor mask for the visualizations.
+%  BOTH CT images, and pick the CT_1 (*_CT1) and CT_3 (*_CT3) volumes. Cache
+%  per-dose recon/truth volumes, geometry, the display density, and the
+%  (possibly grid-expanded) sensor mask for the visualizations.
 
 ct_lo   = min(CONFIG.ct_pair);
 ct_hi   = max(CONFIG.ct_pair);
@@ -176,8 +178,8 @@ for i = 1:nDose
             'Beam %s / segment %s lacks both %s and %s (found: %s).', ...
             mat2str(sel.beam), mat2str(sel.segment), ct1_str, ct3_str, found);
     end
-    fA = out.fields(iA);   % CT_1 (A1 + A2 reference)
-    fB = out.fields(iB);   % CT_3 (A2 target)
+    fA = out.fields(iA);   % CT_1 volumes (rs_CT1 / recon_CT1)
+    fB = out.fields(iB);   % CT_3 volumes (rs_CT3 / recon_CT3)
 
     bm = [];
     if isfield(out.metadata, 'beam_metadata') && ~isempty(out.metadata.beam_metadata)
@@ -205,13 +207,12 @@ for i = 1:nDose
             D.label, num2str(size(D.recon_CT1)), num2str(size(D.recon_CT3)));
     end
 
-    % 10% low-dose cutoff mask from the RayStation truth (consistent across A1/A2).
+    % Representative 10% low-dose cutoff (from the RS truth) for the saved output.
+    % The gamma eval mask itself is rebuilt per comparison from its reference.
     if max(D.rs_CT1(:)) > 0
-        D.cutoff    = 0.10 * max(D.rs_CT1(:));
-        D.eval_mask = D.rs_CT1 >= D.cutoff;
+        D.cutoff = 0.10 * max(D.rs_CT1(:));
     else
-        D.cutoff    = 0.10 * max(D.recon_CT1(:));
-        D.eval_mask = D.recon_CT1 >= D.cutoff;
+        D.cutoff = 0.10 * max(D.recon_CT1(:));
     end
 
     D.density_CT1 = get_display_density(D.cbct_CT1, CONFIG);
@@ -220,7 +221,7 @@ for i = 1:nDose
     D.disp_dims   = size(D.rs_CT1);
     D.embed_off   = [0, 0, 0];
     D.sensor_disp = zeros(size(D.rs_CT1));
-    if CONFIG.enable.sensor_view || CONFIG.enable.dose_panels
+    if any(strcmpi('sensor_view', CONFIG.plots)) || any(strcmpi('dose_panels', CONFIG.plots))
         cfg_sensor = CONFIG;
         tdf = fullfile(CONFIG.working_dir, 'RayStationFiles', CONFIG.patient_id, ...
             CONFIG.session, 'processed', 'total_rs_dose.mat');
@@ -239,11 +240,7 @@ for i = 1:nDose
         end
     end
 
-    D.cA0_idx   = [];
-    D.cA1_idx   = [];
-    D.cA2_idx   = [];
-    D.null_mean = [];
-    D.null_std  = [];
+    D.comp_idx  = [];   % filled by the comparison builder (one index per comparison)
 
     if i == 1
         doses = D;
@@ -256,46 +253,42 @@ gamma_n   = CONFIG.gamma_n(:);
 K         = numel(gamma_n);
 has_gamma = (exist('CalcGamma', 'file') == 2);
 if ~has_gamma
-    warning('CalcGamma not found; gamma sweeps and ensemble will be skipped.');
+    warning('CalcGamma not found; gamma sweeps will be skipped.');
 end
 
-%% ===================== GAMMA SWEEPS (FLATTENED PARFOR) ==================
-%  Build the list of comparisons (A1 and/or A2 per dose), then run ONE parfor
-%  over every (comparison x criterion) job so the CPU pool stays busy. Each job
-%  is an independent CalcGamma evaluation with the dose's 10% truth cutoff mask.
+%% ===================== GAMMA SWEEPS =====================================
+%  Build every (comparison x criterion) job from CONFIG.comparisons, then run
+%  them either in parallel (parfor) or serially, per CONFIG.use_parallel. Each
+%  job is an independent CalcGamma evaluation using the reference distribution
+%  and a 10% low-dose eval mask built from that reference.
 
-cref = {}; ctgt = {}; cmask = {}; cspacing = {}; ckind = {}; cdose = [];
+nCompDef = size(CONFIG.comparisons, 1);
+if nCompDef == 0
+    error('study_pass_rates_individual:NoComparisons', 'CONFIG.comparisons is empty.');
+end
+
+cref = {}; ctgt = {}; cmask = {}; cspacing = {}; cname = {}; cdose = [];
 nc = 0;
 for i = 1:nDose
-    if CONFIG.enable.A0
+    doses(i).comp_idx = zeros(1, nCompDef);
+    for d = 1:nCompDef
+        ref_vol = single(get_dose_field(doses(i), CONFIG.comparisons{d, 2}));
+        tgt_vol = single(get_dose_field(doses(i), CONFIG.comparisons{d, 3}));
+
+        if max(ref_vol(:)) > 0
+            emask = ref_vol >= 0.10 * max(ref_vol(:));
+        else
+            emask = tgt_vol >= 0.10 * max(tgt_vol(:));
+        end
+
         nc = nc + 1;
-        cref{nc}     = single(doses(i).rs_CT1);     %#ok<SAGROW>
-        ctgt{nc}     = single(doses(i).rs_CT3);     %#ok<SAGROW>
-        cmask{nc}    = doses(i).eval_mask;          %#ok<SAGROW>
+        cref{nc}     = ref_vol;                     %#ok<SAGROW>
+        ctgt{nc}     = tgt_vol;                     %#ok<SAGROW>
+        cmask{nc}    = emask;                       %#ok<SAGROW>
         cspacing{nc} = doses(i).spacing_mm;         %#ok<SAGROW>
-        ckind{nc}    = 'A0';                         %#ok<SAGROW>
-        cdose(nc)    = i;                            %#ok<SAGROW>
-        doses(i).cA0_idx = nc;
-    end
-    if CONFIG.enable.A1
-        nc = nc + 1;
-        cref{nc}     = single(doses(i).recon_CT1);  %#ok<SAGROW>
-        ctgt{nc}     = single(doses(i).rs_CT1);     %#ok<SAGROW>
-        cmask{nc}    = doses(i).eval_mask;          %#ok<SAGROW>
-        cspacing{nc} = doses(i).spacing_mm;         %#ok<SAGROW>
-        ckind{nc}    = 'A1';                         %#ok<SAGROW>
-        cdose(nc)    = i;                            %#ok<SAGROW>
-        doses(i).cA1_idx = nc;
-    end
-    if CONFIG.enable.A2
-        nc = nc + 1;
-        cref{nc}     = single(doses(i).recon_CT1);  %#ok<SAGROW>
-        ctgt{nc}     = single(doses(i).recon_CT3);  %#ok<SAGROW>
-        cmask{nc}    = doses(i).eval_mask;          %#ok<SAGROW>
-        cspacing{nc} = doses(i).spacing_mm;         %#ok<SAGROW>
-        ckind{nc}    = 'A2';                         %#ok<SAGROW>
-        cdose(nc)    = i;                            %#ok<SAGROW>
-        doses(i).cA2_idx = nc;
+        cname{nc}    = CONFIG.comparisons{d, 1};    %#ok<SAGROW>
+        cdose(nc)    = i;                           %#ok<SAGROW>
+        doses(i).comp_idx(d) = nc;
     end
 end
 nComp     = nc;
@@ -314,28 +307,23 @@ if has_gamma && nComp > 0
         end
     end
 
-    ensure_pool();
-
-    fprintf('\n[Gamma] %d comparison(s) x %d criteria = %d parallel jobs...\n', ...
-        nComp, K, nJobs);
-
-    job_pass = nan(nJobs, 1);
     critv    = gamma_n;
-    parfor j = 1:nJobs
-        c    = job_c(j);
-        k    = job_k(j);
-        crit = critv(k);
-        sp   = cspacing{c};
-        ref_struct = struct('start', [0, 0, 0], 'width', sp, 'data', double(cref{c}));
-        tgt_struct = struct('start', [0, 0, 0], 'width', sp, 'data', double(ctgt{c}));
-        try
-            gmap = CalcGamma(ref_struct, tgt_struct, crit, crit, ...
-                'local', 0, 'limit', crit * 2, 'restrict', 1);
-            m = cmask{c};
-            job_pass(j) = 100 * mean(gmap(m) <= 1);
-        catch ME
-            warning('Gamma job %d (%s) failed: %s', j, ckind{c}, ME.message);
-            job_pass(j) = NaN;
+    job_pass = nan(nJobs, 1);
+
+    if CONFIG.use_parallel
+        ensure_pool();
+        fprintf('\n[Gamma] %d comparison(s) x %d criteria = %d parallel jobs...\n', ...
+            nComp, K, nJobs);
+        parfor j = 1:nJobs
+            job_pass(j) = run_gamma_job(job_c(j), job_k(j), critv, ...
+                cspacing, cref, ctgt, cmask, cname);
+        end
+    else
+        fprintf('\n[Gamma] %d comparison(s) x %d criteria = %d serial jobs...\n', ...
+            nComp, K, nJobs);
+        for j = 1:nJobs
+            job_pass(j) = run_gamma_job(job_c(j), job_k(j), critv, ...
+                cspacing, cref, ctgt, cmask, cname);
         end
     end
 
@@ -345,8 +333,8 @@ if has_gamma && nComp > 0
 
     % Console summary per comparison.
     for c = 1:nComp
-        fprintf('\n  ----- %s | %s (10%% truth cutoff) -----\n', ...
-            ckind{c}, doses(cdose(c)).label);
+        fprintf('\n  ----- %s | %s (10%% reference cutoff) -----\n', ...
+            cname{c}, doses(cdose(c)).label);
         for k = 1:K
             if isnan(comp_pass(c, k))
                 fprintf('    %g%%/%gmm  FAILED\n', gamma_n(k), gamma_n(k));
@@ -357,81 +345,15 @@ if has_gamma && nComp > 0
     end
 end
 
-%% ===================== A2 NOISE-ENSEMBLE NULL (OPTIONAL) ================
-%  For each dose's CT_1: run the k-Wave forward simulation once, then repeatedly
-%  redraw noise + deconvolve + reconstruct and gamma-compare each noisy recalc to
-%  the ORIGINAL on-disk CT_1 recon. The mean +/- std band is the no-change noise
-%  floor overlaid on the A2 chart. Realizations are distributed across GPUs.
-
-do_ensemble = CONFIG.enable.A2 && CONFIG.enable.noise_ensemble && has_gamma;
-if do_ensemble && CONFIG.convolution_kernel <= 0
-    warning(['Noise ensemble requires CONFIG.convolution_kernel > 0 (noise enters ' ...
-        'in the pulse model). Disabling ensemble.']);
-    do_ensemble = false;
-end
-
-if do_ensemble
-    % Deterministic sensor placement (identical geometry per CT) when available.
-    tdf = fullfile(CONFIG.working_dir, 'RayStationFiles', CONFIG.patient_id, ...
-        CONFIG.session, 'processed', 'total_rs_dose.mat');
-
-    ngpu = 0;
-    try, ngpu = gpuDeviceCount; catch, ngpu = 0; end
-    ensure_pool(max(1, ngpu));
-    pool = gcp('nocreate');
-    if ngpu >= 1 && ~isempty(pool)
-        spmd
-            gpuDevice(mod(labindex - 1, ngpu) + 1);
-        end
-        fprintf('\n[NoiseEnsemble] Pinned %d worker(s) across %d GPU(s).\n', ...
-            pool.NumWorkers, ngpu);
-    elseif ngpu == 0
-        fprintf('\n[NoiseEnsemble] No GPU detected; reconstructions run on CPU worker(s).\n');
-    end
-
-    N        = CONFIG.noise_ensemble.num_realizations;
-    base     = CONFIG.noise_ensemble.base_seed;
-    critv    = gamma_n;
-
-    for i = 1:nDose
-        D   = doses(i);
-        cfg = CONFIG;
-        cfg.meterset = D.meterset_CT1;
-        if isfile(tdf), cfg.total_dose_file = tdf; end
-        if ~isempty(CONFIG.noise_ensemble.num_iters)
-            cfg.num_time_reversal_iter = CONFIG.noise_ensemble.num_iters;
-        end
-
-        fprintf('\n[NoiseEnsemble] Dose %d/%d (%s): forward sim once, %d realizations...\n', ...
-            i, nDose, D.label, N);
-        bundle = build_forward_bundle(D.rs_CT1, D.cbct_CT1, D.gantry_CT1, ...
-            D.beam_meta, cfg, D.label);
-
-        % Original on-disk recon embedded onto the bundle grid (no-op when the
-        % sensor placement did not expand the grid).
-        ref_recon = embed_on_grid(double(D.recon_CT1), bundle.gridSize_orig, ...
-            bundle.embed_offset, 0);
-
-        spacing_loc = bundle.spacing_mm;
-        pr_ens      = nan(N, K);
-        parfor r = 1:N
-            seed = base + (i - 1) * 1000 + r;
-            sd   = redraw_noisy_deconv(bundle, seed);
-            rec  = reconstruct_recon_dose(bundle, sd);
-            pr_ens(r, :) = gamma_sweep_pass_rates(ref_recon, rec, critv, spacing_loc);
-            fprintf('   [NoiseEnsemble] dose %d realization %d/%d complete.\n', i, r, N);
-        end
-
-        doses(i).null_pass_rates = pr_ens;
-        doses(i).null_mean       = mean(pr_ens, 1, 'omitnan');
-        doses(i).null_std        = std(pr_ens, 0, 1, 'omitnan');
-    end
-end
-
 %% ===================== PER-DOSE OUTPUTS =================================
-%  For each dose, emit the enabled A1 / A2 figures. Doses, truths and densities
-%  are embedded onto the sensor display grid so the red sensor contour
-%  co-registers with the dose (no-op when the grid was not expanded).
+%  For each dose, walk CONFIG.comparisons and emit the plots listed in
+%  CONFIG.plots. Reference/target volumes and the density are embedded onto the
+%  sensor display grid so the red sensor contour co-registers with the dose
+%  (no-op when the grid was not expanded).
+
+want_curve  = any(strcmpi('pass_rate',   CONFIG.plots));
+want_panels = any(strcmpi('dose_panels', CONFIG.plots));
+want_sensor = any(strcmpi('sensor_view', CONFIG.plots));
 
 RESULTS = struct();
 RESULTS.config         = CONFIG;
@@ -443,10 +365,6 @@ for i = 1:nDose
     disp_dims = D.disp_dims;
     embed_off = D.embed_off;
 
-    rs1_d  = embed_on_grid(D.rs_CT1,      disp_dims, embed_off, 0);
-    rs3_d  = embed_on_grid(D.rs_CT3,      disp_dims, embed_off, 0);
-    rec1_d = embed_on_grid(D.recon_CT1,   disp_dims, embed_off, 0);
-    rec3_d = embed_on_grid(D.recon_CT3,   disp_dims, embed_off, 0);
     dens_d = embed_on_grid(D.density_CT1, disp_dims, embed_off, CONFIG.uniform_density);
     sens_d = D.sensor_disp;
 
@@ -455,73 +373,34 @@ for i = 1:nDose
     RESULTS.doses(i).spacing_mm = D.spacing_mm;
     RESULTS.doses(i).cutoff_Gy  = D.cutoff;
 
-    % ----- A0: RayStation truth CT_1 vs truth CT_3 -----
-    if CONFIG.enable.A0
-        a0 = comp_pass(D.cA0_idx, :);
-        RESULTS.doses(i).A0.pass_rates = a0;
+    for d = 1:nCompDef
+        name   = CONFIG.comparisons{d, 1};
+        reflbl = CONFIG.comparisons{d, 4};
+        tgtlbl = CONFIG.comparisons{d, 5};
+        pr     = comp_pass(D.comp_idx(d), :);
 
-        if has_gamma
-            plot_gamma_pass_rate_curve(gamma_n, a0(:), 'Truth CT\_1', ...
-                'Truth CT\_3', sprintf('%s | %s [A0]', CONFIG.patient_id, D.label), ...
+        RESULTS.doses(i).(name).pass_rates = pr;
+        RESULTS.doses(i).(name).ref        = CONFIG.comparisons{d, 2};
+        RESULTS.doses(i).(name).tgt        = CONFIG.comparisons{d, 3};
+
+        ref_d = embed_on_grid(double(get_dose_field(D, CONFIG.comparisons{d, 2})), ...
+            disp_dims, embed_off, 0);
+        tgt_d = embed_on_grid(double(get_dose_field(D, CONFIG.comparisons{d, 3})), ...
+            disp_dims, embed_off, 0);
+
+        if want_curve && has_gamma
+            plot_gamma_pass_rate_curve(gamma_n, pr(:), reflbl, tgtlbl, ...
+                sprintf('%s | %s [%s]', CONFIG.patient_id, D.label, name), ...
                 [], [], [], []);
         end
-        if CONFIG.enable.dose_panels
-            plot_truth_recon_diff_axial(rs1_d, rs3_d, rs1_d, dens_d, sens_d, ...
-                D.spacing_mm, {'Truth CT\_1', 'Truth CT\_3'}, ...
-                sprintf('A0  Truth CT_1 vs Truth CT_3  |  %s', D.label), ...
+        if want_panels
+            plot_truth_recon_diff_axial(ref_d, tgt_d, ref_d, dens_d, sens_d, ...
+                D.spacing_mm, {reflbl, tgtlbl}, ...
+                sprintf('%s  %s vs %s  |  %s', name, reflbl, tgtlbl, D.label), ...
                 CONFIG.viz_smooth_sigma, CONFIG.dose_panel_scale, CONFIG.dose_panel_clip_pct);
         end
-        if CONFIG.enable.sensor_view
-            dose_mask = rs1_d >= 0.10 * max(rs1_d(:));
-            plot_sensor_dose_planes(dose_mask, sens_d, D.spacing_mm, dens_d, CONFIG);
-        end
-    end
-
-    % ----- A1: recon CT_1 vs RayStation truth -----
-    if CONFIG.enable.A1
-        a1 = comp_pass(D.cA1_idx, :);
-        RESULTS.doses(i).A1.pass_rates = a1;
-
-        if has_gamma
-            plot_gamma_pass_rate_curve(gamma_n, a1(:), 'Recon CT\_1', ...
-                'RayStation truth', sprintf('%s | %s [A1]', CONFIG.patient_id, D.label), ...
-                [], [], [], []);
-        end
-        if CONFIG.enable.dose_panels
-            plot_truth_recon_diff_axial(rs1_d, rec1_d, rs1_d, dens_d, sens_d, ...
-                D.spacing_mm, {'RayStation truth', 'Recon CT\_1'}, ...
-                sprintf('A1  Truth vs Recon  |  %s', D.label), ...
-                CONFIG.viz_smooth_sigma, CONFIG.dose_panel_scale, CONFIG.dose_panel_clip_pct);
-        end
-        if CONFIG.enable.sensor_view
-            dose_mask = rs1_d >= 0.10 * max(rs1_d(:));
-            plot_sensor_dose_planes(dose_mask, sens_d, D.spacing_mm, dens_d, CONFIG);
-        end
-    end
-
-    % ----- A2: recon CT_1 vs recon CT_3 (+ optional null) -----
-    if CONFIG.enable.A2
-        a2 = comp_pass(D.cA2_idx, :);
-        RESULTS.doses(i).A2.pass_rates = a2;
-        RESULTS.doses(i).A2.null_mean  = D.null_mean;
-        RESULTS.doses(i).A2.null_std   = D.null_std;
-
-        null_mean = D.null_mean;
-        null_std  = D.null_std;
-
-        if has_gamma
-            plot_gamma_pass_rate_curve(gamma_n, a2(:), 'Recon CT\_1', ...
-                'Recon CT\_3', sprintf('%s | %s [A2]', CONFIG.patient_id, D.label), ...
-                [], [], null_mean, null_std);
-        end
-        if CONFIG.enable.dose_panels
-            plot_truth_recon_diff_axial(rec1_d, rec3_d, rs1_d, dens_d, sens_d, ...
-                D.spacing_mm, {'Recon CT\_1', 'Recon CT\_3'}, ...
-                sprintf('A2  CT_1 vs CT_3 Recon  |  %s', D.label), ...
-                CONFIG.viz_smooth_sigma, CONFIG.dose_panel_scale, CONFIG.dose_panel_clip_pct);
-        end
-        if CONFIG.enable.sensor_view
-            dose_mask = rs1_d >= 0.10 * max(rs1_d(:));
+        if want_sensor
+            dose_mask = ref_d >= 0.10 * max(ref_d(:));
             plot_sensor_dose_planes(dose_mask, sens_d, D.spacing_mm, dens_d, CONFIG);
         end
     end
@@ -577,6 +456,41 @@ function lbl = make_dose_label(sel)
         parts{end+1} = sel.plan_type; %#ok<AGROW>
     end
     if isempty(parts), lbl = 'dose'; else, lbl = strjoin(parts, ' '); end
+end
+
+function v = get_dose_field(D, fieldname)
+%GET_DOSE_FIELD  Fetch a named per-dose volume for a comparison spec.
+%  fieldname is one of 'rs_CT1' | 'rs_CT3' | 'recon_CT1' | 'recon_CT3'.
+    switch fieldname
+        case 'rs_CT1',    v = D.rs_CT1;
+        case 'rs_CT3',    v = D.rs_CT3;
+        case 'recon_CT1', v = D.recon_CT1;
+        case 'recon_CT3', v = D.recon_CT3;
+        otherwise
+            error('study_pass_rates_individual:BadField', ...
+                ['Unknown comparison volume "%s" (use rs_CT1 | rs_CT3 | ' ...
+                 'recon_CT1 | recon_CT3).'], fieldname);
+    end
+end
+
+function p = run_gamma_job(c, k, critv, cspacing, cref, ctgt, cmask, cname)
+%RUN_GAMMA_JOB  One CalcGamma evaluation (comparison c, criterion k) -> pass %.
+%  Shared by the parallel (parfor) and serial (for) gamma-sweep paths so both
+%  compute identically. Reference = cref{c}, target = ctgt{c}, evaluated over
+%  the 10% reference cutoff mask cmask{c}.
+    crit = critv(k);
+    sp   = cspacing{c};
+    ref_struct = struct('start', [0, 0, 0], 'width', sp, 'data', double(cref{c}));
+    tgt_struct = struct('start', [0, 0, 0], 'width', sp, 'data', double(ctgt{c}));
+    try
+        gmap = CalcGamma(ref_struct, tgt_struct, crit, crit, ...
+            'local', 0, 'limit', crit * 2, 'restrict', 1);
+        m = cmask{c};
+        p = 100 * mean(gmap(m) <= 1);
+    catch ME
+        warning('Gamma job (%s) failed: %s', cname{c}, ME.message);
+        p = NaN;
+    end
 end
 
 % -------------------------------------------------------------------------
