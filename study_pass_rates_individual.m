@@ -177,17 +177,20 @@ if nDose == 0
     error('study_pass_rates_individual:NoDoses', 'CONFIG.dose_filenames is empty.');
 end
 
-doses = struct([]);
+doses   = struct([]);
+nLoaded = 0;
 
 for i = 1:nDose
-    fn  = CONFIG.dose_filenames{i};
+    fn = CONFIG.dose_filenames{i};
+    fprintf('\n[Load %d/%d] %s\n', i, nDose, fn);
+
+    try
     sel = parse_dose_selection(fn);
     if isempty(sel.beam)
         error('study_pass_rates_individual:NoBeamToken', ...
             'Dose filename "%s" has no _B<beam> token; cannot select a field.', fn);
     end
 
-    fprintf('\n[Load %d/%d] %s\n', i, nDose, fn);
     out = load_field_set(CONFIG, sel);
 
     iA = find_field_by_ct(out.fields, ct1_str);
@@ -279,12 +282,32 @@ for i = 1:nDose
 
     D.comp_idx  = [];   % filled by the comparison builder (one index per comparison)
 
-    if i == 1
+    nLoaded = nLoaded + 1;
+    if nLoaded == 1
         doses = D;
     else
-        doses(i) = D; %#ok<SAGROW>
+        doses(nLoaded) = D; %#ok<SAGROW>
+    end
+
+    catch ME
+        % Missing file (processed dose or recon), no CT pair, bad token, etc.:
+        % skip this dose and move on to the next instead of aborting the run.
+        warning('study_pass_rates_individual:SkipDose', ...
+            'Skipping "%s": %s', fn, ME.message);
+        continue;
     end
 end
+
+% Keep only the doses that actually loaded; skipped/missing files are dropped.
+if nLoaded == 0
+    error('study_pass_rates_individual:NoDosesLoaded', ...
+        'None of the %d dose file(s) could be loaded.', nDose);
+end
+if nLoaded < nDose
+    fprintf('\n[Load] %d of %d dose file(s) loaded; %d skipped.\n', ...
+        nLoaded, nDose, nDose - nLoaded);
+end
+nDose = nLoaded;
 
 gamma_n   = CONFIG.gamma_n(:);
 K         = numel(gamma_n);
