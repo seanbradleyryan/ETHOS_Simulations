@@ -51,9 +51,10 @@ CONFIG.treatment_site = 'Pancreas';
 % Arbitrary list of dose files to analyze. Each carries a _B<beam>_<seg> token
 % (and a _CT_k token, which is ignored here since both CTs are loaded). Add as
 % many as desired; every enabled analysis is run for each.
-CONFIG.dose_filenames = { ...
-    'dose_1194203_Session_1_reference_CT_3_B15_112.mat' ...
-};
+% Here: all 17 beams on segment 112.
+CONFIG.dose_filenames = arrayfun( ...
+    @(b) sprintf('dose_1194203_Session_1_reference_CT_3_B%d_112.mat', b), ...
+    1:17, 'UniformOutput', false);
 
 % The two CT image indices. The LOWER index maps to the *_CT1 volumes and the
 % higher to the *_CT3 volumes referenced by CONFIG.comparisons.
@@ -303,7 +304,7 @@ if nCompDef == 0
     error('study_pass_rates_individual:NoComparisons', 'CONFIG.comparisons is empty.');
 end
 
-cref = {}; ctgt = {}; cmask = {}; cspacing = {}; cname = {}; cdose = [];
+cref = {}; ctgt = {}; cmask = {}; cspacing = {}; cname = {};
 nc = 0;
 for i = 1:nDose
     doses(i).comp_idx = zeros(1, nCompDef);
@@ -323,12 +324,12 @@ for i = 1:nDose
         cmask{nc}    = emask;                       %#ok<SAGROW>
         cspacing{nc} = doses(i).spacing_mm;         %#ok<SAGROW>
         cname{nc}    = CONFIG.comparisons{d, 1};    %#ok<SAGROW>
-        cdose(nc)    = i;                           %#ok<SAGROW>
         doses(i).comp_idx(d) = nc;
     end
 end
 nComp     = nc;
 comp_pass = nan(nComp, K);
+comp_gmap = cell(nComp, 1);   % gamma-index map per comparison (first criterion), for plotting
 
 if has_gamma && nComp > 0
     nJobs = nComp * K;
@@ -345,40 +346,55 @@ if has_gamma && nComp > 0
 
     critv    = gamma_n;
     job_pass = nan(nJobs, 1);
+    job_gmap = cell(nJobs, 1);   % gamma maps kept only for the first criterion
 
     if CONFIG.use_parallel
         ensure_pool();
         fprintf('\n[Gamma] %d comparison(s) x %d criteria = %d parallel jobs...\n', ...
             nComp, K, nJobs);
         parfor j = 1:nJobs
-            job_pass(j) = run_gamma_job(job_c(j), job_k(j), critv, ...
+            [job_pass(j), gm] = run_gamma_job(job_c(j), job_k(j), critv, ...
                 cspacing, cref, ctgt, cmask, cname);
+            if job_k(j) == 1, job_gmap{j} = gm; else, job_gmap{j} = []; end
         end
     else
         fprintf('\n[Gamma] %d comparison(s) x %d criteria = %d serial jobs...\n', ...
             nComp, K, nJobs);
         for j = 1:nJobs
-            job_pass(j) = run_gamma_job(job_c(j), job_k(j), critv, ...
+            [job_pass(j), gm] = run_gamma_job(job_c(j), job_k(j), critv, ...
                 cspacing, cref, ctgt, cmask, cname);
+            if job_k(j) == 1, job_gmap{j} = gm; else, job_gmap{j} = []; end
         end
     end
 
     for j = 1:nJobs
         comp_pass(job_c(j), job_k(j)) = job_pass(j);
-    end
-
-    % Console summary per comparison.
-    for c = 1:nComp
-        fprintf('\n  ----- %s | %s (10%% reference cutoff) -----\n', ...
-            cname{c}, doses(cdose(c)).label);
-        for k = 1:K
-            if isnan(comp_pass(c, k))
-                fprintf('    %g%%/%gmm  FAILED\n', gamma_n(k), gamma_n(k));
-            else
-                fprintf('    %g%%/%gmm  %.2f%%\n', gamma_n(k), gamma_n(k), comp_pass(c, k));
-            end
+        if job_k(j) == 1
+            comp_gmap{job_c(j)} = job_gmap{j};
         end
     end
+
+    % ---- Console summary, GROUPED BY COMPARISON TYPE ----
+    % One labeled block per comparison type; within it, one line per dose/beam.
+    fprintf('\n==================== GAMMA PASS RATES ====================\n');
+    fprintf('(global gamma, 10%% reference-dose cutoff)\n');
+    for d = 1:nCompDef
+        fprintf('\n----- [%s]  %s  vs  %s -----\n', ...
+            CONFIG.comparisons{d, 1}, CONFIG.comparisons{d, 2}, CONFIG.comparisons{d, 3});
+        for i = 1:nDose
+            cidx = doses(i).comp_idx(d);
+            fprintf('  %-16s', doses(i).label);
+            for k = 1:K
+                if isnan(comp_pass(cidx, k))
+                    fprintf('   %g%%/%gmm: FAILED', gamma_n(k), gamma_n(k));
+                else
+                    fprintf('   %g%%/%gmm: %6.2f%%', gamma_n(k), gamma_n(k), comp_pass(cidx, k));
+                end
+            end
+            fprintf('\n');
+        end
+    end
+    fprintf('\n=========================================================\n');
 end
 
 %% ===================== PER-DOSE OUTPUTS =================================
@@ -433,10 +449,22 @@ for i = 1:nDose
                 [], [], [], []);
         end
         if want_panels
+            % Gamma-index map for this comparison (first criterion), embedded onto
+            % the display grid so it co-registers with the dose panels.
+            gmap_d    = [];
+            gcrit     = [];
+            gpass     = NaN;
+            if has_gamma && ~isempty(comp_gmap{D.comp_idx(d)})
+                gmap_d = embed_on_grid(double(comp_gmap{D.comp_idx(d)}), ...
+                    disp_dims, embed_off, NaN);
+                gcrit  = gamma_n(1);
+                gpass  = pr(1);
+            end
             plot_truth_recon_diff_axial(ref_d, tgt_d, ref_d, dens_d, sens_d, ...
                 D.spacing_mm, {reflbl, tgtlbl}, ...
                 sprintf('%s  %s vs %s  |  %s', name, reflbl, tgtlbl, D.label), ...
-                CONFIG.viz_smooth_sigma, CONFIG.dose_panel_scale, CONFIG.dose_panel_clip_pct);
+                CONFIG.viz_smooth_sigma, CONFIG.dose_panel_scale, CONFIG.dose_panel_clip_pct, ...
+                gmap_d, gcrit, gpass);
         end
         if want_sensor
             dose_mask = ref_d >= 0.10 * max(ref_d(:));
@@ -536,11 +564,12 @@ function v = get_dose_field(D, fieldname)
     end
 end
 
-function p = run_gamma_job(c, k, critv, cspacing, cref, ctgt, cmask, cname)
-%RUN_GAMMA_JOB  One CalcGamma evaluation (comparison c, criterion k) -> pass %.
+function [p, gmap] = run_gamma_job(c, k, critv, cspacing, cref, ctgt, cmask, cname)
+%RUN_GAMMA_JOB  One CalcGamma evaluation (comparison c, criterion k).
 %  Shared by the parallel (parfor) and serial (for) gamma-sweep paths so both
 %  compute identically. Reference = cref{c}, target = ctgt{c}, evaluated over
-%  the 10% reference cutoff mask cmask{c}.
+%  the 10% reference cutoff mask cmask{c}. Returns the pass rate p (%) and the
+%  full gamma-index map gmap (target-shaped; [] on failure) for plotting.
     crit = critv(k);
     sp   = cspacing{c};
     ref_struct = struct('start', [0, 0, 0], 'width', sp, 'data', double(cref{c}));
@@ -552,7 +581,8 @@ function p = run_gamma_job(c, k, critv, cspacing, cref, ctgt, cmask, cname)
         p = 100 * mean(gmap(m) <= 1);
     catch ME
         warning('Gamma job (%s) failed: %s', cname{c}, ME.message);
-        p = NaN;
+        p    = NaN;
+        gmap = [];
     end
 end
 
@@ -1376,23 +1406,31 @@ function plot_gamma_pass_rate_curve(crit_n, pass_rates, label_ref, label_tgt, pa
 end
 
 function plot_truth_recon_diff_axial(volA, volB, slice_ref_vol, density, sensor_mask, ...
-        spacing_mm, labels, titleStr, smooth_sigma, scale_mode, clip_pct)
-%PLOT_TRUTH_RECON_DIFF_AXIAL  1x3 axial figure: volA | volB | (volA - volB).
+        spacing_mm, labels, titleStr, smooth_sigma, scale_mode, clip_pct, ...
+        gamma_map, gamma_crit, gamma_pass)
+%PLOT_TRUTH_RECON_DIFF_AXIAL  Axial figure: volA | volB | (volA - volB) [| gamma].
 %  All inputs are on the SAME (display) grid. The axial (constant-Z, dim 3)
 %  slice is taken at the max of slice_ref_vol (the truth). Panels 1 and 2 use the
 %  shared jet dose rendering (render_dose_panel); panel 3 shows the signed
 %  difference with a symmetric diverging colormap (blue<0<red), alpha-ramped by
 %  magnitude. Density is the grayscale background; the sensor contour overlays
-%  every panel.
+%  every panel. When gamma_map is provided (non-empty), a 4th panel renders the
+%  gamma-index map at the same slice (green<=1 pass, red>1 fail), titled with the
+%  gamma_crit (n%/n mm) and gamma_pass (%) pass rate -- same window as the doses.
 %    labels {1x2} panel titles, e.g. {'RayStation truth','Recon CT\_1'}
 %    scale_mode / clip_pct  as in render_dose_panel (relative vs absolute).
 
     if nargin < 9  || isempty(smooth_sigma), smooth_sigma = 0;          end
     if nargin < 10 || isempty(scale_mode),   scale_mode   = 'relative'; end
     if nargin < 11 || isempty(clip_pct),     clip_pct     = 100;        end
+    if nargin < 12, gamma_map  = []; end
+    if nargin < 13, gamma_crit = []; end
+    if nargin < 14, gamma_pass = NaN; end
     use_relative = strcmpi(scale_mode, 'relative');
 
     gridSize = size(volA);
+    have_gamma = ~isempty(gamma_map) && isequal(size(gamma_map), gridSize);
+    n_panels   = 3 + double(have_gamma);
     [~, midx]    = max(slice_ref_vol(:));
     [~, ~, cz]   = ind2sub(gridSize, midx);
 
@@ -1424,8 +1462,9 @@ function plot_truth_recon_diff_axial(volA, volB, slice_ref_vol, density, sensor_
     a_sl = squeeze(volA(:, :, cz))';
     b_sl = squeeze(volB(:, :, cz))';
 
+    fig_width = 460 * n_panels;
     figure('Name', titleStr, 'Color', 'w', 'NumberTitle', 'off', ...
-        'Position', [60, 80, 1380, 460]);
+        'Position', [60, 80, fig_width, 460]);
     if use_relative
         scale_note = sprintf('panels 1-2 scaled to own %s (relative %%)', clip_str);
     else
@@ -1438,21 +1477,21 @@ function plot_truth_recon_diff_axial(volA, volB, slice_ref_vol, density, sensor_
     shared_max = max(robust_dose_max(volA, clip_pct), robust_dose_max(volB, clip_pct));
 
     % --- Panel 1: volA ---
-    ax1 = subplot(1, 3, 1);
+    ax1 = subplot(1, n_panels, 1);
     if use_relative, rmA = robust_dose_max(volA, clip_pct); else, rmA = shared_max; end
     render_dose_panel(ax1, a_sl, dens_sl, sensor_sl, x_ax, y_ax, rmA, cmap_jet, ...
         wl_min, wl_width, use_relative, clip_str, smooth_sigma, 'X (mm)', 'Y (mm)', ...
         sprintf('%s  Axial (Z=%d)', labels{1}, cz));
 
     % --- Panel 2: volB ---
-    ax2 = subplot(1, 3, 2);
+    ax2 = subplot(1, n_panels, 2);
     if use_relative, rmB = robust_dose_max(volB, clip_pct); else, rmB = shared_max; end
     render_dose_panel(ax2, b_sl, dens_sl, sensor_sl, x_ax, y_ax, rmB, cmap_jet, ...
         wl_min, wl_width, use_relative, clip_str, smooth_sigma, 'X (mm)', 'Y (mm)', ...
         sprintf('%s  Axial (Z=%d)', labels{2}, cz));
 
     % --- Panel 3: signed difference (volA - volB) ---
-    ax3 = subplot(1, 3, 3);
+    ax3 = subplot(1, n_panels, 3);
     diff_sl = a_sl - b_sl;
     if smooth_sigma > 0, diff_sl = imgaussfilt(diff_sl, smooth_sigma); end
     dmax = robust_dose_max(abs(diff_sl), clip_pct);
@@ -1489,7 +1528,58 @@ function plot_truth_recon_diff_axial(volA, volB, slice_ref_vol, density, sensor_
     cb = colorbar(ax3); cb.Label.String = 'Difference (Gy)';
     xlabel(ax3, 'X (mm)'); ylabel(ax3, 'Y (mm)');
     title(ax3, sprintf('%s - %s  Axial (Z=%d)', labels{1}, labels{2}, cz));
+
+    % --- Panel 4: gamma index (same window as the dose panels) ---
+    if have_gamma
+        ax4  = subplot(1, n_panels, 4);
+        g_sl = squeeze(gamma_map(:, :, cz))';   % target-shaped; NaN outside the eval region
+
+        if have_density
+            dn     = (dens_sl - wl_min) / wl_width;
+            dn     = max(0, min(1, dn));
+            bg_rgb = repmat(dn, [1, 1, 3]);
+        else
+            bg_rgb = zeros([size(g_sl), 3]);
+        end
+        image(ax4, x_ax, y_ax, bg_rgb);
+        hold(ax4, 'on');
+
+        h_gamma           = imagesc(ax4, x_ax, y_ax, g_sl, [0, 2]);
+        h_gamma.AlphaData = ~isnan(g_sl);   % transparent where no gamma was computed
+        colormap(ax4, gamma_gyr_colormap(256));
+
+        if ~isempty(sensor_sl) && any(sensor_sl(:))
+            contour(ax4, x_ax, y_ax, double(sensor_sl), [0.5, 0.5], 'k-', 'LineWidth', 1.5);
+        end
+        hold(ax4, 'off');
+        axis(ax4, 'xy'); axis(ax4, 'image');
+        caxis(ax4, [0, 2]);
+        cb4 = colorbar(ax4); cb4.Label.String = '\gamma index';
+        xlabel(ax4, 'X (mm)'); ylabel(ax4, 'Y (mm)');
+        if ~isempty(gamma_crit)
+            title(ax4, sprintf('\\gamma  %g%%/%gmm  (pass %.1f%%)  Z=%d', ...
+                gamma_crit, gamma_crit, gamma_pass, cz));
+        else
+            title(ax4, sprintf('\\gamma index  (pass %.1f%%)  Z=%d', gamma_pass, cz));
+        end
+    end
     drawnow;
+end
+
+function cmap = gamma_gyr_colormap(n)
+%GAMMA_GYR_COLORMAP  Gamma-index colormap over [0,2]: green (pass, <=1) ramps
+%  through yellow at gamma=1 to red (fail, >1). Matches the standard IRAI gamma
+%  display convention.
+    if nargin < 1 || isempty(n), n = 256; end
+    h     = floor(n / 2);                       % first half: gamma 0..1
+    green = [0.00, 0.60, 0.20];
+    yellow= [1.00, 0.95, 0.20];
+    red   = [0.80, 0.10, 0.10];
+    half1 = [linspace(green(1), yellow(1), h)', linspace(green(2), yellow(2), h)', ...
+             linspace(green(3), yellow(3), h)'];
+    half2 = [linspace(yellow(1), red(1), n - h)', linspace(yellow(2), red(2), n - h)', ...
+             linspace(yellow(3), red(3), n - h)'];
+    cmap = [half1; half2];
 end
 
 function cmap = blue_white_red(n)
