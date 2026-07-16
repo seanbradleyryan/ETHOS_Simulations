@@ -1,16 +1,19 @@
 %% =========================================================================
-%  RUN_AIR_SOUND_SPEED_COMPARISON.m
-%  Compare k-Wave photoacoustic reconstruction with air sound speed = 343 m/s
-%  (physically correct, slow) vs 1480 m/s (water speed, fast) under otherwise
-%  identical conditions, and gamma-analyze the difference.
+%  RUN_NT_CONVERGENCE_SWEEP.m
+%  Nt convergence sweep: keep air physically correct at 343 m/s and shorten the
+%  k-Wave recording length Nt (default, default/2, ... default/64), reconstruct
+%  each, and gamma-compare every shortened run against the default-Nt recon.
+%  Produces a pass-rate-vs-Nt convergence curve.
 %
-%  Motivation: simTime = 2.5*gridDiag/minC and minC is set by the slowest
-%  tissue. Real air (343 m/s) inflates Nt; using 1480 m/s raises minC (~1450)
-%  and cuts Nt ~4x. This script validates that the speedup does not materially
-%  change the reconstructed dose.
+%  Motivation: Nt = ceil(simTime/dt) with simTime = 2.5*gridDiag/minC, and minC
+%  is set by the slowest tissue (real air, 343 m/s), which inflates Nt. Rather
+%  than falsify air's sound speed (which breaks the air/tissue impedance physics
+%  and produces spurious hotspots), we keep the medium physically correct and
+%  test how few time steps we can afford before the reconstruction degrades.
+%  dt is held fixed (CFL/stability); only the recording length Nt varies.
 %
-%  Modeled on run_standalone_simulation.m. Noise is disabled for both runs so
-%  any gamma difference is attributable to the air-speed change alone.
+%  Modeled on run_standalone_simulation.m. Noise is disabled for every run so
+%  any gamma difference is attributable to the Nt reduction alone.
 %% =========================================================================
 
 clear; clc; close all;
@@ -72,16 +75,18 @@ CONFIG.downscale_factor = 1;
 CONFIG.use_grid_padding = true;
 
 CONFIG.save_results = true;
-CONFIG.output_file  = 'air_sound_speed_comparison_results.mat';
+CONFIG.output_file  = 'nt_convergence_sweep_results.mat';
 CONFIG.plot_results = true;
 
 CONFIG.viz_smooth_sigma = 1.0;
 CONFIG.normalize = false;
 CONFIG.plot_exclusion_zone = false;
 
-% --- Air sound speeds to sweep (m/s). First entry is the physically-correct
-%     reference (343); second is the fast approximation (1480). ---
-CONFIG.air_sound_speeds = [343, 1480];
+% --- Nt convergence sweep. Air is fixed at the physically-correct 343 m/s for
+%     every run. Nt_default is computed from minC on the first run; subsequent
+%     runs use Nt = round(Nt_default ./ divisor). Divisor 1 is the reference. ---
+CONFIG.air_sound_speed = 343;
+CONFIG.nt_divisors     = [1 2 4 8 16 32 64];
 
 %% ========================= RESOLVE FILE PATHS ============================
 
@@ -134,7 +139,7 @@ end
 %% ========================= PRINT CONFIGURATION ===========================
 
 fprintf('=========================================================\n');
-fprintf('  Air Sound-Speed Comparison  (343 vs 1480 m/s)\n');
+fprintf('  Nt Convergence Sweep  (air fixed at %d m/s)\n', CONFIG.air_sound_speed);
 fprintf('=========================================================\n');
 fprintf('  Patient:         %s / %s\n', CONFIG.patient_id, CONFIG.session);
 fprintf('  Dose file:       %s\n', dose_filepath);
@@ -143,7 +148,7 @@ fprintf('  Sensor:          %s\n', CONFIG.sensor_placement_method);
 fprintf('  Tissue model:    %s\n', CONFIG.gruneisen_method);
 fprintf('  Recon method:    %s\n', CONFIG.reconstruction_method);
 fprintf('  Noise:           DISABLED (convolution_kernel = 0)\n');
-fprintf('  Air speeds:      [%s] m/s\n', num2str(CONFIG.air_sound_speeds));
+fprintf('  Nt divisors:     [%s]\n', num2str(CONFIG.nt_divisors));
 fprintf('=========================================================\n\n');
 
 %% ========================= LOAD DATA ====================================
@@ -281,15 +286,19 @@ if CONFIG.downscale_factor ~= 1
     gridSize = [Nx, Ny, Nz];
 end
 
-%% ========================= RUN BOTH AIR SPEEDS ==========================
+%% ========================= RUN Nt SWEEP =================================
+%  Air fixed at 343 m/s for every run. Run 1 (divisor 1) establishes Nt_default;
+%  runs 2..N use Nt = round(Nt_default / divisor).
 
-air_speeds = CONFIG.air_sound_speeds;
-n_runs     = numel(air_speeds);
+divisors   = CONFIG.nt_divisors;
+n_runs     = numel(divisors);
+Nt_default = [];
 
 for k = 1:n_runs
-    air_c = air_speeds(k);
+    div_k = divisors(k);
     fprintf('\n=========================================================\n');
-    fprintf('  RUN %d/%d  -  air sound speed = %d m/s\n', k, n_runs, air_c);
+    fprintf('  RUN %d/%d  -  Nt divisor = %d  (air = %d m/s)\n', ...
+        k, n_runs, div_k, CONFIG.air_sound_speed);
     fprintf('=========================================================\n');
 
     cfg = CONFIG;
@@ -301,108 +310,132 @@ for k = 1:n_runs
         'alpha_coeff', cfg.uniform_alpha_coeff, ...
         'alpha_power', 1.1, ...
         'gruneisen',   cfg.uniform_gruneisen);
-    % Inject the swept air sound speed.
-    cfg.tissue_tables.threshold_2.air.sound_speed = air_c;
+    % Air stays physically correct for every run.
+    cfg.tissue_tables.threshold_2.air.sound_speed = CONFIG.air_sound_speed;
+
+    % Run 1 (divisor 1) uses the natural default Nt; later runs override.
+    if k == 1
+        cfg.nt_override = [];
+    else
+        cfg.nt_override = round(Nt_default / div_k);
+    end
 
     out = simulate_and_reconstruct(cfg, sct, doseGrid, spacing_mm, fd_gantry_angle);
-    out.air_c = air_c;
+    out.nt_divisor = div_k;
+
+    if k == 1
+        Nt_default = out.Nt;
+    end
+
     res(k) = out;
 
-    fprintf('  [RUN %d] air=%d m/s -> minC=%.0f m/s, Nt=%d, fwd=%.1fs, tr=%.1fs\n', ...
-        k, air_c, out.minC, out.Nt, out.fwd_time, out.tr_time);
+    fprintf('  [RUN %d] divisor=%d -> Nt=%d, minC=%.0f m/s, fwd=%.1fs, tr=%.1fs\n', ...
+        k, div_k, out.Nt, out.minC, out.fwd_time, out.tr_time);
 end
 
 %% ========================= SPEEDUP SUMMARY ==============================
 
-fprintf('\n========= SPEEDUP SUMMARY =========\n');
-fprintf('  %-10s  %-8s  %-8s  %-10s  %-10s\n', 'air(m/s)', 'minC', 'Nt', 'fwd(s)', 'tr(s)');
+fprintf('\n========= Nt SWEEP SUMMARY =========\n');
+fprintf('  %-9s  %-8s  %-10s  %-10s  %-10s\n', 'divisor', 'Nt', 'fwd(s)', 'tr(s)', 'speedup');
+t_ref_total = res(1).fwd_time + res(1).tr_time;
 for k = 1:n_runs
-    fprintf('  %-10d  %-8.0f  %-8d  %-10.1f  %-10.1f\n', ...
-        res(k).air_c, res(k).minC, res(k).Nt, res(k).fwd_time, res(k).tr_time);
+    t_total = res(k).fwd_time + res(k).tr_time;
+    fprintf('  %-9d  %-8d  %-10.1f  %-10.1f  %-10.2fx\n', ...
+        res(k).nt_divisor, res(k).Nt, res(k).fwd_time, res(k).tr_time, ...
+        t_ref_total / max(t_total, eps));
 end
-if n_runs == 2
-    dt_ratio = (res(1).fwd_time + res(1).tr_time) / max(res(2).fwd_time + res(2).tr_time, eps);
-    fprintf('  Total-time speedup (343 -> 1480): %.2fx\n', dt_ratio);
+fprintf('====================================\n');
+
+%% ========================= IDENTIFY REFERENCE ==========================
+% Reference = run 1 (default Nt) = ground truth. Every run is gamma-compared
+% against it; the smallest-Nt run (last) is the most degraded target.
+
+recon_ref  = res(1).recon_dose;      % default Nt (truth)
+spacing_mm = res(1).spacing_mm;
+sensor_msk = res(1).sensor_mask;
+density_bg = res(1).density;
+gridSize   = res(1).gridSize;
+
+for k = 2:n_runs
+    if ~isequal(size(res(k).recon_dose), size(recon_ref))
+        error('Recon grids differ between runs 1 and %d: [%s] vs [%s].', ...
+            k, num2str(size(recon_ref)), num2str(size(res(k).recon_dose)));
+    end
 end
-fprintf('===================================\n');
 
-%% ========================= IDENTIFY REF / TGT ===========================
-% Reference = 343 m/s (physically correct). Target = 1480 m/s (fast).
-
-idx_ref = find(air_speeds == 343, 1);
-idx_tgt = find(air_speeds == 1480, 1);
-if isempty(idx_ref), idx_ref = 1; end
-if isempty(idx_tgt), idx_tgt = n_runs; end
-
-recon_ref  = res(idx_ref).recon_dose;   % 343 m/s (truth)
-recon_tgt  = res(idx_tgt).recon_dose;   % 1480 m/s
-spacing_mm = res(idx_ref).spacing_mm;
-sensor_msk = res(idx_ref).sensor_mask;
-density_bg = res(idx_ref).density;
-gridSize   = res(idx_ref).gridSize;
-
-if ~isequal(size(recon_ref), size(recon_tgt))
-    error('Recon grids differ between runs: [%s] vs [%s].', ...
-        num2str(size(recon_ref)), num2str(size(recon_tgt)));
-end
+Nt_list = [res.Nt];
 
 %% ========================= GAMMA ANALYSIS ===============================
-%  343-recon (reference) vs 1480-recon (target).
+%  Every run (each Nt) vs the default-Nt recon. pass_rates is [n_runs x nCrit];
+%  run 1 vs itself yields 100%.
 
 gamma_results = struct();
+gamma_criteria = {10, 10, '10%/10mm'; 5, 5, '5%/5mm'; 3, 3, '3%/3mm'};
+nCrit          = size(gamma_criteria, 1);
+pass_rates     = nan(n_runs, nCrit);
 
 if exist('CalcGamma', 'file') == 2
-    fprintf('\n[Gamma] Running gamma analysis (343-recon ref vs 1480-recon tgt)...\n');
+    fprintf('\n[Gamma] Running Nt-sweep gamma analysis (each Nt vs default-Nt recon)...\n');
 
     ref_struct.start = [0, 0, 0];
     ref_struct.width = spacing_mm;
     ref_struct.data  = double(recon_ref);
 
-    tgt_struct.start = [0, 0, 0];
-    tgt_struct.width = spacing_mm;
-    tgt_struct.data  = double(recon_tgt);
-
     low_dose_cutoff = 0.10 * max(recon_ref(:));
     gamma_eval_mask = recon_ref >= low_dose_cutoff;
 
-    gamma_criteria = {10, 10, '10%/10mm'; 5, 5, '5%/5mm'; 3, 3, '3%/3mm'};
-    gamma_maps     = cell(size(gamma_criteria, 1), 1);
-    pass_rates     = zeros(size(gamma_criteria, 1), 1);
+    % Keep gamma maps only for the reference-vs-smallest-Nt pair (for display).
+    gamma_maps_smallest = cell(nCrit, 1);
 
-    for gc = 1:size(gamma_criteria, 1)
-        pct_crit = gamma_criteria{gc, 1};
-        dta_crit = gamma_criteria{gc, 2};
-        lbl      = gamma_criteria{gc, 3};
-        fprintf('  [%s] Computing...', lbl);
-        try
-            gmap = CalcGamma(ref_struct, tgt_struct, pct_crit, dta_crit, ...
-                'local', 0, 'limit', dta_crit * 2, 'restrict', 1);
-            gamma_maps{gc} = gmap;
-            eval_vals      = gmap(gamma_eval_mask);
-            pass_rate      = 100 * mean(eval_vals <= 1);
-            pass_rates(gc) = pass_rate;
-            fprintf('  Pass rate: %.2f%%\n', pass_rate);
-        catch ME
-            warning('Gamma [%s] failed: %s', lbl, ME.message);
-            gamma_maps{gc} = [];
-            pass_rates(gc) = NaN;
-            fprintf('  FAILED\n');
+    for k = 1:n_runs
+        tgt_struct.start = [0, 0, 0];
+        tgt_struct.width = spacing_mm;
+        tgt_struct.data  = double(res(k).recon_dose);
+
+        fprintf('  [Nt=%d, /%d]\n', res(k).Nt, res(k).nt_divisor);
+        for gc = 1:nCrit
+            pct_crit = gamma_criteria{gc, 1};
+            dta_crit = gamma_criteria{gc, 2};
+            lbl      = gamma_criteria{gc, 3};
+            fprintf('    [%s] Computing...', lbl);
+            try
+                gmap = CalcGamma(ref_struct, tgt_struct, pct_crit, dta_crit, ...
+                    'local', 0, 'limit', dta_crit * 2, 'restrict', 1);
+                eval_vals        = gmap(gamma_eval_mask);
+                pass_rates(k, gc) = 100 * mean(eval_vals <= 1);
+                fprintf('  Pass rate: %.2f%%\n', pass_rates(k, gc));
+                if k == n_runs
+                    gamma_maps_smallest{gc} = gmap;
+                end
+            catch ME
+                warning('Gamma [Nt=%d, %s] failed: %s', res(k).Nt, lbl, ME.message);
+                fprintf('  FAILED\n');
+            end
         end
     end
 
-    gamma_results.maps        = gamma_maps;
-    gamma_results.pass_rates  = pass_rates;
-    gamma_results.criteria    = gamma_criteria;
-    gamma_results.cutoff_Gy   = low_dose_cutoff;
-    gamma_results.eval_mask   = gamma_eval_mask;
+    gamma_results.pass_rates    = pass_rates;      % [n_runs x nCrit]
+    gamma_results.criteria      = gamma_criteria;
+    gamma_results.Nt_list       = Nt_list;
+    gamma_results.nt_divisors   = divisors;
+    gamma_results.cutoff_Gy     = low_dose_cutoff;
+    gamma_results.eval_mask     = gamma_eval_mask;
+    gamma_results.maps_smallest = gamma_maps_smallest;  % ref vs smallest-Nt
 
-    fprintf('\n  ------ Gamma Pass Rates (343-recon vs 1480-recon, 10%% cutoff) ------\n');
-    for gc = 1:size(gamma_criteria, 1)
-        if isnan(pass_rates(gc))
-            fprintf('  %-12s  FAILED\n', gamma_criteria{gc, 3});
-        else
-            fprintf('  %-12s  %.2f%%\n', gamma_criteria{gc, 3}, pass_rates(gc));
+    fprintf('\n  ------ Gamma Pass Rates vs default-Nt recon (10%% cutoff) ------\n');
+    fprintf('  %-8s  %-8s', 'divisor', 'Nt');
+    for gc = 1:nCrit, fprintf('  %-10s', gamma_criteria{gc, 3}); end
+    fprintf('\n');
+    for k = 1:n_runs
+        fprintf('  %-8d  %-8d', divisors(k), Nt_list(k));
+        for gc = 1:nCrit
+            if isnan(pass_rates(k, gc))
+                fprintf('  %-10s', 'FAILED');
+            else
+                fprintf('  %-9.2f%%', pass_rates(k, gc));
+            end
         end
+        fprintf('\n');
     end
 else
     warning('CalcGamma not found. Skipping gamma analysis.');
@@ -413,11 +446,12 @@ end
 
 if CONFIG.save_results
     results = struct();
-    results.recon_343      = recon_ref;
-    results.recon_1480     = recon_tgt;
-    results.air_speeds     = air_speeds;
+    results.recon_default  = recon_ref;                 % default Nt (truth)
+    results.recon_smallest = res(n_runs).recon_dose;    % smallest Nt
+    results.air_sound_speed = CONFIG.air_sound_speed;
+    results.nt_divisors    = divisors;
+    results.Nt             = Nt_list;
     results.minC           = [res.minC];
-    results.Nt             = [res.Nt];
     results.fwd_time_sec   = [res.fwd_time];
     results.tr_time_sec    = [res.tr_time];
     results.spacing_mm     = spacing_mm;
@@ -425,7 +459,8 @@ if CONFIG.save_results
     results.sensor_mask    = sensor_msk;
     results.config         = CONFIG;
     if ~isempty(gamma_results)
-        results.gamma = gamma_results;
+        results.gamma       = gamma_results;
+        results.pass_rates  = gamma_results.pass_rates;  % [n_runs x nCrit]
     end
     save(CONFIG.output_file, '-struct', 'results', '-v7.3');
     fprintf('\nResults saved to: %s\n', CONFIG.output_file);
@@ -434,23 +469,37 @@ end
 %% ========================= VISUALIZATION ================================
 
 if CONFIG.plot_results
+    recon_smallest = res(n_runs).recon_dose;
+
+    % KEY DELIVERABLE: pass-rate-vs-Nt convergence curve.
+    if ~isempty(gamma_results) && isfield(gamma_results, 'pass_rates')
+        plot_pass_rate_vs_nt(Nt_list, gamma_results.pass_rates, gamma_criteria);
+    end
+
     % Shared sensor/dose geometry (identical across runs).
     dose_mask_vis = double(recon_ref) >= 0.10 * max(double(recon_ref(:)));
     plot_sensor_dose_planes(dose_mask_vis, logical(sensor_msk), spacing_mm, density_bg, CONFIG);
 
-    % Recon comparison: 343 (top) vs 1480 (bottom).
-    plot_dose_panels(recon_ref, recon_tgt, sensor_msk, density_bg, spacing_mm, ...
-        'Recon Dose: air 343 m/s (top) vs 1480 m/s (bottom)', CONFIG.viz_smooth_sigma);
+    % Recon comparison: default Nt (top) vs smallest Nt (bottom).
+    plot_dose_panels(recon_ref, recon_smallest, sensor_msk, density_bg, spacing_mm, ...
+        sprintf('Recon Dose: Nt=%d (top) vs Nt=%d (bottom)', Nt_list(1), Nt_list(end)), ...
+        CONFIG.viz_smooth_sigma);
 
-    % Gamma + absolute difference at the reference max-dose axial slice.
-    if ~isempty(gamma_results) && isfield(gamma_results, 'maps')
+    % Gamma + absolute difference at the reference max-dose axial slice
+    % (default-Nt vs smallest-Nt pair).
+    if ~isempty(gamma_results) && isfield(gamma_results, 'maps_smallest')
+        gr_disp            = gamma_results;
+        gr_disp.maps       = gamma_results.maps_smallest;
+        gr_disp.pass_rates = gamma_results.pass_rates(n_runs, :);
+        gr_disp.nt_ref     = Nt_list(1);
+        gr_disp.nt_tgt     = Nt_list(end);
         [~, max_idx]     = max(recon_ref(:));
         [~, ~, cz_gamma] = ind2sub(gridSize, max_idx);
-        plot_gamma_and_error_axial(gamma_results, recon_ref, recon_tgt, sensor_msk, cz_gamma);
+        plot_gamma_and_error_axial(gr_disp, recon_ref, recon_smallest, sensor_msk, cz_gamma);
     end
 end
 
-fprintf('\nAir sound-speed comparison complete.\n');
+fprintf('\nNt convergence sweep complete.\n');
 
 
 %% =========================================================================
@@ -785,11 +834,20 @@ function out = simulate_and_reconstruct(CONFIG, sct, doseGrid, spacing_mm, fd_ga
 
     gridDiag = sqrt((Nx*dx)^2 + (Ny*dy)^2 + (Nz*dz)^2);
     simTime  = 2.5 * gridDiag / minC;
-    Nt       = ceil(simTime / dt);
+    Nt_default = ceil(simTime / dt);
+
+    % Optional Nt override (Nt convergence sweep). dt stays CFL-based for
+    % stability; only the recording length changes.
+    if isfield(CONFIG, 'nt_override') && ~isempty(CONFIG.nt_override)
+        Nt = max(1, round(CONFIG.nt_override));
+    else
+        Nt = Nt_default;
+    end
 
     kgrid.dt = dt;
     kgrid.Nt = Nt;
-    fprintf('       dt = %.2e s, Nt = %d, minC = %.0f m/s, T_sim = %.2e s\n', dt, Nt, minC, simTime);
+    fprintf('       dt = %.2e s, Nt = %d (default %d), minC = %.0f m/s, T_sim = %.2e s\n', ...
+        dt, Nt, Nt_default, minC, Nt * dt);
 
     kmedium             = struct();
     kmedium.density     = medium.density;
@@ -1048,6 +1106,7 @@ function out = simulate_and_reconstruct(CONFIG, sct, doseGrid, spacing_mm, fd_ga
     out.gridSize    = gridSize;
     out.minC        = minC;
     out.Nt          = Nt;
+    out.Nt_default  = Nt_default;
     out.fwd_time    = fwd_time;
     out.tr_time     = tr_time;
 end
@@ -1141,7 +1200,7 @@ end
 
 function plot_dose_panels(original, recon, sensor_mask, density, spacing_mm, titleStr, smooth_sigma)
 %PLOT_DOSE_PANELS 2x3 dose comparison: coronal, sagittal, axial.
-%  Row 1 = first volume (343 m/s), Row 2 = second volume (1480 m/s).
+%  Row 1 = first (reference) volume, Row 2 = second (comparison) volume.
 
     if nargin < 7 || isempty(smooth_sigma), smooth_sigma = 0; end
 
@@ -1170,7 +1229,7 @@ function plot_dose_panels(original, recon, sensor_mask, density, spacing_mm, tit
     sgtitle(sprintf('%s\nIsocenter (max dose): X=%d  Y=%d  Z=%d voxel  |  Dose clim [0, %.4f] Gy', ...
         titleStr, cx, cy, cz, max_dose), 'FontWeight', 'bold', 'FontSize', 11);
 
-    row_labels = {'Air 343 m/s', 'Air 1480 m/s'};
+    row_labels = {'Reference', 'Comparison'};
     doses      = {original, recon};
 
     for row = 1:2
@@ -1259,11 +1318,13 @@ function plot_gamma_and_error_axial(gamma_results, original, recon, sensor_mask,
     criteria   = gamma_results.criteria;
     pass_rates = gamma_results.pass_rates;
     nCrit      = size(criteria, 1);
+    if isfield(gamma_results, 'nt_ref'), nt_ref = gamma_results.nt_ref; else, nt_ref = NaN; end
+    if isfield(gamma_results, 'nt_tgt'), nt_tgt = gamma_results.nt_tgt; else, nt_tgt = NaN; end
 
     figure('Name', 'Gamma & Absolute Difference  Axial', 'Color', 'w', ...
         'NumberTitle', 'off', 'Position', [50, 300, 1400, 370]);
-    sgtitle(sprintf('Axial Plane (Z = %d voxel)  Gamma (343 vs 1480) & |Difference|', cz), ...
-        'FontWeight', 'bold', 'FontSize', 11);
+    sgtitle(sprintf('Axial Plane (Z = %d voxel)  Gamma (Nt=%d vs Nt=%d) & |Difference|', ...
+        cz, nt_ref, nt_tgt), 'FontWeight', 'bold', 'FontSize', 11);
 
     gamma_clim   = [0, 2];
     sensor_slice = squeeze(sensor_mask(:, :, cz))';
@@ -1312,7 +1373,41 @@ function plot_gamma_and_error_axial(gamma_results, original, recon, sensor_mask,
     end
     hold(ax, 'off');
     xlabel(ax, 'X (voxel)'); ylabel(ax, 'Y (voxel)');
-    title(ax, sprintf('|1480 - 343|\nMax: %.4f Gy', max_err));
+    title(ax, sprintf('|Nt=%d - Nt=%d|\nMax: %.4f Gy', nt_tgt, nt_ref, max_err));
+    drawnow;
+end
+
+
+function plot_pass_rate_vs_nt(Nt_list, pass_rates, criteria)
+%PLOT_PASS_RATE_VS_NT  Gamma pass-rate vs Nt convergence curve.
+%  Nt_list    - [1 x nRuns] time-step counts (run 1 = default = reference).
+%  pass_rates - [nRuns x nCrit] pass rates vs the default-Nt recon.
+%  criteria   - {pct, dta, label} cell array, one row per gamma criterion.
+
+    nCrit = size(criteria, 1);
+    [Nt_sorted, order] = sort(Nt_list(:));       % ascending Nt for a clean curve
+    pr_sorted = pass_rates(order, :);
+
+    figure('Name', 'Gamma Pass Rate vs Nt', 'Color', 'w', ...
+        'NumberTitle', 'off', 'Position', [80, 120, 760, 520]);
+    hold on;
+    markers = {'-o', '-s', '-^', '-d', '-v'};
+    for gc = 1:nCrit
+        m = markers{mod(gc - 1, numel(markers)) + 1};
+        plot(Nt_sorted, pr_sorted(:, gc), m, 'LineWidth', 1.8, ...
+            'MarkerSize', 7, 'MarkerFaceColor', 'auto', ...
+            'DisplayName', criteria{gc, 3});
+    end
+    yline(90, 'r--', '90% pass', 'LineWidth', 1.2, 'HandleVisibility', 'off');
+    hold off;
+
+    grid on; box on;
+    xlabel('Nt (time steps)');
+    ylabel('Gamma pass rate (%)');
+    title(sprintf('Gamma Pass Rate vs Nt  (reference = default Nt = %d)', max(Nt_list)));
+    legend('Location', 'southeast');
+    ylim([0, 101]);
+    set(gca, 'XScale', 'log');   % Nt spans powers of 2 -> log x reads cleanly
     drawnow;
 end
 
