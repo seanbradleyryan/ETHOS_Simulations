@@ -13,21 +13,33 @@
 %    truth1_vs_truth3  RayStation truth CT_1 vs truth CT_3   (green connector ref)
 %    truth1_vs_recon1  RayStation truth CT_1 vs recon CT_1   (green)
 %    truth1_vs_recon3  RayStation truth CT_1 vs recon CT_3   (red)
+%    truth3_vs_recon3  RayStation truth CT_3 vs recon CT_3   (own-CT fidelity)
 %
 %  When CONFIG.normalize is true, each recon is first rescaled by the least-
 %  squares gain that best matches it to its OWN-CT truth over that truth's 10%
 %  region (recon_CT1->rs_CT1, recon_CT3->rs_CT3), cancelling the stored absolute
 %  scale (CONFIG.correction_factor); the RS truths are never rescaled.
 %
-%  PLOT (x = beam number, y = pass rate %, at the single gamma criterion):
+%  FIGURE 1 - change detection (x = beam number, y = pass rate %, single crit):
 %    - recon_CT1 vs truth_CT1  (green markers, std error bars),
 %    - recon_CT3 vs truth_CT1  (red markers, std error bars),
 %    - truth_CT1 vs truth_CT3  (blue markers, std error bars),
 %    - a per-beam vertical connector between the two recon means, coloured like
 %      whichever mean is greater.
 %
+%  FIGURE 2 - reconstruction fidelity (each recon vs its OWN-CT truth):
+%    - truth_CT1 vs recon_CT1 (green), truth_CT3 vs recon_CT3 (red), each series
+%      joined by straight lines across beams. No vertical connectors.
+%
+%  Both figures carry a trailing "All" x-axis entry: the mean +/- std pooled over
+%  EVERY segment of EVERY processed beam, separated from the per-beam entries by
+%  a dashed vertical rule.
+%
 %  OPERATIONAL:
 %    - Progress notifications + a total-runtime record are printed to console.
+%    - The whole console session is mirrored to CONFIG.log_file via diary, and
+%      results + log are written beside the recon doses in
+%      SimulationResults/[PatientID]/[Session]/[method]/.
 %    - ALL CalcGamma console output is suppressed (evalc wrapper).
 %    - Missing entries (absent beam, absent segment, missing CT_1/CT_3 pair or
 %      recon file, grid mismatch) are skipped rather than raised.
@@ -70,7 +82,8 @@ CONFIG.gruneisen_method = 'threshold_2';
 CONFIG.comparisons = { ...
     'truth1_vs_truth3', 'rs_CT1', 'rs_CT3',    'Truth CT\_1', 'Truth CT\_3'; ...
     'truth1_vs_recon1', 'rs_CT1', 'recon_CT1', 'Truth CT\_1', 'Recon CT\_1'; ...
-    'truth1_vs_recon3', 'rs_CT1', 'recon_CT3', 'Truth CT\_1', 'Recon CT\_3'  ...
+    'truth1_vs_recon3', 'rs_CT1', 'recon_CT3', 'Truth CT\_1', 'Recon CT\_3'; ...
+    'truth3_vs_recon3', 'rs_CT3', 'recon_CT3', 'Truth CT\_3', 'Recon CT\_3'  ...
 };
 
 % Gamma criterion n (evaluated as n%/n mm). Single value for the summary.
@@ -85,10 +98,33 @@ CONFIG.use_parallel = true;
 CONFIG.num_workers  = 64;   % default local pool size
 
 % --- Output ---
+% Results and the console log are cached beside the recon doses, i.e. in
+% SimulationResults/[PatientID]/[Session]/[gruneisen_method]/. Set output_dir to
+% a path to override that location.
 CONFIG.save_results = true;
+CONFIG.output_dir   = '';   % '' => the recon-dose directory
 CONFIG.output_file  = 'pass_rates_allsegments_results.mat';
+CONFIG.log_file     = 'pass_rates_allsegments_log.txt';
 
 %% ===================== SETUP ============================================
+
+% Cache directory: the recon-dose folder unless explicitly overridden.
+if isempty(CONFIG.output_dir)
+    CONFIG.output_dir = fullfile(CONFIG.working_dir, 'SimulationResults', ...
+        CONFIG.patient_id, CONFIG.session, CONFIG.gruneisen_method);
+end
+if ~isfolder(CONFIG.output_dir)
+    mkdir(CONFIG.output_dir);
+end
+
+% Mirror the whole console session to the log file (overwrite any prior run).
+log_path = CONFIG.log_file;
+if isempty(fileparts(log_path))
+    log_path = fullfile(CONFIG.output_dir, log_path);
+end
+diary off;
+if isfile(log_path), delete(log_path); end
+diary(log_path);
 
 ct_lo   = min(CONFIG.ct_pair);
 ct_hi   = max(CONFIG.ct_pair);
@@ -106,10 +142,17 @@ if ~has_gamma
         'CalcGamma not found on the path; cannot compute pass rates.');
 end
 
-% Column indices (into CONFIG.comparisons / the pass matrices) for the plot.
-d_tt = comp_col(CONFIG.comparisons, 'truth1_vs_truth3');
-d_r1 = comp_col(CONFIG.comparisons, 'truth1_vs_recon1');
-d_r3 = comp_col(CONFIG.comparisons, 'truth1_vs_recon3');
+% Column indices (into CONFIG.comparisons / the pass matrices) for the plots.
+d_tt = comp_col(CONFIG.comparisons, 'truth1_vs_truth3');   % fig 1, blue
+d_r1 = comp_col(CONFIG.comparisons, 'truth1_vs_recon1');   % fig 1 green, fig 2 green
+d_r3 = comp_col(CONFIG.comparisons, 'truth1_vs_recon3');   % fig 1, red
+d_33 = comp_col(CONFIG.comparisons, 'truth3_vs_recon3');   % fig 2, red
+
+if any(isnan([d_tt, d_r1, d_r3, d_33]))
+    error('study_pass_rates_allsegments:MissingComparison', ...
+        ['CONFIG.comparisons must define truth1_vs_truth3, truth1_vs_recon1, ' ...
+         'truth1_vs_recon3 and truth3_vs_recon3 for the summary figures.']);
+end
 
 fprintf('============================================================\n');
 fprintf(' STUDY_PASS_RATES_ALLSEGMENTS\n');
@@ -118,6 +161,8 @@ fprintf(' Patient %s | %s | plan=%s | hash=%s\n', ...
 fprintf(' Beams: %s  (%d)\n', mat2str(beams), nBeams);
 fprintf(' Criterion: %g%%/%gmm | normalize=%d | parallel=%d\n', ...
     crit, crit, CONFIG.normalize, CONFIG.use_parallel);
+fprintf(' Cache dir: %s\n', CONFIG.output_dir);
+fprintf(' Log file : %s\n', log_path);
 fprintf('============================================================\n');
 
 if CONFIG.use_parallel
@@ -131,6 +176,10 @@ std_pass  = nan(nBeams, nComp);
 nseg_used = zeros(1, nBeams);
 nproc     = 0;
 total_seg_evals = 0;
+
+% Per-segment pass rates kept per beam ([nSeg x nComp] each) so the pooled "All"
+% entry is a true mean/std over every segment rather than a mean of beam means.
+seg_pass_by_beam = cell(1, nBeams);
 
 %% ===================== PER-BEAM PROCESSING ==============================
 
@@ -218,6 +267,7 @@ for bi = 1:nBeams
     mean_pass(nproc,:) = mean(pass_seg, 1, 'omitnan');
     std_pass(nproc,:)  = std(pass_seg, 0, 1, 'omitnan');
     nseg_used(nproc)   = ns;
+    seg_pass_by_beam{nproc} = pass_seg;
     total_seg_evals    = total_seg_evals + ns * nComp;
 
     elapsed = toc(run_timer);
@@ -233,11 +283,29 @@ beam_list = beam_list(1:nproc);
 mean_pass = mean_pass(1:nproc, :);
 std_pass  = std_pass(1:nproc, :);
 nseg_used = nseg_used(1:nproc);
+seg_pass_by_beam = seg_pass_by_beam(1:nproc);
 
 if nproc == 0
     error('study_pass_rates_allsegments:NoBeams', ...
         'No beams could be processed (all skipped).');
 end
+
+% Beams are processed in ascending order, but sort so the axis is well-defined
+% regardless of how CONFIG.beams was written.
+[beam_list, ord]  = sort(beam_list);
+mean_pass         = mean_pass(ord, :);
+std_pass          = std_pass(ord, :);
+nseg_used         = nseg_used(ord);
+seg_pass_by_beam  = seg_pass_by_beam(ord);
+
+%% ===================== POOLED "ALL BEAMS" AGGREGATE =====================
+%  Mean +/- std over every segment of every processed beam (each segment weighted
+%  equally), plotted as the trailing "All" x-axis entry on both figures.
+
+all_seg_pass = vertcat(seg_pass_by_beam{:});   % [sum(nseg_used) x nComp]
+all_mean     = mean(all_seg_pass, 1, 'omitnan');
+all_std      = std(all_seg_pass, 0, 1, 'omitnan');
+all_nseg     = size(all_seg_pass, 1);
 
 %% ===================== CONSOLE SUMMARY (BY BEAM) =======================
 
@@ -251,14 +319,33 @@ for n = 1:nproc
             mean_pass(n, d), std_pass(n, d));
     end
 end
+
+fprintf('\n----- [ALL BEAMS]  (%d segments over %d beams) -----\n', all_nseg, nproc);
+for d = 1:nComp
+    fprintf('  %-18s (%s vs %s)   %6.2f%% +/- %5.2f%%\n', ...
+        CONFIG.comparisons{d,1}, CONFIG.comparisons{d,2}, CONFIG.comparisons{d,3}, ...
+        all_mean(d), all_std(d));
+end
 fprintf('\n=============================================================\n');
 
-%% ===================== BEAM PASS-RATE SUMMARY PLOT =====================
+%% ===================== SUMMARY PLOTS ====================================
+%  x positions are 1..nproc for the beams plus one trailing slot for "All", so
+%  the pooled entry sits on the same axis without colliding with a beam number.
 
-plot_beam_pass_rate_summary(beam_list, ...
-    mean_pass(:, d_r1), std_pass(:, d_r1), ...
-    mean_pass(:, d_r3), std_pass(:, d_r3), ...
-    mean_pass(:, d_tt), std_pass(:, d_tt), ...
+x_pos    = 1:(nproc + 1);
+x_labels = [arrayfun(@(b) sprintf('%d', b), beam_list, 'UniformOutput', false), {'All'}];
+
+% Figure 1: change detection (both recons vs the CT_1 truth, plus truth-vs-truth).
+plot_beam_pass_rate_summary(x_pos, x_labels, ...
+    [mean_pass(:, d_r1); all_mean(d_r1)], [std_pass(:, d_r1); all_std(d_r1)], ...
+    [mean_pass(:, d_r3); all_mean(d_r3)], [std_pass(:, d_r3); all_std(d_r3)], ...
+    [mean_pass(:, d_tt); all_mean(d_tt)], [std_pass(:, d_tt); all_std(d_tt)], ...
+    crit, CONFIG.patient_id, CONFIG.session);
+
+% Figure 2: reconstruction fidelity (each recon against its OWN-CT truth).
+plot_recon_fidelity_summary(x_pos, x_labels, ...
+    [mean_pass(:, d_r1); all_mean(d_r1)], [std_pass(:, d_r1); all_std(d_r1)], ...
+    [mean_pass(:, d_33); all_mean(d_33)], [std_pass(:, d_33); all_std(d_33)], ...
     crit, CONFIG.patient_id, CONFIG.session);
 
 %% ========================= SAVE RESULTS ================================
@@ -274,11 +361,16 @@ if CONFIG.save_results
     RESULTS.mean_pass     = mean_pass;   % [nBeams x nComp]
     RESULTS.std_pass      = std_pass;    % [nBeams x nComp]
     RESULTS.n_segments    = nseg_used;
+    RESULTS.seg_pass      = seg_pass_by_beam;   % {1 x nBeams}, each [nSeg x nComp]
+    RESULTS.all_mean      = all_mean;    % [1 x nComp], pooled over every segment
+    RESULTS.all_std       = all_std;     % [1 x nComp]
+    RESULTS.all_n_segments = all_nseg;
+    RESULTS.log_file      = log_path;
     RESULTS.total_runtime_s = total_runtime;
 
     out_path = CONFIG.output_file;
     if isempty(fileparts(out_path))
-        out_path = fullfile(CONFIG.working_dir, out_path);
+        out_path = fullfile(CONFIG.output_dir, out_path);
     end
     save(out_path, '-struct', 'RESULTS', '-v7.3');
     fprintf('\nResults saved to: %s\n', out_path);
@@ -286,6 +378,8 @@ end
 
 fprintf('\nTotal runtime: %.1f s (%.2f min) | %d beam(s), %d segment-evaluation(s).\n', ...
     total_runtime, total_runtime/60, nproc, total_seg_evals);
+fprintf('Console log written to: %s\n', log_path);
+diary off;
 
 
 %% =========================================================================
@@ -453,58 +547,52 @@ function d = comp_col(comparisons, name)
     end
 end
 
-function plot_beam_pass_rate_summary(beams, m_r1, s_r1, m_r3, s_r3, m_tt, s_tt, ...
-        crit, patient_id, session)
-%PLOT_BEAM_PASS_RATE_SUMMARY Mean pass rate (%) vs beam number, std error bars.
+function plot_beam_pass_rate_summary(x_pos, x_labels, m_r1, s_r1, m_r3, s_r3, ...
+        m_tt, s_tt, crit, patient_id, session)
+%PLOT_BEAM_PASS_RATE_SUMMARY Mean pass rate (%) per beam, std error bars.
 %  Three series at the given n%/n mm criterion:
 %    recon_CT1 vs truth_CT1 (green), recon_CT3 vs truth_CT1 (red),
 %    truth_CT1 vs truth_CT3 (blue), each with std error bars. A per-beam vertical
 %    connector joins the two recon means, coloured like whichever mean is greater.
+%  x_pos are consecutive slots and x_labels their tick labels; the final slot is
+%  the pooled "All" entry and is fenced off by a dashed vertical rule.
     green = [0.15, 0.60, 0.20];
     red   = [0.80, 0.15, 0.15];
     blue  = [0.20, 0.40, 0.80];
 
-    beams = beams(:)';
+    x_pos = x_pos(:)';
     m_r1 = m_r1(:)'; s_r1 = s_r1(:)';
     m_r3 = m_r3(:)'; s_r3 = s_r3(:)';
     m_tt = m_tt(:)'; s_tt = s_tt(:)';
 
-    [beams, ord] = sort(beams);
-    m_r1 = m_r1(ord); s_r1 = s_r1(ord);
-    m_r3 = m_r3(ord); s_r3 = s_r3(ord);
-    m_tt = m_tt(ord); s_tt = s_tt(ord);
-
     figure('Name', 'Beam Pass-Rate Summary (all segments)', 'Color', 'w', ...
         'NumberTitle', 'off', ...
-        'Position', [100, 100, max(720, 55 * numel(beams) + 220), 480]);
+        'Position', [100, 100, max(720, 55 * numel(x_pos) + 220), 480]);
     hold on;
 
     % Per-beam connector between the two recon means (colour = greater one).
-    for n = 1:numel(beams)
+    for n = 1:numel(x_pos)
         a = m_r1(n);
         b = m_r3(n);
         if isfinite(a) && isfinite(b)
             if a >= b, lc = green; else, lc = red; end
-            plot([beams(n), beams(n)], [a, b], '-', 'Color', lc, 'LineWidth', 1.5);
+            plot([x_pos(n), x_pos(n)], [a, b], '-', 'Color', lc, 'LineWidth', 1.5);
         end
     end
 
-    h_r1 = errorbar(beams, m_r1, s_r1, 'o', 'Color', green, 'MarkerFaceColor', green, ...
+    h_r1 = errorbar(x_pos, m_r1, s_r1, 'o', 'Color', green, 'MarkerFaceColor', green, ...
         'MarkerSize', 8, 'LineStyle', 'none', 'CapSize', 7, 'LineWidth', 1.2);
-    h_r3 = errorbar(beams, m_r3, s_r3, 'o', 'Color', red, 'MarkerFaceColor', red, ...
+    h_r3 = errorbar(x_pos, m_r3, s_r3, 'o', 'Color', red, 'MarkerFaceColor', red, ...
         'MarkerSize', 8, 'LineStyle', 'none', 'CapSize', 7, 'LineWidth', 1.2);
-    h_tt = errorbar(beams, m_tt, s_tt, 'o', 'Color', blue, 'MarkerFaceColor', blue, ...
+    h_tt = errorbar(x_pos, m_tt, s_tt, 'o', 'Color', blue, 'MarkerFaceColor', blue, ...
         'MarkerSize', 7, 'LineStyle', 'none', 'CapSize', 7, 'LineWidth', 1.2);
 
     yline(90, 'k--', '90%', 'LineWidth', 1.0, 'FontSize', 8, ...
         'LabelHorizontalAlignment', 'left');
+    apply_beam_axis(x_pos, x_labels);
 
     hold off; grid on; box on;
     ylim([0, 105]);
-    if ~isempty(beams)
-        xlim([min(beams) - 0.5, max(beams) + 0.5]);
-        xticks(beams);
-    end
     xlabel('Beam number');
     ylabel(sprintf('Gamma pass rate (%%)  @ %g%%/%g mm', crit, crit));
     title(sprintf('Beam Pass-Rate Summary (mean \\pm std over segments)   |   %s / %s', ...
@@ -514,4 +602,77 @@ function plot_beam_pass_rate_summary(beams, m_r1, s_r1, m_r3, s_r3, m_tt, s_tt, 
         {'Recon CT\_1 vs Truth CT\_1', 'Recon CT\_3 vs Truth CT\_1', ...
          'Truth CT\_1 vs Truth CT\_3'}, 'Location', 'best', 'FontSize', 9);
     drawnow;
+end
+
+function plot_recon_fidelity_summary(x_pos, x_labels, m_11, s_11, m_33, s_33, ...
+        crit, patient_id, session)
+%PLOT_RECON_FIDELITY_SUMMARY Own-CT reconstruction fidelity per beam.
+%  Each recon is gamma-compared against the truth of its OWN CT - truth_CT1 vs
+%  recon_CT1 (green) and truth_CT3 vs recon_CT3 (red) - so a series sitting
+%  consistently higher means that CT's reconstruction is consistently better.
+%  Points within a series are joined by straight lines; the two series are NOT
+%  connected to each other. Same axis convention as the summary figure: the final
+%  slot is the pooled "All" entry, fenced off by a dashed vertical rule.
+    green = [0.15, 0.60, 0.20];
+    red   = [0.80, 0.15, 0.15];
+
+    x_pos = x_pos(:)';
+    m_11 = m_11(:)'; s_11 = s_11(:)';
+    m_33 = m_33(:)'; s_33 = s_33(:)';
+
+    figure('Name', 'Reconstruction Fidelity Summary (all segments)', 'Color', 'w', ...
+        'NumberTitle', 'off', ...
+        'Position', [140, 140, max(720, 55 * numel(x_pos) + 220), 480]);
+    hold on;
+
+    % A NaN gap before the final slot keeps the connecting line within the beam
+    % sequence instead of running it into the pooled "All" entry.
+    [xg, m11g, s11g] = gap_before_last(x_pos, m_11, s_11);
+    [~,  m33g, s33g] = gap_before_last(x_pos, m_33, s_33);
+
+    h_11 = errorbar(xg, m11g, s11g, '-o', 'Color', green, 'MarkerFaceColor', green, ...
+        'MarkerSize', 8, 'CapSize', 7, 'LineWidth', 1.2);
+    h_33 = errorbar(xg, m33g, s33g, '-o', 'Color', red, 'MarkerFaceColor', red, ...
+        'MarkerSize', 8, 'CapSize', 7, 'LineWidth', 1.2);
+
+    yline(90, 'k--', '90%', 'LineWidth', 1.0, 'FontSize', 8, ...
+        'LabelHorizontalAlignment', 'left');
+    apply_beam_axis(x_pos, x_labels);
+
+    hold off; grid on; box on;
+    ylim([0, 105]);
+    xlabel('Beam number');
+    ylabel(sprintf('Gamma pass rate (%%)  @ %g%%/%g mm', crit, crit));
+    title(sprintf(['Reconstruction Fidelity vs Own-CT Truth (mean \\pm std over ' ...
+        'segments)   |   %s / %s'], ...
+        strrep(patient_id, '_', '\_'), strrep(session, '_', '\_')), ...
+        'FontWeight', 'bold', 'FontSize', 12, 'Interpreter', 'tex');
+    legend([h_11, h_33], ...
+        {'Truth CT\_1 vs Recon CT\_1', 'Truth CT\_3 vs Recon CT\_3'}, ...
+        'Location', 'best', 'FontSize', 9);
+    drawnow;
+end
+
+function [xg, yg, eg] = gap_before_last(x, y, e)
+%GAP_BEFORE_LAST Insert a NaN sample before the last point to break the line.
+%  The NaN carries no marker and no error bar, so the last point still plots but
+%  is not joined to the preceding series.
+    if numel(x) < 2
+        xg = x; yg = y; eg = e;
+        return;
+    end
+    xg = [x(1:end-1), NaN, x(end)];
+    yg = [y(1:end-1), NaN, y(end)];
+    eg = [e(1:end-1), NaN, e(end)];
+end
+
+function apply_beam_axis(x_pos, x_labels)
+%APPLY_BEAM_AXIS Tick labels for the beam slots + a rule before the "All" slot.
+    if isempty(x_pos), return; end
+    xlim([min(x_pos) - 0.5, max(x_pos) + 0.5]);
+    xticks(x_pos);
+    xticklabels(x_labels);
+    if numel(x_pos) > 1
+        xline(x_pos(end) - 0.5, ':', 'Color', [0.4, 0.4, 0.4], 'LineWidth', 1.0);
+    end
 end
