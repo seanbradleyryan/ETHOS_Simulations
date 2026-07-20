@@ -961,14 +961,17 @@ function gmap = quiet_gamma_map(ref, tgt, crit, spacing)
 end
 
 function plot_random_picks(picks, CONFIG, crit)
-%PLOT_RANDOM_PICKS One window, one tab per pick; each tab is a single row of
-%  truth | recon | gamma panels for every comparison.
+%PLOT_RANDOM_PICKS One window, one tab per pick; each tab has one ROW of
+%  truth | recon | gamma panels per comparison (first comparison on top). With the
+%  default CONFIG.random_comparisons that puts recon_CT1 (Dose 1 on recon 1) on the
+%  top row and recon_CT3 (Dose 2 on recon 1) on the bottom row.
     np = numel(picks);
     if np == 0, return; end
 
+    nc_max = max(arrayfun(@(k) numel(picks(k).panels), 1:np));
     fig = figure('Name', sprintf('Random segment panels  |  %s / %s', ...
         CONFIG.patient_id, CONFIG.session), 'Color', 'w', ...
-        'NumberTitle', 'off', 'Position', [80, 80, 1500, 380]);
+        'NumberTitle', 'off', 'Position', [80, 80, 900, max(300, 300 * nc_max)]);
     tg = uitabgroup(fig);
     gmap_cmap = gamma_colormap(256);
 
@@ -978,7 +981,9 @@ function plot_random_picks(picks, CONFIG, crit)
         nc = numel(P);
 
         tab = uitab(tg, 'Title', sprintf('B%d S%d', pk.beam, pk.seg));
-        tl  = tiledlayout(tab, 1, 3 * nc, 'Padding', 'compact', 'TileSpacing', 'compact');
+        % nc rows (one comparison each) x 3 columns (truth | recon | gamma). Tiles
+        % fill row-major, so comparison c occupies row c.
+        tl  = tiledlayout(tab, nc, 3, 'Padding', 'compact', 'TileSpacing', 'compact');
         title(tl, sprintf('Beam %d, Segment %d   |   gamma %g%%/%g mm', ...
             pk.beam, pk.seg, crit, crit), 'FontWeight', 'bold');
 
