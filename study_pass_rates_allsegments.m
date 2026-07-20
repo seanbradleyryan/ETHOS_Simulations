@@ -6,8 +6,10 @@
 %  this loads EVERY segment of each beam (both CT images) from the already-
 %  reconstructed doses on disk, computes the gamma pass rate of each configured
 %  comparison for every segment, then reduces to a per-beam MEAN +/- STD across
-%  segments. The only output is the beam pass-rate summary figure (mean markers
-%  with std error bars); all dose/sensor/gamma-index/curve plotting is omitted.
+%  segments. Outputs are two per-beam summary figures (change detection and
+%  reconstruction fidelity) plus an OPTIONAL window of N random per-segment panels
+%  (truth | recon | gamma index). Both the pass-rate results and the random panels
+%  are cached so a matching re-run replots without recomputing gamma.
 %
 %  Comparisons (CONFIG.comparisons), each per segment:
 %    truth1_vs_truth3  RayStation truth CT_1 vs truth CT_3   (green connector ref)
@@ -188,10 +190,11 @@ fprintf(' Cache dir: %s\n', CONFIG.output_dir);
 fprintf(' Log file : %s\n', log_path);
 fprintf('============================================================\n');
 
-% Resolve the results/cache path once (used for both cache-read and save).
+% Resolve the results/cache path once (used for both cache-read and save). Results
+% live beside the recon doses (CONFIG.output_dir) unless an absolute name is given.
 out_path = CONFIG.output_file;
 if isempty(fileparts(out_path))
-    out_path = fullfile(CONFIG.working_dir, out_path);
+    out_path = fullfile(CONFIG.output_dir, out_path);
 end
 
 %% ===================== CACHE CHECK =====================================
@@ -212,6 +215,7 @@ if CONFIG.use_cache && exist(out_path, 'file') == 2
         mean_pass = cached.mean_pass;
         std_pass  = cached.std_pass;
         nseg_used = cached.n_segments;
+        seg_pass_by_beam = cached.seg_pass;   % {1 x nBeams}, each [nSeg x nComp]
         nproc     = numel(beam_list);
         total_seg_evals = sum(nseg_used) * nComp;
         loaded_from_cache = true;
@@ -312,11 +316,10 @@ if nproc == 0
         'No beams could be processed (all skipped).');
 end
 
-<<<<<<< HEAD
 end   % if ~loaded_from_cache
-=======
-% Beams are processed in ascending order, but sort so the axis is well-defined
-% regardless of how CONFIG.beams was written.
+
+% Sort so the axis is well-defined regardless of how CONFIG.beams was written.
+% Applies to both the freshly-computed and the cache-loaded paths.
 [beam_list, ord]  = sort(beam_list);
 mean_pass         = mean_pass(ord, :);
 std_pass          = std_pass(ord, :);
@@ -325,13 +328,14 @@ seg_pass_by_beam  = seg_pass_by_beam(ord);
 
 %% ===================== POOLED "ALL BEAMS" AGGREGATE =====================
 %  Mean +/- std over every segment of every processed beam (each segment weighted
-%  equally), plotted as the trailing "All" x-axis entry on both figures.
+%  equally), plotted as the trailing "All" x-axis entry on both figures. Computed
+%  for both the freshly-computed and the cache-loaded paths (seg_pass_by_beam is
+%  restored from the cache in the latter).
 
 all_seg_pass = vertcat(seg_pass_by_beam{:});   % [sum(nseg_used) x nComp]
 all_mean     = mean(all_seg_pass, 1, 'omitnan');
 all_std      = std(all_seg_pass, 0, 1, 'omitnan');
 all_nseg     = size(all_seg_pass, 1);
->>>>>>> e3670ba7126679375e1c84f24c5bba420e8f0bfe
 
 %% ===================== CONSOLE SUMMARY (BY BEAM) =======================
 
@@ -402,15 +406,7 @@ if CONFIG.save_results && ~loaded_from_cache
     RESULTS.log_file      = log_path;
     RESULTS.total_runtime_s = total_runtime;
 
-<<<<<<< HEAD
     save(out_path, '-struct', 'RESULTS', '-v7.3');   % out_path resolved above
-=======
-    out_path = CONFIG.output_file;
-    if isempty(fileparts(out_path))
-        out_path = fullfile(CONFIG.output_dir, out_path);
-    end
-    save(out_path, '-struct', 'RESULTS', '-v7.3');
->>>>>>> e3670ba7126679375e1c84f24c5bba420e8f0bfe
     fprintf('\nResults saved to: %s\n', out_path);
 end
 
@@ -455,10 +451,11 @@ end
 
 function [ok, cached, why] = try_load_cache(out_path, CONFIG, crit)
 %TRY_LOAD_CACHE Load a saved results .mat and check it matches the current run.
-%  Returns ok=true and a struct with .beams/.mean_pass/.std_pass/.n_segments when
-%  the cached run was produced with the same gamma criterion, comparison set,
-%  requested beams, config hash and normalization; otherwise ok=false and a short
-%  reason in `why`. Any load/format error is reported (non-fatal) rather than raised.
+%  Returns ok=true and a struct with .beams/.mean_pass/.std_pass/.n_segments/
+%  .seg_pass (restricted to the requested beams, in order) when the cached run was
+%  produced with the same gamma criterion, comparison set, requested beams, config
+%  hash and normalization; otherwise ok=false and a short reason in `why`. Any
+%  load/format error is reported (non-fatal) rather than raised.
     ok = false; cached = struct(); why = '';
     try
         cached = load(out_path);
@@ -467,8 +464,8 @@ function [ok, cached, why] = try_load_cache(out_path, CONFIG, crit)
         return;
     end
 
-    req = {'beams', 'mean_pass', 'std_pass', 'n_segments', 'gamma_crit', ...
-           'comparisons', 'config'};
+    req = {'beams', 'mean_pass', 'std_pass', 'n_segments', 'seg_pass', ...
+           'gamma_crit', 'comparisons', 'config'};
     miss = req(~isfield(cached, req));
     if ~isempty(miss)
         why = sprintf('missing field(s): %s', strjoin(miss, ', '));
@@ -515,6 +512,7 @@ function [ok, cached, why] = try_load_cache(out_path, CONFIG, crit)
     cached.mean_pass  = cached.mean_pass(loc, :);
     cached.std_pass   = cached.std_pass(loc, :);
     cached.n_segments = cached.n_segments(loc);
+    cached.seg_pass   = cached.seg_pass(loc);   % {1 x nBeams} per-segment matrices
 
     ok = true;
 end
@@ -756,7 +754,6 @@ function plot_beam_pass_rate_summary(x_pos, x_labels, m_r1, s_r1, m_r3, s_r3, ..
     drawnow;
 end
 
-<<<<<<< HEAD
 %% =========================================================================
 %  RANDOM PER-SEGMENT PANEL VISUALIZATION (own cache)
 %% =========================================================================
@@ -769,9 +766,10 @@ function show_random_segment_panels(CONFIG, crit, ct1_str, ct3_str)
     fprintf('\n----------- RANDOM SEGMENT PANELS -----------\n');
 
     % Resolve the viz-cache path (own file, independent of the results cache).
+    % Cached beside the recon doses (CONFIG.output_dir), like the results cache.
     cache_path = CONFIG.random_cache_file;
     if isempty(fileparts(cache_path))
-        cache_path = fullfile(CONFIG.working_dir, cache_path);
+        cache_path = fullfile(CONFIG.output_dir, cache_path);
     end
 
     picks = [];
@@ -1025,7 +1023,9 @@ function cmap = gamma_colormap(n)
             f = min(x(i) - 1, 1);               % 0..1 across gamma 1..2
             cmap(i, :) = (1 - f) * green + f * red;
         end
-=======
+    end
+end
+
 function plot_recon_fidelity_summary(x_pos, x_labels, m_11, s_11, m_33, s_33, ...
         crit, patient_id, session)
 %PLOT_RECON_FIDELITY_SUMMARY Own-CT reconstruction fidelity per beam.
@@ -1096,6 +1096,5 @@ function apply_beam_axis(x_pos, x_labels)
     xticklabels(x_labels);
     if numel(x_pos) > 1
         xline(x_pos(end) - 0.5, ':', 'Color', [0.4, 0.4, 0.4], 'LineWidth', 1.0);
->>>>>>> e3670ba7126679375e1c84f24c5bba420e8f0bfe
     end
 end
