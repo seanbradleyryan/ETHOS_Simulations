@@ -179,6 +179,10 @@ worker. Depends on `load_recon_dose_data`, `CalcGamma`, and `determine_sensor_ma
 - Orthogonal views at max dose location or dose centroid (sagittal, coronal, transverse).
 - Body contour overlays on dose colormaps; consistent colorbars.
 
+## Other
+
+- CT 2 and CT 3 are synonyms now. Keep the names consistent with the current convention in the code, but in outside conversations, these words refer to the same image. 
+
 ## Prerequisites
 
 - MATLAB R2022a+

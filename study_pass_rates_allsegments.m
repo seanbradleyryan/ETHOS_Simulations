@@ -88,6 +88,29 @@ CONFIG.num_workers  = 64;   % default local pool size
 CONFIG.save_results = true;
 CONFIG.output_file  = 'pass_rates_allsegments_results.mat';
 
+% --- Cache ---
+% When true, if CONFIG.output_file already exists AND its saved run matches the
+% current CONFIG (hash, criterion, comparisons, beams, normalize), the per-beam
+% gamma is SKIPPED and the summary plot / console table are regenerated straight
+% from the cached results. Set false to always recompute.
+CONFIG.use_cache = true;
+
+% --- Random per-segment panel visualization ---
+% When true, ALSO show N randomly chosen segments, each in its own tab of a single
+% window, with one row of panels per tab: truth dose | reconstruction | gamma index
+% for every comparison in CONFIG.random_comparisons. The selected panels are cached
+% to CONFIG.random_cache_file (keyed by hash/criterion/comparisons/N/seed/normalize)
+% so a re-run with the same settings replots WITHOUT recomputing gamma; on a miss
+% the recon volumes are (re)loaded from disk and the gamma maps recomputed. This
+% cache is INDEPENDENT of the pass-rate results cache above (which stores no volumes).
+CONFIG.plot_random_segments = true;
+CONFIG.n_random             = 5;     % number of random segments to display
+CONFIG.random_seed          = 42;    % reproducible selection (used in the cache key)
+% Which comparisons to draw per segment (names from CONFIG.comparisons). Default:
+% the two recon comparisons -> "Dose 1 on recon 1" and "Dose 2 on recon 1".
+CONFIG.random_comparisons   = {'truth1_vs_recon1', 'truth1_vs_recon3'};
+CONFIG.random_cache_file    = 'pass_rates_allsegments_random_viz.mat';
+
 %% ===================== SETUP ============================================
 
 ct_lo   = min(CONFIG.ct_pair);
@@ -120,6 +143,43 @@ fprintf(' Criterion: %g%%/%gmm | normalize=%d | parallel=%d\n', ...
     crit, crit, CONFIG.normalize, CONFIG.use_parallel);
 fprintf('============================================================\n');
 
+% Resolve the results/cache path once (used for both cache-read and save).
+out_path = CONFIG.output_file;
+if isempty(fileparts(out_path))
+    out_path = fullfile(CONFIG.working_dir, out_path);
+end
+
+%% ===================== CACHE CHECK =====================================
+% If a matching cached run exists, load it and skip straight to plotting.
+
+loaded_from_cache = false;
+beam_list = [];
+mean_pass = [];
+std_pass  = [];
+nseg_used = [];
+nproc     = 0;
+total_seg_evals = 0;
+
+if CONFIG.use_cache && exist(out_path, 'file') == 2
+    [ok, cached, why] = try_load_cache(out_path, CONFIG, crit);
+    if ok
+        beam_list = cached.beams;
+        mean_pass = cached.mean_pass;
+        std_pass  = cached.std_pass;
+        nseg_used = cached.n_segments;
+        nproc     = numel(beam_list);
+        total_seg_evals = sum(nseg_used) * nComp;
+        loaded_from_cache = true;
+        fprintf('\n[CACHE] Reusing results from: %s\n', out_path);
+        fprintf('[CACHE] %d beam(s), %d segment(s); skipping gamma recomputation.\n', ...
+            nproc, sum(nseg_used));
+    else
+        fprintf('\n[CACHE] Existing file not reusable (%s); recomputing.\n', why);
+    end
+end
+
+if ~loaded_from_cache
+
 if CONFIG.use_parallel
     ensure_pool(CONFIG.num_workers);
 end
@@ -151,46 +211,8 @@ for bi = 1:nBeams
     spacing = out.metadata.spacing(:)';
 
     % ---- Group fields by segment; build a normalized volume set per segment. ----
-    seg_ids = arrayfun(@(k) seg_of_field(fields(k)), 1:numel(fields));
-    uniq    = unique(seg_ids(~isnan(seg_ids)));
-    uniq    = uniq(:).';   % ensure row so the loop iterates one segment at a time
-
-    seg_data = {};
-    for s = uniq
-        sub = fields(seg_ids == s);
-        iA  = find_field_by_ct(sub, ct1_str);
-        iB  = find_field_by_ct(sub, ct3_str);
-        if isempty(iA) || isempty(iB)
-            continue;   % missing CT_1/CT_3 pair for this segment -> skip entry
-        end
-        fA = sub(iA);
-        fB = sub(iB);
-
-        S = struct();
-        S.recon_CT1 = double(fA.recon_dose);
-        S.recon_CT3 = double(fB.recon_dose);
-        S.rs_CT1    = double(fA.rs_dose);
-        S.rs_CT3    = double(fB.rs_dose);
-        S.spacing   = spacing;
-        S.seg       = s;
-
-        % Skip entries whose recon/truth grids disagree (bad / missing data).
-        if ~isequal(size(S.recon_CT1), size(S.rs_CT1)) || ...
-           ~isequal(size(S.recon_CT3), size(S.rs_CT3)) || ...
-           ~isequal(size(S.rs_CT1),    size(S.rs_CT3))
-            warning('study_pass_rates_allsegments:GridMismatch', ...
-                'Beam #%d seg %d: grid mismatch; skipping segment.', b, s);
-            continue;
-        end
-
-        % Least-squares relative normalization (recon -> own-CT truth).
-        if CONFIG.normalize
-            S.recon_CT1 = S.recon_CT1 * least_squares_gain(S.rs_CT1, S.recon_CT1);
-            S.recon_CT3 = S.recon_CT3 * least_squares_gain(S.rs_CT3, S.recon_CT3);
-        end
-
-        seg_data{end+1} = S; %#ok<SAGROW>
-    end
+    seg_data = group_beam_segments(fields, spacing, ct1_str, ct3_str, ...
+        CONFIG.normalize, b);
 
     ns = numel(seg_data);
     if ns == 0
@@ -239,6 +261,8 @@ if nproc == 0
         'No beams could be processed (all skipped).');
 end
 
+end   % if ~loaded_from_cache
+
 %% ===================== CONSOLE SUMMARY (BY BEAM) =======================
 
 fprintf('\n==================== BEAM MEAN PASS RATES ====================\n');
@@ -261,11 +285,19 @@ plot_beam_pass_rate_summary(beam_list, ...
     mean_pass(:, d_tt), std_pass(:, d_tt), ...
     crit, CONFIG.patient_id, CONFIG.session);
 
+%% ============= RANDOM PER-SEGMENT PANEL VISUALIZATION ==================
+% N random segments, each in its own tab: one row of truth | recon | gamma per
+% requested comparison. Uses its own cache (recomputes gamma only on a miss).
+
+if CONFIG.plot_random_segments
+    show_random_segment_panels(CONFIG, crit, ct1_str, ct3_str);
+end
+
 %% ========================= SAVE RESULTS ================================
 
 total_runtime = toc(run_timer);
 
-if CONFIG.save_results
+if CONFIG.save_results && ~loaded_from_cache
     RESULTS = struct();
     RESULTS.config        = CONFIG;
     RESULTS.gamma_crit    = crit;
@@ -276,11 +308,7 @@ if CONFIG.save_results
     RESULTS.n_segments    = nseg_used;
     RESULTS.total_runtime_s = total_runtime;
 
-    out_path = CONFIG.output_file;
-    if isempty(fileparts(out_path))
-        out_path = fullfile(CONFIG.working_dir, out_path);
-    end
-    save(out_path, '-struct', 'RESULTS', '-v7.3');
+    save(out_path, '-struct', 'RESULTS', '-v7.3');   % out_path resolved above
     fprintf('\nResults saved to: %s\n', out_path);
 end
 
@@ -318,6 +346,120 @@ function ensure_pool(desired_workers)
         end
     catch ME
         fprintf('  [WARN] Could not start parallel pool (%s). Running serially.\n', ME.message);
+    end
+end
+
+function [ok, cached, why] = try_load_cache(out_path, CONFIG, crit)
+%TRY_LOAD_CACHE Load a saved results .mat and check it matches the current run.
+%  Returns ok=true and a struct with .beams/.mean_pass/.std_pass/.n_segments when
+%  the cached run was produced with the same gamma criterion, comparison set,
+%  requested beams, config hash and normalization; otherwise ok=false and a short
+%  reason in `why`. Any load/format error is reported (non-fatal) rather than raised.
+    ok = false; cached = struct(); why = '';
+    try
+        cached = load(out_path);
+    catch ME
+        why = sprintf('load error: %s', ME.message);
+        return;
+    end
+
+    req = {'beams', 'mean_pass', 'std_pass', 'n_segments', 'gamma_crit', ...
+           'comparisons', 'config'};
+    miss = req(~isfield(cached, req));
+    if ~isempty(miss)
+        why = sprintf('missing field(s): %s', strjoin(miss, ', '));
+        return;
+    end
+
+    % Gamma criterion must match.
+    if ~isequal(cached.gamma_crit, crit)
+        why = sprintf('criterion %g%% ~= cached %g%%', crit, cached.gamma_crit);
+        return;
+    end
+
+    % Comparison set (names, in order) must match.
+    if ~isequal(cached.comparisons(:)', CONFIG.comparisons(:,1)')
+        why = 'comparison set differs';
+        return;
+    end
+
+    % Every requested beam must be present in the cache.
+    if ~all(ismember(CONFIG.beams(:)', cached.beams(:)'))
+        why = 'requested beams not all present in cache';
+        return;
+    end
+
+    % Key inputs that change the numbers must match the saved CONFIG.
+    cc = cached.config;
+    if isfield(cc, 'config_hash') && ~isequal(cc.config_hash, CONFIG.config_hash)
+        why = 'config_hash differs';
+        return;
+    end
+    if isfield(cc, 'normalize') && ~isequal(logical(cc.normalize), logical(CONFIG.normalize))
+        why = 'normalize flag differs';
+        return;
+    end
+    if isfield(cc, 'plan_type') && ~strcmpi(char(cc.plan_type), char(CONFIG.plan_type))
+        why = 'plan_type differs';
+        return;
+    end
+
+    % Restrict the cached aggregates to exactly the requested beams, in order.
+    [tf, loc] = ismember(CONFIG.beams(:)', cached.beams(:)');
+    loc = loc(tf);
+    cached.beams      = cached.beams(loc);
+    cached.mean_pass  = cached.mean_pass(loc, :);
+    cached.std_pass   = cached.std_pass(loc, :);
+    cached.n_segments = cached.n_segments(loc);
+
+    ok = true;
+end
+
+function seg_data = group_beam_segments(fields, spacing, ct1_str, ct3_str, normalize, beam)
+%GROUP_BEAM_SEGMENTS Group a beam's loaded fields into per-segment volume sets.
+%  Returns a cell array; each element S has .recon_CT1/.recon_CT3/.rs_CT1/.rs_CT3
+%  (double), .spacing and .seg. Segments missing the CT_1/CT_3 pair or with
+%  mismatched grids are skipped (warning). When `normalize` is true each recon is
+%  scaled by the least-squares gain to its OWN-CT truth over that truth's 10% region.
+    seg_ids = arrayfun(@(k) seg_of_field(fields(k)), 1:numel(fields));
+    uniq    = unique(seg_ids(~isnan(seg_ids)));
+    uniq    = uniq(:).';   % ensure row so the loop iterates one segment at a time
+
+    seg_data = {};
+    for s = uniq
+        sub = fields(seg_ids == s);
+        iA  = find_field_by_ct(sub, ct1_str);
+        iB  = find_field_by_ct(sub, ct3_str);
+        if isempty(iA) || isempty(iB)
+            continue;   % missing CT_1/CT_3 pair for this segment -> skip entry
+        end
+        fA = sub(iA);
+        fB = sub(iB);
+
+        S = struct();
+        S.recon_CT1 = double(fA.recon_dose);
+        S.recon_CT3 = double(fB.recon_dose);
+        S.rs_CT1    = double(fA.rs_dose);
+        S.rs_CT3    = double(fB.rs_dose);
+        S.spacing   = spacing;
+        S.seg       = s;
+
+        % Skip entries whose recon/truth grids disagree (bad / missing data).
+        if ~isequal(size(S.recon_CT1), size(S.rs_CT1)) || ...
+           ~isequal(size(S.recon_CT3), size(S.rs_CT3)) || ...
+           ~isequal(size(S.rs_CT1),    size(S.rs_CT3))
+            warning('study_pass_rates_allsegments:GridMismatch', ...
+                'Beam #%d seg %d: grid mismatch; skipping segment.', beam, s);
+            continue;
+        end
+
+        % Least-squares relative normalization (recon -> own-CT truth).
+        if normalize
+            S.recon_CT1 = S.recon_CT1 * least_squares_gain(S.rs_CT1, S.recon_CT1);
+            S.recon_CT3 = S.recon_CT3 * least_squares_gain(S.rs_CT3, S.recon_CT3);
+        end
+
+        seg_data{end+1} = S; %#ok<AGROW>
     end
 end
 
@@ -514,4 +656,275 @@ function plot_beam_pass_rate_summary(beams, m_r1, s_r1, m_r3, s_r3, m_tt, s_tt, 
         {'Recon CT\_1 vs Truth CT\_1', 'Recon CT\_3 vs Truth CT\_1', ...
          'Truth CT\_1 vs Truth CT\_3'}, 'Location', 'best', 'FontSize', 9);
     drawnow;
+end
+
+%% =========================================================================
+%  RANDOM PER-SEGMENT PANEL VISUALIZATION (own cache)
+%% =========================================================================
+
+function show_random_segment_panels(CONFIG, crit, ct1_str, ct3_str)
+%SHOW_RANDOM_SEGMENT_PANELS N random segments as tabs; one row of truth/recon/gamma
+%  panels per requested comparison. Replots from CONFIG.random_cache_file when it
+%  matches (no gamma recompute); otherwise (re)loads recon volumes from disk,
+%  recomputes the gamma maps, caches the selected slices, and plots.
+    fprintf('\n----------- RANDOM SEGMENT PANELS -----------\n');
+
+    % Resolve the viz-cache path (own file, independent of the results cache).
+    cache_path = CONFIG.random_cache_file;
+    if isempty(fileparts(cache_path))
+        cache_path = fullfile(CONFIG.working_dir, cache_path);
+    end
+
+    picks = [];
+    if CONFIG.use_cache && exist(cache_path, 'file') == 2
+        [ok, cpicks, why] = try_load_random_cache(cache_path, CONFIG, crit);
+        if ok
+            picks = cpicks;
+            fprintf('[CACHE] Reusing %d random panel(s) from: %s\n', ...
+                numel(picks), cache_path);
+        else
+            fprintf('[CACHE] Random-viz cache not reusable (%s); recomputing.\n', why);
+        end
+    end
+
+    if isempty(picks)
+        picks = build_random_picks(CONFIG, crit, ct1_str, ct3_str);
+        if isempty(picks)
+            warning('study_pass_rates_allsegments:NoRandomPicks', ...
+                'No segments available for the random panel view; nothing to plot.');
+            return;
+        end
+        if CONFIG.save_results
+            meta = struct('config_hash', CONFIG.config_hash, ...
+                'comparisons', {CONFIG.random_comparisons(:)'}, ...
+                'n_random_requested', CONFIG.n_random, ...
+                'seed', CONFIG.random_seed, 'normalize', logical(CONFIG.normalize), ...
+                'crit', crit, 'plan_type', CONFIG.plan_type, ...
+                'patient_id', CONFIG.patient_id, 'session', CONFIG.session); %#ok<NASGU>
+            try
+                save(cache_path, 'picks', 'meta', '-v7.3');
+                fprintf('[CACHE] Saved %d random panel(s) to: %s\n', ...
+                    numel(picks), cache_path);
+            catch ME
+                warning('study_pass_rates_allsegments:RandomCacheSave', ...
+                    'Could not save random-viz cache: %s', ME.message);
+            end
+        end
+    end
+
+    plot_random_picks(picks, CONFIG, crit);
+end
+
+function [ok, picks, why] = try_load_random_cache(cache_path, CONFIG, crit)
+%TRY_LOAD_RANDOM_CACHE Load cached random panels; validate against current CONFIG.
+    ok = false; picks = []; why = '';
+    try
+        C = load(cache_path);
+    catch ME
+        why = sprintf('load error: %s', ME.message); return;
+    end
+    if ~isfield(C, 'picks') || ~isfield(C, 'meta')
+        why = 'missing picks/meta'; return;
+    end
+    m = C.meta;
+    if ~isequal(m.config_hash, CONFIG.config_hash), why = 'config_hash differs'; return; end
+    if ~isequal(m.comparisons(:)', CONFIG.random_comparisons(:)')
+        why = 'comparison set differs'; return;
+    end
+    if ~isequal(m.n_random_requested, CONFIG.n_random), why = 'N differs'; return; end
+    if ~isequal(m.seed, CONFIG.random_seed), why = 'seed differs'; return; end
+    if ~isequal(logical(m.normalize), logical(CONFIG.normalize)), why = 'normalize differs'; return; end
+    if ~isequal(m.crit, crit), why = 'criterion differs'; return; end
+    if isfield(m, 'plan_type') && ~strcmpi(char(m.plan_type), char(CONFIG.plan_type))
+        why = 'plan_type differs'; return;
+    end
+    picks = C.picks;
+    ok = true;
+end
+
+function picks = build_random_picks(CONFIG, crit, ct1_str, ct3_str)
+%BUILD_RANDOM_PICKS Randomly select CONFIG.n_random segments and compute their
+%  truth/recon/gamma display slices for each CONFIG.random_comparisons entry.
+%  Loads beams lazily (seeded shuffle) until enough segments are collected.
+    picks = struct('beam', {}, 'seg', {}, 'spacing', {}, 'panels', {});
+
+    specs = resolve_comparisons(CONFIG.comparisons, CONFIG.random_comparisons);
+    if isempty(specs)
+        warning('study_pass_rates_allsegments:NoRandomComparisons', ...
+            'None of CONFIG.random_comparisons matched CONFIG.comparisons.');
+        return;
+    end
+
+    rng(CONFIG.random_seed);                 % reproducible selection
+    beams = CONFIG.beams(:)';
+    beams = beams(randperm(numel(beams)));   % shuffle beam visit order
+    need  = CONFIG.n_random;
+
+    for b = beams
+        if numel(picks) >= need, break; end
+        try
+            out = load_beam_set(CONFIG, b);
+        catch ME
+            warning('study_pass_rates_allsegments:SkipBeam', ...
+                'Random view: skipping beam #%d (load failed): %s', b, ME.message);
+            continue;
+        end
+        spacing  = out.metadata.spacing(:)';
+        seg_data = group_beam_segments(out.fields, spacing, ct1_str, ct3_str, ...
+            CONFIG.normalize, b);
+        if isempty(seg_data), continue; end
+
+        seg_data = seg_data(randperm(numel(seg_data)));   % random segment order
+        for k = 1:numel(seg_data)
+            if numel(picks) >= need, break; end
+            S = seg_data{k};
+            pk = struct('beam', b, 'seg', S.seg, 'spacing', spacing, ...
+                'panels', build_panels(S, specs, crit));
+            picks(end+1) = pk; %#ok<AGROW>
+        end
+    end
+
+    fprintf('[RANDOM] Selected %d segment(s) (requested %d) across beams.\n', ...
+        numel(picks), need);
+end
+
+function panels = build_panels(S, specs, crit)
+%BUILD_PANELS One panel entry per comparison spec: truth/recon slices, gamma slice
+%  (at the reference max-dose slice), pass %, and labels.
+    panels = struct('name', {}, 'ref_label', {}, 'tgt_label', {}, ...
+        'ref_img', {}, 'tgt_img', {}, 'gamma_img', {}, 'passpct', {}, ...
+        'dose_max', {}, 'iz', {});
+    for c = 1:size(specs, 1)
+        ref = get_dose_field(S, specs{c, 2});
+        tgt = get_dose_field(S, specs{c, 3});
+
+        if max(ref(:)) > 0
+            mask = ref >= 0.10 * max(ref(:));
+        else
+            mask = tgt >= 0.10 * max(tgt(:));
+        end
+        gmap = quiet_gamma_map(ref, tgt, crit, S.spacing);
+        if isempty(gmap), gmap = nan(size(ref)); end
+        if any(mask(:))
+            passpct = 100 * mean(gmap(mask) <= 1, 'omitnan');
+        else
+            passpct = NaN;
+        end
+
+        % Display slice: axial slice (dim 3) of the reference's peak dose.
+        [~, iz] = max_slice(ref);
+
+        P = struct();
+        P.name      = specs{c, 1};
+        P.ref_label = specs{c, 4};
+        P.tgt_label = specs{c, 5};
+        P.ref_img   = squeeze(ref(:, :, iz));
+        P.tgt_img   = squeeze(tgt(:, :, iz));
+        P.gamma_img = squeeze(gmap(:, :, iz));
+        P.passpct   = passpct;
+        P.dose_max  = max(ref(:));
+        P.iz        = iz;
+        panels(c) = P; %#ok<AGROW>
+    end
+end
+
+function [pk, iz] = max_slice(vol)
+%MAX_SLICE Index (dim 3) of the slice holding the volume's maximum value.
+    [pk, lin] = max(vol(:));
+    [~, ~, iz] = ind2sub(size(vol), lin);
+    if isempty(iz) || ~isfinite(pk), iz = max(1, round(size(vol, 3) / 2)); end
+end
+
+function specs = resolve_comparisons(all_comps, names)
+%RESOLVE_COMPARISONS Rows of all_comps (name,ref,tgt,ref_label,tgt_label) for names.
+    specs = cell(0, 5);
+    for i = 1:numel(names)
+        r = comp_col(all_comps, names{i});
+        if isnan(r)
+            warning('study_pass_rates_allsegments:UnknownRandomComparison', ...
+                'Random comparison "%s" not found in CONFIG.comparisons; skipping.', names{i});
+            continue;
+        end
+        specs(end+1, :) = all_comps(r, 1:5); %#ok<AGROW>
+    end
+end
+
+function gmap = quiet_gamma_map(ref, tgt, crit, spacing)
+%QUIET_GAMMA_MAP Full global gamma-index volume (CalcGamma output suppressed).
+%  Same CalcGamma call as quiet_gamma_pass but returns the map instead of a scalar.
+    ref_struct = struct('start', [0, 0, 0], 'width', spacing, 'data', double(ref));
+    tgt_struct = struct('start', [0, 0, 0], 'width', spacing, 'data', double(tgt));
+    gmap = [];
+    try
+        evalc(['gmap = CalcGamma(ref_struct, tgt_struct, crit, crit, ', ...
+               '''local'', 0, ''limit'', crit*2, ''restrict'', 1, ''cpu'', 1);']);
+    catch
+        gmap = [];
+    end
+end
+
+function plot_random_picks(picks, CONFIG, crit)
+%PLOT_RANDOM_PICKS One window, one tab per pick; each tab is a single row of
+%  truth | recon | gamma panels for every comparison.
+    np = numel(picks);
+    if np == 0, return; end
+
+    fig = figure('Name', sprintf('Random segment panels  |  %s / %s', ...
+        CONFIG.patient_id, CONFIG.session), 'Color', 'w', ...
+        'NumberTitle', 'off', 'Position', [80, 80, 1500, 380]);
+    tg = uitabgroup(fig);
+    gmap_cmap = gamma_colormap(256);
+
+    for i = 1:np
+        pk = picks(i);
+        P  = pk.panels;
+        nc = numel(P);
+
+        tab = uitab(tg, 'Title', sprintf('B%d S%d', pk.beam, pk.seg));
+        tl  = tiledlayout(tab, 1, 3 * nc, 'Padding', 'compact', 'TileSpacing', 'compact');
+        title(tl, sprintf('Beam %d, Segment %d   |   gamma %g%%/%g mm', ...
+            pk.beam, pk.seg, crit, crit), 'FontWeight', 'bold');
+
+        for c = 1:nc
+            p = P(c);
+            cmax = p.dose_max; if ~(cmax > 0), cmax = 1; end
+
+            % Truth dose (reference).
+            ax = nexttile(tl);
+            imagesc(ax, p.ref_img); axis(ax, 'image', 'off');
+            colormap(ax, hot); clim(ax, [0, cmax]); colorbar(ax);
+            title(ax, {p.ref_label, 'truth'}, 'Interpreter', 'tex');
+
+            % Reconstruction (target).
+            ax = nexttile(tl);
+            imagesc(ax, p.tgt_img); axis(ax, 'image', 'off');
+            colormap(ax, hot); clim(ax, [0, cmax]); colorbar(ax);
+            title(ax, {p.tgt_label, 'recon'}, 'Interpreter', 'tex');
+
+            % Gamma index (<=1 passes).
+            ax = nexttile(tl);
+            imagesc(ax, p.gamma_img); axis(ax, 'image', 'off');
+            colormap(ax, gmap_cmap); clim(ax, [0, 2]); colorbar(ax);
+            title(ax, sprintf('\\gamma index  (%.1f%% \\leq 1)', p.passpct), ...
+                'Interpreter', 'tex');
+        end
+    end
+    drawnow;
+end
+
+function cmap = gamma_colormap(n)
+%GAMMA_COLORMAP Green for gamma<=1 (pass), ramping green->red for 1<gamma<=2 (fail).
+    if nargin < 1 || isempty(n), n = 256; end
+    x    = linspace(0, 2, n)';
+    cmap = zeros(n, 3);
+    green = [0.15, 0.60, 0.20];
+    red   = [0.80, 0.15, 0.15];
+    for i = 1:n
+        if x(i) <= 1
+            cmap(i, :) = green;                 % solid pass colour
+        else
+            f = min(x(i) - 1, 1);               % 0..1 across gamma 1..2
+            cmap(i, :) = (1 - f) * green + f * red;
+        end
+    end
 end
