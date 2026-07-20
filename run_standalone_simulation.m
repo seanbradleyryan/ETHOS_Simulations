@@ -12,13 +12,25 @@ CONFIG.patient_id     = '1194203';
 CONFIG.session        = 'Session_1';
 
 CONFIG.dose_filename = 'dose_1194203_Session_1_reference_CT_1_B15_112.mat';
-% TEMPORARY: standalone sim always uses CBCT1 (CT_1) geometry, regardless
-% of which CBCT the dose was actually computed on. Per-dose CBCT selection
-% lives in the multi-field driver, not here.
+% RECONSTRUCTION geometry. This is the ONLY anatomy we have experimental
+% access to, so time reversal / DAS / pressure->dose always use it (CT_1),
+% regardless of which CBCT the dose was actually delivered on.
 CONFIG.cbct_filename = 'CBCT1_resampled.mat';
+
+% FORWARD-propagation geometry (the "true" anatomy the dose was delivered in).
+% The forward simulation - i.e. the waves that physically reach the detector -
+% uses this medium; reconstruction still uses cbct_filename (CT_1) above. This
+% models reconstructing on blind CT_1 geometry when the delivery actually
+% happened on CT_3.
+%   - Leave EMPTY to reuse cbct_filename for the forward pass too
+%     (dose-1-on-CT_1: forward and reconstruction geometry identical).
+%   - Set to 'CBCT3_resampled.mat' to propagate through CT_3 but reconstruct
+%     on CT_1 (dose-3-on-CT_3 blind-geometry case).
+CONFIG.forward_cbct_filename = '';
 
 CONFIG.dose_file_override = '';
 CONFIG.cbct_file_override = '';
+CONFIG.forward_cbct_file_override = '';
 
 CONFIG.sensor_placement_method = 'determine_sensor_mask';
 CONFIG.sensor_x_index = 2;
@@ -120,6 +132,22 @@ else
     cbct_filepath = fullfile(processed_dir, CONFIG.cbct_filename);
 end
 
+% Forward-geometry CBCT (true anatomy for wave propagation). When no forward
+% CBCT is specified, the forward pass reuses the reconstruction CBCT so the
+% two media are identical (dose-1-on-CT_1 case).
+if ~isempty(CONFIG.forward_cbct_file_override)
+    forward_cbct_filepath = CONFIG.forward_cbct_file_override;
+elseif ~isempty(CONFIG.forward_cbct_filename)
+    if ~exist('processed_dir', 'var')
+        processed_dir = fullfile(CONFIG.working_dir, 'RayStationFiles', ...
+            CONFIG.patient_id, CONFIG.session, 'processed');
+    end
+    forward_cbct_filepath = fullfile(processed_dir, CONFIG.forward_cbct_filename);
+else
+    forward_cbct_filepath = cbct_filepath;
+end
+forward_is_recon = strcmp(forward_cbct_filepath, cbct_filepath);
+
 %% ========================= LOAD PLAN BEAM METADATA =======================
 % determine_sensor_mask needs beam_metadata for ALL beams in the plan
 % (isocenter + jaw extents per beam) to compute the anterior-surface
@@ -160,7 +188,12 @@ fprintf('  Standalone k-Wave Photoacoustic Simulation  (v4.1)\n');
 fprintf('=========================================================\n');
 fprintf('  Patient:         %s / %s\n', CONFIG.patient_id, CONFIG.session);
 fprintf('  Dose file:       %s\n', dose_filepath);
-fprintf('  CBCT file:       %s  (TEMP: standalone always uses CBCT1/CT_1)\n', cbct_filepath);
+fprintf('  Recon CBCT:      %s  (reconstruction / blind geometry)\n', cbct_filepath);
+if forward_is_recon
+    fprintf('  Forward CBCT:    (same as recon  forward and recon geometry identical)\n');
+else
+    fprintf('  Forward CBCT:    %s  (true propagation geometry)\n', forward_cbct_filepath);
+end
 fprintf('  Sensor:          %s\n', CONFIG.sensor_placement_method);
 fprintf('  Tissue model:    %s\n', CONFIG.gruneisen_method);
 fprintf('  Recon method:    %s\n', CONFIG.reconstruction_method);
@@ -248,7 +281,7 @@ Nx = gridSize(1); Ny = gridSize(2); Nz = gridSize(3);
 fprintf('       Grid size: [%d x %d x %d]\n', Nx, Ny, Nz);
 fprintf('       Dose range: [%.6f, %.4f] Gy\n', min(doseGrid(:)), max(doseGrid(:)));
 
-fprintf('[2/7] Loading CBCT data (CBCT1 / CT_1  temporary standalone default)...\n');
+fprintf('[2/7] Loading reconstruction CBCT (blind geometry, CT_1)...\n');
 if ~isfile(cbct_filepath)
     error('CBCT file not found: %s', cbct_filepath);
 end
@@ -263,6 +296,33 @@ end
 
 if ~isfield(sct, 'cubeHU')
     error('CBCT resampled struct missing required field: cubeHU');
+end
+
+% Forward-geometry CBCT (true propagation anatomy). When it is the same file
+% as the reconstruction CBCT, reuse sct rather than reloading.
+if forward_is_recon
+    sct_fwd = sct;
+else
+    fprintf('       Loading forward CBCT (true geometry): %s\n', forward_cbct_filepath);
+    if ~isfile(forward_cbct_filepath)
+        error('Forward CBCT file not found: %s', forward_cbct_filepath);
+    end
+    fwd_cbct_data = load(forward_cbct_filepath);
+    if isfield(fwd_cbct_data, 'CBCT3_resampled')
+        sct_fwd = fwd_cbct_data.CBCT3_resampled;
+    elseif isfield(fwd_cbct_data, 'CBCT1_resampled')
+        sct_fwd = fwd_cbct_data.CBCT1_resampled;
+    else
+        error('CBCT1_resampled / CBCT3_resampled variable not found in %s', forward_cbct_filepath);
+    end
+    if ~isfield(sct_fwd, 'cubeHU')
+        error('Forward CBCT resampled struct missing required field: cubeHU');
+    end
+    if ~isequal(size(sct_fwd.cubeHU), size(sct.cubeHU))
+        error(['Forward CBCT grid [%s] does not match reconstruction CBCT grid [%s].\n' ...
+               'Both CBCTs must be resampled onto the same dose grid.'], ...
+            num2str(size(sct_fwd.cubeHU)), num2str(size(sct.cubeHU)));
+    end
 end
 
 % Spacing: prefer CBCT field; fall back to spacing embedded in step15 field_dose
@@ -315,6 +375,17 @@ if CONFIG.downscale_factor ~= 1
     end
     if isfield(sct, 'cubeDensity')
         sct.cubeDensity = imresize3(sct.cubeDensity, [new_Nx, new_Ny, new_Nz]);
+    end
+
+    % Downscale the forward-geometry CBCT the same way (skip if it aliases sct).
+    if ~forward_is_recon
+        sct_fwd.cubeHU = imresize3(sct_fwd.cubeHU, [new_Nx, new_Ny, new_Nz]);
+        if isfield(sct_fwd, 'bodyMask')
+            sct_fwd.bodyMask = imresize3(single(sct_fwd.bodyMask), [new_Nx, new_Ny, new_Nz], 'nearest') > 0.5;
+        end
+        if isfield(sct_fwd, 'couchMask')
+            sct_fwd.couchMask = imresize3(single(sct_fwd.couchMask), [new_Nx, new_Ny, new_Nz], 'nearest') > 0.5;
+        end
     end
 
     spacing_mm = spacing_mm .* ([Nx, Ny, Nz] ./ [new_Nx, new_Ny, new_Nz]);
@@ -377,6 +448,61 @@ fprintf('       Density range:     [%.0f, %.0f] kg/m^3\n', min(medium.density(:)
 fprintf('       Sound speed range: [%.0f, %.0f] m/s\n',    min(medium.sound_speed(:)), max(medium.sound_speed(:)));
 fprintf('       Gruneisen range:   [%.4f, %.4f]\n',        min(medium.gruneisen(:)), max(medium.gruneisen(:)));
 
+%% --------- FORWARD-GEOMETRY ACOUSTIC MEDIUM (true propagation anatomy) ------
+% `medium` above is the RECONSTRUCTION medium (CT_1) used by time reversal.
+% The forward simulation must instead propagate through the TRUE anatomy the
+% dose was delivered in. Build that medium here and keep only its original-grid
+% property arrays. They are used to (a) compute the true initial pressure p0
+% and (b) get injected into the forward-simulation medium after the grid has
+% been padded/expanded (see kmedium_fwd below). When no separate forward CBCT
+% is requested these are just copies of the reconstruction medium, so the
+% forward and reconstruction passes are identical (dose-1-on-CT_1 case).
+if forward_is_recon
+    fwd_density     = medium.density;
+    fwd_sound_speed = medium.sound_speed;
+    fwd_alpha_coeff = medium.alpha_coeff;
+    fwd_gruneisen   = medium.gruneisen;
+else
+    fprintf('       Building forward-geometry medium from %s...\n', CONFIG.forward_cbct_filename);
+    medium_fwd = create_acoustic_medium(sct_fwd, CONFIG);
+    if CONFIG.force_uniform_density
+        medium_fwd.density = ones(gs) * CONFIG.uniform_density;
+    end
+    if CONFIG.force_uniform_sound_speed
+        medium_fwd.sound_speed = ones(gs) * CONFIG.uniform_sound_speed;
+    end
+    if CONFIG.force_uniform_attenuation
+        medium_fwd.alpha_coeff = ones(gs) * CONFIG.uniform_alpha_coeff;
+    end
+    if CONFIG.force_uniform_gruneisen
+        medium_fwd.gruneisen = ones(gs) * CONFIG.uniform_gruneisen;
+    end
+    if isfield(sct_fwd, 'bodyMask')
+        outside_body_fwd = ~logical(sct_fwd.bodyMask);
+        if isfield(sct_fwd, 'couchMask')
+            outside_body_fwd = outside_body_fwd | logical(sct_fwd.couchMask);
+        end
+        medium_fwd.density(outside_body_fwd)     = CONFIG.uniform_density;
+        medium_fwd.sound_speed(outside_body_fwd) = CONFIG.uniform_sound_speed;
+        medium_fwd.alpha_coeff(outside_body_fwd) = CONFIG.uniform_alpha_coeff;
+        medium_fwd.gruneisen(outside_body_fwd)   = CONFIG.uniform_gruneisen;
+    end
+    fwd_density     = medium_fwd.density;
+    fwd_sound_speed = medium_fwd.sound_speed;
+    fwd_alpha_coeff = medium_fwd.alpha_coeff;
+    fwd_gruneisen   = medium_fwd.gruneisen;
+    clear medium_fwd;
+    fprintf('       [FWD] Density range:     [%.0f, %.0f] kg/m^3\n', min(fwd_density(:)), max(fwd_density(:)));
+    fprintf('       [FWD] Sound speed range: [%.0f, %.0f] m/s\n',    min(fwd_sound_speed(:)), max(fwd_sound_speed(:)));
+    fprintf('       [FWD] Gruneisen range:   [%.4f, %.4f]\n',        min(fwd_gruneisen(:)), max(fwd_gruneisen(:)));
+end
+% Original-grid dims of the forward property arrays; used to place them back
+% into the (possibly padded/expanded) simulation grid for the forward sim.
+fwd_orig_dims = size(fwd_density);
+% Offset of the original-data block within the final simulation grid. Stays
+% [0 0 0] unless determine_sensor_mask expands the grid (set there).
+fwd_inject_offset = [0, 0, 0];
+
 %% ========================= INITIAL PRESSURE p0 ==========================
 
 % Apply body mask to dose before p0 calculation
@@ -390,7 +516,10 @@ meterset       = CONFIG.meterset;
 num_pulses     = ceil(meterset / CONFIG.dose_per_pulse_cGy);
 dose_per_pulse = doseGrid / num_pulses;
 
-p0 = dose_per_pulse .* medium.gruneisen .* medium.density;
+% Initial pressure is generated in the TRUE anatomy, so p0 uses the forward
+% medium's Gruneisen and density (identical to `medium` when no separate
+% forward CBCT was requested).
+p0 = dose_per_pulse .* fwd_gruneisen .* fwd_density;
 p0 = smooth(p0);
 
 fprintf('       Meterset: %.2f MU -> %d pulses\n', meterset, num_pulses);
@@ -585,6 +714,10 @@ switch CONFIG.sensor_placement_method
             yr = gp.x_pre + (1:Ny_orig);
             zr = gp.z_pre + (1:Nz_orig);
 
+            % The original-data block now sits at this offset within the grid;
+            % the forward property arrays are injected here before the fwd sim.
+            fwd_inject_offset = [gp.y_pre, gp.x_pre, gp.z_pre];
+
             density_exp(xr, yr, zr)    = density_unp;
             soundSpeed_exp(xr, yr, zr) = soundSpeed_unp;
             if numel(alphaCoeff_unp) > 1
@@ -741,8 +874,11 @@ fprintf('[6/7] Setting up k-Wave grid...\n');
 
 kgrid = kWaveGrid(Nx, dx, Ny, dy, Nz, dz);
 
-maxC = max(medium.sound_speed(:));
-minC = min(medium.sound_speed(medium.sound_speed > 0));
+% dt/Nt must be stable for BOTH the reconstruction medium (`medium`) and the
+% forward medium (fwd_sound_speed), so bound the sound-speed extremes over both.
+maxC = max(max(medium.sound_speed(:)), max(fwd_sound_speed(:)));
+minC = min(min(medium.sound_speed(medium.sound_speed > 0)), ...
+           min(fwd_sound_speed(fwd_sound_speed > 0)));
 dt   = CONFIG.cfl_number * min([dx, dy, dz]) / maxC;
 
 gridDiag = sqrt((Nx*dx)^2 + (Ny*dy)^2 + (Nz*dz)^2);
@@ -774,6 +910,24 @@ kmedium.sound_speed = medium.sound_speed;
 kmedium.alpha_coeff = medium.alpha_coeff;
 kmedium.alpha_power = 1.1;
 
+% Forward-simulation medium: the reconstruction medium with the true-anatomy
+% property arrays injected over the original-data block. This is the ONLY place
+% the forward geometry differs from the reconstruction geometry; time reversal,
+% residual re-projection, DAS, and pressure->dose all keep using `kmedium` /
+% `medium` (CT_1). When no separate forward CBCT was requested the injected
+% values equal the reconstruction values, so kmedium_fwd == kmedium.
+kmedium_fwd = kmedium;
+if ~forward_is_recon
+    ix = fwd_inject_offset(1) + (1:fwd_orig_dims(1));
+    iy = fwd_inject_offset(2) + (1:fwd_orig_dims(2));
+    iz = fwd_inject_offset(3) + (1:fwd_orig_dims(3));
+    kmedium_fwd.density(ix, iy, iz)     = fwd_density;
+    kmedium_fwd.sound_speed(ix, iy, iz) = fwd_sound_speed;
+    kmedium_fwd.alpha_coeff(ix, iy, iz) = fwd_alpha_coeff;   % scalar broadcasts if needed
+    fprintf('       [FWD] Injected true-anatomy medium into grid block [%d:%d, %d:%d, %d:%d].\n', ...
+        ix(1), ix(end), iy(1), iy(end), iz(1), iz(end));
+end
+
 if CONFIG.use_gpu
     try
         gpuDevice;
@@ -800,7 +954,7 @@ source_fwd.p0 = p0;
 
 try
     fwd_tic    = tic;
-    sensorData = kspaceFirstOrder3D(kgrid, kmedium, source_fwd, sensor, inputArgs{:});
+    sensorData = kspaceFirstOrder3D(kgrid, kmedium_fwd, source_fwd, sensor, inputArgs{:});
     fwd_time   = toc(fwd_tic);
     fprintf('       Forward complete (%.1f s). Sensor data: [%d x %d]\n', ...
         fwd_time, size(sensorData, 1), size(sensorData, 2));

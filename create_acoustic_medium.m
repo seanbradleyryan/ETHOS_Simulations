@@ -191,7 +191,7 @@ function medium = create_acoustic_medium(sct_resampled, config)
     %% ======================== NUMERICAL STABILITY ========================
 
     % Ensure minimum values to prevent division-by-zero or NaN propagation
-    density    = max(density, 1);       % minimum 1 kg/m^3
+    density    = max(density, 30);       % minimum 1 kg/m^3
     soundSpeed = max(soundSpeed, 100);  % minimum 100 m/s
 
     %% ======================== BUILD OUTPUT STRUCT ========================

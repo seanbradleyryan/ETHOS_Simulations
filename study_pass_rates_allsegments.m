@@ -11,6 +11,16 @@
 %  (truth | recon | gamma index). Both the pass-rate results and the random panels
 %  are cached so a matching re-run replots without recomputing gamma.
 %
+%  EVALUATION METRIC (CONFIG.eval_method):
+%    'gamma_index' (default) - the behaviour described above: global gamma pass
+%                              rate (%) at CONFIG.gamma_n %/mm.
+%    'ssim'                  - identical execution / plotting flow, but each
+%                              segment's score is the mean local SSIM (%) over the
+%                              same 10% reference eval mask, and the random-panel
+%                              metric map becomes the local-SSIM map instead of the
+%                              gamma-index map. SSIM outputs use *_ssim-suffixed
+%                              cache/log files so the two metrics never collide.
+%
 %  Comparisons (CONFIG.comparisons), each per segment:
 %    truth1_vs_truth3  RayStation truth CT_1 vs truth CT_3   (green connector ref)
 %    truth1_vs_recon1  RayStation truth CT_1 vs recon CT_1   (green)
@@ -56,6 +66,19 @@ clear; clc; close all;
 run_timer = tic;   % program runtime record
 
 %% ========================= CONFIGURATION ================================
+
+% --- Evaluation metric -------------------------------------------------------
+% Which per-segment metric drives the pass matrices, summary charts, console
+% tables and random panels:
+%   'gamma_index' - global gamma pass rate (%) at CONFIG.gamma_n %/mm (default;
+%                   the original behaviour of this script).
+%   'ssim'        - mean local structural similarity (%) over the same 10%
+%                   reference eval mask. Identical execution / plotting flow, but
+%                   the plotted metric (and the random-panel maps) become SSIM
+%                   instead of gamma. CONFIG.gamma_n is unused in this mode.
+% SSIM outputs are written to *_ssim-suffixed cache/log files so the two metrics
+% never clobber each other.
+CONFIG.eval_method = 'gamma_index';   % 'gamma_index' | 'ssim'
 
 CONFIG.working_dir    = '/mnt/weka/home/80030361/ETHOS_Simulations';
 CONFIG.patient_id     = '1194203';
@@ -133,6 +156,20 @@ CONFIG.random_cache_file    = 'pass_rates_allsegments_random_viz.mat';
 
 %% ===================== SETUP ============================================
 
+% Normalize / validate the evaluation metric, and give the SSIM run its own
+% cache/log filenames so the two metrics do not overwrite each other on disk.
+CONFIG.eval_method = lower(char(CONFIG.eval_method));
+if ~ismember(CONFIG.eval_method, {'gamma_index', 'ssim'})
+    error('study_pass_rates_allsegments:BadEvalMethod', ...
+        'CONFIG.eval_method must be ''gamma_index'' or ''ssim'' (got ''%s'').', ...
+        CONFIG.eval_method);
+end
+if strcmp(CONFIG.eval_method, 'ssim')
+    CONFIG.output_file       = add_name_suffix(CONFIG.output_file, '_ssim');
+    CONFIG.log_file          = add_name_suffix(CONFIG.log_file, '_ssim');
+    CONFIG.random_cache_file = add_name_suffix(CONFIG.random_cache_file, '_ssim');
+end
+
 % Cache directory: the recon-dose folder unless explicitly overridden.
 if isempty(CONFIG.output_dir)
     CONFIG.output_dir = fullfile(CONFIG.working_dir, 'SimulationResults', ...
@@ -161,10 +198,21 @@ nBeams  = numel(beams);
 nComp   = size(CONFIG.comparisons, 1);
 crit    = CONFIG.gamma_n(1);
 
-has_gamma = (exist('CalcGamma', 'file') == 2);
-if ~has_gamma
-    error('study_pass_rates_allsegments:NoCalcGamma', ...
-        'CalcGamma not found on the path; cannot compute pass rates.');
+% Metric-specific labels (axis text, chart-title word, console header) resolved
+% once and threaded to every plotting / printing site.
+metric = build_metric_descriptor(CONFIG.eval_method, crit);
+
+% Required toolbox per metric: CalcGamma for gamma, ssim (IP Toolbox) for SSIM.
+if strcmp(CONFIG.eval_method, 'gamma_index')
+    if exist('CalcGamma', 'file') ~= 2
+        error('study_pass_rates_allsegments:NoCalcGamma', ...
+            'CalcGamma not found on the path; cannot compute gamma pass rates.');
+    end
+else
+    if exist('ssim', 'file') ~= 2
+        error('study_pass_rates_allsegments:NoSSIM', ...
+            'ssim not found (Image Processing Toolbox required for CONFIG.eval_method=''ssim'').');
+    end
 end
 
 % Column indices (into CONFIG.comparisons / the pass matrices) for the plots.
@@ -184,8 +232,8 @@ fprintf(' STUDY_PASS_RATES_ALLSEGMENTS\n');
 fprintf(' Patient %s | %s | plan=%s | hash=%s\n', ...
     CONFIG.patient_id, CONFIG.session, CONFIG.plan_type, CONFIG.config_hash);
 fprintf(' Beams: %s  (%d)\n', mat2str(beams), nBeams);
-fprintf(' Criterion: %g%%/%gmm | normalize=%d | parallel=%d\n', ...
-    crit, crit, CONFIG.normalize, CONFIG.use_parallel);
+fprintf(' Metric: %s%s | normalize=%d | parallel=%d\n', ...
+    metric.name, metric.crit_suffix, CONFIG.normalize, CONFIG.use_parallel);
 fprintf(' Cache dir: %s\n', CONFIG.output_dir);
 fprintf(' Log file : %s\n', log_path);
 fprintf('============================================================\n');
@@ -276,14 +324,15 @@ for bi = 1:nBeams
 
     % ---- Gamma pass rate per (segment x comparison). CalcGamma is silenced. ----
     comparisons = CONFIG.comparisons;
+    eval_method = CONFIG.eval_method;
     pass_seg    = nan(ns, nComp);
     if CONFIG.use_parallel
         parfor si = 1:ns
-            pass_seg(si, :) = seg_pass_rates(seg_data{si}, comparisons, crit);
+            pass_seg(si, :) = seg_pass_rates(seg_data{si}, comparisons, crit, eval_method);
         end
     else
         for si = 1:ns
-            pass_seg(si, :) = seg_pass_rates(seg_data{si}, comparisons, crit);
+            pass_seg(si, :) = seg_pass_rates(seg_data{si}, comparisons, crit, eval_method);
         end
     end
 
@@ -339,8 +388,9 @@ all_nseg     = size(all_seg_pass, 1);
 
 %% ===================== CONSOLE SUMMARY (BY BEAM) =======================
 
-fprintf('\n==================== BEAM MEAN PASS RATES ====================\n');
-fprintf('(global gamma %g%%/%gmm, mean +/- std over segments)\n', crit, crit);
+fprintf('\n==================== BEAM %s (mean over segments) ====================\n', ...
+    upper(metric.title));
+fprintf('(%s, mean +/- std over segments)\n', metric.header_detail);
 for n = 1:nproc
     fprintf('\n----- [beam #%d]  (%d segments) -----\n', beam_list(n), nseg_used(n));
     for d = 1:nComp
@@ -370,20 +420,20 @@ plot_beam_pass_rate_summary(x_pos, x_labels, ...
     [mean_pass(:, d_r1); all_mean(d_r1)], [std_pass(:, d_r1); all_std(d_r1)], ...
     [mean_pass(:, d_r3); all_mean(d_r3)], [std_pass(:, d_r3); all_std(d_r3)], ...
     [mean_pass(:, d_tt); all_mean(d_tt)], [std_pass(:, d_tt); all_std(d_tt)], ...
-    crit, CONFIG.patient_id, CONFIG.session);
+    metric, CONFIG.patient_id, CONFIG.session);
 
 % Figure 2: reconstruction fidelity (each recon against its OWN-CT truth).
 plot_recon_fidelity_summary(x_pos, x_labels, ...
     [mean_pass(:, d_r1); all_mean(d_r1)], [std_pass(:, d_r1); all_std(d_r1)], ...
     [mean_pass(:, d_33); all_mean(d_33)], [std_pass(:, d_33); all_std(d_33)], ...
-    crit, CONFIG.patient_id, CONFIG.session);
+    metric, CONFIG.patient_id, CONFIG.session);
 
 %% ============= RANDOM PER-SEGMENT PANEL VISUALIZATION ==================
 % N random segments, each in its own tab: one row of truth | recon | gamma per
 % requested comparison. Uses its own cache (recomputes gamma only on a miss).
 
 if CONFIG.plot_random_segments
-    show_random_segment_panels(CONFIG, crit, ct1_str, ct3_str);
+    show_random_segment_panels(CONFIG, crit, ct1_str, ct3_str, metric);
 end
 
 %% ========================= SAVE RESULTS ================================
@@ -393,6 +443,7 @@ total_runtime = toc(run_timer);
 if CONFIG.save_results && ~loaded_from_cache
     RESULTS = struct();
     RESULTS.config        = CONFIG;
+    RESULTS.eval_method   = CONFIG.eval_method;
     RESULTS.gamma_crit    = crit;
     RESULTS.beams         = beam_list;
     RESULTS.comparisons   = CONFIG.comparisons(:,1)';
@@ -449,6 +500,39 @@ function ensure_pool(desired_workers)
     end
 end
 
+function name = add_name_suffix(name, suffix)
+%ADD_NAME_SUFFIX Insert suffix before the extension of a filename (keeps any dir).
+%  e.g. add_name_suffix('results.mat','_ssim') -> 'results_ssim.mat'.
+    [d, base, ext] = fileparts(char(name));
+    name = fullfile(d, [base, suffix, ext]);
+    if isempty(d)
+        name = [base, suffix, ext];   % keep it relative when no directory was given
+    end
+end
+
+function metric = build_metric_descriptor(eval_method, crit)
+%BUILD_METRIC_DESCRIPTOR Labels/titles for the active evaluation metric.
+%  Fields: .name (legend/console word), .title (chart-title word), .axis_label
+%  (y-axis text), .crit_suffix (header criterion text), .header_detail (console
+%  sub-header), .is_ssim (logical).
+    switch eval_method
+        case 'ssim'
+            metric.is_ssim     = true;
+            metric.name        = 'Mean local SSIM';
+            metric.title       = 'SSIM';
+            metric.axis_label  = 'Mean local SSIM (%)';
+            metric.crit_suffix = '';
+            metric.header_detail = 'mean local SSIM over the 10% region';
+        otherwise   % 'gamma_index'
+            metric.is_ssim     = false;
+            metric.name        = 'Gamma pass rate';
+            metric.title       = 'Pass-Rate';
+            metric.axis_label  = sprintf('Gamma pass rate (%%)  @ %g%%/%g mm', crit, crit);
+            metric.crit_suffix = sprintf(' @ %g%%/%g mm', crit, crit);
+            metric.header_detail = sprintf('global gamma %g%%/%gmm', crit, crit);
+    end
+end
+
 function [ok, cached, why] = try_load_cache(out_path, CONFIG, crit)
 %TRY_LOAD_CACHE Load a saved results .mat and check it matches the current run.
 %  Returns ok=true and a struct with .beams/.mean_pass/.std_pass/.n_segments/
@@ -492,6 +576,15 @@ function [ok, cached, why] = try_load_cache(out_path, CONFIG, crit)
 
     % Key inputs that change the numbers must match the saved CONFIG.
     cc = cached.config;
+    % Evaluation metric (older caches without the field are treated as gamma).
+    cached_method = 'gamma_index';
+    if isfield(cc, 'eval_method') && ~isempty(cc.eval_method)
+        cached_method = lower(char(cc.eval_method));
+    end
+    if ~strcmp(cached_method, CONFIG.eval_method)
+        why = sprintf('eval_method %s ~= cached %s', CONFIG.eval_method, cached_method);
+        return;
+    end
     if isfield(cc, 'config_hash') && ~isequal(cc.config_hash, CONFIG.config_hash)
         why = 'config_hash differs';
         return;
@@ -651,10 +744,13 @@ function v = get_dose_field(S, fieldname)
     end
 end
 
-function p = seg_pass_rates(S, comparisons, crit)
-%SEG_PASS_RATES Pass rate (%) of every comparison for one segment.
-%  Reference = comparison ref volume; 10% reference cutoff eval mask; global
-%  gamma at crit%/crit mm. Returns a 1 x nComp row (NaN where gamma failed).
+function p = seg_pass_rates(S, comparisons, crit, eval_method)
+%SEG_PASS_RATES Per-comparison metric score (%) for one segment.
+%  Reference = comparison ref volume; 10% reference cutoff eval mask. Depending on
+%  eval_method the score is either the global gamma pass rate (% of eval voxels
+%  with gamma<=1 at crit%/crit mm) or the mean local SSIM (%) over the same mask.
+%  Returns a 1 x nComp row (NaN where the metric failed).
+    if nargin < 4 || isempty(eval_method), eval_method = 'gamma_index'; end
     np = size(comparisons, 1);
     p  = nan(1, np);
     for d = 1:np
@@ -665,7 +761,29 @@ function p = seg_pass_rates(S, comparisons, crit)
         else
             mask = tgt >= 0.10 * max(tgt(:));
         end
-        p(d) = quiet_gamma_pass(ref, tgt, mask, crit, S.spacing);
+        if strcmp(eval_method, 'ssim')
+            p(d) = quiet_ssim_score(ref, tgt, mask);
+        else
+            p(d) = quiet_gamma_pass(ref, tgt, mask, crit, S.spacing);
+        end
+    end
+end
+
+function p = quiet_ssim_score(ref, tgt, mask)
+%QUIET_SSIM_SCORE Mean local SSIM (%) over the eval mask (target vs reference).
+%  Computes the full-volume local SSIM map (ssim's per-voxel output) with the
+%  dynamic range taken from the reference, then averages it over the 10% eval
+%  mask so the score is directly analogous to the gamma pass rate. Returns NaN on
+%  failure (e.g. an all-zero reference and target).
+    smap = quiet_ssim_map(ref, tgt);
+    if isempty(smap)
+        p = NaN;
+        return;
+    end
+    if any(mask(:))
+        p = 100 * mean(smap(mask), 'omitnan');
+    else
+        p = 100 * mean(smap(:), 'omitnan');
     end
 end
 
@@ -698,8 +816,8 @@ function d = comp_col(comparisons, name)
 end
 
 function plot_beam_pass_rate_summary(x_pos, x_labels, m_r1, s_r1, m_r3, s_r3, ...
-        m_tt, s_tt, crit, patient_id, session)
-%PLOT_BEAM_PASS_RATE_SUMMARY Mean pass rate (%) per beam, std error bars.
+        m_tt, s_tt, metric, patient_id, session)
+%PLOT_BEAM_PASS_RATE_SUMMARY Mean metric score (%) per beam, std error bars.
 %  Three series at the given n%/n mm criterion:
 %    recon_CT1 vs truth_CT1 (green), recon_CT3 vs truth_CT1 (red),
 %    truth_CT1 vs truth_CT3 (blue), each with std error bars. A per-beam vertical
@@ -744,9 +862,9 @@ function plot_beam_pass_rate_summary(x_pos, x_labels, m_r1, s_r1, m_r3, s_r3, ..
     hold off; grid on; box on;
     ylim([0, 105]);
     xlabel('Beam number');
-    ylabel(sprintf('Gamma pass rate (%%)  @ %g%%/%g mm', crit, crit));
-    title(sprintf('Beam Pass-Rate Summary (mean \\pm std over segments)   |   %s / %s', ...
-        strrep(patient_id, '_', '\_'), strrep(session, '_', '\_')), ...
+    ylabel(metric.axis_label);
+    title(sprintf('Beam %s Summary (mean \\pm std over segments)   |   %s / %s', ...
+        metric.title, strrep(patient_id, '_', '\_'), strrep(session, '_', '\_')), ...
         'FontWeight', 'bold', 'FontSize', 12, 'Interpreter', 'tex');
     legend([h_r1, h_r3, h_tt], ...
         {'Recon CT\_1 vs Truth CT\_1', 'Recon CT\_3 vs Truth CT\_1', ...
@@ -758,11 +876,13 @@ end
 %  RANDOM PER-SEGMENT PANEL VISUALIZATION (own cache)
 %% =========================================================================
 
-function show_random_segment_panels(CONFIG, crit, ct1_str, ct3_str)
-%SHOW_RANDOM_SEGMENT_PANELS N random segments as tabs; one row of truth/recon/gamma
-%  panels per requested comparison. Replots from CONFIG.random_cache_file when it
-%  matches (no gamma recompute); otherwise (re)loads recon volumes from disk,
-%  recomputes the gamma maps, caches the selected slices, and plots.
+function show_random_segment_panels(CONFIG, crit, ct1_str, ct3_str, metric)
+%SHOW_RANDOM_SEGMENT_PANELS N random segments as tabs; one row of truth/recon/metric
+%  panels per requested comparison. The metric map is a gamma-index volume
+%  ('gamma_index') or a local-SSIM volume ('ssim'). Replots from
+%  CONFIG.random_cache_file when it matches (no metric recompute); otherwise
+%  (re)loads recon volumes from disk, recomputes the metric maps, caches the
+%  selected slices, and plots.
     fprintf('\n----------- RANDOM SEGMENT PANELS -----------\n');
 
     % Resolve the viz-cache path (own file, independent of the results cache).
@@ -796,7 +916,8 @@ function show_random_segment_panels(CONFIG, crit, ct1_str, ct3_str)
                 'comparisons', {CONFIG.random_comparisons(:)'}, ...
                 'n_random_requested', CONFIG.n_random, ...
                 'seed', CONFIG.random_seed, 'normalize', logical(CONFIG.normalize), ...
-                'crit', crit, 'plan_type', CONFIG.plan_type, ...
+                'crit', crit, 'eval_method', CONFIG.eval_method, ...
+                'plan_type', CONFIG.plan_type, ...
                 'patient_id', CONFIG.patient_id, 'session', CONFIG.session); %#ok<NASGU>
             try
                 save(cache_path, 'picks', 'meta', '-v7.3');
@@ -809,7 +930,7 @@ function show_random_segment_panels(CONFIG, crit, ct1_str, ct3_str)
         end
     end
 
-    plot_random_picks(picks, CONFIG, crit);
+    plot_random_picks(picks, CONFIG, crit, metric);
 end
 
 function [ok, picks, why] = try_load_random_cache(cache_path, CONFIG, crit)
@@ -832,6 +953,11 @@ function [ok, picks, why] = try_load_random_cache(cache_path, CONFIG, crit)
     if ~isequal(m.seed, CONFIG.random_seed), why = 'seed differs'; return; end
     if ~isequal(logical(m.normalize), logical(CONFIG.normalize)), why = 'normalize differs'; return; end
     if ~isequal(m.crit, crit), why = 'criterion differs'; return; end
+    cached_method = 'gamma_index';
+    if isfield(m, 'eval_method') && ~isempty(m.eval_method)
+        cached_method = lower(char(m.eval_method));
+    end
+    if ~strcmp(cached_method, CONFIG.eval_method), why = 'eval_method differs'; return; end
     if isfield(m, 'plan_type') && ~strcmpi(char(m.plan_type), char(CONFIG.plan_type))
         why = 'plan_type differs'; return;
     end
@@ -876,7 +1002,7 @@ function picks = build_random_picks(CONFIG, crit, ct1_str, ct3_str)
             if numel(picks) >= need, break; end
             S = seg_data{k};
             pk = struct('beam', b, 'seg', S.seg, 'spacing', spacing, ...
-                'panels', build_panels(S, specs, crit));
+                'panels', build_panels(S, specs, crit, CONFIG.eval_method));
             picks(end+1) = pk; %#ok<AGROW>
         end
     end
@@ -885,9 +1011,12 @@ function picks = build_random_picks(CONFIG, crit, ct1_str, ct3_str)
         numel(picks), need);
 end
 
-function panels = build_panels(S, specs, crit)
-%BUILD_PANELS One panel entry per comparison spec: truth/recon slices, gamma slice
-%  (at the reference max-dose slice), pass %, and labels.
+function panels = build_panels(S, specs, crit, eval_method)
+%BUILD_PANELS One panel entry per comparison spec: truth/recon slices, metric-map
+%  slice (at the reference max-dose slice), score %, and labels. The metric map is
+%  a gamma-index volume ('gamma_index') or a local-SSIM volume ('ssim'); .gamma_img
+%  holds whichever map and .passpct the matching score (gamma pass % or mean SSIM %).
+    if nargin < 4 || isempty(eval_method), eval_method = 'gamma_index'; end
     panels = struct('name', {}, 'ref_label', {}, 'tgt_label', {}, ...
         'ref_img', {}, 'tgt_img', {}, 'gamma_img', {}, 'passpct', {}, ...
         'dose_max', {}, 'iz', {});
@@ -900,12 +1029,22 @@ function panels = build_panels(S, specs, crit)
         else
             mask = tgt >= 0.10 * max(tgt(:));
         end
-        gmap = quiet_gamma_map(ref, tgt, crit, S.spacing);
-        if isempty(gmap), gmap = nan(size(ref)); end
-        if any(mask(:))
-            passpct = 100 * mean(gmap(mask) <= 1, 'omitnan');
+        if strcmp(eval_method, 'ssim')
+            gmap = quiet_ssim_map(ref, tgt);
+            if isempty(gmap), gmap = nan(size(ref)); end
+            if any(mask(:))
+                passpct = 100 * mean(gmap(mask), 'omitnan');
+            else
+                passpct = NaN;
+            end
         else
-            passpct = NaN;
+            gmap = quiet_gamma_map(ref, tgt, crit, S.spacing);
+            if isempty(gmap), gmap = nan(size(ref)); end
+            if any(mask(:))
+                passpct = 100 * mean(gmap(mask) <= 1, 'omitnan');
+            else
+                passpct = NaN;
+            end
         end
 
         % Display slice: axial slice (dim 3) of the reference's peak dose.
@@ -960,20 +1099,53 @@ function gmap = quiet_gamma_map(ref, tgt, crit, spacing)
     end
 end
 
-function plot_random_picks(picks, CONFIG, crit)
+function smap = quiet_ssim_map(ref, tgt)
+%QUIET_SSIM_MAP Full local-SSIM volume (target vs reference), dynamic range from
+%  the reference. Returns [] when neither volume has any positive signal or ssim
+%  fails, so callers can fall back gracefully.
+    ref = double(ref);
+    tgt = double(tgt);
+    dr  = max(ref(:));
+    if ~(dr > 0), dr = max(tgt(:)); end
+    if ~(dr > 0)
+        smap = [];
+        return;
+    end
+    try
+        [~, smap] = ssim(tgt, ref, 'DynamicRange', dr);
+    catch
+        smap = [];
+    end
+end
+
+function plot_random_picks(picks, CONFIG, crit, metric)
 %PLOT_RANDOM_PICKS One window, one tab per pick; each tab has one ROW of
-%  truth | recon | gamma panels per comparison (first comparison on top). With the
-%  default CONFIG.random_comparisons that puts recon_CT1 (Dose 1 on recon 1) on the
-%  top row and recon_CT3 (Dose 2 on recon 1) on the bottom row.
+%  truth | recon | metric panels per comparison (first comparison on top). The
+%  metric column is a gamma-index map ('gamma_index') or a local-SSIM map ('ssim').
+%  With the default CONFIG.random_comparisons that puts recon_CT1 (Dose 1 on recon
+%  1) on the top row and recon_CT3 (Dose 2 on recon 1) on the bottom row.
     np = numel(picks);
     if np == 0, return; end
+    if nargin < 4 || isempty(metric)
+        metric = build_metric_descriptor(CONFIG.eval_method, crit);
+    end
+
+    % Metric-column appearance (colormap / colour limits / title + tab suffix).
+    if metric.is_ssim
+        metric_cmap = parula(256);
+        metric_clim = [0, 1];               % local SSIM, 1 = identical
+        tab_suffix  = 'local SSIM';
+    else
+        metric_cmap = gamma_colormap(256);
+        metric_clim = [0, 2];               % gamma, <=1 passes
+        tab_suffix  = sprintf('gamma %g%%/%g mm', crit, crit);
+    end
 
     nc_max = max(arrayfun(@(k) numel(picks(k).panels), 1:np));
     fig = figure('Name', sprintf('Random segment panels  |  %s / %s', ...
         CONFIG.patient_id, CONFIG.session), 'Color', 'w', ...
         'NumberTitle', 'off', 'Position', [80, 80, 900, max(300, 300 * nc_max)]);
     tg = uitabgroup(fig);
-    gmap_cmap = gamma_colormap(256);
 
     for i = 1:np
         pk = picks(i);
@@ -981,11 +1153,11 @@ function plot_random_picks(picks, CONFIG, crit)
         nc = numel(P);
 
         tab = uitab(tg, 'Title', sprintf('B%d S%d', pk.beam, pk.seg));
-        % nc rows (one comparison each) x 3 columns (truth | recon | gamma). Tiles
+        % nc rows (one comparison each) x 3 columns (truth | recon | metric). Tiles
         % fill row-major, so comparison c occupies row c.
         tl  = tiledlayout(tab, nc, 3, 'Padding', 'compact', 'TileSpacing', 'compact');
-        title(tl, sprintf('Beam %d, Segment %d   |   gamma %g%%/%g mm', ...
-            pk.beam, pk.seg, crit, crit), 'FontWeight', 'bold');
+        title(tl, sprintf('Beam %d, Segment %d   |   %s', ...
+            pk.beam, pk.seg, tab_suffix), 'FontWeight', 'bold');
 
         for c = 1:nc
             p = P(c);
@@ -1003,12 +1175,17 @@ function plot_random_picks(picks, CONFIG, crit)
             colormap(ax, hot); clim(ax, [0, cmax]); colorbar(ax);
             title(ax, {p.tgt_label, 'recon'}, 'Interpreter', 'tex');
 
-            % Gamma index (<=1 passes).
+            % Metric map (gamma index <=1 passes, or local SSIM 0..1).
             ax = nexttile(tl);
             imagesc(ax, p.gamma_img); axis(ax, 'image', 'off');
-            colormap(ax, gmap_cmap); clim(ax, [0, 2]); colorbar(ax);
-            title(ax, sprintf('\\gamma index  (%.1f%% \\leq 1)', p.passpct), ...
-                'Interpreter', 'tex');
+            colormap(ax, metric_cmap); clim(ax, metric_clim); colorbar(ax);
+            if metric.is_ssim
+                title(ax, sprintf('SSIM map  (mean %.1f%%)', p.passpct), ...
+                    'Interpreter', 'tex');
+            else
+                title(ax, sprintf('\\gamma index  (%.1f%% \\leq 1)', p.passpct), ...
+                    'Interpreter', 'tex');
+            end
         end
     end
     drawnow;
@@ -1032,7 +1209,7 @@ function cmap = gamma_colormap(n)
 end
 
 function plot_recon_fidelity_summary(x_pos, x_labels, m_11, s_11, m_33, s_33, ...
-        crit, patient_id, session)
+        metric, patient_id, session)
 %PLOT_RECON_FIDELITY_SUMMARY Own-CT reconstruction fidelity per beam.
 %  Each recon is gamma-compared against the truth of its OWN CT - truth_CT1 vs
 %  recon_CT1 (green) and truth_CT3 vs recon_CT3 (red) - so a series sitting
@@ -1069,7 +1246,7 @@ function plot_recon_fidelity_summary(x_pos, x_labels, m_11, s_11, m_33, s_33, ..
     hold off; grid on; box on;
     ylim([0, 105]);
     xlabel('Beam number');
-    ylabel(sprintf('Gamma pass rate (%%)  @ %g%%/%g mm', crit, crit));
+    ylabel(metric.axis_label);
     title(sprintf(['Reconstruction Fidelity vs Own-CT Truth (mean \\pm std over ' ...
         'segments)   |   %s / %s'], ...
         strrep(patient_id, '_', '\_'), strrep(session, '_', '\_')), ...
