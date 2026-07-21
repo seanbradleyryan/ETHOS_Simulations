@@ -85,9 +85,15 @@ CONFIG.plot_results = true;
 % Set to 0 to disable display smoothing.
 CONFIG.viz_smooth_sigma = 1.0;
 
-% Normalize: divide original and reconstructed dose by their own max before
-% comparison / gamma so both peak at 1.0.
+% Normalize before comparison / gamma. Master on/off switch.
 CONFIG.normalize = false;
+% Normalization scheme (used only when CONFIG.normalize is true):
+%   'max' : divide original and reconstructed dose by their own max (both peak at 1.0).
+%   'lsq' : least-squares relative normalization (from study_pass_rates_allsegments).
+%           Scale the RECON by the gain g = sum(truth.*recon)/sum(recon.^2) over the
+%           truth's >=10% region -- the g minimizing ||truth - g*recon||^2. The
+%           original dose is left unscaled (kept as the ground-truth reference).
+CONFIG.normalize_method = 'lsq';
 
 % Gamma logging: append CONFIG + gamma pass rates to gamma_log.mat (in
 % working_dir) after each run. Keeps a running record of the best gamma per
@@ -1290,24 +1296,45 @@ if did_pad
 end
 
 %% ========================= NORMALIZE DOSES ===============================
-% When enabled, divide original and reconstructed doses by their respective
-% maxima so both peak at 1.0. Affects downstream RESULTS SUMMARY, gamma, and
-% plotting.
+% When enabled, rescale per CONFIG.normalize_method. Affects downstream RESULTS
+% SUMMARY, gamma, and plotting.
+%   'max' : divide original and reconstructed doses by their own maxima (both peak at 1.0).
+%   'lsq' : least-squares gain of the recon to the original truth (truth unscaled).
 
 if isfield(CONFIG, 'normalize') && CONFIG.normalize
-    dg_max = max(doseGrid(:));
-    rd_max = max(recon_dose(:));
-    fprintf('\n[NORM] Normalizing doses by their max:\n');
-    fprintf('       Original max:      %.4f Gy\n', dg_max);
-    fprintf('       Reconstructed max: %.4f Gy\n', rd_max);
-    if dg_max > 0
-        doseGrid = doseGrid / dg_max;
+    norm_method = 'max';
+    if isfield(CONFIG, 'normalize_method') && ~isempty(CONFIG.normalize_method)
+        norm_method = lower(CONFIG.normalize_method);
     end
-    if rd_max > 0
-        recon_dose = recon_dose / rd_max;
+
+    switch norm_method
+        case 'max'
+            dg_max = max(doseGrid(:));
+            rd_max = max(recon_dose(:));
+            fprintf('\n[NORM] Normalizing doses by their max:\n');
+            fprintf('       Original max:      %.4f Gy\n', dg_max);
+            fprintf('       Reconstructed max: %.4f Gy\n', rd_max);
+            if dg_max > 0
+                doseGrid = doseGrid / dg_max;
+            end
+            if rd_max > 0
+                recon_dose = recon_dose / rd_max;
+            end
+            % Re-derive the low-dose threshold relative to the (now-normalized) original
+            doseThreshold = 0.01 * max(doseGrid(:));
+
+        case 'lsq'
+            % Least-squares relative normalization: scale the recon by the gain
+            % best matching it to the original truth over the truth's 10% region.
+            % The original dose (doseThreshold) is unchanged.
+            g = least_squares_gain(doseGrid, recon_dose);
+            recon_dose = recon_dose * g;
+            fprintf('\n[NORM] Least-squares gain normalization (recon -> truth): g = %.4f\n', g);
+
+        otherwise
+            error('run_standalone_simulation:BadNormalizeMethod', ...
+                'Unknown CONFIG.normalize_method "%s" (use ''max'' or ''lsq'').', norm_method);
     end
-    % Re-derive the low-dose threshold relative to the (now-normalized) original
-    doseThreshold = 0.01 * max(doseGrid(:));
 end
 
 %% ========================= RESULTS SUMMARY ===============================
@@ -1911,6 +1938,28 @@ function cmap = gamma_colormap_gyr()
     g = [linspace(0.85, 1, half)'; linspace(1, 0, rest)'];
     b = zeros(n, 1);
     cmap = [r, g, b];
+end
+
+
+function g = least_squares_gain(rs_truth, recon)
+%LEAST_SQUARES_GAIN Scalar gain aligning a recon to its RS truth (relative norm).
+%  g = sum(rs.*recon)/sum(recon.^2) over the truth's 10% low-dose region; the g
+%  minimizing ||rs - g*recon||^2 there. Falls back to 1 for empty/zero inputs.
+%  (Ported from study_pass_rates_allsegments.m.)
+    rs_truth = double(rs_truth);
+    recon    = double(recon);
+    if max(rs_truth(:)) > 0
+        mask = rs_truth >= 0.10 * max(rs_truth(:));
+    else
+        mask = true(size(rs_truth));
+    end
+    r = recon(mask);
+    denom = sum(r .^ 2);
+    if denom > 0
+        g = sum(rs_truth(mask) .* r) / denom;
+    else
+        g = 1;
+    end
 end
 
 

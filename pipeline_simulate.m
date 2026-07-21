@@ -53,6 +53,19 @@ CONFIG.Nt_scaling               = 6;      % >0: when air sets minC, divide Nt by
 CONFIG.use_gpu                  = true;   % GPU acceleration
 CONFIG.num_time_reversal_iter   = 5;      % Time-reversal iterations per field
 
+% --- Blind-Geometry Reconstruction (CT_3 / adapted fields) ---
+% When true, every CT_3 (adapted) beam/segment field is FORWARD-propagated on
+% its own CT_3 medium (the waves that physically reach the detector) but
+% reconstructed via iterative time reversal on the reference CT_1 medium -- the
+% only geometry a live IRAI system actually has to invert on. Such fields are
+% routed to run_second_field_simulation instead of run_single_field_simulation.
+% CT_1 (reference) fields are unaffected. Included in the config hash, so
+% flipping this yields a separate set of recon outputs (never reused across the
+% full-access vs blind cases).
+CONFIG.blind_recon_ct3           = true;
+% CT label of the reference geometry we reconstruct on (default 'CT_1').
+CONFIG.blind_recon_reference_label = 'CT_1';
+
 % --- Sensor Placement ---
 % Controls the k-Wave sensor mask geometry used in every per-field simulation.
 %   'full_plane_anterior' : Full YZ plane at x = sensor_x_index.
@@ -342,9 +355,12 @@ for p_idx = 1:length(CONFIG.patients)
                         send(progress_queue, struct('kind','process','field_idx',fi,'gantry',fd.gantry_angle,'message',''));
 
                         t_field = tic;
-                        [cbct_fd, medium_fd] = select_cbct_for_field(fd, ...
-                            cbct_by_label, medium_by_label);
-                        rd = run_field_quietly(fd, cbct_fd, medium_fd, ...
+                        % Route CT_3 (adapted) fields through the blind-geometry
+                        % second-field simulation (forward on CT_3, reconstruct
+                        % on CT_1); CT_1 fields keep the standard single-field
+                        % simulation. Selection of the field's own CBCT/medium
+                        % happens inside the dispatcher.
+                        rd = run_field_dispatch(fd, cbct_by_label, medium_by_label, ...
                             beam_metadata, CONFIG, precomputed_sensor);
                         rd = gather(rd);
                         save_field_reconstruction(rd, fd, patient_id, session, CONFIG, CONFIG_HASH);
@@ -415,10 +431,10 @@ for p_idx = 1:length(CONFIG.patients)
                             f, num_pending, fd.gantry_angle, why);
 
                         t_field = tic;
-                        [cbct_fd, medium_fd] = select_cbct_for_field(fd, ...
-                            cbct_by_label, medium_by_label);
-                        recon_dose = run_field_quietly(fd, cbct_fd, medium_fd, ...
-                            beam_metadata, CONFIG, precomputed_sensor);
+                        % CT_3 fields -> blind-geometry second-field simulation;
+                        % CT_1 fields -> standard single-field simulation.
+                        recon_dose = run_field_dispatch(fd, cbct_by_label, ...
+                            medium_by_label, beam_metadata, CONFIG, precomputed_sensor);
                         save_field_reconstruction(recon_dose, fd, patient_id, session, CONFIG, CONFIG_HASH);
                         save_simulated_dose(recon_dose, fd, patient_id, session, CONFIG, CONFIG_HASH);
 
@@ -671,6 +687,60 @@ function recon_dose = run_field_quietly(field_dose, cbct_resampled, medium, ...
     % string in the loop body would hide those uses and break the broadcast.
     [~, recon_dose] = evalc(['run_single_field_simulation(field_dose, ' ...
         'cbct_resampled, medium, beam_metadata, config, precomputed_sensor)']);
+end
+
+function recon_dose = run_field_dispatch(field_dose, cbct_by_label, medium_by_label, ...
+        beam_metadata, config, precomputed_sensor)
+    % Route a single field to the correct simulation:
+    %   - CT_3 (adapted) fields  -> run_second_field_simulation (BLIND geometry):
+    %       forward-propagate on the field's own CT_3 medium, but reconstruct
+    %       (iterative time reversal) on the reference CT_1 medium, since a live
+    %       IRAI system never has the adapted geometry to invert on.
+    %   - CT_1 (reference) fields -> run_single_field_simulation (full access).
+    % The field's own (TRUE) CBCT geometry + forward medium is selected here and
+    % passed through; the reference medium is pulled from medium_by_label. Kept
+    % as a normal function (not an inline branch at the parfor call site) so
+    % parfor still classifies cbct_by_label / medium_by_label as broadcast vars.
+    [cbct_fd, medium_fwd] = select_cbct_for_field(field_dose, cbct_by_label, medium_by_label);
+
+    ref_label = blind_recon_reference_label(config);
+    blind_on  = isfield(config, 'blind_recon_ct3') && config.blind_recon_ct3;
+
+    fld_label = '';
+    if isfield(field_dose, 'ct_label') && ~isempty(field_dose.ct_label)
+        fld_label = strrep(field_dose.ct_label, '-', '_');
+    end
+
+    if blind_on && ~isempty(fld_label) && ~strcmp(fld_label, ref_label) ...
+            && isfield(medium_by_label, ref_label)
+        medium_recon = medium_by_label.(ref_label);
+        recon_dose = run_second_field_quietly(field_dose, cbct_fd, medium_fwd, ...
+            medium_recon, beam_metadata, config, precomputed_sensor);
+    else
+        recon_dose = run_field_quietly(field_dose, cbct_fd, medium_fwd, ...
+            beam_metadata, config, precomputed_sensor);
+    end
+end
+
+function lbl = blind_recon_reference_label(config)
+    % Normalized CT label of the reference (reconstruction) geometry.
+    if isfield(config, 'blind_recon_reference_label') && ...
+            ~isempty(config.blind_recon_reference_label)
+        lbl = strrep(char(config.blind_recon_reference_label), '-', '_');
+    else
+        lbl = 'CT_1';
+    end
+end
+
+function recon_dose = run_second_field_quietly(field_dose, cbct_resampled, medium_fwd, ...
+        medium_recon, beam_metadata, config, precomputed_sensor)
+    % Blind-geometry per-field simulation with the same console suppression as
+    % run_field_quietly. medium_fwd is the TRUE (CT_3) forward medium; the
+    % reconstruction runs on medium_recon (reference CT_1). Every argument stays
+    % a normal function input so parfor ships beam_metadata / precomputed_sensor
+    % / medium_recon to the workers (a bare evalc string would hide those uses).
+    [~, recon_dose] = evalc(['run_second_field_simulation(field_dose, ' ...
+        'cbct_resampled, medium_fwd, medium_recon, beam_metadata, config, precomputed_sensor)']);
 end
 
 function save_field_reconstruction(recon_dose, field_dose, patient_id, session, config, hash8)
