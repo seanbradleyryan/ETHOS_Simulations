@@ -21,8 +21,15 @@ CONFIG.dose_filename = 'dose_1194203_Session_1_reference_CT_3_B15_112.mat';
 % _CT_k token selecting one of these; this script automatically locates that
 % dose file's counterpart on the OTHER CT image, runs the identical forward +
 % reconstruction pipeline on both, and gamma-compares the two reconstructions.
-% Each dose is simulated on its OWN CBCT geometry (CBCT<k>_resampled.mat).
+% Each dose is FORWARD-propagated on its OWN CBCT geometry (CBCT<k>_resampled.mat).
 CONFIG.ct_pair = [1, 3];
+
+% Reference geometry we experimentally have access to and RECONSTRUCT on.
+% A dose whose own CT index differs from this is reconstructed "blind": the
+% forward simulation (waves reaching the detector) runs on the dose's TRUE CT
+% geometry, but iterative time reversal switches to this reference CT, because
+% in a live IRAI system we never have the adapted (CT_3) geometry to invert on.
+CONFIG.reference_ct = 1;
 
 CONFIG.dose_file_override = '';
 CONFIG.cbct_file_override = '';
@@ -137,6 +144,22 @@ end
 ct_b_all = CONFIG.ct_pair(CONFIG.ct_pair ~= ct_a);
 ct_b     = ct_b_all(1);
 
+% Per-iteration CT index (di=1 -> ct_a listed, di=2 -> ct_b counterpart).
+ct_list = [ct_a, ct_b];
+
+% Validate the reconstruction reference CT and resolve its CBCT geometry. Any
+% dose whose own CT differs from reference_ct is reconstructed on this CBCT.
+if ~isfield(CONFIG, 'reference_ct') || isempty(CONFIG.reference_ct)
+    CONFIG.reference_ct = 1;
+end
+if ~ismember(CONFIG.reference_ct, CONFIG.ct_pair)
+    error('run_standalone_comparison:BadReferenceCT', ...
+        'CONFIG.reference_ct = %d must be one of CONFIG.ct_pair = [%s].', ...
+        CONFIG.reference_ct, num2str(CONFIG.ct_pair));
+end
+recon_cbct_filepath = fullfile(processed_dir, ...
+    sprintf('CBCT%d_resampled.mat', CONFIG.reference_ct));
+
 % Counterpart dose file: same name with the CT token swapped.
 dose_basename_B = regexprep(dose_basename_A, '_CT_\d+_', sprintf('_CT_%d_', ct_b));
 dose_filepath_B = fullfile(processed_dir, dose_basename_B);
@@ -220,7 +243,18 @@ dose_filepath = dose_filepath_list{di};
 cbct_filepath = cbct_filepath_list{di};
 label         = label_list{di};
 
+% Blind reconstruction: TRUE (forward) geometry is this dose's own CT, but if
+% that differs from the reference CT we time-reverse on the reference geometry.
+ct_this     = ct_list(di);
+blind_recon = (ct_this ~= CONFIG.reference_ct);
+
 fprintf('\n##################### PROCESSING DOSE %d/2: %s #####################\n', di, label);
+if blind_recon
+    fprintf('   [BLIND] Forward on CT_%d, reconstruction on reference CT_%d.\n', ...
+        ct_this, CONFIG.reference_ct);
+else
+    fprintf('   [FULL ACCESS] Forward and reconstruction both on CT_%d.\n', ct_this);
+end
 
 %% ========================= LOAD DATA ====================================
 
@@ -387,6 +421,50 @@ fprintf('       Density range:     [%.0f, %.0f] kg/m^3\n', min(medium.density(:)
 fprintf('       Sound speed range: [%.0f, %.0f] m/s\n',    min(medium.sound_speed(:)), max(medium.sound_speed(:)));
 fprintf('       Gruneisen range:   [%.4f, %.4f]\n',        min(medium.gruneisen(:)), max(medium.gruneisen(:)));
 
+% --- Reconstruction medium (BLIND GEOMETRY HANDLING) ---
+% `medium` above is the TRUE geometry, used to generate the sensor data the
+% detector would actually measure (forward simulation). Iterative time reversal
+% only has access to the reference CT, so build a SEPARATE reconstruction
+% medium from the reference CBCT when this dose is on a different CT. Both media
+% share the same grid, so every downstream padding/expansion/crop is applied to
+% both in lockstep (see pad_medium_to / expand_medium / crop_medium helpers).
+if blind_recon
+    fprintf('       [BLIND] Loading reference-CT medium from %s\n', recon_cbct_filepath);
+    if ~isfile(recon_cbct_filepath)
+        error('Reference CBCT for reconstruction not found: %s', recon_cbct_filepath);
+    end
+    rec_cbct = load(recon_cbct_filepath);
+    if isfield(rec_cbct, 'CBCT1_resampled')
+        sct_recon = rec_cbct.CBCT1_resampled;
+    elseif isfield(rec_cbct, 'CBCT3_resampled')
+        sct_recon = rec_cbct.CBCT3_resampled;
+    else
+        error('CBCT1_resampled / CBCT3_resampled variable not found in %s', recon_cbct_filepath);
+    end
+    if ~isfield(sct_recon, 'cubeHU')
+        error('Reference CBCT resampled struct missing required field: cubeHU');
+    end
+    % Match the forward sct grid (which may already be downscaled at this point).
+    if CONFIG.downscale_factor ~= 1
+        sct_recon.cubeHU = imresize3(sct_recon.cubeHU, size(sct.cubeHU));
+        if isfield(sct_recon, 'bodyMask')
+            sct_recon.bodyMask = imresize3(single(sct_recon.bodyMask), size(sct.cubeHU), 'nearest') > 0.5;
+        end
+        if isfield(sct_recon, 'couchMask')
+            sct_recon.couchMask = imresize3(single(sct_recon.couchMask), size(sct.cubeHU), 'nearest') > 0.5;
+        end
+    elseif ~isequal(size(sct_recon.cubeHU), size(sct.cubeHU))
+        error(['Reference CBCT grid [%s] does not match this dose''s CBCT grid [%s].\n' ...
+               'Both CBCTs must be resampled onto the same dose grid.'], ...
+            num2str(size(sct_recon.cubeHU)), num2str(size(sct.cubeHU)));
+    end
+    medium_recon = create_medium(sct_recon, CONFIG);
+    fprintf('       [BLIND] Recon medium density range: [%.0f, %.0f] kg/m^3\n', ...
+        min(medium_recon.density(:)), max(medium_recon.density(:)));
+else
+    medium_recon = medium;   % full access: reconstruction geometry == forward geometry
+end
+
 %% ========================= INITIAL PRESSURE p0 ==========================
 
 % Apply body mask to dose before p0 calculation
@@ -452,6 +530,12 @@ if did_pad
     medium.sound_speed = soundSpeed_pad;
     medium.alpha_coeff = alphaCoeff_pad;
     medium.gruneisen   = gruneisen_pad;
+
+    if blind_recon
+        medium_recon = pad_medium_to(medium_recon, [Nx_pad, Ny_pad, Nz_pad]);
+    else
+        medium_recon = medium;
+    end
 
     p0_pad = zeros(Nx_pad, Ny_pad, Nz_pad);
     p0_pad(1:Nx, 1:Ny, 1:Nz) = p0;
@@ -621,6 +705,14 @@ switch CONFIG.sensor_placement_method
                 'alpha_coeff', alphaCoeff_exp, ...
                 'gruneisen',   gruneisen_exp);
 
+            % Mirror the crop->water-expand onto the reference-CT medium so it
+            % occupies the identical expanded grid. Nx_orig/Ny_orig/Nz_orig are
+            % still the pre-expansion sizes here (updated below).
+            if blind_recon
+                medium_recon = crop_medium(medium_recon, [Nx_orig, Ny_orig, Nz_orig]);
+                medium_recon = expand_medium(medium_recon, [Nx_exp, Ny_exp, Nz_exp], xr, yr, zr);
+            end
+
             % Expand doseGrid / doseMask with zeros (no dose in water padding).
             doseGrid_exp = zeros(Nx_exp, Ny_exp, Nz_exp);
             doseGrid_exp(xr, yr, zr) = doseGrid;
@@ -680,6 +772,14 @@ switch CONFIG.sensor_placement_method
                 medium.alpha_coeff = alphaCoeff_pad;
                 medium.gruneisen   = gruneisen_pad;
                 p0 = p0_pad2;
+
+                if blind_recon
+                    medium_recon = pad_medium_to(medium_recon, [Nx_pad2, Ny_pad2, Nz_pad2]);
+                end
+            end
+
+            if ~blind_recon
+                medium_recon = medium;
             end
 
             Nx = Nx_pad2; Ny = Ny_pad2; Nz = Nz_pad2;
@@ -764,11 +864,20 @@ kgrid.Nt = Nt;
 
 fprintf('       dt = %.2e s, Nt = %d, T_sim = %.2e s\n', dt, Nt, simTime);
 
-kmedium             = struct();
-kmedium.density     = medium.density;
-kmedium.sound_speed = medium.sound_speed;
-kmedium.alpha_coeff = medium.alpha_coeff;
-kmedium.alpha_power = 1.1;
+% Forward-propagation medium = TRUE geometry (generates the measured signal).
+kmedium_fwd             = struct();
+kmedium_fwd.density     = medium.density;
+kmedium_fwd.sound_speed = medium.sound_speed;
+kmedium_fwd.alpha_coeff = medium.alpha_coeff;
+kmedium_fwd.alpha_power = 1.1;
+
+% Reconstruction medium = reference CT (what time reversal actually inverts on).
+% Identical to the forward medium for full-access doses (medium_recon == medium).
+kmedium_recon             = struct();
+kmedium_recon.density     = medium_recon.density;
+kmedium_recon.sound_speed = medium_recon.sound_speed;
+kmedium_recon.alpha_coeff = medium_recon.alpha_coeff;
+kmedium_recon.alpha_power = 1.1;
 
 if CONFIG.use_gpu
     try
@@ -796,7 +905,7 @@ source_fwd.p0 = p0;
 
 try
     fwd_tic    = tic;
-    sensorData = kspaceFirstOrder3D(kgrid, kmedium, source_fwd, sensor, inputArgs{:});
+    sensorData = kspaceFirstOrder3D(kgrid, kmedium_fwd, source_fwd, sensor, inputArgs{:});
     fwd_time   = toc(fwd_tic);
     fprintf('       Forward complete (%.1f s). Sensor data: [%d x %d]\n', ...
         fwd_time, size(sensorData, 1), size(sensorData, 2));
@@ -969,7 +1078,7 @@ try
         sensor_tr.mask   = ones(Nx, Ny, Nz);
         sensor_tr.record = {'p_final'};
 
-        p0_recon = kspaceFirstOrder3D(kgrid, kmedium, source_tr, sensor_tr, inputArgs{:});
+        p0_recon = kspaceFirstOrder3D(kgrid, kmedium_recon, source_tr, sensor_tr, inputArgs{:});
 
         if isstruct(p0_recon) && isfield(p0_recon, 'p_final')
             reconPressure = reshape(p0_recon.p_final, [Nx, Ny, Nz]);
@@ -1033,7 +1142,7 @@ try
         if tr_iter < CONFIG.num_time_reversal_iter
             source_resid    = struct();
             source_resid.p0 = reconPressure;
-            sensorDataRecon = kspaceFirstOrder3D(kgrid, kmedium, source_resid, sensor, inputArgs{:});
+            sensorDataRecon = kspaceFirstOrder3D(kgrid, kmedium_recon, source_resid, sensor, inputArgs{:});
             sensorData      = sensorData + (sensorData_measured - sensorDataRecon);
         end
     end
@@ -1056,7 +1165,7 @@ fprintf('       Running Delay-And-Sum reconstruction...\n');
 
 try
     das_tic = tic;
-    reconPressure = das_reconstruct(sensorData, sensor, sensor_info_orig, medium, ...
+    reconPressure = das_reconstruct(sensorData, sensor, sensor_info_orig, medium_recon, ...
                                     Nx, Ny, Nz, dx, dy, dz, dt, das_opts);
     reconPressure = reconPressure * CONFIG.correction_factor;
 
@@ -1087,7 +1196,7 @@ try
 
     % ---- Iteration 1: DAS seed ----
     fprintf('       --- Iter 1/%d: DAS seed ---\n', N_iter);
-    reconPressure = das_reconstruct(sensorData, sensor, sensor_info_orig, medium, ...
+    reconPressure = das_reconstruct(sensorData, sensor, sensor_info_orig, medium_recon, ...
                                     Nx, Ny, Nz, dx, dy, dz, dt, das_opts);
 
     % Initialize convergence tracking (same shape as TR branch)
@@ -1123,7 +1232,7 @@ try
     if N_iter > 1
         source_resid    = struct();
         source_resid.p0 = reconPressure;
-        sensorDataRecon = kspaceFirstOrder3D(kgrid, kmedium, source_resid, sensor, inputArgs{:});
+        sensorDataRecon = kspaceFirstOrder3D(kgrid, kmedium_recon, source_resid, sensor, inputArgs{:});
         sensorData      = sensorData + (sensorData_measured - sensorDataRecon);
     end
 
@@ -1141,7 +1250,7 @@ try
         sensor_tr.mask   = ones(Nx, Ny, Nz);
         sensor_tr.record = {'p_final'};
 
-        p0_recon = kspaceFirstOrder3D(kgrid, kmedium, source_tr, sensor_tr, inputArgs{:});
+        p0_recon = kspaceFirstOrder3D(kgrid, kmedium_recon, source_tr, sensor_tr, inputArgs{:});
 
         if isstruct(p0_recon) && isfield(p0_recon, 'p_final')
             reconPressure = reshape(p0_recon.p_final, [Nx, Ny, Nz]);
@@ -1201,7 +1310,7 @@ try
         if tr_iter < N_iter
             source_resid    = struct();
             source_resid.p0 = reconPressure;
-            sensorDataRecon = kspaceFirstOrder3D(kgrid, kmedium, source_resid, sensor, inputArgs{:});
+            sensorDataRecon = kspaceFirstOrder3D(kgrid, kmedium_recon, source_resid, sensor, inputArgs{:});
             sensorData      = sensorData + (sensorData_measured - sensorDataRecon);
         end
     end
@@ -1233,6 +1342,13 @@ if did_pad
     gridSize    = gridSize_orig;
     medium      = medium_orig;
     sensor.mask = sensor.mask(1:Nx_orig, 1:Ny_orig, 1:Nz_orig);
+end
+
+% Pressure->dose conversion below uses `medium`. For a blind reconstruction the
+% recovered pressure lives on the REFERENCE-CT geometry, so convert with the
+% reference-CT medium (gruneisen/density), cropped to the reconstruction grid.
+if blind_recon
+    medium = crop_medium(medium_recon, gridSize);
 end
 
 %% ========================= PRESSURE SCALE CORRECTION ====================
@@ -1304,112 +1420,116 @@ RES(di).label             = label;
 
 end   % di loop over the two dose files
 
-%% ===================== EXTRACT THE TWO RECON DOSES =======================
+%% ===================== EXTRACT DOSES & RECONSTRUCTIONS ===================
 
-recon_A    = RES(1).recon_dose;
-recon_B    = RES(2).recon_dose;
+recon_A    = RES(1).recon_dose;   % listed dose reconstruction (for panels/save)
+recon_B    = RES(2).recon_dose;   % counterpart dose reconstruction
 spacing_mm = RES(1).spacing_mm;
 
 if ~isequal(RES(1).gridSize, RES(2).gridSize)
     error('run_standalone_comparison:GridMismatch', ...
-        ['The two reconstructed doses are on different grids ([%s] vs [%s]).\n' ...
-         'A common grid is required for the gamma comparison.'], ...
+        ['The two doses are on different grids ([%s] vs [%s]).\n' ...
+         'A common grid is required for the gamma comparisons.'], ...
         num2str(RES(1).gridSize), num2str(RES(2).gridSize));
 end
 
+% --- Map RES entries to CT-indexed doses used in the gamma comparisons ---
+%   dose1 / recon1 : reference-CT dose (full-access reconstruction)
+%   dose2 / recon2 : other-CT dose (blind reconstruction on the reference CT)
+idx1 = find(ct_list == CONFIG.reference_ct, 1);
+idx2 = find(ct_list ~= CONFIG.reference_ct, 1);
+if isempty(idx2)
+    tmp  = setdiff([1, 2], idx1);
+    idx2 = tmp(1);
+end
+
+dose1  = double(RES(idx1).doseGrid);      % CT_ref truth (input dose)
+recon1 = double(RES(idx1).recon_dose);    % CT_ref reconstruction
+dose2  = double(RES(idx2).doseGrid);      % other-CT truth (input dose)
+recon2 = double(RES(idx2).recon_dose);    % other-CT blind reconstruction
+label1 = RES(idx1).label;
+label2 = RES(idx2).label;
+sensor1 = RES(idx1).sensor_mask;
+sensor2 = RES(idx2).sensor_mask;
+
 %% ========================= NORMALIZE DOSES ===============================
-% When enabled, divide each reconstructed dose by its own max so both peak
-% at 1.0 before the comparison / gamma.
+% When enabled, divide each volume by its own max so all peak at 1.0 before
+% the gamma comparisons. Default (CONFIG.normalize=false) keeps absolute Gy so
+% the recon-vs-truth comparisons remain physically meaningful.
 
 if isfield(CONFIG, 'normalize') && CONFIG.normalize
-    a_max = max(recon_A(:));
-    b_max = max(recon_B(:));
-    fprintf('\n[NORM] Normalizing both reconstructed doses by their max:\n');
-    fprintf('       %s max: %.4f Gy\n', RES(1).label, a_max);
-    fprintf('       %s max: %.4f Gy\n', RES(2).label, b_max);
-    if a_max > 0, recon_A = recon_A / a_max; end
-    if b_max > 0, recon_B = recon_B / b_max; end
+    fprintf('\n[NORM] Normalizing each dose / reconstruction by its own max.\n');
+    nrm = @(v) v / max([max(v(:)), eps]);
+    dose1 = nrm(dose1); recon1 = nrm(recon1);
+    dose2 = nrm(dose2); recon2 = nrm(recon2);
+    recon_A = nrm(recon_A); recon_B = nrm(recon_B);
 end
 
 %% ========================= RESULTS SUMMARY ===============================
 
 fprintf('\n========= COMPARISON RESULTS =========\n');
-fprintf('  %-22s [%.6f, %.4f] Gy\n', [RES(1).label ':'], min(recon_A(:)), max(recon_A(:)));
-fprintf('  %-22s [%.6f, %.4f] Gy\n', [RES(2).label ':'], min(recon_B(:)), max(recon_B(:)));
-
-cmp_threshold = 0.01 * max(recon_A(:));
-cmp_region    = recon_A > cmp_threshold;
-if any(cmp_region(:))
-    abs_error = abs(recon_B(cmp_region) - recon_A(cmp_region));
-    rel_error = abs_error ./ max(recon_A(cmp_region), 1e-10) * 100;
-    fprintf('  Mean abs diff: %.6f Gy\n', mean(abs_error));
-    fprintf('  Mean rel diff: %.2f%%\n',  mean(rel_error));
-    fprintf('  Max  rel diff: %.2f%%\n',  max(rel_error));
-end
+fprintf('  %-26s [%.6f, %.4f] Gy\n', [label1 ' truth (dose1):'],  min(dose1(:)),  max(dose1(:)));
+fprintf('  %-26s [%.6f, %.4f] Gy\n', [label1 ' recon (recon1):'], min(recon1(:)), max(recon1(:)));
+fprintf('  %-26s [%.6f, %.4f] Gy\n', [label2 ' truth (dose2):'],  min(dose2(:)),  max(dose2(:)));
+fprintf('  %-26s [%.6f, %.4f] Gy\n', [label2 ' recon (recon2):'], min(recon2(:)), max(recon2(:)));
 fprintf('=====================================\n');
 
 %% ========================= GAMMA ANALYSIS ================================
-% Three gamma analyses between the two reconstructed doses.
-%   Reference = dose A (listed),  Target = dose B (counterpart).
+% Four gamma comparisons (each at 10%/10mm, 5%/5mm, 3%/3mm):
+%   1. dose1  vs dose2   truth change between the two plans/geometries
+%   2. recon1 vs dose1   reference-CT detector accuracy
+%   3. recon2 vs dose2   blind reconstruction accuracy (vs its own truth)
+%   4. recon2 vs dose1   blind recon of the other-CT dose vs the reference truth
+% Each pair is stored as {name, reference, target, title, sensor_mask}. The
+% reference (ground truth) defines the 10% low-dose evaluation mask.
+
+gamma_criteria = {10, 10, '10%/10mm'; 5, 5, '5%/5mm'; 3, 3, '3%/3mm'};
+
+gamma_pairs = {
+    'dose1_vs_dose2',  dose1,  dose2,  sprintf('%s truth  vs  %s truth', label1, label2), sensor1;
+    'recon1_vs_dose1', dose1,  recon1, sprintf('%s recon  vs  %s truth', label1, label1), sensor1;
+    'recon2_vs_dose2', dose2,  recon2, sprintf('%s recon  vs  %s truth', label2, label2), sensor2;
+    'recon2_vs_dose1', dose1,  recon2, sprintf('%s recon  vs  %s truth', label2, label1), sensor2;
+};
 
 gamma_results = struct();
 
 if exist('CalcGamma', 'file') == 2
 
-    fprintf('\n[Gamma] Running gamma analysis between the two reconstructed doses...\n');
-    fprintf('        Reference: %s   |   Target: %s\n', RES(1).label, RES(2).label);
+    for pp = 1:size(gamma_pairs, 1)
+        pair_name  = gamma_pairs{pp, 1};
+        ref_vol    = gamma_pairs{pp, 2};
+        tgt_vol    = gamma_pairs{pp, 3};
+        pair_title = gamma_pairs{pp, 4};
 
-    ref_struct.start = [0, 0, 0];
-    ref_struct.width = spacing_mm;
-    ref_struct.data  = double(recon_A);
+        fprintf('\n[Gamma] %s\n', pair_title);
+        gr = run_gamma_pair(ref_vol, tgt_vol, spacing_mm, gamma_criteria);
+        gr.name  = pair_name;
+        gr.title = pair_title;
+        gr.ref   = ref_vol;
+        gr.tgt   = tgt_vol;
+        gr.sensor_mask = gamma_pairs{pp, 5};
 
-    tgt_struct.start = [0, 0, 0];
-    tgt_struct.width = spacing_mm;
-    tgt_struct.data  = double(recon_B);
-
-    low_dose_cutoff = 0.10 * max(recon_A(:));
-    gamma_eval_mask = recon_A >= low_dose_cutoff;
-
-    gamma_criteria = {10, 10, '10%/10mm'; 5, 5, '5%/5mm'; 3, 3, '3%/3mm'};
-    gamma_maps     = cell(size(gamma_criteria, 1), 1);
-    pass_rates     = zeros(size(gamma_criteria, 1), 1);
-
-    for gc = 1:size(gamma_criteria, 1)
-        pct_crit = gamma_criteria{gc, 1};
-        dta_crit = gamma_criteria{gc, 2};
-        lbl      = gamma_criteria{gc, 3};
-
-        fprintf('  [%s] Computing...', lbl);
-        try
-            gmap = CalcGamma(ref_struct, tgt_struct, pct_crit, dta_crit, ...
-                'local', 0, 'limit', dta_crit * 2, 'restrict', 1);
-            gamma_maps{gc} = gmap;
-            eval_vals       = gmap(gamma_eval_mask);
-            pass_rate       = 100 * mean(eval_vals <= 1);
-            pass_rates(gc)  = pass_rate;
-            fprintf('  Pass rate: %.2f%%\n', pass_rate);
-        catch ME
-            warning('Gamma [%s] failed: %s', lbl, ME.message);
-            gamma_maps{gc} = [];
-            pass_rates(gc) = NaN;
-            fprintf('  FAILED\n');
+        for gc = 1:size(gamma_criteria, 1)
+            if isnan(gr.pass_rates(gc))
+                fprintf('    %-12s  FAILED\n', gamma_criteria{gc, 3});
+            else
+                fprintf('    %-12s  %.2f%%\n', gamma_criteria{gc, 3}, gr.pass_rates(gc));
+            end
         end
+
+        gamma_results.(pair_name) = gr;
     end
 
-    gamma_results.maps        = gamma_maps;
-    gamma_results.pass_rates  = pass_rates;
-    gamma_results.criteria    = gamma_criteria;
-    gamma_results.cutoff_Gy   = low_dose_cutoff;
-    gamma_results.eval_mask   = gamma_eval_mask;
-
-    fprintf('\n  ------ Gamma Pass Rates: %s vs %s (10%% low-dose cutoff) ------\n', ...
-        RES(1).label, RES(2).label);
-    for gc = 1:size(gamma_criteria, 1)
-        if isnan(pass_rates(gc))
-            fprintf('  %-12s  FAILED\n', gamma_criteria{gc, 3});
-        else
-            fprintf('  %-12s  %.2f%%\n', gamma_criteria{gc, 3}, pass_rates(gc));
-        end
+    % Combined pass-rate table across all four comparisons.
+    fprintf('\n  ------ Gamma Pass Rates (10%% low-dose cutoff on reference) ------\n');
+    fprintf('  %-34s %10s %10s %10s\n', 'Comparison', gamma_criteria{1,3}, ...
+        gamma_criteria{2,3}, gamma_criteria{3,3});
+    pair_fn = fieldnames(gamma_results);
+    for pp = 1:numel(pair_fn)
+        gr = gamma_results.(pair_fn{pp});
+        pr = gr.pass_rates;
+        fprintf('  %-34s %9.2f%% %9.2f%% %9.2f%%\n', gr.title, pr(1), pr(2), pr(3));
     end
 else
     warning('CalcGamma not found. Skipping gamma analysis.');
@@ -1417,12 +1537,11 @@ else
 end
 
 %% ========================= GAMMA LOG ====================================
-% Append CONFIG + gamma pass rates to a running .mat log. Maintains a
-% per-criterion best record (highest pass rate and the CONFIG that produced
-% it). Skipped when gamma analysis failed or produced no results.
+% Append CONFIG + the four-comparison gamma pass-rate table to a running .mat
+% log. Skipped when gamma analysis failed or produced no results.
 
 if isfield(CONFIG, 'log_gamma') && CONFIG.log_gamma && ...
-        ~isempty(gamma_results) && isfield(gamma_results, 'pass_rates')
+        ~isempty(gamma_results) && isstruct(gamma_results) && ~isempty(fieldnames(gamma_results))
 
     if isfield(CONFIG, 'gamma_log_file') && ~isempty(CONFIG.gamma_log_file)
         log_path = CONFIG.gamma_log_file;
@@ -1435,14 +1554,22 @@ if isfield(CONFIG, 'log_gamma') && CONFIG.log_gamma && ...
         log_path = fullfile(CONFIG.working_dir, log_path);
     end
 
+    pair_fn = fieldnames(gamma_results);
+    crit_labels = gamma_results.(pair_fn{1}).criteria(:, 3);
+
+    % pass_rates: [nComparisons x nCriteria]; rows named by comparisons.
+    PR = nan(numel(pair_fn), numel(crit_labels));
+    for pp = 1:numel(pair_fn)
+        PR(pp, :) = gamma_results.(pair_fn{pp}).pass_rates(:)';
+    end
+
     entry = struct();
     entry.timestamp     = datestr(now, 'yyyy-mm-dd HH:MM:SS');
     entry.config        = CONFIG;
     entry.dose_filename = CONFIG.dose_filename;
-    entry.criteria      = gamma_results.criteria(:, 3);
-    entry.pass_rates    = gamma_results.pass_rates(:);
-
-    n_crit = numel(entry.pass_rates);
+    entry.comparisons   = pair_fn;
+    entry.criteria      = crit_labels;
+    entry.pass_rates    = PR;
 
     if isfile(log_path)
         L = load(log_path);
@@ -1451,22 +1578,8 @@ if isfield(CONFIG, 'log_gamma') && CONFIG.log_gamma && ...
         else
             log_entries = struct([]);
         end
-        if isfield(L, 'best')
-            best = L.best;
-        else
-            best = repmat(struct('criterion', '', 'pass_rate', -Inf, ...
-                'config', [], 'timestamp', ''), n_crit, 1);
-            for gc = 1:n_crit
-                best(gc).criterion = entry.criteria{gc};
-            end
-        end
     else
         log_entries = struct([]);
-        best = repmat(struct('criterion', '', 'pass_rate', -Inf, ...
-            'config', [], 'timestamp', ''), n_crit, 1);
-        for gc = 1:n_crit
-            best(gc).criterion = entry.criteria{gc};
-        end
     end
 
     if isempty(log_entries)
@@ -1475,29 +1588,10 @@ if isfield(CONFIG, 'log_gamma') && CONFIG.log_gamma && ...
         log_entries(end+1) = entry;
     end
 
-    for gc = 1:n_crit
-        pr = entry.pass_rates(gc);
-        if ~isnan(pr) && pr > best(gc).pass_rate
-            best(gc).criterion = entry.criteria{gc};
-            best(gc).pass_rate = pr;
-            best(gc).config    = CONFIG;
-            best(gc).timestamp = entry.timestamp;
-        end
-    end
-
-    save(log_path, 'log_entries', 'best', '-v7.3');
+    save(log_path, 'log_entries', '-v7.3');
 
     fprintf('\n[GammaLog] Appended run to %s (%d total entries).\n', ...
         log_path, numel(log_entries));
-    fprintf('           Best pass rates so far:\n');
-    for gc = 1:n_crit
-        if isfinite(best(gc).pass_rate)
-            fprintf('             %-12s  %.2f%%   (%s)\n', ...
-                best(gc).criterion, best(gc).pass_rate, best(gc).timestamp);
-        else
-            fprintf('             %-12s  (none)\n', best(gc).criterion);
-        end
-    end
 end
 
 %% ========================= SAVE RESULTS =================================
@@ -1552,11 +1646,15 @@ if CONFIG.plot_results
     end
 
     % Figure 3  Axial gamma (3 criteria) + absolute error
-    if ~isempty(gamma_results) && isfield(gamma_results, 'maps')
-        [~, max_dose_idx] = max(recon_A(:));
-        [~, ~, cz_gamma]  = ind2sub(RES(1).gridSize, max_dose_idx);
-        plot_gamma_and_error_axial(gamma_results, recon_A, recon_B, ...
-            RES(1).sensor_mask, cz_gamma);
+    if ~isempty(gamma_results) && isstruct(gamma_results)
+        pair_fn = fieldnames(gamma_results);
+        for k = 1:numel(pair_fn)
+            gr = gamma_results.(pair_fn{k});
+            [~, max_dose_idx] = max(gr.ref(:));
+            [~, ~, cz_gamma]  = ind2sub(size(gr.ref), max_dose_idx);
+            plot_gamma_and_error_axial(gr, gr.ref, gr.tgt, ...
+                gr.sensor_mask, cz_gamma, gr.title);
+        end
     end
 
 end
@@ -1855,10 +1953,14 @@ function plot_convergence_history(conv_max_pressure, conv_rel_change, num_iters,
 end
 
 
-function plot_gamma_and_error_axial(gamma_results, original, recon, sensor_mask, cz)
+function plot_gamma_and_error_axial(gamma_results, original, recon, sensor_mask, cz, titleStr)
 %PLOT_GAMMA_AND_ERROR_AXIAL 1x4 axial figure:
 %  gamma 10/10 | gamma 5/5 | gamma 3/3 | absolute dose error.
 %  Sensor contour in red.  Slice at cz (max-dose axial index).
+%  original = gamma reference volume, recon = gamma target volume.
+%  titleStr (optional) names the comparison in the figure title.
+
+    if nargin < 6 || isempty(titleStr), titleStr = 'Gamma Index & Absolute Error'; end
 
     gridSize = size(original);
     cz = max(1, min(gridSize(3), cz));
@@ -1873,9 +1975,9 @@ function plot_gamma_and_error_axial(gamma_results, original, recon, sensor_mask,
     pass_rates = gamma_results.pass_rates;
     nCrit      = size(criteria, 1);
 
-    figure('Name', 'Gamma & Absolute Error  Axial', 'Color', 'w', ...
+    figure('Name', ['Gamma & Absolute Error - ' titleStr], 'Color', 'w', ...
         'NumberTitle', 'off', 'Position', [50, 300, 1400, 370]);
-    sgtitle(sprintf('Axial Plane (Z = %d voxel)  Gamma Index & Absolute Error', cz), ...
+    sgtitle(sprintf('%s\nAxial Plane (Z = %d voxel)  Gamma Index & |Target - Reference|', titleStr, cz), ...
         'FontWeight', 'bold', 'FontSize', 11);
 
     gamma_clim   = [0, 2];
@@ -2117,4 +2219,90 @@ function tables = define_tissue_tables()
         'alpha_coeff', 0, ...
         'alpha_power', 1.0, ...
         'gruneisen',   0);
+end
+
+
+function m = pad_medium_to(m, sz)
+%PAD_MEDIUM_TO Water-pad the four medium fields into an sz grid.
+%  Copies each existing field into the leading sub-block of a fresh sz array
+%  filled with the background (water: density 1000, c 1540, alpha/gruneisen 0),
+%  mirroring the forward-medium FFT/grid padding so the reference-CT medium
+%  stays voxel-aligned with it.
+    d = ones(sz) * 1000;
+    d(1:size(m.density,1),     1:size(m.density,2),     1:size(m.density,3))     = m.density;
+    c = ones(sz) * 1540;
+    c(1:size(m.sound_speed,1), 1:size(m.sound_speed,2), 1:size(m.sound_speed,3)) = m.sound_speed;
+    a = zeros(sz);
+    if numel(m.alpha_coeff) > 1
+        a(1:size(m.alpha_coeff,1), 1:size(m.alpha_coeff,2), 1:size(m.alpha_coeff,3)) = m.alpha_coeff;
+    else
+        a(:) = m.alpha_coeff;
+    end
+    g = zeros(sz);
+    g(1:size(m.gruneisen,1),   1:size(m.gruneisen,2),   1:size(m.gruneisen,3))   = m.gruneisen;
+    m.density = d; m.sound_speed = c; m.alpha_coeff = a; m.gruneisen = g;
+end
+
+
+function m = expand_medium(m_unp, sz, xr, yr, zr)
+%EXPAND_MEDIUM Place cropped medium fields into a water-filled sz grid at the
+%  index ranges (xr,yr,zr), matching the sensor-driven grid expansion applied
+%  to the forward medium.
+    d = ones(sz) * 1000;  d(xr, yr, zr) = m_unp.density;
+    c = ones(sz) * 1540;  c(xr, yr, zr) = m_unp.sound_speed;
+    a = zeros(sz);
+    if numel(m_unp.alpha_coeff) > 1
+        a(xr, yr, zr) = m_unp.alpha_coeff;
+    else
+        a(:) = m_unp.alpha_coeff;
+    end
+    g = zeros(sz);        g(xr, yr, zr) = m_unp.gruneisen;
+    m = struct('density', d, 'sound_speed', c, 'alpha_coeff', a, 'gruneisen', g);
+end
+
+
+function m = crop_medium(m, sz)
+%CROP_MEDIUM Crop the four medium fields to the leading sz sub-block.
+    m.density     = m.density(1:sz(1),     1:sz(2),     1:sz(3));
+    m.sound_speed = m.sound_speed(1:sz(1), 1:sz(2),     1:sz(3));
+    if numel(m.alpha_coeff) > 1
+        m.alpha_coeff = m.alpha_coeff(1:sz(1), 1:sz(2), 1:sz(3));
+    end
+    m.gruneisen   = m.gruneisen(1:sz(1),   1:sz(2),     1:sz(3));
+end
+
+
+function gr = run_gamma_pair(ref_vol, tgt_vol, spacing_mm, criteria)
+%RUN_GAMMA_PAIR Gamma index of tgt_vol against ref_vol at each criterion row.
+%  ref_vol is the reference (ground truth): it sets the 10% low-dose evaluation
+%  mask. criteria is an {pct, dta, label} cell array. Returns a struct with
+%  .maps (per-criterion gamma maps), .pass_rates (% gamma<=1 within the mask),
+%  .criteria, .cutoff_Gy, and .eval_mask.
+    nCrit = size(criteria, 1);
+    gr = struct('maps', {cell(nCrit, 1)}, 'pass_rates', nan(nCrit, 1), ...
+                'criteria', {criteria}, 'cutoff_Gy', 0, 'eval_mask', []);
+
+    ref_struct.start = [0, 0, 0]; ref_struct.width = spacing_mm; ref_struct.data = double(ref_vol);
+    tgt_struct.start = [0, 0, 0]; tgt_struct.width = spacing_mm; tgt_struct.data = double(tgt_vol);
+
+    cutoff    = 0.10 * max(ref_vol(:));
+    eval_mask = ref_vol >= cutoff;
+    gr.cutoff_Gy = cutoff;
+    gr.eval_mask = eval_mask;
+
+    for gc = 1:nCrit
+        pct = criteria{gc, 1};
+        dta = criteria{gc, 2};
+        lbl = criteria{gc, 3};
+        try
+            gmap = CalcGamma(ref_struct, tgt_struct, pct, dta, ...
+                'local', 0, 'limit', dta * 2, 'restrict', 1);
+            gr.maps{gc}       = gmap;
+            gr.pass_rates(gc) = 100 * mean(gmap(eval_mask) <= 1);
+        catch ME
+            warning('Gamma [%s] failed: %s', lbl, ME.message);
+            gr.maps{gc}       = [];
+            gr.pass_rates(gc) = NaN;
+        end
+    end
 end
