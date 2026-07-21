@@ -1517,7 +1517,7 @@ fprintf('=====================================\n');
 % Each pair is stored as {name, reference, target, title, sensor_mask}. The
 % reference (ground truth) defines the 10% low-dose evaluation mask.
 
-gamma_criteria = {10, 10, '10%/10mm'; 5, 5, '5%/5mm'; 3, 3, '3%/3mm'};
+gamma_criteria = {3, 3, '3%/3mm'};
 
 gamma_pairs = {
     'dose1_vs_dose2',  dose1,  dose2,  sprintf('%s truth  vs  %s truth', label1, label2), sensor1;
