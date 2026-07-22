@@ -143,8 +143,8 @@ SWEEP.use_parallel = true;
 SWEEP.num_workers  = [];   % [] -> #GPUs (GPU) or feature('numcores') (CPU)
 
 % Primary gamma criterion used for the pass/fail decision.
-SWEEP.gamma_criteria = {10, 10, '10%/10mm'; 5, 5, '5%/5mm'; 3, 3, '3%/3mm'};
-SWEEP.primary_crit_idx = 3;   % 3%/3mm
+SWEEP.gamma_criteria = {3, 3, '3%/3mm'};
+SWEEP.primary_crit_idx = 1;   % 3%/3mm (only criterion)
 
 % Output files (written to working_dir).
 run_stamp = datestr(now, 'yyyymmdd_HHMMSS');
