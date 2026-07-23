@@ -95,7 +95,7 @@ CONFIG.sensor_mode           = CONFIG.sensor_placement_method;  % passed to step
 
 % --- Parallel Processing ---
 CONFIG.use_parallel          = true;
-CONFIG.num_parallel_workers  = 16;
+CONFIG.num_parallel_workers  = 8;
 
 % --- Multi-Instance Coordination ---
 % Multiple copies of this script (e.g. one per remote-desktop session, all
