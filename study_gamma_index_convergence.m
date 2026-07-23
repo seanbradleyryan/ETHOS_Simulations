@@ -523,14 +523,20 @@ function pass_rates = run_tr_convergence(tag, kgrid, inputArgs, ...
     ex = expdims(1); ey = expdims(2); ez = expdims(3);
 
     %% ---- Forward simulation (measurement through the true medium) ----
+    % GPU note: with DataCast='gpuArray-single', kspaceFirstOrder3D returns a
+    % gpuArray and clears the GPU device on exit. Retaining that gpuArray and
+    % re-feeding it into the next call invalidates it ("The data no longer exists
+    % on the device"). So EVERY kspaceFirstOrder3D output is gathered to CPU here
+    % and all persistent loop state (sensorData, reconPressure) is kept on CPU;
+    % k-Wave re-casts the CPU inputs to GPU internally each call.
     fprintf('[%s] Forward simulation...\n', tag);
     source_fwd = struct('p0', p0);
     fwd_tic    = tic;
-    sensorData = kspaceFirstOrder3D(kgrid, kmed_fwd, source_fwd, sensor, inputArgs{:});
+    sensorData = gather(kspaceFirstOrder3D(kgrid, kmed_fwd, source_fwd, sensor, inputArgs{:}));
     fprintf('[%s] Forward complete (%.1f s). Sensor data: [%d x %d]\n', ...
         tag, toc(fwd_tic), size(sensorData, 1), size(sensorData, 2));
 
-    sensorData = smooth(sensorData);
+    sensorData = gather(smooth(sensorData));
     FS         = 1 / kgrid.dt;
 
     %% ---- Physical measurement chain (pulse / freq response / noise / deconv) ----
@@ -561,14 +567,14 @@ function pass_rates = run_tr_convergence(tag, kgrid, inputArgs, ...
 
         p0_recon = kspaceFirstOrder3D(kgrid, kmed_recon, source_tr, sensor_tr, inputArgs{:});
         if isstruct(p0_recon) && isfield(p0_recon, 'p_final')
-            reconPressure = reshape(p0_recon.p_final, size(p0));
+            reconPressure = reshape(gather(p0_recon.p_final), size(p0));
         else
-            reconPressure = reshape(p0_recon, size(p0));
+            reconPressure = reshape(gather(p0_recon), size(p0));
         end
-        reconPressure = max(reconPressure, 0);
+        reconPressure = max(reconPressure, 0);   % CPU
 
         % ---- Convert THIS iteration's estimate to dose, then gamma vs truth ----
-        rp = gather(reconPressure(1:ex, 1:ey, 1:ez)) * CONFIG.correction_factor;
+        rp = reconPressure(1:ex, 1:ey, 1:ez) * CONFIG.correction_factor;
         recon_dose = (rp ./ conversionFactor) * num_pulses;
         if mask_to_region
             recon_dose = recon_dose .* double(doseMask_exp);
@@ -586,9 +592,11 @@ function pass_rates = run_tr_convergence(tag, kgrid, inputArgs, ...
             tag, it, N_iter, gamma_crit, gamma_crit, pass_rates(it), max(rp(:)));
 
         % ---- Residual correction for the next iteration (through the model medium) ----
+        % reconPressure is CPU; k-Wave re-casts it to GPU internally. Gather the
+        % result so sensorData stays a CPU array across iterations.
         if it < N_iter
             source_resid    = struct('p0', reconPressure);
-            sensorDataRecon = kspaceFirstOrder3D(kgrid, kmed_recon, source_resid, sensor, inputArgs{:});
+            sensorDataRecon = gather(kspaceFirstOrder3D(kgrid, kmed_recon, source_resid, sensor, inputArgs{:}));
             sensorData      = sensorData + (sensorData_measured - sensorDataRecon);
         end
     end
@@ -629,7 +637,9 @@ function [sensorData, sensorData_measured] = apply_measurement_chain(sensorData,
         sensorData          = single(sensorData_deconv);
         sensorData_measured = single(sensorData_deconv);
     else
-        sensorData          = gaussianFilter(sensorData, FS, 0.35e6, 100, true);
+        % gather so the returned sensor data is CPU-resident (gaussianFilter
+        % preserves the input's device; the caller keeps sensorData on the CPU).
+        sensorData          = gather(gaussianFilter(sensorData, FS, 0.35e6, 100, true));
         sensorData_measured = sensorData;
     end
 end
