@@ -1,0 +1,339 @@
+================================================================
+  ETHOS OPTIMIZATION SWEEP REPORT
+  Generated: 2026-07-22 16:42:33
+================================================================
+  Patient / session : 1194203 / Session_1
+  Dose file         : dose_1194203_Session_1_reference_CT_3_B15_112.mat
+  Reference CT      : CT_1   (CT pair [1  3])
+  Reconstruction    : tr, sensor=determine_sensor_mask, tissue=threshold_2
+  Native dims       : [96  141  141]
+  Normalization     : ON  (least-squares gain, recon -> own-CT truth 10% region)
+  RNG seed (noise)  : 42  (deterministic noise draw)
+
+  METHOD: one-factor-at-a-time. Each run changes ONE variable and
+  holds all others at their default. The all-default run below is the
+  reference. recon = recon1 (reference-CT, full-access reconstruction).
+  Runtime = sum of forward + time-reversal wall time over BOTH doses.
+
+  SUCCESS if EITHER (at 3%/3mm):
+    (1) gamma(default recon vs swept recon) >= 98%  AND  runtime <= default
+    (2) gamma(swept recon vs truth) > default's  AND  runtime <= default
+    (runtime tolerance for "equal or lower": 2%)
+
+----------------------------------------------------------------
+  DEFAULT / REFERENCE RUN
+----------------------------------------------------------------
+  downscale_factor=1  pml_size=10  cfl=0.30  tr_iter=10  Nt_scaling=6  conv_tol=1.0e-03
+  runtime = 351.2 s   (fwd [9.1 8.7] | tr [166.9 166.5] ; iters [10 10])
+      dose1_vs_dose2 (truth change)  :   3%/3mm=96.33%
+      recon1_vs_dose1 (ref detector) :   3%/3mm=39.10%
+      recon2_vs_dose2 (blind vs own) :   3%/3mm=21.47%
+      recon2_vs_dose1 (blind vs ref) :   3%/3mm=21.17%
+
+================================================================
+  SWEEP: voxel_scale (dx,dy,dz x 2^p)   (field: downscale_factor)
+================================================================
+  value       runtime    dRun%     iters stab-3%/3mm R1vT-3%/3mm     c1     c2   RESULT
+  --------------------------------------------------------------------------------------
+  1.189        219.6s   -37.5   [10 10]     86.53%     42.46%      n      Y  SUCCESS
+  1.26         207.9s   -40.8   [10 10]     85.41%     43.84%      n      Y  SUCCESS
+  1.414        140.1s   -60.1   [10 10]     82.05%     43.81%      n      Y  SUCCESS
+  2             80.4s   -77.1   [10 10]     64.26%     41.05%      n      Y  SUCCESS
+  4             61.9s   -82.4   [10 10]     61.98%     54.04%      n      Y  SUCCESS
+  8             28.8s   -91.8   [10 10]     72.94%     53.79%      n      Y  SUCCESS
+
+  --- downscale_factor = 1.189 ---
+      runtime 219.6 s (default 351.2 s), iters [10 10]
+      stability (default recon vs this recon):   3%/3mm=86.53%
+      dose1_vs_dose2 (truth change)  :   3%/3mm=96.33%
+      recon1_vs_dose1 (ref detector) :   3%/3mm=42.46%
+      recon2_vs_dose2 (blind vs own) :   3%/3mm=24.90%
+      recon2_vs_dose1 (blind vs ref) :   3%/3mm=24.49%
+
+  --- downscale_factor = 1.26 ---
+      runtime 207.9 s (default 351.2 s), iters [10 10]
+      stability (default recon vs this recon):   3%/3mm=85.41%
+      dose1_vs_dose2 (truth change)  :   3%/3mm=96.33%
+      recon1_vs_dose1 (ref detector) :   3%/3mm=43.84%
+      recon2_vs_dose2 (blind vs own) :   3%/3mm=24.48%
+      recon2_vs_dose1 (blind vs ref) :   3%/3mm=24.06%
+
+  --- downscale_factor = 1.414 ---
+      runtime 140.1 s (default 351.2 s), iters [10 10]
+      stability (default recon vs this recon):   3%/3mm=82.05%
+      dose1_vs_dose2 (truth change)  :   3%/3mm=96.33%
+      recon1_vs_dose1 (ref detector) :   3%/3mm=43.81%
+      recon2_vs_dose2 (blind vs own) :   3%/3mm=25.65%
+      recon2_vs_dose1 (blind vs ref) :   3%/3mm=25.30%
+
+  --- downscale_factor = 2 ---
+      runtime 80.4 s (default 351.2 s), iters [10 10]
+      stability (default recon vs this recon):   3%/3mm=64.26%
+      dose1_vs_dose2 (truth change)  :   3%/3mm=96.33%
+      recon1_vs_dose1 (ref detector) :   3%/3mm=41.05%
+      recon2_vs_dose2 (blind vs own) :   3%/3mm=30.43%
+      recon2_vs_dose1 (blind vs ref) :   3%/3mm=30.37%
+
+  --- downscale_factor = 4 ---
+      runtime 61.9 s (default 351.2 s), iters [10 10]
+      stability (default recon vs this recon):   3%/3mm=61.98%
+      dose1_vs_dose2 (truth change)  :   3%/3mm=96.33%
+      recon1_vs_dose1 (ref detector) :   3%/3mm=54.04%
+      recon2_vs_dose2 (blind vs own) :   3%/3mm=32.98%
+      recon2_vs_dose1 (blind vs ref) :   3%/3mm=32.51%
+
+  --- downscale_factor = 8 ---
+      runtime 28.8 s (default 351.2 s), iters [10 10]
+      stability (default recon vs this recon):   3%/3mm=72.94%
+      dose1_vs_dose2 (truth change)  :   3%/3mm=96.33%
+      recon1_vs_dose1 (ref detector) :   3%/3mm=53.79%
+      recon2_vs_dose2 (blind vs own) :   3%/3mm=53.23%
+      recon2_vs_dose1 (blind vs ref) :   3%/3mm=54.02%
+
+================================================================
+  SWEEP: pml_size (reduce)   (field: pml_size)
+================================================================
+  value       runtime    dRun%     iters stab-3%/3mm R1vT-3%/3mm     c1     c2   RESULT
+  --------------------------------------------------------------------------------------
+  9           1356.7s  +286.3   [10 10]     92.09%     39.31%      n      n       no
+  8           1155.5s  +229.0   [10 10]     92.05%     39.16%      n      n       no
+  7            930.9s  +165.1   [10 10]     91.86%     39.58%      n      n       no
+  6           1293.7s  +268.4   [10 10]     91.93%     39.59%      n      n       no
+  5           1192.3s  +239.5   [10 10]     91.62%     39.65%      n      n       no
+
+  --- pml_size = 9 ---
+      runtime 1356.7 s (default 351.2 s), iters [10 10]
+      stability (default recon vs this recon):   3%/3mm=92.09%
+      dose1_vs_dose2 (truth change)  :   3%/3mm=96.33%
+      recon1_vs_dose1 (ref detector) :   3%/3mm=39.31%
+      recon2_vs_dose2 (blind vs own) :   3%/3mm=21.01%
+      recon2_vs_dose1 (blind vs ref) :   3%/3mm=21.07%
+
+  --- pml_size = 8 ---
+      runtime 1155.5 s (default 351.2 s), iters [10 10]
+      stability (default recon vs this recon):   3%/3mm=92.05%
+      dose1_vs_dose2 (truth change)  :   3%/3mm=96.33%
+      recon1_vs_dose1 (ref detector) :   3%/3mm=39.16%
+      recon2_vs_dose2 (blind vs own) :   3%/3mm=20.97%
+      recon2_vs_dose1 (blind vs ref) :   3%/3mm=21.28%
+
+  --- pml_size = 7 ---
+      runtime 930.9 s (default 351.2 s), iters [10 10]
+      stability (default recon vs this recon):   3%/3mm=91.86%
+      dose1_vs_dose2 (truth change)  :   3%/3mm=96.33%
+      recon1_vs_dose1 (ref detector) :   3%/3mm=39.58%
+      recon2_vs_dose2 (blind vs own) :   3%/3mm=21.27%
+      recon2_vs_dose1 (blind vs ref) :   3%/3mm=21.51%
+
+  --- pml_size = 6 ---
+      runtime 1293.7 s (default 351.2 s), iters [10 10]
+      stability (default recon vs this recon):   3%/3mm=91.93%
+      dose1_vs_dose2 (truth change)  :   3%/3mm=96.33%
+      recon1_vs_dose1 (ref detector) :   3%/3mm=39.59%
+      recon2_vs_dose2 (blind vs own) :   3%/3mm=21.03%
+      recon2_vs_dose1 (blind vs ref) :   3%/3mm=21.30%
+
+  --- pml_size = 5 ---
+      runtime 1192.3 s (default 351.2 s), iters [10 10]
+      stability (default recon vs this recon):   3%/3mm=91.62%
+      dose1_vs_dose2 (truth change)  :   3%/3mm=96.33%
+      recon1_vs_dose1 (ref detector) :   3%/3mm=39.65%
+      recon2_vs_dose2 (blind vs own) :   3%/3mm=20.75%
+      recon2_vs_dose1 (blind vs ref) :   3%/3mm=20.99%
+
+================================================================
+  SWEEP: cfl_number   (field: cfl_number)
+================================================================
+  value       runtime    dRun%     iters stab-3%/3mm R1vT-3%/3mm     c1     c2   RESULT
+  --------------------------------------------------------------------------------------
+  0.1         3344.5s  +852.3   [10 10]     93.67%     40.25%      n      n       no
+  0.2         1680.2s  +378.4   [10 10]     93.79%     39.73%      n      n       no
+  0.3         1233.3s  +251.2   [10 10]     91.97%     39.30%      n      n       no
+  0.4            FAIL   ERROR: MATLAB:smooth:expectedFinite | Expected input number 1, mat, to be finite.
+  0.5            FAIL   ERROR: MATLAB:smooth:expectedFinite | Expected input number 1, mat, to be finite.
+
+  --- cfl_number = 0.1 ---
+      runtime 3344.5 s (default 351.2 s), iters [10 10]
+      stability (default recon vs this recon):   3%/3mm=93.67%
+      dose1_vs_dose2 (truth change)  :   3%/3mm=96.33%
+      recon1_vs_dose1 (ref detector) :   3%/3mm=40.25%
+      recon2_vs_dose2 (blind vs own) :   3%/3mm=22.15%
+      recon2_vs_dose1 (blind vs ref) :   3%/3mm=22.30%
+
+  --- cfl_number = 0.2 ---
+      runtime 1680.2 s (default 351.2 s), iters [10 10]
+      stability (default recon vs this recon):   3%/3mm=93.79%
+      dose1_vs_dose2 (truth change)  :   3%/3mm=96.33%
+      recon1_vs_dose1 (ref detector) :   3%/3mm=39.73%
+      recon2_vs_dose2 (blind vs own) :   3%/3mm=21.42%
+      recon2_vs_dose1 (blind vs ref) :   3%/3mm=21.06%
+
+  --- cfl_number = 0.3 ---
+      runtime 1233.3 s (default 351.2 s), iters [10 10]
+      stability (default recon vs this recon):   3%/3mm=91.97%
+      dose1_vs_dose2 (truth change)  :   3%/3mm=96.33%
+      recon1_vs_dose1 (ref detector) :   3%/3mm=39.30%
+      recon2_vs_dose2 (blind vs own) :   3%/3mm=20.89%
+      recon2_vs_dose1 (blind vs ref) :   3%/3mm=21.23%
+
+  --- cfl_number = 0.4 ---
+      FAILED: MATLAB:smooth:expectedFinite | Expected input number 1, mat, to be finite.
+
+  --- cfl_number = 0.5 ---
+      FAILED: MATLAB:smooth:expectedFinite | Expected input number 1, mat, to be finite.
+
+================================================================
+  SWEEP: num_time_reversal_iter   (field: num_time_reversal_iter)
+================================================================
+  value       runtime    dRun%     iters stab-3%/3mm R1vT-3%/3mm     c1     c2   RESULT
+  --------------------------------------------------------------------------------------
+  3            382.8s    +9.0     [3 3]     90.70%     34.74%      n      n       no
+  5            381.5s    +8.6     [5 5]     91.93%     36.39%      n      n       no
+  7            281.7s   -19.8     [7 7]     92.20%     37.72%      n      n       no
+  10          1002.8s  +185.5   [10 10]     91.97%     39.30%      n      n       no
+
+  --- num_time_reversal_iter = 3 ---
+      runtime 382.8 s (default 351.2 s), iters [3 3]
+      stability (default recon vs this recon):   3%/3mm=90.70%
+      dose1_vs_dose2 (truth change)  :   3%/3mm=96.33%
+      recon1_vs_dose1 (ref detector) :   3%/3mm=34.74%
+      recon2_vs_dose2 (blind vs own) :   3%/3mm=20.49%
+      recon2_vs_dose1 (blind vs ref) :   3%/3mm=20.68%
+
+  --- num_time_reversal_iter = 5 ---
+      runtime 381.5 s (default 351.2 s), iters [5 5]
+      stability (default recon vs this recon):   3%/3mm=91.93%
+      dose1_vs_dose2 (truth change)  :   3%/3mm=96.33%
+      recon1_vs_dose1 (ref detector) :   3%/3mm=36.39%
+      recon2_vs_dose2 (blind vs own) :   3%/3mm=20.64%
+      recon2_vs_dose1 (blind vs ref) :   3%/3mm=20.73%
+
+  --- num_time_reversal_iter = 7 ---
+      runtime 281.7 s (default 351.2 s), iters [7 7]
+      stability (default recon vs this recon):   3%/3mm=92.20%
+      dose1_vs_dose2 (truth change)  :   3%/3mm=96.33%
+      recon1_vs_dose1 (ref detector) :   3%/3mm=37.72%
+      recon2_vs_dose2 (blind vs own) :   3%/3mm=21.02%
+      recon2_vs_dose1 (blind vs ref) :   3%/3mm=21.09%
+
+  --- num_time_reversal_iter = 10 ---
+      runtime 1002.8 s (default 351.2 s), iters [10 10]
+      stability (default recon vs this recon):   3%/3mm=91.97%
+      dose1_vs_dose2 (truth change)  :   3%/3mm=96.33%
+      recon1_vs_dose1 (ref detector) :   3%/3mm=39.30%
+      recon2_vs_dose2 (blind vs own) :   3%/3mm=20.89%
+      recon2_vs_dose1 (blind vs ref) :   3%/3mm=21.23%
+
+================================================================
+  SWEEP: Nt_scaling (recording length)   (field: Nt_scaling)
+================================================================
+  value       runtime    dRun%     iters stab-3%/3mm R1vT-3%/3mm     c1     c2   RESULT
+  --------------------------------------------------------------------------------------
+  4           1730.7s  +392.8   [10 10]     91.24%     42.31%      n      n       no
+  6           1251.0s  +256.2   [10 10]     91.97%     39.30%      n      n       no
+  8           1029.9s  +193.2   [10 10]     91.12%     37.30%      n      n       no
+  10           897.8s  +155.6   [10 10]     90.43%     35.17%      n      n       no
+  12           745.4s  +112.2   [10 10]     89.27%     33.31%      n      n       no
+
+  --- Nt_scaling = 4 ---
+      runtime 1730.7 s (default 351.2 s), iters [10 10]
+      stability (default recon vs this recon):   3%/3mm=91.24%
+      dose1_vs_dose2 (truth change)  :   3%/3mm=96.33%
+      recon1_vs_dose1 (ref detector) :   3%/3mm=42.31%
+      recon2_vs_dose2 (blind vs own) :   3%/3mm=21.06%
+      recon2_vs_dose1 (blind vs ref) :   3%/3mm=21.00%
+
+  --- Nt_scaling = 6 ---
+      runtime 1251.0 s (default 351.2 s), iters [10 10]
+      stability (default recon vs this recon):   3%/3mm=91.97%
+      dose1_vs_dose2 (truth change)  :   3%/3mm=96.33%
+      recon1_vs_dose1 (ref detector) :   3%/3mm=39.30%
+      recon2_vs_dose2 (blind vs own) :   3%/3mm=20.89%
+      recon2_vs_dose1 (blind vs ref) :   3%/3mm=21.23%
+
+  --- Nt_scaling = 8 ---
+      runtime 1029.9 s (default 351.2 s), iters [10 10]
+      stability (default recon vs this recon):   3%/3mm=91.12%
+      dose1_vs_dose2 (truth change)  :   3%/3mm=96.33%
+      recon1_vs_dose1 (ref detector) :   3%/3mm=37.30%
+      recon2_vs_dose2 (blind vs own) :   3%/3mm=21.16%
+      recon2_vs_dose1 (blind vs ref) :   3%/3mm=21.23%
+
+  --- Nt_scaling = 10 ---
+      runtime 897.8 s (default 351.2 s), iters [10 10]
+      stability (default recon vs this recon):   3%/3mm=90.43%
+      dose1_vs_dose2 (truth change)  :   3%/3mm=96.33%
+      recon1_vs_dose1 (ref detector) :   3%/3mm=35.17%
+      recon2_vs_dose2 (blind vs own) :   3%/3mm=21.52%
+      recon2_vs_dose1 (blind vs ref) :   3%/3mm=21.23%
+
+  --- Nt_scaling = 12 ---
+      runtime 745.4 s (default 351.2 s), iters [10 10]
+      stability (default recon vs this recon):   3%/3mm=89.27%
+      dose1_vs_dose2 (truth change)  :   3%/3mm=96.33%
+      recon1_vs_dose1 (ref detector) :   3%/3mm=33.31%
+      recon2_vs_dose2 (blind vs own) :   3%/3mm=21.36%
+      recon2_vs_dose1 (blind vs ref) :   3%/3mm=21.16%
+
+================================================================
+  SWEEP: convergence_tol (TR early stop)   (field: convergence_tol)
+================================================================
+  value       runtime    dRun%     iters stab-3%/3mm R1vT-3%/3mm     c1     c2   RESULT
+  --------------------------------------------------------------------------------------
+  0.001       1155.7s  +229.1   [10 10]     91.97%     39.30%      n      n       no
+  0.003       1367.2s  +289.3   [10 10]     91.97%     39.30%      n      n       no
+  0.01        1227.7s  +249.6   [10 10]     91.97%     39.30%      n      n       no
+  0.03        1072.9s  +205.5   [10 10]     91.97%     39.30%      n      n       no
+  0.1          920.3s  +162.0     [8 8]     92.36%     38.45%      n      n       no
+
+  --- convergence_tol = 0.001 ---
+      runtime 1155.7 s (default 351.2 s), iters [10 10]
+      stability (default recon vs this recon):   3%/3mm=91.97%
+      dose1_vs_dose2 (truth change)  :   3%/3mm=96.33%
+      recon1_vs_dose1 (ref detector) :   3%/3mm=39.30%
+      recon2_vs_dose2 (blind vs own) :   3%/3mm=20.89%
+      recon2_vs_dose1 (blind vs ref) :   3%/3mm=21.23%
+
+  --- convergence_tol = 0.003 ---
+      runtime 1367.2 s (default 351.2 s), iters [10 10]
+      stability (default recon vs this recon):   3%/3mm=91.97%
+      dose1_vs_dose2 (truth change)  :   3%/3mm=96.33%
+      recon1_vs_dose1 (ref detector) :   3%/3mm=39.30%
+      recon2_vs_dose2 (blind vs own) :   3%/3mm=20.89%
+      recon2_vs_dose1 (blind vs ref) :   3%/3mm=21.23%
+
+  --- convergence_tol = 0.01 ---
+      runtime 1227.7 s (default 351.2 s), iters [10 10]
+      stability (default recon vs this recon):   3%/3mm=91.97%
+      dose1_vs_dose2 (truth change)  :   3%/3mm=96.33%
+      recon1_vs_dose1 (ref detector) :   3%/3mm=39.30%
+      recon2_vs_dose2 (blind vs own) :   3%/3mm=20.89%
+      recon2_vs_dose1 (blind vs ref) :   3%/3mm=21.23%
+
+  --- convergence_tol = 0.03 ---
+      runtime 1072.9 s (default 351.2 s), iters [10 10]
+      stability (default recon vs this recon):   3%/3mm=91.97%
+      dose1_vs_dose2 (truth change)  :   3%/3mm=96.33%
+      recon1_vs_dose1 (ref detector) :   3%/3mm=39.30%
+      recon2_vs_dose2 (blind vs own) :   3%/3mm=20.89%
+      recon2_vs_dose1 (blind vs ref) :   3%/3mm=21.23%
+
+  --- convergence_tol = 0.1 ---
+      runtime 920.3 s (default 351.2 s), iters [8 8]
+      stability (default recon vs this recon):   3%/3mm=92.36%
+      dose1_vs_dose2 (truth change)  :   3%/3mm=96.33%
+      recon1_vs_dose1 (ref detector) :   3%/3mm=38.45%
+      recon2_vs_dose2 (blind vs own) :   3%/3mm=20.89%
+      recon2_vs_dose1 (blind vs ref) :   3%/3mm=21.26%
+
+================================================================
+  SUCCESSFUL RUNS (6)
+================================================================
+  voxel_scale (dx,dy,dz x 2^p)   = 1.189       runtime 219.6s (default 351.2s)  [crit2: more accurate+faster]
+  voxel_scale (dx,dy,dz x 2^p)   = 1.26        runtime 207.9s (default 351.2s)  [crit2: more accurate+faster]
+  voxel_scale (dx,dy,dz x 2^p)   = 1.414       runtime 140.1s (default 351.2s)  [crit2: more accurate+faster]
+  voxel_scale (dx,dy,dz x 2^p)   = 2           runtime 80.4s (default 351.2s)  [crit2: more accurate+faster]
+  voxel_scale (dx,dy,dz x 2^p)   = 4           runtime 61.9s (default 351.2s)  [crit2: more accurate+faster]
+  voxel_scale (dx,dy,dz x 2^p)   = 8           runtime 28.8s (default 351.2s)  [crit2: more accurate+faster]
+
+(End of report)
