@@ -377,6 +377,9 @@ end
 dx = spacing_mm(1) / 1000;
 dy = spacing_mm(2) / 1000;
 dz = spacing_mm(3) / 1000;
+dx = dx*2; 
+dy=dy*2; 
+dz = dz*2; 
 
 sctSize = size(sct.cubeHU);
 if ~isequal(gridSize, sctSize)
