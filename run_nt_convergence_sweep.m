@@ -79,7 +79,11 @@ CONFIG.output_file  = 'nt_convergence_sweep_results.mat';
 CONFIG.plot_results = true;
 
 CONFIG.viz_smooth_sigma = 1.0;
-CONFIG.normalize = false;
+% Least-squares relative normalization (method from study_pass_rates_allsegments.m):
+% each run's reconstruction is rescaled by the scalar gain that best fits it to
+% the RayStation truth (doseGrid) over that truth's 10% region, before the gamma
+% comparison. Enabled by default.
+CONFIG.normalize = true;
 CONFIG.plot_exclusion_zone = false;
 
 % --- Nt convergence sweep. Air is fixed at the physically-correct 343 m/s for
@@ -363,6 +367,20 @@ for k = 2:n_runs
     end
 end
 
+%% ========================= NORMALIZE RECONS =============================
+% Least-squares relative normalization: scale each run's recon by the gain that
+% best fits it to its own RayStation truth (doseGrid) over the truth's 10%
+% region, so the recon-vs-recon gamma is amplitude-consistent. (CONFIG.normalize)
+if isfield(CONFIG, 'normalize') && CONFIG.normalize
+    fprintf('\n[NORM] Least-squares normalizing each run''s recon to the truth dose.\n');
+    for k = 1:n_runs
+        gk = least_squares_gain(res(k).doseGrid, res(k).recon_dose);
+        res(k).recon_dose = res(k).recon_dose * gk;
+        fprintf('       Run %d (Nt=%d): gain x%.4g\n', k, res(k).Nt, gk);
+    end
+    recon_ref = res(1).recon_dose;   % refresh reference after scaling
+end
+
 Nt_list = [res.Nt];
 
 %% ========================= GAMMA ANALYSIS ===============================
@@ -505,6 +523,28 @@ fprintf('\nNt convergence sweep complete.\n');
 %% =========================================================================
 %  LOCAL FUNCTIONS
 %% =========================================================================
+
+function g = least_squares_gain(rs_truth, recon)
+%LEAST_SQUARES_GAIN Scalar gain aligning a recon to its RS truth (relative norm).
+%  g = sum(rs.*recon)/sum(recon.^2) over the truth's 10% low-dose region; the g
+%  minimizing ||rs - g*recon||^2 there. Falls back to 1 for empty/zero inputs.
+%  (Method mirrored from study_pass_rates_allsegments.m.)
+    rs_truth = double(rs_truth);
+    recon    = double(recon);
+    if max(rs_truth(:)) > 0
+        mask = rs_truth >= 0.10 * max(rs_truth(:));
+    else
+        mask = true(size(rs_truth));
+    end
+    r = recon(mask);
+    denom = sum(r .^ 2);
+    if denom > 0
+        g = sum(rs_truth(mask) .* r) / denom;
+    else
+        g = 1;
+    end
+end
+
 
 function out = simulate_and_reconstruct(CONFIG, sct, doseGrid, spacing_mm, fd_gantry_angle)
 %SIMULATE_AND_RECONSTRUCT  Full forward + reconstruction pipeline for one air

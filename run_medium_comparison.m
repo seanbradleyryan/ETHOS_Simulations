@@ -46,6 +46,11 @@ CONFIG.conv_tol           = 0.01;  % 1% relative-change convergence threshold
 CONFIG.gamma_pct    = 3;    % Dose difference criterion (%)
 CONFIG.gamma_dta    = 3;    % Distance-to-agreement (mm)
 CONFIG.gamma_cutoff = 10;   % Dose cutoff (% of max) for pass-rate mask
+% Least-squares relative normalization (method from study_pass_rates_allsegments.m):
+% each reconstructed pressure is rescaled by the scalar gain that best fits it to
+% the truth p0 over p0's 10% region, before the gamma comparison. Enabled by
+% default.
+CONFIG.normalize    = true;
 
 % Acoustic tissue properties: density (kg/m^3), sound_speed (m/s), Gruneisen, RGB colour
 PROPS.oil   = struct('name','Oil',   'density',  900, 'sound_speed', 1460, ...
@@ -296,6 +301,17 @@ for m = 1:4
     tar_plan.width = spacing_mm;
     tar_plan.data  = p0r_plan;
 
+    % Least-squares relative normalization: scale each reconstructed pressure to
+    % the truth p0 over p0's 10% region, so the gamma is amplitude-consistent.
+    if isfield(CONFIG, 'normalize') && CONFIG.normalize
+        g_sph  = least_squares_gain(p0, p0r_sph);
+        g_plan = least_squares_gain(p0, p0r_plan);
+        tar_sph.data  = p0r_sph  * g_sph;
+        tar_plan.data = p0r_plan * g_plan;
+        fprintf('  [Normalize] LS gains: spherical x%.4g, planar x%.4g (-> truth p0)\n', ...
+            g_sph, g_plan);
+    end
+
     gamma_sph  = CalcGamma(ref_s, tar_sph,  CONFIG.gamma_pct, CONFIG.gamma_dta, ...
         'local', 0, 'restrict', 1, 'res', 20, 'limit', 2, 'cpu', 1);
     gamma_plan = CalcGamma(ref_s, tar_plan, CONFIG.gamma_pct, CONFIG.gamma_dta, ...
@@ -327,6 +343,32 @@ end
 fprintf('\n=====================================================\n');
 fprintf('  All simulations complete.\n');
 fprintf('=====================================================\n');
+
+
+%% =========================================================================
+%  LOCAL FUNCTION: least-squares relative normalization gain
+%% =========================================================================
+
+function g = least_squares_gain(rs_truth, recon)
+%LEAST_SQUARES_GAIN Scalar gain aligning a recon to its truth (relative norm).
+%  g = sum(rs.*recon)/sum(recon.^2) over the truth's 10% low-dose region; the g
+%  minimizing ||rs - g*recon||^2 there. Falls back to 1 for empty/zero inputs.
+%  (Method mirrored from study_pass_rates_allsegments.m.)
+    rs_truth = double(rs_truth);
+    recon    = double(recon);
+    if max(rs_truth(:)) > 0
+        mask = rs_truth >= 0.10 * max(rs_truth(:));
+    else
+        mask = true(size(rs_truth));
+    end
+    r = recon(mask);
+    denom = sum(r .^ 2);
+    if denom > 0
+        g = sum(rs_truth(mask) .* r) / denom;
+    else
+        g = 1;
+    end
+end
 
 
 %% =========================================================================

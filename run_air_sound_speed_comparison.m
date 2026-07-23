@@ -76,7 +76,11 @@ CONFIG.output_file  = 'air_sound_speed_comparison_results.mat';
 CONFIG.plot_results = true;
 
 CONFIG.viz_smooth_sigma = 1.0;
-CONFIG.normalize = false;
+% Least-squares relative normalization (method from study_pass_rates_allsegments.m):
+% each run's reconstruction is rescaled by the scalar gain that best fits it to
+% the RayStation truth (doseGrid) over that truth's 10% region, before the gamma
+% comparison. Enabled by default.
+CONFIG.normalize = true;
 CONFIG.plot_exclusion_zone = false;
 
 % --- Air sound speeds to sweep (m/s). First entry is the physically-correct
@@ -346,6 +350,19 @@ if ~isequal(size(recon_ref), size(recon_tgt))
         num2str(size(recon_ref)), num2str(size(recon_tgt)));
 end
 
+%% ========================= NORMALIZE RECONS =============================
+% Least-squares relative normalization: scale each recon by the gain that best
+% fits it to its own RayStation truth (doseGrid) over the truth's 10% region, so
+% the recon-vs-recon gamma is amplitude-consistent. (CONFIG.normalize)
+if isfield(CONFIG, 'normalize') && CONFIG.normalize
+    fprintf('\n[NORM] Least-squares normalizing each recon to the truth dose.\n');
+    g_ref = least_squares_gain(res(idx_ref).doseGrid, recon_ref);
+    g_tgt = least_squares_gain(res(idx_tgt).doseGrid, recon_tgt);
+    recon_ref = recon_ref * g_ref;
+    recon_tgt = recon_tgt * g_tgt;
+    fprintf('       Gains: 343 m/s x%.4g, 1480 m/s x%.4g\n', g_ref, g_tgt);
+end
+
 %% ========================= GAMMA ANALYSIS ===============================
 %  343-recon (reference) vs 1480-recon (target).
 
@@ -456,6 +473,28 @@ fprintf('\nAir sound-speed comparison complete.\n');
 %% =========================================================================
 %  LOCAL FUNCTIONS
 %% =========================================================================
+
+function g = least_squares_gain(rs_truth, recon)
+%LEAST_SQUARES_GAIN Scalar gain aligning a recon to its RS truth (relative norm).
+%  g = sum(rs.*recon)/sum(recon.^2) over the truth's 10% low-dose region; the g
+%  minimizing ||rs - g*recon||^2 there. Falls back to 1 for empty/zero inputs.
+%  (Method mirrored from study_pass_rates_allsegments.m.)
+    rs_truth = double(rs_truth);
+    recon    = double(recon);
+    if max(rs_truth(:)) > 0
+        mask = rs_truth >= 0.10 * max(rs_truth(:));
+    else
+        mask = true(size(rs_truth));
+    end
+    r = recon(mask);
+    denom = sum(r .^ 2);
+    if denom > 0
+        g = sum(rs_truth(mask) .* r) / denom;
+    else
+        g = 1;
+    end
+end
+
 
 function out = simulate_and_reconstruct(CONFIG, sct, doseGrid, spacing_mm, fd_gantry_angle)
 %SIMULATE_AND_RECONSTRUCT  Full forward + reconstruction pipeline for one air

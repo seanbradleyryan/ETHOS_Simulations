@@ -3,8 +3,9 @@
 %  Two-dose k-Wave photoacoustic comparison.
 %  Runs the standalone forward + reconstruction pipeline (identical to
 %  run_standalone_simulation.m) on the listed dose file AND on its counterpart
-%  on the other CT image, then performs three gamma analyses (10%/10mm,
-%  5%/5mm, 3%/3mm) between the two reconstructed doses.
+%  on the other CT image, then gamma-compares the two reconstructed doses at the
+%  configured criterion (3%/3mm). Each reconstruction is least-squares
+%  normalized to its own-CT RayStation truth before comparison (CONFIG.normalize).
 %  =========================================================================
 
 clear; clc; close all;
@@ -99,9 +100,12 @@ CONFIG.plot_results = true;
 % Set to 0 to disable display smoothing.
 CONFIG.viz_smooth_sigma = 1.0;
 
-% Normalize: divide original and reconstructed dose by their own max before
-% comparison / gamma so both peak at 1.0.
-CONFIG.normalize = false;
+% Normalize: least-squares relative normalization (method from
+% study_pass_rates_allsegments.m). Each reconstruction is rescaled by the scalar
+% gain that best fits it to its OWN-CT RayStation truth over that truth's 10%
+% low-dose region, before the gamma comparisons. Truths are left in absolute Gy.
+% Enabled by default.
+CONFIG.normalize = true;
 
 % Gamma logging: append CONFIG + gamma pass rates to gamma_log.mat (in
 % working_dir) after each run. Keeps a running record of the best gamma per
@@ -1490,16 +1494,24 @@ sensor1 = RES(idx1).sensor_mask;
 sensor2 = RES(idx2).sensor_mask;
 
 %% ========================= NORMALIZE DOSES ===============================
-% When enabled, divide each volume by its own max so all peak at 1.0 before
-% the gamma comparisons. Default (CONFIG.normalize=false) keeps absolute Gy so
-% the recon-vs-truth comparisons remain physically meaningful.
+% Least-squares relative normalization (method from study_pass_rates_allsegments.m):
+% each RECONSTRUCTION is rescaled by the scalar gain that best fits it to its
+% OWN-CT RayStation truth over that truth's 10% low-dose region (minimizing
+% ||truth - g*recon||^2). Truths (dose1/dose2) are left in absolute Gy. This
+% removes the global amplitude ambiguity of the acoustic reconstruction before
+% the gamma comparisons while preserving spatial dose structure. Enabled by
+% default (CONFIG.normalize).
 
 if isfield(CONFIG, 'normalize') && CONFIG.normalize
-    fprintf('\n[NORM] Normalizing each dose / reconstruction by its own max.\n');
-    nrm = @(v) v / max([max(v(:)), eps]);
-    dose1 = nrm(dose1); recon1 = nrm(recon1);
-    dose2 = nrm(dose2); recon2 = nrm(recon2);
-    recon_A = nrm(recon_A); recon_B = nrm(recon_B);
+    fprintf('\n[NORM] Least-squares normalizing each reconstruction to its own-CT truth.\n');
+    g1 = least_squares_gain(dose1, recon1);
+    g2 = least_squares_gain(dose2, recon2);
+    recon1 = recon1 * g1;
+    recon2 = recon2 * g2;
+    % recon_A/recon_B feed the dose-panel figure; scale each to its own truth.
+    recon_A = recon_A * least_squares_gain(double(RES(1).doseGrid), recon_A);
+    recon_B = recon_B * least_squares_gain(double(RES(2).doseGrid), recon_B);
+    fprintf('       Gains: recon(%s)=%.4g, recon(%s)=%.4g\n', label1, g1, label2, g2);
 end
 
 %% ========================= RESULTS SUMMARY ===============================
@@ -1687,7 +1699,7 @@ if CONFIG.plot_results
             RES(1).num_iters_done, CONFIG.convergence_tol, p0_max_for_plot);
     end
 
-    % Figure 3  Axial gamma (3 criteria) + absolute error
+    % Figure 3  Axial gamma + absolute error + normalized reconstruction
     if ~isempty(gamma_results) && isstruct(gamma_results)
         pair_fn = fieldnames(gamma_results);
         for k = 1:numel(pair_fn)
@@ -1996,10 +2008,12 @@ end
 
 
 function plot_gamma_and_error_axial(gamma_results, original, recon, sensor_mask, cz, titleStr)
-%PLOT_GAMMA_AND_ERROR_AXIAL 1x4 axial figure:
-%  gamma 10/10 | gamma 5/5 | gamma 3/3 | absolute dose error.
+%PLOT_GAMMA_AND_ERROR_AXIAL 1x(nCrit+2) axial figure:
+%  gamma map(s) | absolute dose error | normalized reconstruction.
+%  Only the criteria actually present in gamma_results are drawn (no empty
+%  panels), so a single-criterion run shows exactly one gamma panel.
 %  Sensor contour in red.  Slice at cz (max-dose axial index).
-%  original = gamma reference volume, recon = gamma target volume.
+%  original = gamma reference volume, recon = gamma target (normalized recon).
 %  titleStr (optional) names the comparison in the figure title.
 
     if nargin < 6 || isempty(titleStr), titleStr = 'Gamma Index & Absolute Error'; end
@@ -2016,18 +2030,19 @@ function plot_gamma_and_error_axial(gamma_results, original, recon, sensor_mask,
     criteria   = gamma_results.criteria;
     pass_rates = gamma_results.pass_rates;
     nCrit      = size(criteria, 1);
+    nCol       = nCrit + 2;   % gamma panel(s) + error + normalized recon
 
-    figure('Name', ['Gamma & Absolute Error - ' titleStr], 'Color', 'w', ...
-        'NumberTitle', 'off', 'Position', [50, 300, 1400, 370]);
-    sgtitle(sprintf('%s\nAxial Plane (Z = %d voxel)  Gamma Index & |Target - Reference|', titleStr, cz), ...
+    figure('Name', ['Gamma / Error / Normalized Recon - ' titleStr], 'Color', 'w', ...
+        'NumberTitle', 'off', 'Position', [50, 300, 360 * nCol, 370]);
+    sgtitle(sprintf('%s\nAxial Plane (Z = %d voxel)  Gamma Index, |Target - Reference|, Normalized Recon', titleStr, cz), ...
         'FontWeight', 'bold', 'FontSize', 11);
 
     gamma_clim   = [0, 2];
     sensor_slice = squeeze(sensor_mask(:, :, cz))';
 
-    % Gamma panels
+    % Gamma panels (one per criterion present)
     for g = 1:nCrit
-        ax = subplot(1, 4, g);
+        ax = subplot(1, nCol, g);
         gmap = maps{g};
         if ~isempty(gmap)
             gmap_disp = double(gmap);
@@ -2057,10 +2072,11 @@ function plot_gamma_and_error_axial(gamma_results, original, recon, sensor_mask,
         title(ax, sprintf('%s\nPass rate: %s', criteria{g, 3}, pr_str));
     end
 
-    % Absolute error panel
-    ax = subplot(1, 4, 4);
     orig_slice  = squeeze(original(:, :, cz))';
     recon_slice = squeeze(recon(:, :, cz))';
+
+    % Absolute error panel
+    ax = subplot(1, nCol, nCrit + 1);
     err_slice   = abs(recon_slice - orig_slice);
     max_err     = max(err_slice(:));
     if max_err == 0, max_err = 1; end
@@ -2078,6 +2094,25 @@ function plot_gamma_and_error_axial(gamma_results, original, recon, sensor_mask,
 
     xlabel(ax, 'X (voxel)'); ylabel(ax, 'Y (voxel)');
     title(ax, sprintf('|Recon - Original|\nMax: %.4f Gy', max_err));
+
+    % Normalized reconstruction panel (the gamma target volume, post-normalization)
+    ax = subplot(1, nCol, nCrit + 2);
+    recon_max = max(recon_slice(:));
+    if recon_max == 0, recon_max = 1; end
+
+    imagesc(ax, recon_slice, [0, recon_max]);
+    axis(ax, 'xy'); axis(ax, 'image');
+    colormap(ax, 'parula');
+    cb = colorbar(ax); cb.Label.String = 'Dose (Gy)';
+
+    hold(ax, 'on');
+    if any(sensor_slice(:))
+        contour(ax, sensor_slice, [0.5, 0.5], 'r-', 'LineWidth', 2);
+    end
+    hold(ax, 'off');
+
+    xlabel(ax, 'X (voxel)'); ylabel(ax, 'Y (voxel)');
+    title(ax, sprintf('Normalized Recon\nMax: %.4f Gy', recon_max));
 
     drawnow;
 end
@@ -2257,6 +2292,28 @@ function m = crop_medium(m, sz)
         m.alpha_coeff = m.alpha_coeff(1:sz(1), 1:sz(2), 1:sz(3));
     end
     m.gruneisen   = m.gruneisen(1:sz(1),   1:sz(2),     1:sz(3));
+end
+
+
+function g = least_squares_gain(rs_truth, recon)
+%LEAST_SQUARES_GAIN Scalar gain aligning a recon to its RS truth (relative norm).
+%  g = sum(rs.*recon)/sum(recon.^2) over the truth's 10% low-dose region; the g
+%  minimizing ||rs - g*recon||^2 there. Falls back to 1 for empty/zero inputs.
+%  (Method mirrored from study_pass_rates_allsegments.m.)
+    rs_truth = double(rs_truth);
+    recon    = double(recon);
+    if max(rs_truth(:)) > 0
+        mask = rs_truth >= 0.10 * max(rs_truth(:));
+    else
+        mask = true(size(rs_truth));
+    end
+    r = recon(mask);
+    denom = sum(r .^ 2);
+    if denom > 0
+        g = sum(rs_truth(mask) .* r) / denom;
+    else
+        g = 1;
+    end
 end
 
 

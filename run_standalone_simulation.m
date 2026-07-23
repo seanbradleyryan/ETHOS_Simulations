@@ -85,8 +85,9 @@ CONFIG.plot_results = true;
 % Set to 0 to disable display smoothing.
 CONFIG.viz_smooth_sigma = 1.0;
 
-% Normalize before comparison / gamma. Master on/off switch.
-CONFIG.normalize = false;
+% Normalize before comparison / gamma. Master on/off switch. Enabled by default
+% (least-squares recon->truth scheme; see CONFIG.normalize_method below).
+CONFIG.normalize = true;
 % Normalization scheme (used only when CONFIG.normalize is true):
 %   'max' : divide original and reconstructed dose by their own max (both peak at 1.0).
 %   'lsq' : least-squares relative normalization (from study_pass_rates_allsegments).

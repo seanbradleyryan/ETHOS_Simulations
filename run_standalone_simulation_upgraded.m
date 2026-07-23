@@ -108,8 +108,10 @@ CONFIG.sensitivity_map_adjoint = 'tr_lossy';   % 'tr_lossy' | 'tr_true' | 'das'
 % (2) GLOBAL LEAST-SQUARES GAIN (uses truth - CHARACTERIZATION ONLY)
 %   c = sum(r .* t) / sum(r .^ 2) over the gamma eval mask, where r=recon,
 %   t=truth. Applied as recon_calibrated = c * recon. Reported alongside
-%   uncalibrated gamma. Not deployable (uses truth).
-CONFIG.least_squares_gain = false;
+%   uncalibrated gamma. Not deployable (uses truth). This is the
+%   study_pass_rates_allsegments.m normalization method; enabled by default so
+%   the LS-calibrated gamma is always reported alongside the uncalibrated one.
+CONFIG.least_squares_gain = true;
 
 % (3) TRUE k-WAVE ADJOINT (Arridge et al. 2016)
 %   Replaces lossy-TR-as-adjoint with the true operator adjoint. Enables

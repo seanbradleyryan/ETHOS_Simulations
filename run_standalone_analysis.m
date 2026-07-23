@@ -70,6 +70,13 @@ CONFIG.pml_size           = 10;
 CONFIG.aim_at_iso         = true;
 CONFIG.force_turn_angle   = 290;
 
+% --- Normalization ---
+% Least-squares relative normalization (method from study_pass_rates_allsegments.m):
+% each reconstruction is rescaled by the scalar gain that best fits it to its
+% OWN RayStation truth over that truth's 10% low-dose region, before the gamma
+% analysis. RS truth volumes are left in absolute Gy. Enabled by default.
+CONFIG.normalize = true;
+
 % --- Visualization ---
 % Gaussian sigma (voxels) applied to dose slices for DISPLAY ONLY in the dose
 % comparison panels. Fills speckle gaps in a spotty recon. 0 disables.
@@ -117,6 +124,14 @@ switch lower(CONFIG.analysis_mode)
         labelTgt     = sprintf('Reconstructed (%s)', field_ct_label(fld));
         panelTitle   = sprintf('Dose Comparison: %s vs %s', labelRef, labelTgt);
 
+        % Least-squares normalization: scale the recon (target) to its RS truth
+        % (the reference); the truth is left unscaled. (See CONFIG.normalize.)
+        if isfield(CONFIG, 'normalize') && CONFIG.normalize
+            gT = least_squares_gain(refDose, tgtDose);
+            tgtDose = tgtDose * gT;
+            fprintf('  [Normalize] LS gain recon->truth: x%.4g\n', gT);
+        end
+
     case {'comparison', 'sweep'}
         ct1 = sprintf('CT_%d', CONFIG.ct_pair(1));
         ct2 = sprintf('CT_%d', CONFIG.ct_pair(2));
@@ -153,6 +168,17 @@ switch lower(CONFIG.analysis_mode)
         labelRef     = sprintf('%s recon', ct1);
         labelTgt     = sprintf('%s recon', ct2);
         panelTitle   = sprintf('Recon vs Recon: %s vs %s', labelRef, labelTgt);
+
+        % Least-squares normalization: scale EACH recon to its OWN-CT RS truth
+        % over that truth's 10% region. (See CONFIG.normalize.)
+        if isfield(CONFIG, 'normalize') && CONFIG.normalize
+            gA = least_squares_gain(double(fldA.rs_dose), refDose);
+            gB = least_squares_gain(double(fldB.rs_dose), tgtDose);
+            refDose = refDose * gA;
+            tgtDose = tgtDose * gB;
+            fprintf('  [Normalize] LS gains: %s x%.4g, %s x%.4g (each -> own truth)\n', ...
+                ct1, gA, ct2, gB);
+        end
 
     otherwise
         error('run_standalone_analysis:BadMode', ...
@@ -407,6 +433,28 @@ end
 %% =========================================================================
 %  GAMMA ANALYSIS  (copied from run_standalone_simulation.m:1270-1330)
 %% =========================================================================
+
+function g = least_squares_gain(rs_truth, recon)
+%LEAST_SQUARES_GAIN Scalar gain aligning a recon to its RS truth (relative norm).
+%  g = sum(rs.*recon)/sum(recon.^2) over the truth's 10% low-dose region; the g
+%  minimizing ||rs - g*recon||^2 there. Falls back to 1 for empty/zero inputs.
+%  (Method mirrored from study_pass_rates_allsegments.m.)
+    rs_truth = double(rs_truth);
+    recon    = double(recon);
+    if max(rs_truth(:)) > 0
+        mask = rs_truth >= 0.10 * max(rs_truth(:));
+    else
+        mask = true(size(rs_truth));
+    end
+    r = recon(mask);
+    denom = sum(r .^ 2);
+    if denom > 0
+        g = sum(rs_truth(mask) .* r) / denom;
+    else
+        g = 1;
+    end
+end
+
 
 function gamma_results = compute_gamma_results(refDose, tgtDose, spacing_mm)
     gamma_results = struct();
