@@ -345,9 +345,11 @@ end
 % (medium) / zero (p0, dose) fills the expansion + FFT padding. This reproduces
 % the two-stage expand-then-pad flow of run_standalone_simulation exactly.
 
-% Padded media for k-Wave (density/sound/alpha in water fill; gruneisen 0 in fill)
-kmed1 = embed_medium(medium1, paddims, off);
-kmed3 = embed_medium(medium3, paddims, off);
+% Padded k-Wave media (density/sound/alpha in water fill). Gruneisen is NOT a
+% k-Wave wave-propagation property, so it is carried as a SEPARATE padded array
+% (needed only for p0 and the pressure->dose conversion), never inside kmedium.
+[kmed1, grun1_pad] = embed_medium(medium1, paddims, off);
+[kmed3, ~]         = embed_medium(medium3, paddims, off);   % CT_3 gruneisen unused (recon is CT_1)
 
 % Padded initial-pressure sources (zero fill)
 p0_A = embed_fill(p0_A_orig, paddims, off, 0);
@@ -355,8 +357,8 @@ p0_B = embed_fill(p0_B_orig, paddims, off, 0);
 
 % Reconstruction (model) medium is CT_1 for BOTH studies. Crop to the expanded
 % grid for the per-iteration pressure->dose conversion.
-grun_recon_exp = kmed1.gruneisen(1:expdims(1), 1:expdims(2), 1:expdims(3));
-dens_recon_exp = kmed1.density(1:expdims(1),   1:expdims(2), 1:expdims(3));
+grun_recon_exp = grun1_pad(1:expdims(1),     1:expdims(2), 1:expdims(3));
+dens_recon_exp = kmed1.density(1:expdims(1), 1:expdims(2), 1:expdims(3));
 
 % Reference truth (D1) and the per-study low-dose masks on the expanded grid.
 ref_dose_exp  = embed_fill(D1, expdims, off, 0);   % common reference for both studies
@@ -754,16 +756,22 @@ function [off, expdims, paddims] = resolve_grid_geometry(orig_dims, gp, use_pad,
 end
 
 
-function kmed = embed_medium(medium, dims, off)
-%EMBED_MEDIUM Place a medium's arrays into the padded grid with water fill
-%  (density 1000, sound 1540, alpha 0, gruneisen 0), returning a k-Wave medium
-%  struct (alpha_power = 1.1).
+function [kmed, gruneisen_pad] = embed_medium(medium, dims, off)
+%EMBED_MEDIUM Place a medium's arrays into the padded grid with water fill.
+%  Returns:
+%    kmed          - the k-Wave medium struct (density 1000, sound 1540, alpha 0
+%                    in the fill; alpha_power = 1.1). Contains ONLY the fields
+%                    kspaceFirstOrder3D uses -- NO gruneisen.
+%    gruneisen_pad - the padded Gruneisen array (0 in the fill), carried
+%                    separately because Gruneisen is a photoacoustic source /
+%                    dose-conversion property, not a wave-propagation property.
     kmed = struct();
     kmed.density     = embed_fill(medium.density,     dims, off, 1000);
     kmed.sound_speed = embed_fill(medium.sound_speed, dims, off, 1540);
     kmed.alpha_coeff = embed_fill(medium.alpha_coeff, dims, off, 0);
-    kmed.gruneisen   = embed_fill(medium.gruneisen,   dims, off, 0);
     kmed.alpha_power = 1.1;
+
+    gruneisen_pad = embed_fill(medium.gruneisen, dims, off, 0);
 end
 
 
