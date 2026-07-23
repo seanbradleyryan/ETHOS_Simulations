@@ -1509,7 +1509,7 @@ fprintf('  %-26s [%.6f, %.4f] Gy\n', [label2 ' recon (recon2):'], min(recon2(:))
 fprintf('=====================================\n');
 
 %% ========================= GAMMA ANALYSIS ================================
-% Four gamma comparisons (each at 10%/10mm, 5%/5mm, 3%/3mm):
+% Four gamma comparisons (each at 3%/3mm):
 %   1. dose1  vs dose2   truth change between the two plans/geometries
 %   2. recon1 vs dose1   reference-CT detector accuracy
 %   3. recon2 vs dose2   blind reconstruction accuracy (vs its own truth)
@@ -1555,15 +1555,20 @@ if exist('CalcGamma', 'file') == 2
         gamma_results.(pair_name) = gr;
     end
 
-    % Combined pass-rate table across all four comparisons.
+    % Combined pass-rate table across all comparisons (generic over the
+    % number of criteria in gamma_criteria).
     fprintf('\n  ------ Gamma Pass Rates (10%% low-dose cutoff on reference) ------\n');
-    fprintf('  %-34s %10s %10s %10s\n', 'Comparison', gamma_criteria{1,3}, ...
-        gamma_criteria{2,3}, gamma_criteria{3,3});
+    fprintf('  %-34s', 'Comparison');
+    for gc = 1:size(gamma_criteria, 1)
+        fprintf(' %10s', gamma_criteria{gc, 3});
+    end
+    fprintf('\n');
     pair_fn = fieldnames(gamma_results);
     for pp = 1:numel(pair_fn)
         gr = gamma_results.(pair_fn{pp});
-        pr = gr.pass_rates;
-        fprintf('  %-34s %9.2f%% %9.2f%% %9.2f%%\n', gr.title, pr(1), pr(2), pr(3));
+        fprintf('  %-34s', gr.title);
+        fprintf(' %9.2f%%', gr.pass_rates);
+        fprintf('\n');
     end
 else
     warning('CalcGamma not found. Skipping gamma analysis.');
