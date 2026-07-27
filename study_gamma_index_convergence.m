@@ -38,79 +38,85 @@
 %  the remote device. Do not execute locally.
 %% =========================================================================
 
-clear; clc; close all;
+function RESULTS = study_gamma_index_convergence(dose_file, CONFIG)
+%STUDY_GAMMA_INDEX_CONVERGENCE  Gamma pass-rate convergence vs TR iteration for a
+%  single field dose, plus truth-vs-recon dose / gamma comparison panels.
+%
+%  For one beam/segment (a CT_1 field dose and its derived CT_3 counterpart) this
+%  runs both Study A (matched CT_1) and Study B (cross-CT: CT_3 delivery, CT_1
+%  model) and, after EVERY time-reversal iteration, records the n%/n mm gamma
+%  pass rate of the reconstructed dose against the CT_1 truth (D1). It also
+%  snapshots the reconstructed dose and its gamma-index map at selected
+%  iterations (default 1 and 10) for a truth-vs-recon comparison panel.
+%
+%  USAGE
+%    study_gamma_index_convergence()                       % built-in defaults
+%    study_gamma_index_convergence(dose_file)              % one CT_1 dose file
+%    RESULTS = study_gamma_index_convergence(dose_file, CONFIG)
+%
+%  INPUTS
+%    dose_file - [] / '' to keep CONFIG.dose_filename_ct1; a bare CT_1 field-dose
+%                filename (looked up under the patient/session processed dir); or
+%                a FULL PATH to a CT_1 field-dose .mat (its folder overrides the
+%                processed dir). The CT_3 counterpart is derived by swapping
+%                _CT_1_ -> _CT_3_ unless CONFIG.dose_filename_ct3 is set.
+%    CONFIG    - optional struct; any field overrides the defaults returned by
+%                default_config() (see the bottom of this file). Notable fields:
+%                  .snapshot_iters  TR iterations to snapshot for the dose/gamma
+%                                   panels (default [1 10], clamped to N_iter).
+%                  .plot_results    draw figures (default true).
+%                  .save_figures    save each figure as PNG to CONFIG.figure_dir.
+%                  .close_figures   close each figure after saving (batch mode).
+%                  .save_results    save the RESULTS struct to CONFIG.output_file.
+%
+%  OUTPUT
+%    RESULTS - per-iteration pass rates (A/B), the snapshot recon doses + gamma
+%              maps for both studies, and grid/metadata. Also written to disk when
+%              CONFIG.save_results is true.
+%
+%  DELIVERABLES (figures):
+%    - Study A / Study B truth-vs-recon dose + gamma comparison panels (iters 1,10)
+%    - Gamma pass rate vs TR iteration: Study A, Study B, and both overlaid.
+%
+%  DEPENDENCIES: create_acoustic_medium, determine_sensor_mask,
+%    find_optimal_kwave_size, kspaceFirstOrder3D, gaussianFilter, CalcGamma.
+%  See also: run_standalone_simulation, study_pass_rates_individual,
+%    run_gamma_convergence_batch.
+%
+%  NOTE: HIPAA / remote-execution - this file is WRITTEN here but must be RUN on
+%  the remote device. Do not execute locally.
+%% =========================================================================
+
 study_timer = tic;
 
 %% ========================= CONFIGURATION ================================
+% Start from the shared defaults, then overlay any caller-supplied overrides and
+% the dose-file argument.
 
-CONFIG.working_dir    = '/mnt/weka/home/80030361/ETHOS_Simulations';
-CONFIG.patient_id     = '1194203';
-CONFIG.session        = 'Session_1';
+if nargin < 2 || isempty(CONFIG)
+    CONFIG = struct();
+end
+CONFIG = merge_config(default_config(), CONFIG);
 
-% CT_1 field dose. The CT_3 counterpart filename is derived from this by
-% swapping the '_CT_1_' token for '_CT_3_' (same beam/segment, other CT image).
-CONFIG.dose_filename_ct1 = 'dose_1194203_Session_1_reference_CT_1_B15_112.mat';
-CONFIG.dose_filename_ct3 = '';   % '' => derive from the CT_1 name (recommended)
-
-CONFIG.cbct_filename_ct1 = 'CBCT1_resampled.mat';
-CONFIG.cbct_filename_ct3 = 'CBCT3_resampled.mat';
-
-CONFIG.sensor_placement_method = 'determine_sensor_mask';
-CONFIG.sensor_x_index = 2;
-CONFIG.sensor_y_index = 4;
-
-% Physical 2D ultrasound array geometry (sparse element mask).
-CONFIG.elements_per_side = 32;
-CONFIG.element_pitch_mm  = 4.35;
-CONFIG.element_size_mm   = 3.65;
-
-CONFIG.gruneisen_method = 'threshold_2';
-
-CONFIG.force_uniform_density     = false;
-CONFIG.force_uniform_sound_speed = false;
-CONFIG.force_uniform_attenuation = false;
-CONFIG.force_uniform_gruneisen   = false;
-
-CONFIG.uniform_density      = 1000;
-CONFIG.uniform_sound_speed  = 1540;
-CONFIG.uniform_alpha_coeff  = 0;
-CONFIG.uniform_alpha_power  = 1.1;
-CONFIG.uniform_gruneisen    = 1.0;
-
-CONFIG.dose_per_pulse_cGy   = 0.16;
-CONFIG.meterset             = 140;
-CONFIG.pml_size             = 10;
-CONFIG.cfl_number           = 0.3;
-CONFIG.Nt_scaling           = 6;      % >0: when air sets minC, shorten Nt by this
-CONFIG.use_gpu              = true;
-CONFIG.correction_factor    = 20;     % cancelled by the LSQ normalization below
-CONFIG.use_pressure_scale_correction = false;
-CONFIG.mask_recon_to_dose_region     = true;
-
-% --- Convergence study: 20 time-reversal iterations, gamma after each ---
-CONFIG.num_time_reversal_iter = 20;
-CONFIG.gamma_n                = 3;    % gamma criterion, evaluated as n%/n mm
-
-% --- Pulse Convolution / Noise / Deconvolution (physical measurement chain) ---
-% Set convolution_kernel to 0 to apply only the sensor frequency response.
-CONFIG.convolution_kernel  = 4e-6;    % Gaussian sigma in seconds (4 us)
-CONFIG.conv_noise_level    = 0.125;   % noise amplitude as fraction of peak signal
-CONFIG.conv_deconv_lambda  = 1e-4;    % Wiener regularization for deconvolution
-
-CONFIG.use_grid_padding = true;
-
-% Least-squares normalization of the recon to the truth (from
-% study_pass_rates_allsegments). Keep true so absolute scale does not drive gamma.
-CONFIG.normalize = true;
-
-CONFIG.save_results = true;
-CONFIG.output_file  = 'gamma_index_convergence_results.mat';
-CONFIG.plot_results = true;
+% Resolve the dose-file argument. A bare name is looked up under the processed
+% dir; a full path additionally overrides that dir (used by the batch driver).
+processed_dir_override = '';
+if nargin >= 1 && ~isempty(dose_file)
+    [dose_arg_dir, dose_arg_base, dose_arg_ext] = fileparts(char(dose_file));
+    CONFIG.dose_filename_ct1 = [dose_arg_base, dose_arg_ext];
+    if ~isempty(dose_arg_dir)
+        processed_dir_override = dose_arg_dir;
+    end
+end
 
 %% ========================= RESOLVE FILE PATHS ============================
 
-processed_dir = fullfile(CONFIG.working_dir, 'RayStationFiles', ...
-    CONFIG.patient_id, CONFIG.session, 'processed');
+if ~isempty(processed_dir_override)
+    processed_dir = processed_dir_override;
+else
+    processed_dir = fullfile(CONFIG.working_dir, 'RayStationFiles', ...
+        CONFIG.patient_id, CONFIG.session, 'processed');
+end
 
 % Derive the CT_3 dose filename from the CT_1 one unless explicitly given.
 if isempty(CONFIG.dose_filename_ct3)
@@ -126,6 +132,23 @@ dose_ct1_path = fullfile(processed_dir, CONFIG.dose_filename_ct1);
 dose_ct3_path = fullfile(processed_dir, CONFIG.dose_filename_ct3);
 cbct_ct1_path = fullfile(processed_dir, CONFIG.cbct_filename_ct1);
 cbct_ct3_path = fullfile(processed_dir, CONFIG.cbct_filename_ct3);
+
+% A short beam/segment tag (e.g. B15_112) parsed from the dose filename, used to
+% name figures/results per field. Falls back to the base filename.
+file_tag = dose_file_tag(CONFIG.dose_filename_ct1);
+
+% Fill in figure / results output locations if the caller left them empty.
+if isempty(CONFIG.figure_dir)
+    CONFIG.figure_dir = fullfile(CONFIG.working_dir, 'AnalysisResults', ...
+        CONFIG.patient_id, CONFIG.session, 'gamma_convergence');
+end
+if isempty(CONFIG.results_dir)
+    CONFIG.results_dir = CONFIG.figure_dir;
+end
+if isempty(CONFIG.output_file)
+    CONFIG.output_file = fullfile(CONFIG.results_dir, ...
+        ['gamma_index_convergence_' file_tag '.mat']);
+end
 
 %% ========================= LOAD PLAN BEAM METADATA =======================
 % determine_sensor_mask needs beam_metadata (isocenter + jaw extents per beam)
@@ -426,7 +449,7 @@ inputArgs = {'Smooth', false, 'PMLInside', false, 'PMLSize', CONFIG.pml_size, ..
 fprintf('\n=========================================================\n');
 fprintf('  STUDY A - matched CT_1 (fwd CT_1, recon CT_1, gamma vs D1)\n');
 fprintf('=========================================================\n');
-pass_A = run_tr_convergence('A/CT1', kgrid, inputArgs, ...
+[pass_A, snap_A] = run_tr_convergence('A/CT1', kgrid, inputArgs, ...
     kmed1, kmed1, p0_A, sensor, ...
     grun_recon_exp, dens_recon_exp, ref_dose_exp, doseMaskA_exp, body_exp, ...
     num_pulses, expdims, spacing_mm, CONFIG.gamma_n, CONFIG.num_time_reversal_iter, CONFIG);
@@ -436,7 +459,7 @@ pass_A = run_tr_convergence('A/CT1', kgrid, inputArgs, ...
 fprintf('\n=========================================================\n');
 fprintf('  STUDY B - cross-CT (fwd CT_3, recon CT_1, gamma vs D1)\n');
 fprintf('=========================================================\n');
-pass_B = run_tr_convergence('B/CT3->CT1', kgrid, inputArgs, ...
+[pass_B, snap_B] = run_tr_convergence('B/CT3->CT1', kgrid, inputArgs, ...
     kmed3, kmed1, p0_B, sensor, ...
     grun_recon_exp, dens_recon_exp, ref_dose_exp, doseMaskB_exp, body_exp, ...
     num_pulses, expdims, spacing_mm, CONFIG.gamma_n, CONFIG.num_time_reversal_iter, CONFIG);
@@ -458,41 +481,69 @@ green = [0.15, 0.60, 0.20];
 red   = [0.80, 0.15, 0.15];
 
 if CONFIG.plot_results
-    % Figure 1 - Study A alone.
-    plot_gamma_convergence({pass_A}, ...
+    ptxt = strrep(CONFIG.patient_id, '_', '\_');
+    stxt = strrep(CONFIG.session,    '_', '\_');
+    ftxt = strrep(file_tag,          '_', '\_');
+
+    % --- Truth-vs-recon dose + gamma-index comparison panels (iters 1 & 10) ---
+    % Study A (matched CT_1) and Study B (cross-CT), one figure each.
+    fhA = plot_dose_gamma_panel(snap_A, ...
+        sprintf('Study A (matched CT\\_1)  |  %s', ftxt), ptxt, stxt);
+    save_and_maybe_close(fhA, CONFIG, [file_tag '_panel_studyA']);
+
+    fhB = plot_dose_gamma_panel(snap_B, ...
+        sprintf('Study B (CT\\_3\\rightarrowCT\\_1)  |  %s', ftxt), ptxt, stxt);
+    save_and_maybe_close(fhB, CONFIG, [file_tag '_panel_studyB']);
+
+    % --- Gamma pass rate vs TR iteration ---
+    % Figure - Study A alone.
+    fh1 = plot_gamma_convergence({pass_A}, ...
         {'Recon CT\_1 vs Truth D1'}, {green}, CONFIG.gamma_n, ...
-        'Study A: Matched CT\_1 Reconstruction', CONFIG.patient_id, CONFIG.session);
+        sprintf('Study A: Matched CT\\_1 Reconstruction  |  %s', ftxt), ...
+        CONFIG.patient_id, CONFIG.session);
+    save_and_maybe_close(fh1, CONFIG, [file_tag '_convergence_studyA']);
 
-    % Figure 2 - Study B alone.
-    plot_gamma_convergence({pass_B}, ...
+    % Figure - Study B alone.
+    fh2 = plot_gamma_convergence({pass_B}, ...
         {'Recon CT\_3\rightarrowCT\_1 vs Truth D1'}, {red}, CONFIG.gamma_n, ...
-        'Study B: Cross-CT (CT\_3 delivery, CT\_1 model)', CONFIG.patient_id, CONFIG.session);
+        sprintf('Study B: Cross-CT (CT\\_3 delivery, CT\\_1 model)  |  %s', ftxt), ...
+        CONFIG.patient_id, CONFIG.session);
+    save_and_maybe_close(fh2, CONFIG, [file_tag '_convergence_studyB']);
 
-    % Figure 3 - both overlaid.
-    plot_gamma_convergence({pass_A, pass_B}, ...
+    % Figure - both overlaid.
+    fh3 = plot_gamma_convergence({pass_A, pass_B}, ...
         {'A: Recon CT\_1 vs D1', 'B: Recon CT\_3\rightarrowCT\_1 vs D1'}, ...
         {green, red}, CONFIG.gamma_n, ...
-        'Gamma Convergence: Matched CT\_1 vs Cross-CT', CONFIG.patient_id, CONFIG.session);
+        sprintf('Gamma Convergence: Matched CT\\_1 vs Cross-CT  |  %s', ftxt), ...
+        CONFIG.patient_id, CONFIG.session);
+    save_and_maybe_close(fh3, CONFIG, [file_tag '_convergence_overlay']);
 end
 
 %% ========================= SAVE RESULTS ================================
 
 total_runtime = toc(study_timer);
 
-if CONFIG.save_results
-    RESULTS = struct();
-    RESULTS.config          = CONFIG;
-    RESULTS.gamma_crit      = CONFIG.gamma_n;
-    RESULTS.num_iterations  = N_iter;
-    RESULTS.iterations      = (1:N_iter)';
-    RESULTS.pass_rate_A     = pass_A;   % matched CT_1, recon vs D1
-    RESULTS.pass_rate_B     = pass_B;   % cross-CT (CT_3 fwd, CT_1 recon), recon vs D1
-    RESULTS.dose_filename_ct1 = CONFIG.dose_filename_ct1;
-    RESULTS.dose_filename_ct3 = CONFIG.dose_filename_ct3;
-    RESULTS.spacing_mm      = spacing_mm;
-    RESULTS.grid_size       = expdims;
-    RESULTS.total_runtime_s = total_runtime;
+% Always assemble the RESULTS output (also written to disk when save_results).
+RESULTS = struct();
+RESULTS.config          = CONFIG;
+RESULTS.file_tag        = file_tag;
+RESULTS.gamma_crit      = CONFIG.gamma_n;
+RESULTS.num_iterations  = N_iter;
+RESULTS.iterations      = (1:N_iter)';
+RESULTS.pass_rate_A     = pass_A;   % matched CT_1, recon vs D1
+RESULTS.pass_rate_B     = pass_B;   % cross-CT (CT_3 fwd, CT_1 recon), recon vs D1
+RESULTS.snapshot_A      = snap_A;   % iter-1/10 recon dose + gamma map (Study A)
+RESULTS.snapshot_B      = snap_B;   % iter-1/10 recon dose + gamma map (Study B)
+RESULTS.dose_filename_ct1 = CONFIG.dose_filename_ct1;
+RESULTS.dose_filename_ct3 = CONFIG.dose_filename_ct3;
+RESULTS.spacing_mm      = spacing_mm;
+RESULTS.grid_size       = expdims;
+RESULTS.total_runtime_s = total_runtime;
 
+if CONFIG.save_results
+    if ~isempty(CONFIG.results_dir) && ~isfolder(CONFIG.results_dir)
+        mkdir(CONFIG.results_dir);
+    end
     save(CONFIG.output_file, '-struct', 'RESULTS', '-v7.3');
     fprintf('\nResults saved to: %s\n', CONFIG.output_file);
 end
@@ -500,12 +551,14 @@ end
 fprintf('\nTotal runtime: %.1f s (%.2f min).\n', total_runtime, total_runtime / 60);
 fprintf('Gamma index convergence study complete.\n');
 
+end   % ===== end of main function study_gamma_index_convergence =====
+
 
 %% =========================================================================
 %  LOCAL FUNCTIONS
 %% =========================================================================
 
-function pass_rates = run_tr_convergence(tag, kgrid, inputArgs, ...
+function [pass_rates, snap] = run_tr_convergence(tag, kgrid, inputArgs, ...
         kmed_fwd, kmed_recon, p0, sensor, ...
         grun_recon_exp, dens_recon_exp, ref_dose_exp, doseMask_exp, body_exp, ...
         num_pulses, expdims, spacing_mm, gamma_crit, N_iter, CONFIG)
@@ -518,9 +571,35 @@ function pass_rates = run_tr_convergence(tag, kgrid, inputArgs, ...
 %  (kmed_recon). For Study A both are CT_1; for Study B kmed_fwd is CT_3 and
 %  kmed_recon is CT_1 (model/anatomy mismatch).
 %
-%  Returns pass_rates: [N_iter x 1], gamma %/mm pass rate per TR iteration.
+%  Returns:
+%    pass_rates - [N_iter x 1], gamma %/mm pass rate per TR iteration.
+%    snap       - snapshot struct for the dose/gamma comparison panel, with the
+%                 reconstructed dose and gamma-index map captured at the iterations
+%                 in CONFIG.snapshot_iters (clamped to [1, N_iter]). Fields:
+%                   .iters      [1 x M] captured iteration numbers
+%                   .recon      {1 x M} recon dose volumes (expdims)
+%                   .gmap       {1 x M} gamma-index maps (expdims; [] on failure)
+%                   .pass       [1 x M] pass rate at each captured iteration
+%                   .ref_dose   truth D1 on the expanded grid
+%                   .slice      axial (Z) index of the truth max, for display
+%                   .spacing_mm, .gamma_crit
 
     ex = expdims(1); ey = expdims(2); ez = expdims(3);
+
+    % Snapshot iterations for the comparison panel (default [1 10]).
+    snap_iters = CONFIG.snapshot_iters(:)';
+    snap_iters = unique(min(max(round(snap_iters), 1), N_iter));
+
+    snap = struct();
+    snap.iters      = [];
+    snap.recon      = {};
+    snap.gmap       = {};
+    snap.pass       = [];
+    snap.ref_dose   = ref_dose_exp;
+    snap.spacing_mm = spacing_mm;
+    snap.gamma_crit = gamma_crit;
+    [~, truth_max_idx] = max(ref_dose_exp(:));
+    [~, ~, snap.slice] = ind2sub([ex, ey, ez], truth_max_idx);
 
     %% ---- Forward simulation (measurement through the true medium) ----
     % GPU note: with DataCast='gpuArray-single', kspaceFirstOrder3D returns a
@@ -587,9 +666,19 @@ function pass_rates = run_tr_convergence(tag, kgrid, inputArgs, ...
             recon_dose = recon_dose * least_squares_gain(ref_dose_exp, recon_dose);
         end
 
-        pass_rates(it) = gamma_pass_rate(ref_dose_exp, recon_dose, gamma_crit, spacing_mm);
+        want_map = ismember(it, snap_iters);
+        [pass_rates(it), gmap_it] = gamma_pass_rate(ref_dose_exp, recon_dose, ...
+            gamma_crit, spacing_mm, want_map);
         fprintf('[%s] iter %2d/%d:  gamma %g%%/%g mm pass = %.2f%%  (max recon p = %.3e)\n', ...
             tag, it, N_iter, gamma_crit, gamma_crit, pass_rates(it), max(rp(:)));
+
+        % Capture the recon dose + gamma map at the requested snapshot iterations.
+        if want_map
+            snap.iters(end + 1) = it;
+            snap.recon{end + 1} = recon_dose;
+            snap.gmap{end + 1}  = gmap_it;
+            snap.pass(end + 1)  = pass_rates(it);
+        end
 
         % ---- Residual correction for the next iteration (through the model medium) ----
         % reconPressure is CPU; k-Wave re-casts it to GPU internally. Gather the
@@ -645,10 +734,16 @@ function [sensorData, sensorData_measured] = apply_measurement_chain(sensorData,
 end
 
 
-function pr = gamma_pass_rate(ref, tgt, crit, spacing)
+function [pr, gmap_out] = gamma_pass_rate(ref, tgt, crit, spacing, want_map)
 %GAMMA_PASS_RATE Global gamma pass rate (%) of tgt against ref at crit%/crit mm.
 %  Reference = ref (truth); the 10% reference cutoff sets the eval mask. CalcGamma
 %  console output is suppressed via evalc. Returns NaN on failure / empty ref.
+%
+%  Second output gmap_out is the full 3D gamma-index map (same size as ref); it is
+%  only returned when want_map is true (default false), otherwise []. Voxels below
+%  the 10% eval cutoff are NaN'd in gmap_out so they don't skew the display scale.
+    if nargin < 5, want_map = false; end
+    gmap_out = [];
     ref = double(ref);
     tgt = double(tgt);
     if max(ref(:)) <= 0
@@ -663,6 +758,10 @@ function pr = gamma_pass_rate(ref, tgt, crit, spacing)
         evalc(['gmap = CalcGamma(ref_struct, tgt_struct, crit, crit, ', ...
                '''local'', 0, ''limit'', crit*2, ''restrict'', 1);']);
         pr = 100 * mean(gmap(mask) <= 1);
+        if want_map
+            gmap_out = gmap;
+            gmap_out(~mask) = NaN;   % show gamma only in the evaluated region
+        end
     catch
         pr = NaN;
     end
@@ -886,11 +985,12 @@ function assert_same_grid(name, ref_dims, got_dims)
 end
 
 
-function plot_gamma_convergence(pass_cell, labels, colors, gamma_crit, ttl, patient_id, session)
+function fh = plot_gamma_convergence(pass_cell, labels, colors, gamma_crit, ttl, patient_id, session)
 %PLOT_GAMMA_CONVERGENCE Gamma pass rate (%) vs TR iteration for one or more series.
 %  pass_cell - cell of [N x 1] pass-rate vectors; labels/colors index-matched.
+%  Returns the figure handle fh (for saving by the caller).
     N = numel(pass_cell{1});
-    figure('Name', ttl, 'Color', 'w', 'NumberTitle', 'off', ...
+    fh = figure('Name', ttl, 'Color', 'w', 'NumberTitle', 'off', ...
         'Position', [120, 120, 780, 520]);
     hold on;
     markers = {'-o', '-s', '-^', '-d'};
@@ -915,6 +1015,216 @@ function plot_gamma_convergence(pass_cell, labels, colors, gamma_crit, ttl, pati
         'FontWeight', 'bold', 'FontSize', 12, 'Interpreter', 'tex');
     legend(h, 'Location', 'southeast', 'FontSize', 9, 'Interpreter', 'tex');
     drawnow;
+end
+
+
+function fh = plot_dose_gamma_panel(snap, study_label, patient_txt, session_txt)
+%PLOT_DOSE_GAMMA_PANEL Truth-vs-recon dose + gamma-index comparison panel.
+%  Renders the axial slice through the truth-dose maximum. Layout (2 x 3):
+%     [ Truth D1      | Recon iter s1  | Recon iter s2 ]
+%     [ (blank)       | Gamma iter s1  | Gamma iter s2 ]
+%  Top row: dose in 'hot' with a shared color scale (0..max truth). Bottom row:
+%  gamma index (green<=1 pass, red>1 fail) under the matching recon column, with
+%  the pass rate in the title. Returns the figure handle fh.
+    sl    = snap.slice;
+    truth = snap.ref_dose;
+    tmax  = max(truth(:));
+    if ~(tmax > 0), tmax = 1; end
+
+    nsnap = min(2, numel(snap.iters));   % panel has room for two snapshot columns
+    gcmap = gamma_colormap();
+
+    fh = figure('Name', sprintf('Dose/Gamma panel  %s', study_label), ...
+        'Color', 'w', 'NumberTitle', 'off', 'Position', [80, 80, 1220, 760]);
+    tl = tiledlayout(fh, 2, 3, 'TileSpacing', 'compact', 'Padding', 'compact');
+
+    % (1,1) truth dose
+    ax = nexttile(tl, 1);
+    imagesc(ax, squeeze(truth(:, :, sl))');
+    axis(ax, 'xy'); axis(ax, 'image'); colormap(ax, 'hot');
+    caxis(ax, [0, tmax]); colorbar(ax);
+    xlabel(ax, 'X (voxel)'); ylabel(ax, 'Y (voxel)');
+    title(ax, sprintf('Truth D1   (Z=%d)', sl), 'FontWeight', 'bold');
+
+    % (1,2..3) recon dose at each snapshot iteration (shared dose scale)
+    for k = 1:nsnap
+        ax = nexttile(tl, 1 + k);
+        imagesc(ax, squeeze(snap.recon{k}(:, :, sl))');
+        axis(ax, 'xy'); axis(ax, 'image'); colormap(ax, 'hot');
+        caxis(ax, [0, tmax]); colorbar(ax);
+        xlabel(ax, 'X (voxel)'); ylabel(ax, 'Y (voxel)');
+        title(ax, sprintf('Recon dose   (iter %d)', snap.iters(k)), 'FontWeight', 'bold');
+    end
+
+    % (2,1) intentionally blank so gamma maps sit under their recon columns
+    ax = nexttile(tl, 4); axis(ax, 'off');
+
+    % (2,2..3) gamma-index map at each snapshot iteration
+    for k = 1:nsnap
+        ax = nexttile(tl, 4 + k);
+        gmap = snap.gmap{k};
+        if isempty(gmap)
+            axis(ax, 'off');
+            title(ax, sprintf('Gamma iter %d (unavailable)', snap.iters(k)));
+            continue;
+        end
+        gslice = squeeze(gmap(:, :, sl))';
+        him = imagesc(ax, gslice);
+        set(him, 'AlphaData', ~isnan(gslice));   % transparent outside eval region
+        axis(ax, 'xy'); axis(ax, 'image'); colormap(ax, gcmap);
+        caxis(ax, [0, 2]); cb = colorbar(ax); cb.Label.String = '\gamma index';
+        xlabel(ax, 'X (voxel)'); ylabel(ax, 'Y (voxel)');
+        title(ax, sprintf('Gamma %g%%/%g mm  iter %d   (pass %.1f%%)', ...
+            snap.gamma_crit, snap.gamma_crit, snap.iters(k), snap.pass(k)), ...
+            'FontWeight', 'bold');
+    end
+
+    title(tl, sprintf('%s      |      %s / %s', study_label, patient_txt, session_txt), ...
+        'FontWeight', 'bold', 'FontSize', 12, 'Interpreter', 'tex');
+    drawnow;
+end
+
+
+function cmap = gamma_colormap()
+%GAMMA_COLORMAP 256-level map over gamma in [0, 2]: green for pass (<1), red for
+%  fail (>1), yellow near the gamma=1 threshold. Used with caxis([0 2]).
+    n = 256;
+    x = linspace(0, 2, n)';
+    r = min(1, max(0, (x - 0.7) / 0.6));      % ramps up to 1 approaching gamma=1
+    g = min(1, max(0, (1.3 - x) / 0.6));      % ramps down past gamma=1
+    b = 0.10 * ones(n, 1);
+    cmap = [r, g, b];
+end
+
+
+function out_path = save_and_maybe_close(fh, CONFIG, name)
+%SAVE_AND_MAYBE_CLOSE Save fh to CONFIG.figure_dir/<name>.png (when save_figures)
+%  and close it (when close_figures). Returns the written path ('' if not saved).
+    out_path = '';
+    if isempty(fh) || ~ishandle(fh)
+        return;
+    end
+    if isfield(CONFIG, 'save_figures') && CONFIG.save_figures
+        if ~isempty(CONFIG.figure_dir) && ~isfolder(CONFIG.figure_dir)
+            mkdir(CONFIG.figure_dir);
+        end
+        out_path = fullfile(CONFIG.figure_dir, [name '.png']);
+        try
+            exportgraphics(fh, out_path, 'Resolution', 150);
+        catch
+            print(fh, out_path, '-dpng', '-r150');   % fallback for older MATLAB
+        end
+        fprintf('  [FIG] Saved %s\n', out_path);
+    end
+    if isfield(CONFIG, 'close_figures') && CONFIG.close_figures
+        close(fh);
+    end
+end
+
+
+function tag = dose_file_tag(dose_filename)
+%DOSE_FILE_TAG Short beam/segment tag parsed from a field-dose filename.
+%  'dose_..._B15_112.mat' -> 'B15_112'. Falls back to the base filename (sans
+%  extension) when the _B<beam>_<seg> pattern is absent.
+    [~, base] = fileparts(char(dose_filename));
+    tok = regexp(base, '_B(\d+)_(\d+)$', 'tokens', 'once');
+    if ~isempty(tok)
+        tag = sprintf('B%s_%s', tok{1}, tok{2});
+    else
+        tag = base;
+    end
+end
+
+
+function C = merge_config(base, override)
+%MERGE_CONFIG Shallow overlay: every field of override replaces base's field.
+    C = base;
+    if isempty(override) || ~isstruct(override)
+        return;
+    end
+    fn = fieldnames(override);
+    for i = 1:numel(fn)
+        C.(fn{i}) = override.(fn{i});
+    end
+end
+
+
+function CONFIG = default_config()
+%DEFAULT_CONFIG Default parameters for the gamma-index TR-convergence study.
+%  Any field may be overridden by the CONFIG struct passed to the main function.
+    CONFIG = struct();
+
+    CONFIG.working_dir    = '/mnt/weka/home/80030361/ETHOS_Simulations';
+    CONFIG.patient_id     = '1194203';
+    CONFIG.session        = 'Session_1';
+
+    % CT_1 field dose. The CT_3 counterpart filename is derived from this by
+    % swapping the '_CT_1_' token for '_CT_3_' (same beam/segment, other CT image).
+    CONFIG.dose_filename_ct1 = 'dose_1194203_Session_1_reference_CT_1_B15_112.mat';
+    CONFIG.dose_filename_ct3 = '';   % '' => derive from the CT_1 name (recommended)
+
+    CONFIG.cbct_filename_ct1 = 'CBCT1_resampled.mat';
+    CONFIG.cbct_filename_ct3 = 'CBCT3_resampled.mat';
+
+    CONFIG.sensor_placement_method = 'determine_sensor_mask';
+    CONFIG.sensor_x_index = 2;
+    CONFIG.sensor_y_index = 4;
+
+    % Physical 2D ultrasound array geometry (sparse element mask).
+    CONFIG.elements_per_side = 32;
+    CONFIG.element_pitch_mm  = 4.35;
+    CONFIG.element_size_mm   = 3.65;
+
+    CONFIG.gruneisen_method = 'threshold_2';
+
+    CONFIG.force_uniform_density     = false;
+    CONFIG.force_uniform_sound_speed = false;
+    CONFIG.force_uniform_attenuation = false;
+    CONFIG.force_uniform_gruneisen   = false;
+
+    CONFIG.uniform_density      = 1000;
+    CONFIG.uniform_sound_speed  = 1540;
+    CONFIG.uniform_alpha_coeff  = 0;
+    CONFIG.uniform_alpha_power  = 1.1;
+    CONFIG.uniform_gruneisen    = 1.0;
+
+    CONFIG.dose_per_pulse_cGy   = 0.16;
+    CONFIG.meterset             = 140;
+    CONFIG.pml_size             = 10;
+    CONFIG.cfl_number           = 0.3;
+    CONFIG.Nt_scaling           = 6;      % >0: when air sets minC, shorten Nt by this
+    CONFIG.use_gpu              = true;
+    CONFIG.correction_factor    = 20;     % cancelled by the LSQ normalization below
+    CONFIG.use_pressure_scale_correction = false;
+    CONFIG.mask_recon_to_dose_region     = true;
+
+    % --- Convergence study: 20 time-reversal iterations, gamma after each ---
+    CONFIG.num_time_reversal_iter = 20;
+    CONFIG.gamma_n                = 3;    % gamma criterion, evaluated as n%/n mm
+
+    % TR iterations snapshotted for the truth-vs-recon dose/gamma panels.
+    CONFIG.snapshot_iters = [1, 10];
+
+    % --- Pulse Convolution / Noise / Deconvolution (physical measurement chain) ---
+    % Set convolution_kernel to 0 to apply only the sensor frequency response.
+    CONFIG.convolution_kernel  = 4e-6;    % Gaussian sigma in seconds (4 us)
+    CONFIG.conv_noise_level    = 0.125;   % noise amplitude as fraction of peak signal
+    CONFIG.conv_deconv_lambda  = 1e-4;    % Wiener regularization for deconvolution
+
+    CONFIG.use_grid_padding = true;
+
+    % Least-squares normalization of the recon to the truth (from
+    % study_pass_rates_allsegments). Keep true so absolute scale does not drive gamma.
+    CONFIG.normalize = true;
+
+    % --- Output ---
+    CONFIG.save_results  = true;
+    CONFIG.output_file   = '';   % '' => AnalysisResults/.../gamma_convergence per dose
+    CONFIG.results_dir   = '';   % '' => same as figure_dir
+    CONFIG.plot_results  = true;
+    CONFIG.save_figures  = false; % batch driver sets true
+    CONFIG.close_figures = false; % batch driver sets true (headless)
+    CONFIG.figure_dir    = '';   % '' => AnalysisResults/<pt>/<sess>/gamma_convergence
 end
 
 
