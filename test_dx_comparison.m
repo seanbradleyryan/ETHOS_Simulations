@@ -135,6 +135,12 @@ DISPLAY.gamma_panels  = true;    % axial gamma/error/recon, per gamma pair, per 
 DISPLAY.sensor_view   = false;   % sensor-vs-dose-mask 1x3 view, per dx
 DISPLAY.convergence   = false;   % p0 convergence history (reference-CT recon), per dx
 
+% Figure saving. Files go to AnalysisResults/[PatientID]/[Session]/dx_comparison.
+DISPLAY.save_figures  = true;
+DISPLAY.figure_format = 'png';   % 'png' | 'fig' | 'both'
+DISPLAY.figure_dir    = fullfile(CONFIG.working_dir, 'AnalysisResults', ...
+                                 CONFIG.patient_id, CONFIG.session, 'dx_comparison');
+
 %% ========================= PRIMARY GAMMA CRITERION ======================
 GAMMA_CRITERIA = {3, 3, '3%/3mm'};       % single criterion, as in both scripts
 PRIMARY = 1;
@@ -248,6 +254,10 @@ fprintf('  Patient %s / %s   dose: %s\n', CONFIG.patient_id, CONFIG.session, CON
 fprintf('  Reference CT: CT_%d   (CT pair [%s])\n', CONFIG.reference_ct, num2str(CONFIG.ct_pair));
 fprintf('  %d dx values: %s\n', nDx, mat2str(round(dx_values, 4)));
 fprintf('  (downscale_factor = 1 is the reference baseline; no parallel pool)\n');
+if DISPLAY.save_figures
+    if ~isfolder(DISPLAY.figure_dir), mkdir(DISPLAY.figure_dir); end
+    fprintf('  Saving figures (%s) to: %s\n', DISPLAY.figure_format, DISPLAY.figure_dir);
+end
 fprintf('=========================================================\n\n');
 
 %% ========================= MAIN dx LOOP =================================
@@ -375,22 +385,26 @@ for k = 1:nDx
 
         % --- FIGURES: reproduce run_standalone_comparison's results ---
         fig_tag = sprintf('dx=%s', dx_lbl);
+        dtag    = safe_tag(dx_lbl);   % filesystem-safe dx label
 
         if DISPLAY.sensor_view
             dose_mask_vis = double(o1.doseGrid) >= 0.10 * max(double(o1.doseGrid(:)));
             plot_sensor_dose_planes(dose_mask_vis, logical(o1.sensor_mask), ...
                 spacing_mm, o1.density, CONFIG, fig_tag);
+            save_fig(DISPLAY, sprintf('dx_%s_sensor_view', dtag));
         end
 
         if DISPLAY.dose_panels
             plot_dose_panels(recon_A, recon_B, o1.sensor_mask, o1.density, spacing_mm, ...
                 sprintf('Dose Comparison: Two Reconstructed Doses  [%s]', fig_tag), ...
                 {o1.label, o2.label}, CONFIG.viz_smooth_sigma);
+            save_fig(DISPLAY, sprintf('dx_%s_dose_panels', dtag));
         end
 
         if DISPLAY.convergence
             plot_convergence_history(oref.conv_max_pressure, oref.conv_rel_change, ...
                 oref.num_iters_done, CONFIG.convergence_tol, max(oref.p0(:)), fig_tag);
+            save_fig(DISPLAY, sprintf('dx_%s_convergence', dtag));
         end
 
         if DISPLAY.gamma_panels
@@ -401,6 +415,7 @@ for k = 1:nDx
                 [~, ~, cz_g] = ind2sub(size(gr.ref), mdi);
                 plot_gamma_and_error_axial(gr, gr.ref, gr.tgt, gr.sensor_mask, cz_g, ...
                     sprintf('%s   [%s]', gr.title, fig_tag));
+                save_fig(DISPLAY, sprintf('dx_%s_gamma_%s', dtag, gr.name));
             end
         end
         drawnow;
@@ -485,6 +500,34 @@ end
 
 function s = tern(c, a, b)
     if c, s = a; else, s = b; end
+end
+
+function s = safe_tag(lbl)
+%SAFE_TAG  Turn a dx label (e.g. '1.189') into a filesystem-safe token ('1p189').
+    s = regexprep(lbl, '\.', 'p');
+    s = regexprep(s, '[^A-Za-z0-9_]', '_');
+end
+
+function save_fig(DISPLAY, basename)
+%SAVE_FIG  Save the current figure to DISPLAY.figure_dir (png / fig / both).
+    if ~isfield(DISPLAY, 'save_figures') || ~DISPLAY.save_figures, return; end
+    if ~isfolder(DISPLAY.figure_dir), mkdir(DISPLAY.figure_dir); end
+    fig = gcf;
+    fmt = 'png';
+    if isfield(DISPLAY, 'figure_format') && ~isempty(DISPLAY.figure_format)
+        fmt = lower(DISPLAY.figure_format);
+    end
+    try
+        if any(strcmpi(fmt, {'png', 'both'}))
+            exportgraphics(fig, fullfile(DISPLAY.figure_dir, [basename '.png']), ...
+                'Resolution', 150);
+        end
+        if any(strcmpi(fmt, {'fig', 'both'}))
+            savefig(fig, fullfile(DISPLAY.figure_dir, [basename '.fig']));
+        end
+    catch ME
+        fprintf('  [WARN] Could not save figure "%s": %s\n', basename, ME.message);
+    end
 end
 
 

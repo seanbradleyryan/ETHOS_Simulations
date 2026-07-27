@@ -449,10 +449,10 @@ inputArgs = {'Smooth', false, 'PMLInside', false, 'PMLSize', CONFIG.pml_size, ..
 fprintf('\n=========================================================\n');
 fprintf('  STUDY A - matched CT_1 (fwd CT_1, recon CT_1, gamma vs D1)\n');
 fprintf('=========================================================\n');
-[pass_A, snap_A] = run_tr_convergence('A/CT1', kgrid, inputArgs, ...
+[pass_A, snap_A, noise_amp_A] = run_tr_convergence('A/CT1', kgrid, inputArgs, ...
     kmed1, kmed1, p0_A, sensor, ...
     grun_recon_exp, dens_recon_exp, ref_dose_exp, doseMaskA_exp, body_exp, ...
-    num_pulses, expdims, spacing_mm, CONFIG.gamma_n, CONFIG.num_time_reversal_iter, CONFIG);
+    num_pulses, expdims, spacing_mm, CONFIG.gamma_n, CONFIG.num_time_reversal_iter, CONFIG, []);
 
 %% ========================= STUDY B: cross-CT ===========================
 
@@ -462,16 +462,61 @@ fprintf('=========================================================\n');
 [pass_B, snap_B] = run_tr_convergence('B/CT3->CT1', kgrid, inputArgs, ...
     kmed3, kmed1, p0_B, sensor, ...
     grun_recon_exp, dens_recon_exp, ref_dose_exp, doseMaskB_exp, body_exp, ...
-    num_pulses, expdims, spacing_mm, CONFIG.gamma_n, CONFIG.num_time_reversal_iter, CONFIG);
+    num_pulses, expdims, spacing_mm, CONFIG.gamma_n, CONFIG.num_time_reversal_iter, CONFIG, []);
+
+%% ========================= STUDY N: noise-floor null ===================
+% Null hypothesis: reconstruct from PURE ELECTRONIC NOISE (no coherent signal),
+% injected at the same absolute amplitude Study A saw, through the identical
+% deconvolution + TR-convergence + gamma pipeline (gamma vs the same truth D1
+% over the same 10% dose region). The A/B signal curves should sit far above
+% this floor. Only meaningful when the pulse model actually injects noise; when
+% CONFIG.null_realizations > 1 the pass rates are averaged over independent
+% noise draws (the snapshot panel uses the first realization).
+
+run_null = CONFIG.convolution_kernel > 0 && CONFIG.conv_noise_level > 0 && ...
+           isfinite(noise_amp_A) && noise_amp_A > 0;
+pass_N = [];
+snap_N = [];
+if run_null
+    n_real = max(1, round(CONFIG.null_realizations));
+    fprintf('\n=========================================================\n');
+    fprintf('  STUDY N - noise floor (noise-only, recon CT_1, gamma vs D1)\n');
+    fprintf('  noise amp = %.3e Pa (matched to Study A), %d realization(s)\n', ...
+        noise_amp_A, n_real);
+    fprintf('=========================================================\n');
+    opts_null  = struct('noise_only', true, 'forced_noise_amp', noise_amp_A);
+    passN_acc  = zeros(CONFIG.num_time_reversal_iter, 1);
+    for r = 1:n_real
+        [pn, sn] = run_tr_convergence(sprintf('N/noise r%d', r), kgrid, inputArgs, ...
+            kmed1, kmed1, p0_A, sensor, ...
+            grun_recon_exp, dens_recon_exp, ref_dose_exp, doseMaskA_exp, body_exp, ...
+            num_pulses, expdims, spacing_mm, CONFIG.gamma_n, ...
+            CONFIG.num_time_reversal_iter, CONFIG, opts_null);
+        passN_acc = passN_acc + pn(:);
+        if r == 1, snap_N = sn; end
+    end
+    pass_N = passN_acc / n_real;
+else
+    fprintf(['\n[STUDY N] Skipped noise-floor null: requires a pulse model with ' ...
+             'noise (CONFIG.convolution_kernel > 0 and conv_noise_level > 0).\n']);
+end
 
 %% ========================= CONSOLE SUMMARY =============================
 
-N_iter = CONFIG.num_time_reversal_iter;
+N_iter   = CONFIG.num_time_reversal_iter;
+have_null = ~isempty(pass_N);
 fprintf('\n==================== GAMMA %g%%/%g mm CONVERGENCE ====================\n', ...
     CONFIG.gamma_n, CONFIG.gamma_n);
-fprintf('  %-6s  %-14s  %-14s\n', 'iter', 'Study A (%)', 'Study B (%)');
-for it = 1:N_iter
-    fprintf('  %-6d  %-14.2f  %-14.2f\n', it, pass_A(it), pass_B(it));
+if have_null
+    fprintf('  %-6s  %-14s  %-14s  %-16s\n', 'iter', 'Study A (%)', 'Study B (%)', 'Noise floor (%)');
+    for it = 1:N_iter
+        fprintf('  %-6d  %-14.2f  %-14.2f  %-16.2f\n', it, pass_A(it), pass_B(it), pass_N(it));
+    end
+else
+    fprintf('  %-6s  %-14s  %-14s\n', 'iter', 'Study A (%)', 'Study B (%)');
+    for it = 1:N_iter
+        fprintf('  %-6d  %-14.2f  %-14.2f\n', it, pass_A(it), pass_B(it));
+    end
 end
 fprintf('====================================================================\n');
 
@@ -479,6 +524,8 @@ fprintf('====================================================================\n'
 
 green = [0.15, 0.60, 0.20];
 red   = [0.80, 0.15, 0.15];
+gray  = [0.45, 0.45, 0.45];   % noise floor (null)
+null_lbl = 'Noise floor (null)';
 
 if CONFIG.plot_results
     ptxt = strrep(CONFIG.patient_id, '_', '\_');
@@ -486,7 +533,7 @@ if CONFIG.plot_results
     ftxt = strrep(file_tag,          '_', '\_');
 
     % --- Truth-vs-recon dose + gamma-index comparison panels (iters 1 & 10) ---
-    % Study A (matched CT_1) and Study B (cross-CT), one figure each.
+    % Study A (matched CT_1), Study B (cross-CT), and the noise-floor null.
     fhA = plot_dose_gamma_panel(snap_A, ...
         sprintf('Study A (matched CT\\_1)  |  %s', ftxt), ptxt, stxt);
     save_and_maybe_close(fhA, CONFIG, [file_tag '_panel_studyA']);
@@ -495,28 +542,49 @@ if CONFIG.plot_results
         sprintf('Study B (CT\\_3\\rightarrowCT\\_1)  |  %s', ftxt), ptxt, stxt);
     save_and_maybe_close(fhB, CONFIG, [file_tag '_panel_studyB']);
 
+    if have_null
+        fhN = plot_dose_gamma_panel(snap_N, ...
+            sprintf('Noise floor / null (noise-only)  |  %s', ftxt), ptxt, stxt);
+        save_and_maybe_close(fhN, CONFIG, [file_tag '_panel_noise']);
+    end
+
     % --- Gamma pass rate vs TR iteration ---
-    % Figure - Study A alone.
-    fh1 = plot_gamma_convergence({pass_A}, ...
-        {'Recon CT\_1 vs Truth D1'}, {green}, CONFIG.gamma_n, ...
+    % The noise floor (gray) is overlaid on every convergence graph so the A/B
+    % signal curves can be seen sitting above it.
+
+    % Figure - Study A alone (+ noise floor).
+    sA = {pass_A}; lA = {'Recon CT\_1 vs Truth D1'}; cA = {green};
+    if have_null, sA{end+1} = pass_N; lA{end+1} = null_lbl; cA{end+1} = gray; end
+    fh1 = plot_gamma_convergence(sA, lA, cA, CONFIG.gamma_n, ...
         sprintf('Study A: Matched CT\\_1 Reconstruction  |  %s', ftxt), ...
         CONFIG.patient_id, CONFIG.session);
     save_and_maybe_close(fh1, CONFIG, [file_tag '_convergence_studyA']);
 
-    % Figure - Study B alone.
-    fh2 = plot_gamma_convergence({pass_B}, ...
-        {'Recon CT\_3\rightarrowCT\_1 vs Truth D1'}, {red}, CONFIG.gamma_n, ...
+    % Figure - Study B alone (+ noise floor).
+    sB = {pass_B}; lB = {'Recon CT\_3\rightarrowCT\_1 vs Truth D1'}; cB = {red};
+    if have_null, sB{end+1} = pass_N; lB{end+1} = null_lbl; cB{end+1} = gray; end
+    fh2 = plot_gamma_convergence(sB, lB, cB, CONFIG.gamma_n, ...
         sprintf('Study B: Cross-CT (CT\\_3 delivery, CT\\_1 model)  |  %s', ftxt), ...
         CONFIG.patient_id, CONFIG.session);
     save_and_maybe_close(fh2, CONFIG, [file_tag '_convergence_studyB']);
 
-    % Figure - both overlaid.
-    fh3 = plot_gamma_convergence({pass_A, pass_B}, ...
-        {'A: Recon CT\_1 vs D1', 'B: Recon CT\_3\rightarrowCT\_1 vs D1'}, ...
-        {green, red}, CONFIG.gamma_n, ...
-        sprintf('Gamma Convergence: Matched CT\\_1 vs Cross-CT  |  %s', ftxt), ...
+    % Figure - both studies overlaid (+ noise floor).
+    s3 = {pass_A, pass_B};
+    l3 = {'A: Recon CT\_1 vs D1', 'B: Recon CT\_3\rightarrowCT\_1 vs D1'};
+    c3 = {green, red};
+    if have_null, s3{end+1} = pass_N; l3{end+1} = null_lbl; c3{end+1} = gray; end
+    fh3 = plot_gamma_convergence(s3, l3, c3, CONFIG.gamma_n, ...
+        sprintf('Gamma Convergence: Signal vs Noise Floor  |  %s', ftxt), ...
         CONFIG.patient_id, CONFIG.session);
     save_and_maybe_close(fh3, CONFIG, [file_tag '_convergence_overlay']);
+
+    % Figure - noise floor alone (its own convergence, mirroring A/B).
+    if have_null
+        fhN2 = plot_gamma_convergence({pass_N}, {null_lbl}, {gray}, CONFIG.gamma_n, ...
+            sprintf('Noise Floor (null): Noise-only Reconstruction  |  %s', ftxt), ...
+            CONFIG.patient_id, CONFIG.session);
+        save_and_maybe_close(fhN2, CONFIG, [file_tag '_convergence_noise']);
+    end
 end
 
 %% ========================= SAVE RESULTS ================================
@@ -532,8 +600,11 @@ RESULTS.num_iterations  = N_iter;
 RESULTS.iterations      = (1:N_iter)';
 RESULTS.pass_rate_A     = pass_A;   % matched CT_1, recon vs D1
 RESULTS.pass_rate_B     = pass_B;   % cross-CT (CT_3 fwd, CT_1 recon), recon vs D1
+RESULTS.pass_rate_N     = pass_N;   % noise-floor null (noise-only), recon vs D1; [] if skipped
 RESULTS.snapshot_A      = snap_A;   % iter-1/10 recon dose + gamma map (Study A)
 RESULTS.snapshot_B      = snap_B;   % iter-1/10 recon dose + gamma map (Study B)
+RESULTS.snapshot_N      = snap_N;   % iter-1/10 recon dose + gamma map (noise floor); [] if skipped
+RESULTS.noise_amp_A     = noise_amp_A;   % absolute noise amplitude (Pa) used for the null
 RESULTS.dose_filename_ct1 = CONFIG.dose_filename_ct1;
 RESULTS.dose_filename_ct3 = CONFIG.dose_filename_ct3;
 RESULTS.spacing_mm      = spacing_mm;
@@ -558,10 +629,10 @@ end   % ===== end of main function study_gamma_index_convergence =====
 %  LOCAL FUNCTIONS
 %% =========================================================================
 
-function [pass_rates, snap] = run_tr_convergence(tag, kgrid, inputArgs, ...
+function [pass_rates, snap, noise_amp] = run_tr_convergence(tag, kgrid, inputArgs, ...
         kmed_fwd, kmed_recon, p0, sensor, ...
         grun_recon_exp, dens_recon_exp, ref_dose_exp, doseMask_exp, body_exp, ...
-        num_pulses, expdims, spacing_mm, gamma_crit, N_iter, CONFIG)
+        num_pulses, expdims, spacing_mm, gamma_crit, N_iter, CONFIG, opts)
 %RUN_TR_CONVERGENCE Forward sim (through kmed_fwd) + iterative time reversal
 %  (through kmed_recon), recording the gamma pass rate of the reconstructed dose
 %  against ref_dose_exp AFTER EVERY iteration.
@@ -583,6 +654,18 @@ function [pass_rates, snap] = run_tr_convergence(tag, kgrid, inputArgs, ...
 %                   .ref_dose   truth D1 on the expanded grid
 %                   .slice      axial (Z) index of the truth max, for display
 %                   .spacing_mm, .gamma_crit
+%    noise_amp  - absolute electronic-noise amplitude (Pa) injected by the
+%                 measurement chain (0 when no pulse model). Feeds the null study.
+%
+%  NULL / NOISE-FLOOR MODE (opts.noise_only == true): no coherent forward source
+%  is simulated. Instead the sensor traces are pure electronic noise at
+%  opts.forced_noise_amp (matched to a real study), pushed through the identical
+%  deconvolution + TR-convergence + per-iteration gamma pipeline. The resulting
+%  pass_rates are the noise floor: real studies should sit far above them.
+
+    if nargin < 19 || isempty(opts), opts = struct(); end
+    if ~isfield(opts, 'noise_only'),       opts.noise_only = false;      end
+    if ~isfield(opts, 'forced_noise_amp'), opts.forced_noise_amp = [];   end
 
     ex = expdims(1); ey = expdims(2); ez = expdims(3);
 
@@ -608,18 +691,33 @@ function [pass_rates, snap] = run_tr_convergence(tag, kgrid, inputArgs, ...
     % on the device"). So EVERY kspaceFirstOrder3D output is gathered to CPU here
     % and all persistent loop state (sensorData, reconPressure) is kept on CPU;
     % k-Wave re-casts the CPU inputs to GPU internally each call.
-    fprintf('[%s] Forward simulation...\n', tag);
-    source_fwd = struct('p0', p0);
-    fwd_tic    = tic;
-    sensorData = gather(kspaceFirstOrder3D(kgrid, kmed_fwd, source_fwd, sensor, inputArgs{:}));
-    fprintf('[%s] Forward complete (%.1f s). Sensor data: [%d x %d]\n', ...
-        tag, toc(fwd_tic), size(sensorData, 1), size(sensorData, 2));
+    FS = 1 / kgrid.dt;
+    if opts.noise_only
+        % ---- NULL: no coherent source; sensor sees only electronic noise ----
+        % Build zero-signal traces of the SAME shape a real forward sim would
+        % produce, then let the measurement chain inject noise at the matched
+        % absolute amplitude and Wiener-deconvolve it exactly as for real data.
+        nSens = nnz(sensor.mask);
+        Nt    = kgrid.Nt;
+        fprintf('[%s] Noise-only null: %d sensors x %d samples, noise amp = %.3e Pa.\n', ...
+            tag, nSens, Nt, opts.forced_noise_amp);
+        sensorData = zeros(nSens, Nt);
+        [sensorData, sensorData_measured, noise_amp] = apply_measurement_chain( ...
+            sensorData, kgrid.dt, FS, CONFIG, true, opts.forced_noise_amp);
+    else
+        fprintf('[%s] Forward simulation...\n', tag);
+        source_fwd = struct('p0', p0);
+        fwd_tic    = tic;
+        sensorData = gather(kspaceFirstOrder3D(kgrid, kmed_fwd, source_fwd, sensor, inputArgs{:}));
+        fprintf('[%s] Forward complete (%.1f s). Sensor data: [%d x %d]\n', ...
+            tag, toc(fwd_tic), size(sensorData, 1), size(sensorData, 2));
 
-    sensorData = gather(smooth(sensorData));
-    FS         = 1 / kgrid.dt;
+        sensorData = gather(smooth(sensorData));
 
-    %% ---- Physical measurement chain (pulse / freq response / noise / deconv) ----
-    [sensorData, sensorData_measured] = apply_measurement_chain(sensorData, kgrid.dt, FS, CONFIG);
+        %% ---- Physical measurement chain (pulse / freq response / noise / deconv) ----
+        [sensorData, sensorData_measured, noise_amp] = apply_measurement_chain( ...
+            sensorData, kgrid.dt, FS, CONFIG);
+    end
 
     %% ---- Pressure->dose conversion factor for the recon medium ----
     conversionFactor = grun_recon_exp .* dens_recon_exp;
@@ -693,12 +791,27 @@ function [pass_rates, snap] = run_tr_convergence(tag, kgrid, inputArgs, ...
 end
 
 
-function [sensorData, sensorData_measured] = apply_measurement_chain(sensorData, dt, FS, CONFIG)
+function [sensorData, sensorData_measured, noise_amp] = apply_measurement_chain( ...
+        sensorData, dt, FS, CONFIG, noise_only, forced_noise_amp)
 %APPLY_MEASUREMENT_CHAIN Model the physical acquisition chain, in order:
 %  (1) convolve each sensor trace with a Gaussian pulse kernel, (2) apply the
 %  sensor frequency response, (3) add electronic noise, (4) Wiener-deconvolve the
 %  pulse kernel. With CONFIG.convolution_kernel == 0 only the frequency response
 %  is applied. Ported from run_standalone_simulation.m.
+%
+%  noise_only (default false): the NULL path. The coherent (post-frequency-
+%  response) signal is zeroed, so the only content is freshly drawn electronic
+%  noise; everything downstream (noise draw + Wiener deconvolution) is identical
+%  to the real path, so the noise "appears in the same way".
+%  forced_noise_amp (default []): use this absolute noise amplitude (Pa) instead
+%  of the signal-scaled default -- lets the null match a real study's noise level.
+%
+%  Third output noise_amp is the absolute electronic-noise amplitude used (Pa),
+%  0 when there is no pulse model (no noise-injection point).
+    if nargin < 5 || isempty(noise_only), noise_only = false; end
+    if nargin < 6,                        forced_noise_amp = []; end
+    noise_amp = 0;
+
     if CONFIG.convolution_kernel > 0
         conv_kernel_sigma  = CONFIG.convolution_kernel;
         conv_noise_level   = CONFIG.conv_noise_level;
@@ -718,7 +831,17 @@ function [sensorData, sensorData_measured] = apply_measurement_chain(sensorData,
 
         sensorData_conv   = real(ifft(fft(sensorData_cpu, [], 2) .* H, [], 2));
         sensorData_resp   = gaussianFilter(sensorData_conv, FS, 0.35e6, 100, true);
-        noise_amp         = conv_noise_level * max(abs(sensorData_resp(:)));
+
+        if noise_only
+            % Null: strip the coherent signal, keep only the noise draw.
+            sensorData_resp = zeros(size(sensorData_resp));
+        end
+
+        if ~isempty(forced_noise_amp)
+            noise_amp = forced_noise_amp;
+        else
+            noise_amp = conv_noise_level * max(abs(sensorData_resp(:)));
+        end
         sensorData_noisy  = sensorData_resp + noise_amp * randn(size(sensorData_resp));
         sensorData_deconv = real(ifft( ...
             fft(sensorData_noisy, [], 2) .* H_conj ./ (H_power + conv_deconv_lambda), [], 2));
@@ -726,9 +849,15 @@ function [sensorData, sensorData_measured] = apply_measurement_chain(sensorData,
         sensorData          = single(sensorData_deconv);
         sensorData_measured = single(sensorData_deconv);
     else
-        % gather so the returned sensor data is CPU-resident (gaussianFilter
-        % preserves the input's device; the caller keeps sensorData on the CPU).
-        sensorData          = gather(gaussianFilter(sensorData, FS, 0.35e6, 100, true));
+        % No pulse model => no electronic-noise injection point. In noise-only
+        % mode there is nothing to reconstruct; the caller guards against this.
+        if noise_only
+            sensorData = zeros(size(sensorData), 'single');
+        else
+            % gather so the returned sensor data is CPU-resident (gaussianFilter
+            % preserves the input's device; the caller keeps sensorData on the CPU).
+            sensorData = gather(gaussianFilter(sensorData, FS, 0.35e6, 100, true));
+        end
         sensorData_measured = sensorData;
     end
 end
@@ -1204,6 +1333,13 @@ function CONFIG = default_config()
 
     % TR iterations snapshotted for the truth-vs-recon dose/gamma panels.
     CONFIG.snapshot_iters = [1, 10];
+
+    % Noise-floor null hypothesis: reconstruct pure electronic noise (matched to
+    % Study A's noise amplitude) through the same TR-convergence pipeline, so the
+    % A/B signal curves can be shown sitting far above it. null_realizations > 1
+    % averages the noise-floor pass rates over independent noise draws (the panel
+    % uses the first realization). Requires convolution_kernel > 0 to be active.
+    CONFIG.null_realizations = 1;
 
     % --- Pulse Convolution / Noise / Deconvolution (physical measurement chain) ---
     % Set convolution_kernel to 0 to apply only the sensor frequency response.

@@ -106,7 +106,7 @@ fprintf('=========================================================\n\n');
 %% ========================= RUN OVER SELECTION ===========================
 
 summary = struct('name', {}, 'ok', {}, 'pass_A_final', {}, 'pass_B_final', {}, ...
-    'runtime_s', {}, 'error', {});
+    'pass_N_final', {}, 'runtime_s', {}, 'error', {});
 
 for i = 1:nPick
     name      = selected(i).name;
@@ -122,11 +122,17 @@ for i = 1:nPick
         summary(i).ok           = true;
         summary(i).pass_A_final = RESULTS.pass_rate_A(end);
         summary(i).pass_B_final = RESULTS.pass_rate_B(end);
+        if isfield(RESULTS, 'pass_rate_N') && ~isempty(RESULTS.pass_rate_N)
+            summary(i).pass_N_final = RESULTS.pass_rate_N(end);   % noise floor
+        else
+            summary(i).pass_N_final = NaN;
+        end
         summary(i).error        = '';
     catch ME
         summary(i).ok           = false;
         summary(i).pass_A_final = NaN;
         summary(i).pass_B_final = NaN;
+        summary(i).pass_N_final = NaN;
         summary(i).error        = ME.message;
         fprintf('  [ERROR] %s failed: %s\n', name, ME.message);
     end
@@ -138,14 +144,14 @@ end
 batch_runtime = toc(batch_timer);
 
 fprintf('\n==================== BATCH SUMMARY ====================\n');
-fprintf('  %-42s  %-6s  %-10s  %-10s  %-8s\n', ...
-    'dose file', 'ok', 'A final %', 'B final %', 'time (s)');
+fprintf('  %-42s  %-6s  %-10s  %-10s  %-12s  %-8s\n', ...
+    'dose file', 'ok', 'A final %', 'B final %', 'Noise flr %', 'time (s)');
 for i = 1:numel(summary)
     okstr = 'yes';
     if ~summary(i).ok, okstr = 'NO'; end
-    fprintf('  %-42s  %-6s  %-10.2f  %-10.2f  %-8.1f\n', ...
+    fprintf('  %-42s  %-6s  %-10.2f  %-10.2f  %-12.2f  %-8.1f\n', ...
         summary(i).name, okstr, summary(i).pass_A_final, ...
-        summary(i).pass_B_final, summary(i).runtime_s);
+        summary(i).pass_B_final, summary(i).pass_N_final, summary(i).runtime_s);
 end
 fprintf('------------------------------------------------------\n');
 fprintf('  Total: %d files, %d ok, %.1f s (%.2f min).\n', ...
