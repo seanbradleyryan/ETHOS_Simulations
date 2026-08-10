@@ -93,7 +93,7 @@ function CONFIG = get_default_config(varargin)
 
     % --- Reconstruction method: 'tr' (iterative time reversal) | 'das' | 'hybrid' ---
     CONFIG.reconstruction_method  = 'tr';
-    CONFIG.num_time_reversal_iter = 10;
+    CONFIG.num_time_reversal_iter = 1;
     CONFIG.convergence_tol        = 1e-3;
 
     % --- Pulse convolution / noise / deconvolution (set kernel 0 to disable) ---

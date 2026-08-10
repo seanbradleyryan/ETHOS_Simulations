@@ -18,10 +18,14 @@ addpath(genpath(fullfile(fileparts(mfilename('fullpath')), 'utils')));
 %% ========================= CONFIGURATION ================================
 
 CONFIG = get_default_config();
+CONFIG.mask_recon_to_dose_region     = false;    % zero recon dose outside the >1% dose mask
+
 
 % --- Comparison-specific settings ---
 CONFIG.ct_pair      = [1, 3];   % the two CT images paired for comparison
 CONFIG.reference_ct = 1;        % geometry we (blindly) reconstruct on
+
+CONFIG.num_tr_iter = 1; 
 
 % --- Example overrides ---
 % CONFIG.dose_filename         = 'dose_1194203_Session_1_reference_CT_1_B15_112.mat';
