@@ -27,9 +27,25 @@ CONFIG.reference_ct = 1;        % geometry we (blindly) reconstruct on
 
 CONFIG.num_tr_iter = 1; 
 
+% Noise-only control: re-run the blind (counterpart-CT) field with the true
+% acoustic signal nulled, so only electronic noise is reconstructed. Compared
+% against the real recon to check the reconstruction is recovering signal, not
+% noise artifacts. Set false to skip the extra simulation.
+CONFIG.include_noise_only = true;
+
 % --- Example overrides ---
 % CONFIG.dose_filename         = 'dose_1194203_Session_1_reference_CT_1_B15_112.mat';
 % CONFIG.reconstruction_method = 'tr';
+
+%% ===================== PLOT SELECTION ===================================
+%  Enable/disable each figure drawn at the end of this script. These only take
+%  effect when CONFIG.plot_results is true (the master switch). Edit freely --
+%  this PLOTS struct is local to this script.
+PLOTS = struct();
+PLOTS.dose_panels       = true;   % 3-view panels: the two reconstructed doses
+PLOTS.convergence       = true;   % TR max-pressure / relative-change history
+PLOTS.gamma_maps        = true;   % per-pair gamma + error axial maps
+PLOTS.noise_only_panels = true;   % 3-view panels: blind recon vs noise-only recon
 
 %% ===================== RESOLVE DOSE PAIR & CBCT PATHS ====================
 %  Resolve the listed dose (A), then derive its counterpart (B) on the other CT
@@ -131,6 +147,31 @@ for di = 1:2
     RES(di).label             = label_list{di};
 end
 
+%% ===================== NOISE-ONLY CONTROL RECONSTRUCTION ================
+%  Re-run the BLIND (counterpart-CT) field with CONFIG.noise_only, which nulls
+%  the true acoustic signal and reconstructs only electronic noise (at the same
+%  amplitude the real run uses). If this looks like the real recon, the
+%  "reconstruction" is dominated by artifacts rather than genuine dose recovery.
+
+recon_noise = [];
+if CONFIG.include_noise_only
+    di_blind = find(ct_list ~= CONFIG.reference_ct, 1);
+    if isempty(di_blind), di_blind = 2; end   % degenerate: reference not in pair
+    ct_blind = ct_list(di_blind);
+
+    fprintf('\n########## NOISE-ONLY CONTROL: CT_%d geometry ##########\n', ct_blind);
+
+    cfg = CONFIG;
+    cfg.dose_file_override       = dose_filepath_list{di_blind};
+    cfg.cbct_file_override       = cbct_filepath_list{di_blind};
+    cfg.blind_recon              = (ct_blind ~= CONFIG.reference_ct);
+    cfg.recon_cbct_file_override = recon_cbct_filepath;
+    cfg.noise_only               = true;
+
+    out_noise   = run_standalone_field(cfg);
+    recon_noise = out_noise.recon_dose;
+end
+
 %% ===================== EXTRACT / MAP / NORMALIZE =========================
 
 recon_A    = RES(1).recon_dose;
@@ -152,6 +193,12 @@ dose2  = double(RES(idx2).doseGrid);   recon2 = double(RES(idx2).recon_dose);
 label1 = RES(idx1).label;              label2 = RES(idx2).label;
 sensor1 = RES(idx1).sensor_mask;       sensor2 = RES(idx2).sensor_mask;
 
+% The noise-only control shares the blind field's geometry (idx2), so it lines
+% up with dose2 / recon2 / sensor2 for gamma and plotting.
+if ~isempty(recon_noise)
+    recon_noise = double(recon_noise);
+end
+
 % Least-squares normalization: scale each recon to its OWN-CT truth.
 if isfield(CONFIG, 'normalize') && CONFIG.normalize
     g1 = least_squares_gain(dose1, recon1);
@@ -160,6 +207,9 @@ if isfield(CONFIG, 'normalize') && CONFIG.normalize
     recon2 = recon2 * g2;
     recon_A = recon_A * least_squares_gain(double(RES(1).doseGrid), recon_A);
     recon_B = recon_B * least_squares_gain(double(RES(2).doseGrid), recon_B);
+    if ~isempty(recon_noise)
+        recon_noise = recon_noise * least_squares_gain(dose2, recon_noise);
+    end
     fprintf('\n[NORM] LSQ gains: recon(%s)=%.4g, recon(%s)=%.4g\n', label1, g1, label2, g2);
 end
 
@@ -173,6 +223,15 @@ gamma_pairs = {
     'recon2_vs_dose2', dose2,  recon2, sprintf('%s recon  vs  %s truth', label2, label2), sensor2;
     'recon2_vs_dose1', dose1,  recon2, sprintf('%s recon  vs  %s truth', label2, label1), sensor2;
 };
+
+% Noise-only control comparisons (blind geometry, idx2): how well pure noise
+% passes gamma against the truth, and how similar it is to the real recon.
+if ~isempty(recon_noise)
+    gamma_pairs = [gamma_pairs; {
+        'noise_vs_dose2',  dose2,  recon_noise, sprintf('noise-only  vs  %s truth', label2), sensor2;
+        'noise_vs_recon2', recon2, recon_noise, sprintf('noise-only  vs  %s recon', label2), sensor2;
+    }];
+end
 
 gamma_results = struct();
 if exist('CalcGamma', 'file') == 2
@@ -221,6 +280,9 @@ if CONFIG.save_results
     results.reconPressure_B = RES(2).reconPressure;
     results.sensor_mask_A   = RES(1).sensor_mask;
     results.sensor_mask_B   = RES(2).sensor_mask;
+    if ~isempty(recon_noise)
+        results.recon_dose_noise = recon_noise;   % noise-only control (blind geometry)
+    end
     results.config          = CONFIG;
     results.spacing_mm      = spacing_mm;
     results.grid_size       = RES(1).gridSize;
@@ -236,16 +298,19 @@ end
 %% ========================= POST-SIMULATION PLOTS =======================
 
 if CONFIG.plot_results
-    plot_dose_panels(recon_A, recon_B, RES(1).sensor_mask, RES(1).density, spacing_mm, ...
-        'Dose Comparison: Two Reconstructed Doses', CONFIG.viz_smooth_sigma, ...
-        {RES(1).label, RES(2).label});
+    if PLOTS.dose_panels
+        plot_dose_panels(recon_A, recon_B, RES(1).sensor_mask, RES(1).density, spacing_mm, ...
+            'Dose Comparison: Two Reconstructed Doses', CONFIG.viz_smooth_sigma, ...
+            {RES(1).label, RES(2).label});
+    end
 
-    if any(strcmpi(CONFIG.reconstruction_method, {'tr', 'hybrid'})) && ~isempty(RES(1).conv_max_pressure)
+    if PLOTS.convergence && ...
+            any(strcmpi(CONFIG.reconstruction_method, {'tr', 'hybrid'})) && ~isempty(RES(1).conv_max_pressure)
         plot_convergence_history(RES(1).conv_max_pressure, RES(1).conv_rel_change, ...
             RES(1).num_iters_done, CONFIG.convergence_tol, max(RES(1).p0(:)));
     end
 
-    if ~isempty(gamma_results) && isstruct(gamma_results)
+    if PLOTS.gamma_maps && ~isempty(gamma_results) && isstruct(gamma_results)
         pair_fn = fieldnames(gamma_results);
         for k = 1:numel(pair_fn)
             gr = gamma_results.(pair_fn{k});
@@ -253,6 +318,12 @@ if CONFIG.plot_results
             [~, ~, cz_gamma]  = ind2sub(size(gr.ref), max_dose_idx);
             plot_gamma_and_error_axial(gr, gr.ref, gr.tgt, gr.sensor_mask, cz_gamma, gr.title);
         end
+    end
+
+    if PLOTS.noise_only_panels && ~isempty(recon_noise)
+        plot_dose_panels(recon2, recon_noise, sensor2, RES(idx2).density, spacing_mm, ...
+            sprintf('Noise-only control: %s recon vs noise-only recon', label2), ...
+            CONFIG.viz_smooth_sigma, {sprintf('%s recon', label2), 'Noise-only recon'});
     end
 end
 
