@@ -215,22 +215,50 @@ if isfield(CONFIG, 'normalize') && CONFIG.normalize
 end
 
 %% ========================= GAMMA ANALYSIS ==============================
-%  Four 3%/3mm comparisons. Each pair: {name, reference(truth), target, title, sensor}.
+%  3%/3mm comparisons in two groups. Each row:
+%  {name, group, reference(truth), target, title, sensor}.
+%    HEADLINE    -- everything referenced to the CT ref truth:
+%                     CT ref truth  vs  CT blind truth
+%                     CT ref truth  vs  CT ref   recon
+%                     CT ref truth  vs  CT blind recon
+%                     CT ref truth  vs  noise-only recon
+%    SUBHEADLINE -- everything referenced to the CT blind truth:
+%                     CT blind truth vs  CT blind recon
+%                     CT blind truth vs  noise-only recon
+%  ct_ref = full-access recon geometry (dose1/recon1); ct_blind = blind
+%  geometry (dose2/recon2). recon_noise is on the blind geometry.
+
+ct_ref   = CONFIG.reference_ct;
+blind_ids = ct_list(ct_list ~= ct_ref);
+ct_blind  = blind_ids(1);
 
 gamma_criteria = {3, 3, '3%/3mm'};
-gamma_pairs = {
-    'dose1_vs_dose2',  dose1,  dose2,  sprintf('%s truth  vs  %s truth', label1, label2), sensor1;
-    'recon1_vs_dose1', dose1,  recon1, sprintf('%s recon  vs  %s truth', label1, label1), sensor1;
-    'recon2_vs_dose2', dose2,  recon2, sprintf('%s recon  vs  %s truth', label2, label2), sensor2;
-    'recon2_vs_dose1', dose1,  recon2, sprintf('%s recon  vs  %s truth', label2, label1), sensor2;
-};
 
-% Noise-only control comparisons (blind geometry, idx2): how well pure noise
-% passes gamma against the truth, and how similar it is to the real recon.
+% --- Headline: referenced to CT ref truth ---
+gamma_pairs = {
+    'headline_truth_vs_truth',      'Headline', dose1, dose2, ...
+        sprintf('CT %d truth  vs  CT %d truth', ct_ref, ct_blind), sensor1;
+    'headline_truth_vs_refrecon',   'Headline', dose1, recon1, ...
+        sprintf('CT %d truth  vs  CT %d recon', ct_ref, ct_ref),   sensor1;
+    'headline_truth_vs_blindrecon', 'Headline', dose1, recon2, ...
+        sprintf('CT %d truth  vs  CT %d recon', ct_ref, ct_blind), sensor2;
+};
 if ~isempty(recon_noise)
     gamma_pairs = [gamma_pairs; {
-        'noise_vs_dose2',  dose2,  recon_noise, sprintf('noise-only  vs  %s truth', label2), sensor2;
-        'noise_vs_recon2', recon2, recon_noise, sprintf('noise-only  vs  %s recon', label2), sensor2;
+        'headline_truth_vs_noise',  'Headline', dose1, recon_noise, ...
+            sprintf('CT %d truth  vs  noise-only recon', ct_ref),  sensor2;
+    }];
+end
+
+% --- Subheadline: referenced to CT blind truth ---
+gamma_pairs = [gamma_pairs; {
+    'sub_truth_vs_blindrecon',      'Subheadline', dose2, recon2, ...
+        sprintf('CT %d truth  vs  CT %d recon', ct_blind, ct_blind), sensor2;
+}];
+if ~isempty(recon_noise)
+    gamma_pairs = [gamma_pairs; {
+        'sub_truth_vs_noise',       'Subheadline', dose2, recon_noise, ...
+            sprintf('CT %d truth  vs  noise-only recon', ct_blind), sensor2;
     }];
 end
 
@@ -238,23 +266,29 @@ gamma_results = struct();
 if exist('CalcGamma', 'file') == 2
     for pp = 1:size(gamma_pairs, 1)
         pair_name  = gamma_pairs{pp, 1};
-        ref_vol    = gamma_pairs{pp, 2};
-        tgt_vol    = gamma_pairs{pp, 3};
-        fprintf('\n[Gamma] %s\n', gamma_pairs{pp, 4});
+        ref_vol    = gamma_pairs{pp, 3};
+        tgt_vol    = gamma_pairs{pp, 4};
+        fprintf('\n[Gamma] %s\n', gamma_pairs{pp, 5});
         gr = compute_gamma(ref_vol, tgt_vol, spacing_mm, 'Criteria', gamma_criteria);
-        gr.name  = pair_name;
-        gr.title = gamma_pairs{pp, 4};
-        gr.ref   = ref_vol;
-        gr.tgt   = tgt_vol;
-        gr.sensor_mask = gamma_pairs{pp, 5};
+        gr.name        = pair_name;
+        gr.group       = gamma_pairs{pp, 2};
+        gr.title       = gamma_pairs{pp, 5};
+        gr.ref         = ref_vol;
+        gr.tgt         = tgt_vol;
+        gr.sensor_mask = gamma_pairs{pp, 6};
         gamma_results.(pair_name) = gr;
     end
 
-    fprintf('\n  ------ Gamma Pass Rates (10%% cutoff on reference) ------\n');
+    fprintf('\n  ===== Gamma Pass Rates (3%%/3mm, 10%% cutoff on reference) =====\n');
     pair_fn = fieldnames(gamma_results);
-    for pp = 1:numel(pair_fn)
-        gr = gamma_results.(pair_fn{pp});
-        fprintf('  %-34s %8.2f%%\n', gr.title, gr.pass_rates(1));
+    for grp = {'Headline', 'Subheadline'}
+        fprintf('\n  %s:\n', grp{1});
+        for pp = 1:numel(pair_fn)
+            gr = gamma_results.(pair_fn{pp});
+            if strcmp(gr.group, grp{1})
+                fprintf('    %-36s %8.2f%%\n', gr.title, gr.pass_rates(1));
+            end
+        end
     end
 else
     warning('CalcGamma not found. Skipping gamma analysis.');
