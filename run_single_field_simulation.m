@@ -1,12 +1,27 @@
-function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbct_resampled, medium, beam_metadata, config, precomputed_sensor)
+function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbct_resampled, medium, beam_metadata, config, precomputed_sensor, medium_recon)
 %RUN_SINGLE_FIELD_SIMULATION k-Wave forward + time-reversal for one field
 %
-%   [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbct_resampled, medium, beam_metadata, config, precomputed_sensor)
+%   [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbct_resampled, medium, beam_metadata, config, precomputed_sensor, medium_recon)
 %
 %   Converts a single radiation field dose to initial acoustic pressure
 %   (p0 = D * Gamma * rho), runs the k-Wave forward simulation to generate
 %   synthetic sensor data, then applies time-reversal (or DAS) reconstruction
 %   to recover the initial pressure distribution and converts back to dose.
+%
+%   TWO RECONSTRUCTION MODES (selected by CONFIG.blind_recon):
+%     * FULL ACCESS (CONFIG.blind_recon = false, the default): the forward
+%       simulation AND the reconstruction both run on `medium`. Identical to the
+%       historical behavior of this function; `medium_recon` is ignored.
+%     * BLIND (CONFIG.blind_recon = true AND a non-empty `medium_recon`): models
+%       the live IRAI case where the acoustic waves are generated in and travel
+%       through the patient's TRUE (adapted, e.g. CT_3) anatomy `medium`, but the
+%       ONLY geometry we can invert on is the reference (e.g. CT_1) anatomy
+%       `medium_recon`. Forward propagation (and p0) use `medium`; iterative time
+%       reversal, the residual re-forward inside the TR loop, DAS delays, and the
+%       final pressure->dose conversion all use `medium_recon`. Both media live on
+%       the same base grid, so every grid transform (force-uniform overrides,
+%       downscale, FFT padding, determine_sensor_mask grid expansion / re-padding)
+%       is applied to `medium_recon` in lockstep to keep the two voxel-aligned.
 %
 %   INPUTS:
 %       field_dose - Struct from step15_process_doses:
@@ -60,6 +75,9 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
 %           .conv_noise_level           [0.01]   - Noise fraction of peak sensor
 %           .conv_deconv_lambda         [1e-4]   - Wiener deconvolution regularisation
 %           .reconstruction_method      ['tr']   - 'tr' or 'das'
+%           .blind_recon                [false]  - When true (and medium_recon is
+%                                                  supplied), forward on `medium`
+%                                                  but reconstruct on medium_recon.
 %           .use_attenuation            [true]   - Use medium.alpha_coeff in kspaceFirstOrder3D
 %           .alpha_power                [1.1]    - Acoustic attenuation power exponent
 %           .use_pressure_scale_correction [false]
@@ -92,6 +110,13 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
 %           and only when its base grid matches this field's grid (e.g. it is
 %           ignored under a non-unity downscale_factor). Pass [] or omit to
 %           compute the mask inline per field as before.
+%       medium_recon - (Optional) RECONSTRUCTION (reference-geometry) acoustic
+%           medium from create_acoustic_medium() for the reference CBCT (e.g.
+%           CBCT1). Used for iterative time reversal, the residual re-forward
+%           inside the TR loop, DAS delays, and the pressure->dose conversion.
+%           Same fields as `medium` and the SAME base grid. Honored only when
+%           CONFIG.blind_recon is true; pass [] or omit for full-access
+%           reconstruction (both passes on `medium`).
 %
 %   OUTPUTS:
 %       recon_dose  - 3D reconstructed dose array (Gy), cropped back to the
@@ -109,6 +134,8 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
 %           .conv_rel_change    - Per-iteration relative change
 %           .grid_padding       - Original / padded / expanded sizes
 %           .recon_method       - Which branch ran ('tr' | 'das')
+%           .blind_recon        - Logical: true when forward and reconstruction
+%                                 media differed (blind geometry)
 %
 %   NOTES:
 %       - Stateless: safe for parfor execution. Diagnostic plotting must be
@@ -164,15 +191,29 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
     uniform_gruneisen_val   = safe_config(config, 'uniform_gruneisen', 1.0);
 
     plot_results = safe_config(config, 'plot_results', false);
+    return_diag  = safe_config(config, 'return_diagnostics', false);
 
     sensor_method = safe_config(config, 'sensor_placement_method', 'full_plane_anterior');
 
     if nargin < 4, beam_metadata = []; end
     if nargin < 6, precomputed_sensor = []; end
+    if nargin < 7, medium_recon = []; end
+
+    % Blind reconstruction: forward-propagate on `medium` (true / CT_3 geometry)
+    % but time-reverse on `medium_recon` (reference / CT_1 geometry). Enabled by
+    % CONFIG.blind_recon AND a non-empty medium_recon. Otherwise it is full
+    % access -- every reconstruction stage runs on `medium` exactly as before.
+    blind_recon = safe_config(config, 'blind_recon', false) && ~isempty(medium_recon);
+    if safe_config(config, 'blind_recon', false) && isempty(medium_recon)
+        warning('run_single_field_simulation:BlindNoReconMedium', ...
+            ['CONFIG.blind_recon is true but no reconstruction medium was ' ...
+             'supplied; running full-access reconstruction.']);
+    end
 
     % Initialize sim_results output
     sim_results              = struct();
     sim_results.recon_method = recon_method;
+    sim_results.blind_recon  = blind_recon;
 
     %% ======================== EXTRACT DATA ========================
 
@@ -196,6 +237,13 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
             Nx, Ny, Nz, ...
             medium.grid_size(1), medium.grid_size(2), medium.grid_size(3));
     end
+    if blind_recon && isfield(medium_recon, 'grid_size') && ...
+            ~isequal(gridSize, medium_recon.grid_size)
+        error('run_single_field_simulation:ReconSizeMismatch', ...
+            'Field dose [%d %d %d] does not match reconstruction medium [%d %d %d].', ...
+            Nx, Ny, Nz, ...
+            medium_recon.grid_size(1), medium_recon.grid_size(2), medium_recon.grid_size(3));
+    end
 
     %% ======================== PULSE CALCULATION ========================
 
@@ -208,6 +256,9 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
     num_pulses = ceil(meterset / dose_per_pulse_cGy);
 
     fprintf('        Meterset: %.2f MU, Pulses: %d\n', meterset, num_pulses);
+    if blind_recon
+        fprintf('        [BLIND] Forward on true medium, reconstruction on reference medium.\n');
+    end
     sim_results.num_pulses = num_pulses;
 
     %% ======================== FORCE-UNIFORM MEDIUM OVERRIDES ========================
@@ -216,18 +267,22 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
 
     if force_uniform_density
         medium.density = ones(gridSize) * uniform_density_val;
+        if blind_recon, medium_recon.density = ones(gridSize) * uniform_density_val; end
         fprintf('        [Override] density forced uniform = %g kg/m^3\n', uniform_density_val);
     end
     if force_uniform_speed
         medium.sound_speed = ones(gridSize) * uniform_speed_val;
+        if blind_recon, medium_recon.sound_speed = ones(gridSize) * uniform_speed_val; end
         fprintf('        [Override] sound_speed forced uniform = %g m/s\n', uniform_speed_val);
     end
     if force_uniform_atten
         medium.alpha_coeff = ones(gridSize) * uniform_alpha_coeff_val;
+        if blind_recon, medium_recon.alpha_coeff = ones(gridSize) * uniform_alpha_coeff_val; end
         fprintf('        [Override] alpha_coeff forced uniform = %g\n', uniform_alpha_coeff_val);
     end
     if force_uniform_gruneisen
         medium.gruneisen = ones(gridSize) * uniform_gruneisen_val;
+        if blind_recon, medium_recon.gruneisen = ones(gridSize) * uniform_gruneisen_val; end
         fprintf('        [Override] gruneisen forced uniform = %g\n', uniform_gruneisen_val);
     end
 
@@ -254,6 +309,17 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
         end
         medium.gruneisen   = imresize3(medium.gruneisen,   [new_Nx, new_Ny, new_Nz]);
         medium.grid_size   = [new_Nx, new_Ny, new_Nz];
+
+        % Blind: downscale the reconstruction medium in lockstep.
+        if blind_recon
+            medium_recon.density     = imresize3(medium_recon.density,     [new_Nx, new_Ny, new_Nz]);
+            medium_recon.sound_speed = imresize3(medium_recon.sound_speed, [new_Nx, new_Ny, new_Nz]);
+            if numel(medium_recon.alpha_coeff) > 1
+                medium_recon.alpha_coeff = imresize3(medium_recon.alpha_coeff, [new_Nx, new_Ny, new_Nz]);
+            end
+            medium_recon.gruneisen   = imresize3(medium_recon.gruneisen,   [new_Nx, new_Ny, new_Nz]);
+            medium_recon.grid_size   = [new_Nx, new_Ny, new_Nz];
+        end
 
         if isfield(cbct_resampled, 'bodyMask') && ~isempty(cbct_resampled.bodyMask)
             cbct_resampled.bodyMask = imresize3(single(cbct_resampled.bodyMask), ...
@@ -317,6 +383,13 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
     gridSize_orig = gridSize;
     medium_orig   = medium;
 
+    % Reconstruction medium at original size (pre-FFT-pad). Set only on the blind
+    % path; drives the pressure->dose conversion below. Left [] for full access.
+    medium_recon_orig = [];
+    if blind_recon
+        medium_recon_orig = medium_recon;
+    end
+
     % Track the original (post-downscale, pre-expansion) input size and any
     % expansion offsets so the final recon_dose can be cropped back to match
     % what the caller expects from field_dose.dose_Gy.
@@ -337,6 +410,9 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
             Nx, Ny, Nz, Nx_pad, Ny_pad, Nz_pad);
 
         [medium, p0] = pad_medium_and_p0(medium, p0, Nx, Ny, Nz, Nx_pad, Ny_pad, Nz_pad);
+        if blind_recon
+            medium_recon = pad_medium_to(medium_recon, [Nx_pad, Ny_pad, Nz_pad]);
+        end
 
         Nx = Nx_pad; Ny = Ny_pad; Nz = Nz_pad;
         gridSize = [Nx, Ny, Nz];
@@ -516,9 +592,9 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
                 medium.gruneisen   = gruneisen_exp;
                 p0 = p0_exp;
 
-                % medium_orig drives the post-recon pressure->dose conversion;
-                % update it to the expanded-but-unpadded medium so its size
-                % matches the cropped reconPressure.
+                % medium_orig drives the post-recon pressure->dose conversion in
+                % full access; update it to the expanded-but-unpadded medium so
+                % its size matches the cropped reconPressure.
                 medium_orig = struct( ...
                     'density',     density_exp, ...
                     'sound_speed', soundSpeed_exp, ...
@@ -526,6 +602,19 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
                     'gruneisen',   gruneisen_exp, ...
                     'alpha_power', medium.alpha_power, ...
                     'grid_size',   [Nx_exp, Ny_exp, Nz_exp]);
+
+                % Blind: mirror the strip->water-expand onto the reconstruction
+                % medium so it occupies the identical expanded grid. Nx_orig/
+                % Ny_orig/Nz_orig are still the PRE-expansion sizes here (bumped
+                % below). medium_recon_orig drives the pressure->dose conversion,
+                % so it must track the expanded-but-unpadded reconstruction medium.
+                if blind_recon
+                    medium_recon = crop_medium(medium_recon, [Nx_orig, Ny_orig, Nz_orig]);
+                    medium_recon = expand_medium(medium_recon, [Nx_exp, Ny_exp, Nz_exp], xr, yr, zr);
+                    medium_recon.alpha_power = alpha_power_value;
+                    medium_recon.grid_size   = [Nx_exp, Ny_exp, Nz_exp];
+                    medium_recon_orig = medium_recon;
+                end
 
                 % Expand doseGrid / doseMask / bodyMask / couchMask
                 doseGrid_exp = zeros(Nx_exp, Ny_exp, Nz_exp);
@@ -570,6 +659,9 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
                         Nx_orig, Ny_orig, Nz_orig, Nx_pad2, Ny_pad2, Nz_pad2);
                     [medium, p0] = pad_medium_and_p0(medium, p0, ...
                         Nx_orig, Ny_orig, Nz_orig, Nx_pad2, Ny_pad2, Nz_pad2);
+                    if blind_recon
+                        medium_recon = pad_medium_to(medium_recon, [Nx_pad2, Ny_pad2, Nz_pad2]);
+                    end
                     did_pad = true;
                 else
                     did_pad = ~isequal([Nx_pad2, Ny_pad2, Nz_pad2], gridSize_orig);
@@ -654,9 +746,20 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
 
     kgrid = kWaveGrid(Nx, dx, Ny, dy, Nz, dz);
 
-    % CFL-stable time step
-    maxC = max(medium.sound_speed(:));
-    minC = min(medium.sound_speed(medium.sound_speed > 0));
+    % CFL-stable time step. The SAME kgrid.dt / Nt drive both the forward
+    % propagation and (when blind) the reconstruction propagation on the
+    % reference medium, so bound the step by the fastest tissue across BOTH media
+    % and set the recording length by the slowest across both. For full access
+    % the two media are the same, so this reduces to the historical single-medium
+    % calculation.
+    if blind_recon
+        maxC = max(max(medium.sound_speed(:)), max(medium_recon.sound_speed(:)));
+        minC = min(min(medium.sound_speed(medium.sound_speed > 0)), ...
+                   min(medium_recon.sound_speed(medium_recon.sound_speed > 0)));
+    else
+        maxC = max(medium.sound_speed(:));
+        minC = min(medium.sound_speed(medium.sound_speed > 0));
+    end
     dt   = cfl * min([dx, dy, dz]) / maxC;
 
     % Simulation time: 2.5x grid diagonal traversal at minimum speed
@@ -688,6 +791,10 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
 
     %% ======================== k-WAVE MEDIUM ========================
 
+    %  kmedium     : FORWARD medium -- generates the sensor data.
+    %  kmedium_rec : RECONSTRUCTION medium -- time reversal inverts on this. For
+    %                full access it is the SAME struct as kmedium.
+
     kmedium             = struct();
     kmedium.density     = medium.density;
     kmedium.sound_speed = medium.sound_speed;
@@ -697,6 +804,21 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
     else
         kmedium.alpha_coeff = 0 * medium.alpha_coeff;
         kmedium.alpha_power = 0;
+    end
+
+    if blind_recon
+        kmedium_rec             = struct();
+        kmedium_rec.density     = medium_recon.density;
+        kmedium_rec.sound_speed = medium_recon.sound_speed;
+        if use_attenuation
+            kmedium_rec.alpha_coeff = medium_recon.alpha_coeff;
+            kmedium_rec.alpha_power = alpha_power_value;
+        else
+            kmedium_rec.alpha_coeff = 0 * medium_recon.alpha_coeff;
+            kmedium_rec.alpha_power = 0;
+        end
+    else
+        kmedium_rec = kmedium;   % full access: reconstruct on the forward medium
     end
 
     %% ======================== DATA CAST (GPU/CPU) ========================
@@ -848,7 +970,7 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
                     sensor_tr.mask   = ones(Nx, Ny, Nz);
                     sensor_tr.record = {'p_final'};
 
-                    p0_recon = kspaceFirstOrder3D(kgrid, kmedium, source_tr, sensor_tr, inputArgs{:});
+                    p0_recon = kspaceFirstOrder3D(kgrid, kmedium_rec, source_tr, sensor_tr, inputArgs{:});
 
                     if isstruct(p0_recon) && isfield(p0_recon, 'p_final')
                         reconPressure = reshape(p0_recon.p_final, [Nx, Ny, Nz]);
@@ -914,7 +1036,7 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
                     if tr_iter < num_tr_iter
                         source_resid    = struct();
                         source_resid.p0 = reconPressure;
-                        sensorDataRecon = kspaceFirstOrder3D(kgrid, kmedium, ...
+                        sensorDataRecon = kspaceFirstOrder3D(kgrid, kmedium_rec, ...
                             source_resid, sensor, inputArgs{:});
                         sensorData = sensorData + (sensorData_measured - sensorDataRecon);
                     end
@@ -944,7 +1066,8 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
                     'aperture_cos', safe_config(config, 'das_aperture_cos', 0.997), ...
                     'depth_weight', safe_config(config, 'das_depth_weight', true), ...
                     'interp',       safe_config(config, 'das_interp',       'nearest'));
-                reconPressure = das_reconstruct(sensorData, sensor, sensor_info, medium, ...
+                if blind_recon, das_medium = medium_recon; else, das_medium = medium; end
+                reconPressure = das_reconstruct(sensorData, sensor, sensor_info, das_medium, ...
                                                 Nx, Ny, Nz, dx, dy, dz, dt, das_opts);
                 reconPressure = reconPressure * correction_factor;
                 conv_max_pressure(1) = max(reconPressure(:));
@@ -1008,7 +1131,18 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
 
     %% ======================== PRESSURE -> DOSE CONVERSION ========================
 
-    conversionFactor = medium.gruneisen .* medium.density;
+    % Blind: the recovered pressure lives on the RECONSTRUCTION (reference)
+    % geometry, so convert pressure->dose with the reconstruction medium's
+    % gruneisen/density (medium_recon_orig). Full access: convert with the forward
+    % medium (medium, restored to medium_orig by the crop-to-original step above),
+    % exactly as before. The body mask still comes from cbct_resampled.
+    if blind_recon
+        conv_medium = medium_recon_orig;
+    else
+        conv_medium = medium;
+    end
+
+    conversionFactor = conv_medium.gruneisen .* conv_medium.density;
     conversionFactor(conversionFactor == 0) = 1;
 
     reconDosePerPulse = reconPressure ./ conversionFactor;
@@ -1025,8 +1159,9 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
 
     % Mask air pockets: air-classified voxels (density ~1.2 kg/m^3, assigned
     % only inside the body for threshold_2) carry no real PA dose signal and
-    % would otherwise reconstruct as hotspots. Zero them from the final dose.
-    recon_dose(medium.density < 100) = 0;
+    % would otherwise reconstruct as hotspots. Use the reconstruction medium's
+    % density (the geometry the recovered dose lives on) to find them.
+    recon_dose(conv_medium.density < 100) = 0;
 
     fprintf('        Reconstructed dose: [%.4f, %.4f] Gy\n', ...
         min(recon_dose(:)), max(recon_dose(:)));
@@ -1075,6 +1210,31 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
         end
     end
 
+    %% ======================== DIAGNOSTIC ARRAYS (opt-in) ========================
+    %  When CONFIG.return_diagnostics is true, hand back the pressure/geometry
+    %  arrays the standalone/comparison analyses need, each windowed to the same
+    %  input-dose region as recon_dose. Default-off so pipeline_simulate (parfor,
+    %  memory-sensitive) is unaffected. reconPressure / sensor.mask / conv_medium
+    %  are at gridSize_orig here; p0 is still at the padded working size, so take
+    %  its leading original block before windowing.
+    if return_diag
+        eo  = expansion_offsets;
+        idc = input_dims_for_crop;
+        sim_results.recon_dose = recon_dose;     % input dims (convenience copy)
+        sim_results.doseGrid   = doseGrid;       % input dims, masked (+ normalized if enabled)
+        sim_results.spacing    = spacing_mm;
+        try
+            sim_results.reconPressure = window_to_input(reconPressure,       eo, idc);
+            sim_results.sensor_mask   = logical(window_to_input(sensor.mask, eo, idc));
+            sim_results.density       = window_to_input(conv_medium.density, eo, idc);
+            p0_orig                   = p0(1:Nx_orig, 1:Ny_orig, 1:Nz_orig);
+            sim_results.p0            = window_to_input(p0_orig,             eo, idc);
+        catch ME
+            warning('run_single_field_simulation:DiagCropFail', ...
+                'Could not window diagnostic arrays to input size: %s', ME.message);
+        end
+    end
+
     %% ======================== RESULTS SUMMARY ========================
 
     fprintf('\n        ========= RESULTS =========\n');
@@ -1101,12 +1261,20 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
             sensor_for_plot = sensor.mask(eo(1) + (1:idc(1)), ...
                                           eo(2) + (1:idc(2)), ...
                                           eo(3) + (1:idc(3)));
-            density_for_plot = medium_orig.density(eo(1) + (1:idc(1)), ...
-                                                   eo(2) + (1:idc(2)), ...
-                                                   eo(3) + (1:idc(3)));
+            % Density background = geometry the recovered dose lives on:
+            % reconstruction medium when blind, forward medium for full access.
+            if blind_recon
+                plot_density_full = medium_recon_orig.density;
+                panel_title = 'Dose Comparison: True Dose vs Blind Reconstruction';
+            else
+                plot_density_full = medium_orig.density;
+                panel_title = 'Dose Comparison: Original vs Reconstructed';
+            end
+            density_for_plot = plot_density_full(eo(1) + (1:idc(1)), ...
+                                                 eo(2) + (1:idc(2)), ...
+                                                 eo(3) + (1:idc(3)));
             plot_dose_panels(doseGrid, recon_dose, sensor_for_plot, ...
-                density_for_plot, spacing_mm, ...
-                'Dose Comparison: Original vs Reconstructed');
+                density_for_plot, spacing_mm, panel_title);
         catch ME
             warning('run_single_field_simulation:DosePanelsFail', ...
                 'plot_dose_panels failed: %s', ME.message);
@@ -1138,6 +1306,14 @@ function val = safe_config(config, field_name, default_val)
     else
         val = default_val;
     end
+end
+
+
+function B = window_to_input(A, eo, idc)
+%WINDOW_TO_INPUT Slice the input-dose window (offset eo, size idc) out of a
+%  gridSize_orig-sized array so a diagnostic array aligns with recon_dose. With
+%  no grid expansion eo = [0 0 0] and idc == size(A), so this is the identity.
+    B = A(eo(1) + (1:idc(1)), eo(2) + (1:idc(2)), eo(3) + (1:idc(3)));
 end
 
 
@@ -1197,6 +1373,56 @@ function [medium, p0] = pad_medium_and_p0(medium, p0, Nx_src, Ny_src, Nz_src, Nx
     medium.alpha_coeff = alphaCoeff_pad;
     medium.gruneisen   = gruneisen_pad;
     p0 = p0_pad;
+end
+
+
+function m = pad_medium_to(m, sz)
+%PAD_MEDIUM_TO Water-pad the four medium fields into an sz grid.
+%  Copies each existing field into the leading sub-block of a fresh sz array
+%  filled with the background (water: density 1000, c 1540, alpha/gruneisen 0),
+%  mirroring the forward-medium FFT/grid padding so the reconstruction medium
+%  stays voxel-aligned with it. Scalar .alpha_power / .grid_size are preserved.
+    d = ones(sz) * 1000;
+    d(1:size(m.density,1),     1:size(m.density,2),     1:size(m.density,3))     = m.density;
+    c = ones(sz) * 1540;
+    c(1:size(m.sound_speed,1), 1:size(m.sound_speed,2), 1:size(m.sound_speed,3)) = m.sound_speed;
+    a = zeros(sz);
+    if numel(m.alpha_coeff) > 1
+        a(1:size(m.alpha_coeff,1), 1:size(m.alpha_coeff,2), 1:size(m.alpha_coeff,3)) = m.alpha_coeff;
+    else
+        a(:) = m.alpha_coeff;
+    end
+    g = zeros(sz);
+    g(1:size(m.gruneisen,1),   1:size(m.gruneisen,2),   1:size(m.gruneisen,3))   = m.gruneisen;
+    m.density = d; m.sound_speed = c; m.alpha_coeff = a; m.gruneisen = g;
+end
+
+
+function m = expand_medium(m_unp, sz, xr, yr, zr)
+%EXPAND_MEDIUM Place cropped medium fields into a water-filled sz grid at the
+%  index ranges (xr,yr,zr), matching the sensor-driven grid expansion applied
+%  to the forward medium.
+    d = ones(sz) * 1000;  d(xr, yr, zr) = m_unp.density;
+    c = ones(sz) * 1540;  c(xr, yr, zr) = m_unp.sound_speed;
+    a = zeros(sz);
+    if numel(m_unp.alpha_coeff) > 1
+        a(xr, yr, zr) = m_unp.alpha_coeff;
+    else
+        a(:) = m_unp.alpha_coeff;
+    end
+    g = zeros(sz);        g(xr, yr, zr) = m_unp.gruneisen;
+    m = struct('density', d, 'sound_speed', c, 'alpha_coeff', a, 'gruneisen', g);
+end
+
+
+function m = crop_medium(m, sz)
+%CROP_MEDIUM Crop the four medium fields to the leading sz sub-block.
+    m.density     = m.density(1:sz(1),     1:sz(2),     1:sz(3));
+    m.sound_speed = m.sound_speed(1:sz(1), 1:sz(2),     1:sz(3));
+    if numel(m.alpha_coeff) > 1
+        m.alpha_coeff = m.alpha_coeff(1:sz(1), 1:sz(2), 1:sz(3));
+    end
+    m.gruneisen   = m.gruneisen(1:sz(1),   1:sz(2),     1:sz(3));
 end
 
 

@@ -58,7 +58,8 @@ CONFIG.num_time_reversal_iter   = 5;      % Time-reversal iterations per field
 % its own CT_3 medium (the waves that physically reach the detector) but
 % reconstructed via iterative time reversal on the reference CT_1 medium -- the
 % only geometry a live IRAI system actually has to invert on. Such fields are
-% routed to run_second_field_simulation instead of run_single_field_simulation.
+% run through run_single_field_simulation's blind branch (CONFIG.blind_recon set
+% per-call by the dispatcher); CT_1 (reference) fields use its full-access branch.
 % CT_1 (reference) fields are unaffected. Included in the config hash, so
 % flipping this yields a separate set of recon outputs (never reused across the
 % full-access vs blind cases).
@@ -691,12 +692,14 @@ end
 
 function recon_dose = run_field_dispatch(field_dose, cbct_by_label, medium_by_label, ...
         beam_metadata, config, precomputed_sensor)
-    % Route a single field to the correct simulation:
-    %   - CT_3 (adapted) fields  -> run_second_field_simulation (BLIND geometry):
+    % Route a single field to the correct reconstruction mode of the merged
+    % run_single_field_simulation:
+    %   - CT_3 (adapted) fields  -> BLIND geometry (CONFIG.blind_recon = true):
     %       forward-propagate on the field's own CT_3 medium, but reconstruct
     %       (iterative time reversal) on the reference CT_1 medium, since a live
     %       IRAI system never has the adapted geometry to invert on.
-    %   - CT_1 (reference) fields -> run_single_field_simulation (full access).
+    %   - CT_1 (reference) fields -> full access (forward and reconstruction on
+    %       the same medium).
     % The field's own (TRUE) CBCT geometry + forward medium is selected here and
     % passed through; the reference medium is pulled from medium_by_label. Kept
     % as a normal function (not an inline branch at the parfor call site) so
@@ -714,7 +717,7 @@ function recon_dose = run_field_dispatch(field_dose, cbct_by_label, medium_by_la
     if blind_on && ~isempty(fld_label) && ~strcmp(fld_label, ref_label) ...
             && isfield(medium_by_label, ref_label)
         medium_recon = medium_by_label.(ref_label);
-        recon_dose = run_second_field_quietly(field_dose, cbct_fd, medium_fwd, ...
+        recon_dose = run_blind_field_quietly(field_dose, cbct_fd, medium_fwd, ...
             medium_recon, beam_metadata, config, precomputed_sensor);
     else
         recon_dose = run_field_quietly(field_dose, cbct_fd, medium_fwd, ...
@@ -732,15 +735,19 @@ function lbl = blind_recon_reference_label(config)
     end
 end
 
-function recon_dose = run_second_field_quietly(field_dose, cbct_resampled, medium_fwd, ...
+function recon_dose = run_blind_field_quietly(field_dose, cbct_resampled, medium_fwd, ...
         medium_recon, beam_metadata, config, precomputed_sensor)
     % Blind-geometry per-field simulation with the same console suppression as
     % run_field_quietly. medium_fwd is the TRUE (CT_3) forward medium; the
-    % reconstruction runs on medium_recon (reference CT_1). Every argument stays
-    % a normal function input so parfor ships beam_metadata / precomputed_sensor
-    % / medium_recon to the workers (a bare evalc string would hide those uses).
-    [~, recon_dose] = evalc(['run_second_field_simulation(field_dose, ' ...
-        'cbct_resampled, medium_fwd, medium_recon, beam_metadata, config, precomputed_sensor)']);
+    % reconstruction runs on medium_recon (reference CT_1). CONFIG.blind_recon is
+    % set here so the merged run_single_field_simulation takes its blind branch
+    % (forward on medium_fwd, time reversal on the trailing medium_recon arg).
+    % Every argument stays a normal function input so parfor ships beam_metadata /
+    % precomputed_sensor / medium_recon to the workers (a bare evalc string would
+    % hide those uses).
+    config.blind_recon = true;
+    [~, recon_dose] = evalc(['run_single_field_simulation(field_dose, ' ...
+        'cbct_resampled, medium_fwd, beam_metadata, config, precomputed_sensor, medium_recon)']);
 end
 
 function save_field_reconstruction(recon_dose, field_dose, patient_id, session, config, hash8)
