@@ -153,26 +153,6 @@ Reuses `compute_sim_config_hash`, `list_processed_field_doses`, and `load_field_
 recon outputs from `SimulationResults/[PatientID]/[Session]/[method]/` (`<base>_recon_<hash>.mat`,
 `total_recon_dose_<hash>.mat`) and RayStation/CBCT inputs from `RayStationFiles/[PatientID]/[Session]/processed/`.
 
-### `study_pass_rates_individual.m` — per-dose batch gamma analysis
-
-Top-level script (editable `CONFIG` block) that runs gamma pass-rate analysis for an **arbitrary list**
-of dose files (`CONFIG.dose_filenames`). Each file selects a beam/segment; the script loads that field's
-pre-computed reconstruction on **both** CT images (CT_1 and CT_3) plus the RayStation truth via
-`load_recon_dose_data` (`Mode='set'`) — no k-Wave needed except for the optional ensemble. Per dose it
-runs two independently toggleable analyses:
-
-- **A1** — recon vs its own RayStation truth (CT_1): per-dose detector accuracy.
-- **A2** — CT_1 recon vs CT_3 recon: adapted-vs-reference change detection, with an optional
-  **noise-ensemble null** (forward sim once → redraw noise → reconstruct ×N → gamma vs the original
-  CT_1 recon) overlaid as the no-change noise floor.
-
-Each analysis emits (gated by `CONFIG.enable.{A1,A2,dose_panels,sensor_view,noise_ensemble}`): a gamma
-pass-rate vs `n%/n mm` chart, a 3-panel axial figure (volA | volB | signed difference) at the truth
-max-dose slice, and a 10%-dose-area + sensor-model view. Gamma sweeps run as one flattened `parfor` over
-all `(dose × analysis × criterion)` jobs; the ensemble runs `parfor` over realizations with one GPU per
-worker. Depends on `load_recon_dose_data`, `CalcGamma`, and `determine_sensor_mask`. See
-`CLAUDE-SIMULATION_CONTEXT.md` for the full method. (Remote/HIPAA execution; do not run locally.)
-
 ## Visualization Preferences
 
 - Subplots: **maximum 3 rows** on screen; 3–4 columns fine.
@@ -182,6 +162,23 @@ worker. Depends on `load_recon_dose_data`, `CalcGamma`, and `determine_sensor_ma
 ## Other
 
 - CT 2 and CT 3 are synonyms now. Keep the names consistent with the current convention in the code, but in outside conversations, these words refer to the same image. 
+
+## Architecture guidelines 
+
+These can be overrided if necessary for script functionality. If they are, flag this in your summary of the code written.
+
+Write code that a physics BS who has taken one matlab course could read and modify without asking questions. 
+
+- No classes unless there's genuine mutable state. Prefer plain functions.
+- No decorators, metaclasses, context managers, or generators unless
+  they solve a real problem here.
+- No abstract base classes, no dependency injection, no factory patterns.
+- No custom exception hierarchies. Use built-in exceptions.
+- No premature generalization: write the specific case, not a configurable framework for cases that don't exist.
+- No wrapper functions that are called exactly once.
+- Avoid comprehensions nested more than one level; use a for loop.
+- Any script over 200 lines need a one line justification before writing it. 
+- After writing, re-read and delete anything not required by the stated task. Report what you removed.
 
 ## Prerequisites
 

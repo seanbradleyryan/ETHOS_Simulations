@@ -63,6 +63,9 @@
 %  =========================================================================
 
 clear; clc; close all;
+
+% Ensure the moved helper functions in utils/ are on the path (run from root).
+addpath(genpath(fullfile(fileparts(mfilename('fullpath')), 'utils')));
 run_timer = tic;   % program runtime record
 
 %% ========================= CONFIGURATION ================================

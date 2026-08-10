@@ -47,6 +47,9 @@
 
 clear; clc; close all;
 
+% Ensure the moved helper functions in utils/ are on the path (run from root).
+addpath(genpath(fullfile(fileparts(mfilename('fullpath')), 'utils')));
+
 %% ======================= dx VALUES TO SWEEP =============================
 %  EDIT THIS LINE to change which voxel scales are tested. Each value multiplies
 %  dx,dy,dz. 1 = native resolution (always used as the reference baseline; it is

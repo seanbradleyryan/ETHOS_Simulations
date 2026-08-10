@@ -155,6 +155,9 @@ function out = run_standalone_field(config)
     engine_config = config;
     engine_config.return_diagnostics = true;
     engine_config.normalize          = false;
+    % Headless: the caller (driver) owns plotting, built from the arrays below.
+    % This also avoids figure spam when a sweep calls this in a loop.
+    engine_config.plot_results       = false;
 
     [recon_dose, sim_results] = run_single_field_simulation( ...
         field_dose, sct, medium, beam_metadata, engine_config, [], medium_recon);

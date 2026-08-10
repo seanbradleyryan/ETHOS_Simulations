@@ -57,6 +57,9 @@
 
 clear; clc; close all;
 
+% Ensure the moved helper functions in utils/ are on the path (run from root).
+addpath(genpath(fullfile(fileparts(mfilename('fullpath')), 'utils')));
+
 %% ========================= BASE CONFIGURATION ===========================
 %  These are the DEFAULT values. Every sweep changes exactly one field and
 %  leaves the rest at these values. The default run uses all of them.

@@ -89,6 +89,9 @@ function RESULTS = study_gamma_index_convergence(dose_file, CONFIG)
 
 study_timer = tic;
 
+% Ensure the moved helper functions in utils/ are on the path (run from root).
+addpath(genpath(fullfile(fileparts(mfilename('fullpath')), 'utils')));
+
 %% ========================= CONFIGURATION ================================
 % Start from the shared defaults, then overlay any caller-supplied overrides and
 % the dose-file argument.

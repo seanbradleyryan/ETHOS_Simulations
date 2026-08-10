@@ -18,6 +18,9 @@
 
 clear; clc; close all;
 
+% Ensure the moved helper functions in utils/ are on the path (run from root).
+addpath(genpath(fullfile(fileparts(mfilename('fullpath')), 'utils')));
+
 %% ========================= CONFIGURATION ================================
 
 CONFIG.working_dir    = '/mnt/weka/home/80030361/ETHOS_Simulations';

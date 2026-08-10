@@ -62,6 +62,9 @@
 
 clear; clc; close all;
 
+% Ensure the moved helper functions in utils/ are on the path when run from root.
+addpath(genpath(fullfile(fileparts(mfilename('fullpath')), 'utils')));
+
 %% ========================= CONFIGURATION =================================
 
 CONFIG.patient_id            = '1194203';
