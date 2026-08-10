@@ -1,5 +1,9 @@
 %% =========================================================================
 %  STUDY_OPTIMIZATION_SWEEPS.m
+%  [+ethos] NOT migrated: mixes a grid-size-changing downscale leg (cross-grid
+%  gamma), blind recon, and reference-run stability scoring. The same-grid legs
+%  (cfl_number, num_time_reversal_iter) map to ethos.StudyRunner.paramSweep with
+%  'ScoreVs' a reference SimResult. See CLAUDE-SIMULATION_CONTEXT.md migration table.
 %  One-factor-at-a-time (OAT) optimization sweeps for a SINGLE beam/segment
 %  pair, built on the run_standalone_comparison.m two-dose k-Wave pipeline.
 %

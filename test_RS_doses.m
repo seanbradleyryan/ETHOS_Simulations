@@ -1,6 +1,10 @@
 %% =========================================================================
 %  TEST_RS_DOSES.m
 %  ETHOS Photoacoustic Pipeline — RayStation Dose Verification
+%  [+ethos] NOT migrated: a PRE-simulation sanity check (sums RayStation field
+%  doses by CT label and gamma-compares to the ETHOS RTDOSE) that runs before any
+%  recon exists, so it does not use the recon-centric class layer. gamma math is
+%  available via ethos.Analysis.gamma. See CLAUDE-SIMULATION_CONTEXT.md migration table.
 %  =========================================================================
 %
 %  PURPOSE:

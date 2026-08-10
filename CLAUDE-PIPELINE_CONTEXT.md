@@ -38,6 +38,7 @@
 | `CalcGamma.m` | Gamma index calculation (external dependency) |
 | `load_processed_data.m` | Loads previously processed dose/CT data |
 | `load_recon_dose_data.m` | Loads computed recon doses (single/set/total) + RS, ETHOS truth, CBCT, RTPLAN stats — no re-sim. See CLAUDE.md "Analysis Utilities" |
+| `+ethos/` class layer | OOP driver/analysis layer wrapping the above: `SimConfig`/`SimCase`/`Simulator`/`SimResult`/`Analysis`/`StudyRunner`/`SimPlotter`. `Simulator.resolve` does load-or-simulate (`DoseSource.Auto`); `StudyRunner` runs gamma (3%/3mm) + SSIM. See `CLAUDE-SIMULATION_CONTEXT.md`. Thin driver: `run_standalone_ethos.m` |
 
 ## Full Workflow (Common Operations)
 

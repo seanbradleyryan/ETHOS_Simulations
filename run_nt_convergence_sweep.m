@@ -1,5 +1,9 @@
 %% =========================================================================
 %  RUN_NT_CONVERGENCE_SWEEP.m
+%  [+ethos] NOT migrated: the Nt divisor (recording-length shortening) is not a
+%  parameter of run_single_field_simulation, so ethos.Simulator cannot vary it.
+%  Reproducing it would require the class layer to expose the inline k-Wave
+%  forward loop. See CLAUDE-SIMULATION_CONTEXT.md migration table.
 %  Nt convergence sweep: keep air physically correct at 343 m/s and shorten the
 %  k-Wave recording length Nt (default, default/2, ... default/64), reconstruct
 %  each, and gamma-compare every shortened run against the default-Nt recon.

@@ -1,5 +1,9 @@
 %% RUN_MEDIUM_COMPARISON.m
 %  Photoacoustic reconstruction comparison across 4 tissue media.
+%  [+ethos] NOT migrated: builds SYNTHETIC layered phantom media (oil/water/bone)
+%  with custom spherical/planar sensors and direct k-Wave calls -- not the
+%  patient CBCT + determine_sensor_mask pipeline the classes wrap.
+%  See CLAUDE-SIMULATION_CONTEXT.md migration table.
 %  Media layers stack along the Z axis (k-Wave dim 3).
 %  Each medium is simulated with both a spherical and a planar (XY-plane)
 %  sensor, reconstructed via iterative TR (<=10 iter, 1% rel-change tol).

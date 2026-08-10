@@ -1,5 +1,8 @@
 %% =========================================================================
 %  TEST_TIME_DEPENDENCE.m
+%  [+ethos] NOT migrated: bespoke time-dependence experiment that instruments
+%  the inline k-Wave forward directly, not a run_single_field_simulation axis.
+%  See CLAUDE-SIMULATION_CONTEXT.md migration table.
 %  Compare two methods of applying Gaussian pulse time-dependence:
 %    Sim 1 - Time-dependent source: p(x,t) = p0(x) * g(t)
 %    Sim 2 - Instantaneous source + post-convolution: conv(sensor_data, g)

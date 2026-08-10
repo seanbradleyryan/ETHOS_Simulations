@@ -1,6 +1,93 @@
 # SIMULATION_CONTEXT.md — k-Wave, Tissue Models & Sensor Design
 
-> Referenced when working on: `run_single_field_simulation.m`, `run_standalone_simulation.m`, `create_acoustic_medium.m`, `determine_sensor_mask.m`, `apply_element_averaging.m`, `find_optimal_kwave_size.m`, `run_medium_comparison.m`, `test_time_dependence.m`
+> Referenced when working on: `run_single_field_simulation.m`, `run_standalone_simulation.m`, `create_acoustic_medium.m`, `determine_sensor_mask.m`, `apply_element_averaging.m`, `find_optimal_kwave_size.m`, `run_medium_comparison.m`, `test_time_dependence.m`, and the `+ethos/` class layer.
+
+## `+ethos/` Class Layer (condensed simulation/analysis architecture)
+
+An OOP layer that condenses the repeated CONFIG blocks + orchestration copied
+across the `run_*` / `study_*` / `test_*` driver scripts. **It wraps the existing
+functions; no physics moved into the classes.** Value classes are `parfor`-safe;
+`Simulator`/`StudyRunner` are handles. All live in package folder `+ethos/`, so
+each is one `.m` file called as `ethos.ClassName`.
+
+### Classes
+
+| Class | Kind | Role | Wraps / calls |
+|---|---|---|---|
+| `ethos.SimConfig` | value | Config object replacing the copy-pasted CONFIG blocks. Presets `standalone`/`pipeline`/`convergenceSweep`/`gammaBatch`; `withOverrides` (returns a copy); `validate`; `hash`; `toStruct` (plain struct bridge); static `tissueTables`. `dose_source` + `gamma_default=[3 3]`. | `compute_sim_config_hash` |
+| `ethos.DoseSource` | enum | `Simulate` \| `Load` \| `Auto`. Drives `Simulator.resolve`. | — |
+| `ethos.SimCase` | value | One immutable dose+geometry+medium+sensor bundle. Factories `fromDoseFile`, `fromProcessed` (**folds in `load_processed_data`**), `list` (lightweight, filtered). `materialize` builds medium+sensor on demand; static `buildSensor`. | `load_processed_data`, `list_processed_field_doses`, `load_field_dose_file`, `create_acoustic_medium`, `determine_sensor_mask` |
+| `ethos.Simulator` | handle | Owns the load-or-simulate decision. `resolve` (per `dose_source`), `resolveMany` (parfor over value cases), `run` (force sim, optional recon cache), `runBlind` (forward on true CT, invert on reference CT), `loadField`/`loadTotal`. Always returns a `SimResult`. | `run_single_field_simulation`, `run_second_field_simulation`, `load_recon_dose_data` |
+| `ethos.SimResult` | value | **Universal currency** — identical whether simulated or loaded. `recon_dose`, `rs_truth`, `ethos_truth`, `density`, `sensor_mask/info`, `metadata`, `rtplan`, `p0`/`reconPressure` (sim-only), `provenance`. Adapters `fromField`/`fromTotal`/`fromSim`. | `load_recon_dose_data` output |
+| `ethos.Analysis` | static | `gamma` (default **3%/3 mm**, global, `limit=2·DTA`, `restrict=1`), `ssim` (scored over the **same 10%-of-truth mask** as gamma), `gammaSweep` (n%/n mm curve). | `CalcGamma`, `ssim` |
+| `ethos.StudyRunner` | handle | Source-agnostic studies. Metrics `gamma`/`ssim`/`gammaChange`/`gammaSweep`; studies `compare`, `compareBlind` (reference full recon vs blind recon of the adapted anatomy), `sweep`, `paramSweep` (single-field axis sweep keeping every recon; `ScoreVs` truth/first/reference-run), `gammaBatch` (A1/A2 per dose), `beamSummary` (per-beam gamma/SSIM over all segments). `ensureSensor`; plot helpers `plotResult`/`plotSweep`/`plotParamSweep`/`plotBeamSummary`/`plotPassRateCurve`. | `ethos.Analysis`, `ethos.Simulator`, `ethos.SimPlotter` |
+| `ethos.SimPlotter` | static | Single home for the figure primitives (was duplicated, file-local, in every `run_*`). `reconVsTruth`, `changePanels`, `gammaMap`, `sensorPlacement`, `doseDifference`, `convergence`, `all`. Ports `plot_truth_recon_diff_axial` / `plot_sensor_dose_planes` / gamma-map panel. | — |
+
+### Key invariants
+
+- **`SimResult` is the only currency the analysis/plot layer touches**, so
+  "some studies simulate, some just analyze" is one flag (`dose_source`), not two
+  code paths. `Auto` loads a hash-matching recon if present, else simulates.
+- **`toStruct()` is the bridge**: every physics function keeps taking a plain
+  `config` struct unchanged. Adopt the classes incrementally driver-by-driver.
+- **Hash parity**: `SimConfig.toStruct` emits the same field names a pipeline
+  CONFIG carries, so a `SimConfig` hashes identically to the CONFIG that wrote
+  the on-disk recons (`load_recon_dose_data` also disk-scans as a fallback).
+- **Sensor on loaded results**: `load_recon_dose_data` returns no sensor mask;
+  `StudyRunner.ensureSensor(result, simCase)` rebuilds it via
+  `SimCase.buildSensor` for sensor-placement plots.
+- **Not ported**: the redraw-noise ensemble null stays in
+  `study_pass_rates_individual.m` (it depends on forward-bundle internals that
+  are file-local, not standalone-callable).
+
+### Minimal usage
+
+```matlab
+cfg = ethos.SimConfig.standalone().withOverrides( ...
+        'working_dir', WD, 'patient_id', '1194203', 'session', 'Session_1');
+sr  = ethos.StudyRunner(cfg);
+c   = ethos.SimCase.list('1194203','Session_1',cfg,'Beam',15,'Segment',112,'CTLabel','CT_1');
+r   = sr.resolve(c(1));            % load-or-simulate -> SimResult
+G   = sr.gamma(r);                 % 3%/3 mm vs RayStation truth
+S   = sr.ssim(r);                  % SSIM over the gamma mask
+ethos.SimPlotter.reconVsTruth(r, G);   ethos.SimPlotter.sensorPlacement(r);
+```
+
+The driver scripts have been migrated to this layer where they map cleanly (see
+the migration table below). `run_standalone_simulation.m` is the canonical thin
+example: preset + a few `withOverrides`, then `resolve` / `gamma` / `ssim` /
+`SimPlotter`.
+
+### Driver migration status
+
+Each kept script carries a `[+ethos]` header note explaining the same rationale.
+
+| Script | Status | Class path / why kept |
+|---|---|---|
+| `run_standalone_simulation.m` | **Migrated** | `Simulator.run` + `SimPlotter` (thin) |
+| `run_standalone_comparison.m` | **Migrated** | `StudyRunner.compareBlind` |
+| `run_standalone_analysis.m` | **Migrated** | `gamma`/`gammaChange`/`gammaSweep` (load-only) |
+| `run_dt_comparison.m` | **Migrated** | `paramSweep('cfl_number', …, 'ScoreVs','first')` (dt ∝ cfl) |
+| `run_air_sound_speed_comparison.m` | **Migrated** | `paramSweep` + `SimConfig.withTissue` (air row) |
+| `study_pass_rates_allsegments.m` | **Migrated** | `StudyRunner.beamSummary` |
+| `study_pass_rates_individual.m` | **Partial** | A1/A2 → `gammaBatch`; kept for the noise-ensemble null (forward-bundle internals) |
+| `run_standalone_simulation_upgraded.m` | Kept | Experimental superset of the standalone run |
+| `test_dx_comparison.m` | Kept | downscale changes grid → cross-grid gamma (not in `Analysis.gamma`) |
+| `study_optimization_sweeps.m` | Kept | cross-grid downscale + blind + reference-run scoring |
+| `run_nt_convergence_sweep.m` | Kept | Nt divisor is not a `run_single_field_simulation` param |
+| `study_gamma_index_convergence.m` | Kept | needs per-TR-iteration recon |
+| `run_gamma_convergence_batch.m` | Kept | thin orchestrator of the above study |
+| `test_time_dependence.m` | Kept | bespoke inline k-Wave time-dependence probe |
+| `run_medium_comparison.m` | Kept | synthetic phantom media + custom sensors (not the patient pipeline) |
+| `test_RS_doses.m` | Kept | pre-sim RS-vs-ETHOS check; no recon involved |
+| `run_single_field_simulation.m` / `run_second_field_simulation.m` | Wrapped | physics FUNCTIONS the classes call (not drivers) |
+
+Common reason the "Kept" scripts resist migration: they parametrize k-Wave
+internals `run_single_field_simulation` does not expose (Nt divisor, per-iteration
+recon, dt beyond CFL, synthetic media) or change the recon grid size (cross-grid
+gamma). Reproducing them means porting the inline forward/recon loop into the
+class layer — deferred so nothing numerically unvalidated ships in the very
+studies whose purpose is numerical sensitivity.
 
 ## k-Wave Simulation Parameters
 

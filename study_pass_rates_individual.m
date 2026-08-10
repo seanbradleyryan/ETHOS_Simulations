@@ -1,5 +1,11 @@
 %% =========================================================================
 %  STUDY_PASS_RATES_INDIVIDUAL.m
+%  [+ethos] PARTIALLY superseded: the per-dose A1 (recon vs truth) and A2 (CT_1 vs
+%  CT_3) gamma is now ethos.StudyRunner.gammaBatch. This file is kept because its
+%  noise-ensemble NULL (forward once -> redraw noise -> re-reconstruct xN) depends
+%  on forward-bundle internals (build_forward_bundle / redraw_noisy_deconv /
+%  reconstruct_recon_dose) that are file-local and not exposed to the class layer.
+%  See CLAUDE-SIMULATION_CONTEXT.md migration table.
 %  Batch, per-dose photoacoustic gamma analysis driven by the ALREADY-
 %  RECONSTRUCTED doses on disk (no per-run k-Wave reconstruction).
 %

@@ -1,5 +1,9 @@
 %% =========================================================================
 %  STUDY_GAMMA_INDEX_CONVERGENCE.m
+%  [+ethos] NOT migrated: needs the reconstructed dose at EACH time-reversal
+%  iteration; run_single_field_simulation returns only the final recon (its
+%  sim_results carries a convergence-pressure history, not per-iteration recon
+%  doses). See CLAUDE-SIMULATION_CONTEXT.md migration table.
 %  Gamma pass-rate vs number of time-reversal iterations.
 %
 %  Modeled on run_standalone_simulation.m / run_nt_convergence_sweep.m. Instead

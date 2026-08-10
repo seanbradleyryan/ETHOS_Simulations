@@ -1,5 +1,9 @@
 %% =========================================================================
 %  TEST_DX_COMPARISON.m
+%  [+ethos] NOT migrated: sweeping downscale_factor changes the recon GRID SIZE,
+%  so scoring needs cross-grid gamma resampling that ethos.Analysis.gamma does
+%  not do (it assumes co-gridded volumes). ethos.StudyRunner.paramSweep covers
+%  same-grid axes only. See CLAUDE-SIMULATION_CONTEXT.md migration table.
 %  Voxel-scale (dx,dy,dz) sweep for a SINGLE beam/segment pair, with a full
 %  run_standalone_comparison-style VISUAL verification at every dx value.
 %

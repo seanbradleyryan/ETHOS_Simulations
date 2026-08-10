@@ -12,6 +12,7 @@ Scan the user's first message for these keywords. If matched, read that file BEF
 | RayStation, RS script, scripting, IronPython | `CLAUDE-RayStation.md` |
 | DICOM, MLC, segment, RTPLAN, RT struct, sort, explode | `CLAUDE-DICOM_CONTEXT.md` |
 | pipeline, step table, orchestrator, workflow, load_recon | `CLAUDE-PIPELINE_CONTEXT.md` |
+| SimConfig, SimCase, Simulator, StudyRunner, SimResult, SimPlotter, +ethos, class layer | `CLAUDE-SIMULATION_CONTEXT.md` |
 
 ### Context Files
 
@@ -48,6 +49,7 @@ C:/Users/80030361/ETHOS_Simulations/
 
 ## Architecture Patterns
 
+- **Class layer (`+ethos/`):** `SimConfig` (config presets + `toStruct` bridge + `hash`), `SimCase` (dose+geometry+medium+sensor bundle), `Simulator` (load-or-simulate `resolve`), `SimResult` (universal recon+truth container), `Analysis`/`StudyRunner` (gamma default 3%/3mm + SSIM over the same 10%-of-truth mask), `SimPlotter` (all figures). Value classes are `parfor`-safe; the classes **wrap** the functions below, never replace them. See `CLAUDE-SIMULATION_CONTEXT.md`.
 - **CONFIG-driven:** All parameters in a `CONFIG` struct. No hardcoded magic numbers in logic.
 - **Function signature:** `function output = stepN_name(patient_id, session, config)` — `patient_id` and `session` are always `char`.
 - **Stateless functions:** `parfor`-safe. No persistent variables, no globals, no shared state.

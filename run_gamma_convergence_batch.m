@@ -1,5 +1,8 @@
 %% =========================================================================
 %  RUN_GAMMA_CONVERGENCE_BATCH.m
+%  [+ethos] NOT migrated: already a thin batch that orchestrates
+%  study_gamma_index_convergence (itself not migrated -- needs per-iteration
+%  recon). See CLAUDE-SIMULATION_CONTEXT.md migration table.
 %  Batch driver: run study_gamma_index_convergence over a RANDOM selection of
 %  beam/segment field-dose files.
 %

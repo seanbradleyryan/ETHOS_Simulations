@@ -1,5 +1,9 @@
 %% =========================================================================
 %  RUN_STANDALONE_SIMULATION_UPGRADED.m
+%  [+ethos] NOT migrated: superset/experimental variant of the standalone run.
+%  For the class-based single-field flow use run_standalone_simulation.m
+%  (thin driver on ethos.Simulator/StudyRunner/SimPlotter). Kept for its
+%  extra experimental features. See CLAUDE-SIMULATION_CONTEXT.md migration table.
 %  Standalone k-Wave Photoacoustic Forward + Time-Reversal Simulation
 %  Adds CONFIG-gated reconstruction-fidelity upgrades. All upgrade flags
 %  default to FALSE so they can be enabled and validated one-by-one.
