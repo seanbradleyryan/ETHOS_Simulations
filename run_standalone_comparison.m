@@ -26,6 +26,7 @@ CONFIG.ct_pair      = [1, 3];   % the two CT images paired for comparison
 CONFIG.reference_ct = 1;        % geometry we (blindly) reconstruct on
 
 CONFIG.num_tr_iter = 1; 
+CONFIG.conv_noise_level = .01
 
 % Noise-only control: re-run the blind (counterpart-CT) field with the true
 % acoustic signal nulled, so only electronic noise is reconstructed. Compared
@@ -43,9 +44,9 @@ CONFIG.include_noise_only = true;
 %  this PLOTS struct is local to this script.
 PLOTS = struct();
 PLOTS.dose_panels       = true;   % 3-view panels: the two reconstructed doses
-PLOTS.convergence       = true;   % TR max-pressure / relative-change history
-PLOTS.gamma_maps        = true;   % per-pair gamma + error axial maps
-PLOTS.noise_only_panels = true;   % 3-view panels: blind recon vs noise-only recon
+PLOTS.convergence       = false;   % TR max-pressure / relative-change history
+PLOTS.gamma_maps        = false;   % per-pair gamma + error axial maps
+PLOTS.noise_only_panels = false;   % 3-view panels: blind recon vs noise-only recon
 
 %% ===================== RESOLVE DOSE PAIR & CBCT PATHS ====================
 %  Resolve the listed dose (A), then derive its counterpart (B) on the other CT
