@@ -74,6 +74,14 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
 %           .convolution_kernel         [4e-6]   - Gaussian pulse sigma (s); 0 disables
 %           .conv_noise_level           [0.01]   - Noise fraction of peak sensor
 %           .conv_deconv_lambda         [1e-4]   - Wiener deconvolution regularisation
+%           .noise_only                 [false]  - Null-signal control: run the
+%                                                  forward sim to fix the noise
+%                                                  amplitude, then discard the true
+%                                                  signal so ONLY electronic noise
+%                                                  is reconstructed. Whatever dose
+%                                                  comes out is pure noise artifact,
+%                                                  a baseline for "is the recon
+%                                                  actually recovering signal?".
 %           .reconstruction_method      ['tr']   - 'tr' or 'das'
 %           .blind_recon                [false]  - When true (and medium_recon is
 %                                                  supplied), forward on `medium`
@@ -172,6 +180,7 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
     conv_kernel_sigma   = safe_config(config, 'convolution_kernel', 4e-6);
     conv_noise_level    = safe_config(config, 'conv_noise_level', 0.01);
     conv_deconv_lambda  = safe_config(config, 'conv_deconv_lambda', 1e-4);
+    noise_only          = safe_config(config, 'noise_only', false);
 
     recon_method            = lower(safe_config(config, 'reconstruction_method', 'tr'));
     use_pressure_scale_corr = safe_config(config, 'use_pressure_scale_correction', false);
@@ -214,6 +223,7 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
     sim_results              = struct();
     sim_results.recon_method = recon_method;
     sim_results.blind_recon  = blind_recon;
+    sim_results.noise_only   = noise_only;
 
     %% ======================== EXTRACT DATA ========================
 
@@ -900,8 +910,15 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
         % 2. Sensor frequency response (band-limit AFTER pulse convolution)
         sensorData_resp = gaussianFilter(sensorData_conv, FS, 0.35e6, 100, true);
 
-        % 3. Add electronic noise (after frequency-response filtering)
-        noise_amp        = conv_noise_level * max(abs(sensorData_resp(:)));
+        % 3. Add electronic noise (after frequency-response filtering).
+        %    noise_amp is set from the TRUE signal peak so a noise_only run adds
+        %    the exact noise the real run would have; then, when noise_only, the
+        %    true signal is discarded so ONLY noise reaches the reconstruction.
+        noise_amp = conv_noise_level * max(abs(sensorData_resp(:)));
+        if noise_only
+            sensorData_resp(:) = 0;
+            fprintf('        [NOISE ONLY] True signal nulled; reconstructing noise alone.\n');
+        end
         sensorData_noisy = sensorData_resp + noise_amp * randn(size(sensorData_resp));
 
         % 4. Wiener deconvolution of the pulse kernel
@@ -915,7 +932,16 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
         fprintf('        Pulse model complete. Noise amp: %.3e Pa\n', noise_amp);
     else
         % No pulse model: apply only the sensor frequency response.
-        sensorData          = gaussianFilter(sensorData, FS, 0.35e6, 100, true);
+        sensorData = gaussianFilter(sensorData, FS, 0.35e6, 100, true);
+        if noise_only
+            % Null-signal test: keep only electronic noise at the amplitude the
+            % true signal would have set (see noise_only note above).
+            noise_amp     = conv_noise_level * max(abs(sensorData(:)));
+            sensorData(:) = 0;
+            sensorData    = sensorData + noise_amp * randn(size(sensorData));
+            fprintf('        [NOISE ONLY] True signal nulled; reconstructing noise alone (amp %.3e Pa).\n', ...
+                noise_amp);
+        end
         sensorData_measured = sensorData;
         fprintf('        Pulse convolution disabled; frequency response applied.\n');
     end
