@@ -14,42 +14,23 @@ addpath(genpath(fullfile(fileparts(mfilename('fullpath')), 'utils')));
 
 %% ========================= CONFIGURATION ================================
 
-CONFIG.working_dir    = '/mnt/weka/home/80030361/ETHOS_Simulations';
-CONFIG.patient_id     = '1194203';
-CONFIG.session        = 'Session_1';
+% Shared simulation defaults from get_default_config (single source of truth).
+% All inherited fields (gruneisen_method, force_uniform_*, uniform_*,
+% dose_per_pulse_cGy, meterset, pml_size, cfl_number, Nt_scaling, use_gpu,
+% downscale_factor, use_grid_padding, tissue_tables) already match this
+% script's previous values. Below: only the selections this test overrides.
+CONFIG = get_default_config();
 
-CONFIG.dose_filename = 'total_rs_dose.mat';
-CONFIG.sct_filename  = 'sct_resampled.mat';
-
+% This test reads an SCT (not a CBCT) and a specific single-field dose, and
+% uses a full-plane lateral sensor instead of the array element mask.
+CONFIG.dose_filename      = 'total_rs_dose.mat';
+CONFIG.sct_filename       = 'sct_resampled.mat';
 CONFIG.dose_file_override = 'field1dose.mat';
 CONFIG.sct_file_override  = '';
 
 CONFIG.sensor_placement_method = 'full_plane_lateral';
 CONFIG.sensor_x_index = 20;
 CONFIG.sensor_y_index = 40;
-
-CONFIG.gruneisen_method = 'threshold_2';
-
-CONFIG.force_uniform_density     = false;
-CONFIG.force_uniform_sound_speed = false;
-CONFIG.force_uniform_attenuation = false;
-CONFIG.force_uniform_gruneisen   = false;
-
-CONFIG.uniform_density      = 1000;
-CONFIG.uniform_sound_speed  = 1540;
-CONFIG.uniform_alpha_coeff  = 0;
-CONFIG.uniform_alpha_power  = 1.1;
-CONFIG.uniform_gruneisen    = 1.0;
-
-CONFIG.dose_per_pulse_cGy = 0.16;
-CONFIG.meterset           = 140;
-CONFIG.pml_size           = 10;
-CONFIG.cfl_number         = 0.3;
-CONFIG.Nt_scaling         = 6;     % >0: when air sets minC, divide Nt by this to shorten recording (0 = off)
-CONFIG.use_gpu            = true;
-
-CONFIG.downscale_factor = 1;
-CONFIG.use_grid_padding = true;
 
 % Gaussian pulse width (sigma), in seconds
 CONFIG.gaussian_sigma_s = 5e-6;   % 5 µs

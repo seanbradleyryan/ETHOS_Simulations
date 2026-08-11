@@ -60,60 +60,17 @@ DX.downscale_values = 2.^[1/4, 1/3, 1/2, 1, 2, 3];
 %  Identical defaults to study_optimization_sweeps.m / run_standalone_comparison.m.
 %  Every dx run uses these; only CONFIG.downscale_factor changes per run.
 
-CONFIG.working_dir    = '/mnt/weka/home/80030361/ETHOS_Simulations';
-CONFIG.patient_id     = '1194203';
-CONFIG.session        = 'Session_1';
+% Shared defaults from get_default_config (single source of truth); identical to
+% study_optimization_sweeps.m. Only the fields below differ or are study-specific.
+% downscale_factor stays at the default (1) and is overwritten per dx in the loop.
+CONFIG = get_default_config();
 
-% Single beam/segment pair to study.
+% Single beam/segment pair to study (CT_3 dose; the default is the CT_1 dose).
 CONFIG.dose_filename = 'dose_1194203_Session_1_reference_CT_3_B15_112.mat';
-
 CONFIG.ct_pair      = [1, 3];
 CONFIG.reference_ct = 1;
 
-CONFIG.dose_file_override = '';
-CONFIG.cbct_file_override = '';
-
-CONFIG.sensor_placement_method = 'determine_sensor_mask';
-CONFIG.sensor_x_index = 2;
-CONFIG.sensor_y_index = 4;
-
-CONFIG.elements_per_side = 32;
-CONFIG.element_pitch_mm  = 4.35;
-CONFIG.element_size_mm   = 3.65;
-
-CONFIG.gruneisen_method = 'threshold_2';
-
-CONFIG.force_uniform_density     = false;
-CONFIG.force_uniform_sound_speed = false;
-CONFIG.force_uniform_attenuation = false;
-CONFIG.force_uniform_gruneisen   = false;
-
-CONFIG.uniform_density      = 1000;
-CONFIG.uniform_sound_speed  = 1540;
-CONFIG.uniform_alpha_coeff  = 0;
-CONFIG.uniform_alpha_power  = 1.1;
-CONFIG.uniform_gruneisen    = 1.0;
-
-CONFIG.dose_per_pulse_cGy     = 0.16;
-CONFIG.meterset               = 140;
-CONFIG.pml_size               = 10;
-CONFIG.cfl_number             = 0.3;
-CONFIG.Nt_scaling             = 6;
-CONFIG.use_gpu                = true;
-CONFIG.correction_factor      = 20;
-CONFIG.use_pressure_scale_correction = false;
-CONFIG.mask_recon_to_dose_region     = true;
-
-CONFIG.reconstruction_method = 'tr';     % this study only reconstructs with TR
-CONFIG.num_time_reversal_iter = 10;
-CONFIG.convergence_tol        = 1e-3;
-
-CONFIG.convolution_kernel  = 4e-6;
-CONFIG.conv_noise_level    = 0.125;
-CONFIG.conv_deconv_lambda  = 1e-4;
-
-CONFIG.downscale_factor = 1;             % overwritten per dx in the loop
-CONFIG.use_grid_padding = true;
+CONFIG.num_time_reversal_iter = 10;      % more TR iterations than the default (1)
 
 % Deterministic electronic-noise draw so pass-rate differences between dx values
 % reflect the grid change, not run-to-run noise variance (same as the sweep).
@@ -122,10 +79,6 @@ CONFIG.rng_seed              = 42;
 % Success criteria (same thresholds as study_optimization_sweeps).
 CONFIG.success_stability_pct = 98;       % criterion-1 stability threshold (%)
 CONFIG.runtime_tol           = 0.02;     % allow 2% timing jitter for "<= default"
-
-% Least-squares relative normalization (recon -> own-CT truth over the truth's
-% 10% region) before every gamma. Truths untouched. Same as both source scripts.
-CONFIG.normalize = true;
 
 % Gaussian sigma (voxels) applied to dose slices for DISPLAY ONLY in the dose
 % panels (fills recon speckle). 0 = disable.

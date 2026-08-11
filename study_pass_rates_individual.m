@@ -46,9 +46,10 @@ addpath(genpath(fullfile(fileparts(mfilename('fullpath')), 'utils')));
 
 %% ========================= CONFIGURATION ================================
 
-CONFIG.working_dir    = '/mnt/weka/home/80030361/ETHOS_Simulations';
-CONFIG.patient_id     = '1194203';
-CONFIG.session        = 'Session_1';
+% Shared simulation defaults from get_default_config (single source of truth).
+% Analysis / sensor-extra / display fields and the few sim overrides are set
+% below; every other sim field inherits its previous (default-matching) value.
+CONFIG = get_default_config();
 CONFIG.treatment_site = 'Pancreas';
 
 % Arbitrary list of dose files to analyze. Each carries a _B<beam>_<seg> token
@@ -106,12 +107,9 @@ CONFIG.use_parallel = true;
 CONFIG.gamma_n = 3;   % 3%/3 mm only
 
 % --- Sensor geometry (placement + display) ---
-CONFIG.sensor_placement_method = 'determine_sensor_mask';
-CONFIG.sensor_x_index = 2;
-CONFIG.sensor_y_index = 4;
-CONFIG.elements_per_side  = 32;
-CONFIG.element_pitch_mm   = 4.35;
-CONFIG.element_size_mm    = 3.64;
+% method / sensor_x_index / sensor_y_index / elements_per_side / element_pitch_mm
+% are inherited from get_default_config; only the differences/extras are set here.
+CONFIG.element_size_mm    = 3.64;    % this study uses 3.64 mm (default is 3.65)
 CONFIG.sensor_standoff_mm = 5;
 CONFIG.jaw_margin_mm      = 10;
 CONFIG.sensor_placement   = 'anterior';
@@ -119,49 +117,22 @@ CONFIG.aim_at_iso         = true;
 CONFIG.force_turn_angle   = 290;     % forced turn must be 290 deg (rotation-bug workaround)
 
 % --- Tissue / acoustic medium model ---
-CONFIG.gruneisen_method = 'threshold_2';
-
-CONFIG.force_uniform_density     = false;
-CONFIG.force_uniform_sound_speed = false;
-CONFIG.force_uniform_attenuation = false;
-CONFIG.force_uniform_gruneisen   = false;
-
-CONFIG.uniform_density      = 1000;
-CONFIG.uniform_sound_speed  = 1540;
-CONFIG.uniform_alpha_coeff  = 0;
-CONFIG.uniform_alpha_power  = 1.1;
-CONFIG.uniform_gruneisen    = 1.0;
+% All inherited from get_default_config (gruneisen_method='threshold_2',
+% force_uniform_*=false, uniform_* = water-like, tissue_tables built there).
 
 % --- Forward / reconstruction parameters (noise ensemble only) ---
-CONFIG.dose_per_pulse_cGy     = 0.16;
-CONFIG.meterset               = 140;   % overridden per-dose from rtplan.meterset when available
-CONFIG.pml_size               = 10;
-CONFIG.cfl_number             = 0.3;
-CONFIG.Nt_scaling             = 6;     % >0: when air sets minC, divide Nt by this to shorten the recording (0 = disabled)
-CONFIG.use_gpu                = true;
-CONFIG.correction_factor             = 1.9;
-CONFIG.use_pressure_scale_correction = false;
-CONFIG.mask_recon_to_dose_region     = true;
+% dose_per_pulse_cGy, meterset, pml_size, cfl_number, Nt_scaling, use_gpu,
+% use_pressure_scale_correction, mask_recon_to_dose_region, reconstruction_method,
+% convergence_tol, convolution/noise params, downscale_factor and use_grid_padding
+% are all inherited from get_default_config. Overrides for this study:
+CONFIG.correction_factor      = 1.9;   % engine calibration (default is 20)
+CONFIG.num_time_reversal_iter = 5;     % more TR iterations than the default (1)
 
-CONFIG.reconstruction_method = 'tr';   % 'tr' | 'DAS' | 'hybrid'
-CONFIG.num_time_reversal_iter = 5;
-CONFIG.convergence_tol        = 1e-3;
-
-% --- Pulse convolution / noise / deconvolution (drives the noise ensemble) ---
-CONFIG.convolution_kernel  = 4e-6;   % Gaussian sigma in seconds (4 us); 0 disables noise
-CONFIG.conv_noise_level    = 0.125;  % noise amplitude as fraction of peak sensor signal
-CONFIG.conv_deconv_lambda  = 1e-4;   % Wiener regularization for deconvolution
-
-CONFIG.downscale_factor = 1;
-CONFIG.use_grid_padding = true;
-
-% --- Display options ---
-CONFIG.viz_smooth_sigma   = 1.0;        % Gaussian sigma (voxels) for display-only smoothing
+% --- Display options (viz_smooth_sigma inherited from get_default_config) ---
 CONFIG.dose_panel_scale   = 'relative'; % 'relative' | 'absolute'
 CONFIG.dose_panel_clip_pct = 99.5;      % percentile anchoring the colour-scale top
 
-% --- Output ---
-CONFIG.save_results = true;
+% --- Output (save_results inherited = true) ---
 CONFIG.output_file  = 'pass_rates_individual_results.mat';
 
 %% ===================== RESOLVE THE DOSE LIST ============================

@@ -127,9 +127,10 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
 %           reconstruction (both passes on `medium`).
 %
 %   OUTPUTS:
-%       recon_dose  - 3D reconstructed dose array (Gy), cropped back to the
-%                     input field_dose.dose_Gy size (or, with downscale_factor,
-%                     to the downscaled size).
+%       recon_dose  - 3D reconstructed dose array (Gy), always returned at the
+%                     input field_dose.dose_Gy size. With a non-unity
+%                     downscale_factor the recon is resampled back up from the
+%                     coarse simulation grid to these native dimensions.
 %       sim_results - Struct with diagnostics:
 %           .sensor_info        - Sensor placement info
 %           .forward_time_s     - Forward sim wall time
@@ -298,9 +299,15 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
 
     %% ======================== DOWNSCALE FACTOR ========================
     %  Optional pre-sim downscale of the whole grid (dose, medium, body/couch
-    %  masks). Useful for rapid testing. Note that recon_dose returned from
-    %  this function will then be at the downscaled size; the caller must
-    %  accommodate that if it sums across fields.
+    %  masks). Useful for rapid testing / large speedups (coarser dx also grows
+    %  the CFL time step, so cost falls faster than voxel count alone). The
+    %  reconstructed dose is resampled back to the native dimensions at the end
+    %  of the function, so the caller always receives recon_dose at the input
+    %  field_dose.dose_Gy size.
+
+    % Native dose dims/spacing (pre-downscale) for the resample-back at the end.
+    native_dims       = gridSize;
+    native_spacing_mm = spacing_mm;
 
     if downscale_factor ~= 1
         df     = downscale_factor;
@@ -377,7 +384,7 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
     if ~any(doseMask(:)) || max(p0(:)) == 0
         warning('run_single_field_simulation:NoDose', ...
             'No significant dose or zero initial pressure. Returning zeros.');
-        recon_dose = zeros(gridSize);
+        recon_dose = zeros(native_dims);
         sim_results.sensor_info = struct();
         return;
     end
@@ -1314,6 +1321,20 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
                 warning('run_single_field_simulation:ConvPlotFail', ...
                     'plot_convergence_history failed: %s', ME.message);
             end
+        end
+    end
+
+    %% ============ RESAMPLE RECON BACK TO NATIVE DOSE DIMENSIONS ============
+    %  With a non-unity downscale_factor the recon currently sits on the coarse
+    %  simulation grid. Resample it back up to the native dose dimensions so the
+    %  caller can compare it against the full-resolution truth (gamma/SSIM) with
+    %  no further resampling. Clamp negatives from the cubic interpolation.
+    %  Diagnostic/pressure arrays above stay on the simulation grid.
+    if downscale_factor ~= 1 && ~isequal(size(recon_dose), native_dims)
+        recon_dose = max(imresize3(recon_dose, native_dims), 0);
+        fprintf('        Resampled recon_dose back to native dims [%d %d %d]\n', native_dims);
+        if return_diag
+            sim_results.recon_dose = recon_dose;
         end
     end
 

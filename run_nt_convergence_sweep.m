@@ -23,71 +23,18 @@ addpath(genpath(fullfile(fileparts(mfilename('fullpath')), 'utils')));
 
 %% ========================= CONFIGURATION ================================
 
-CONFIG.working_dir    = '/mnt/weka/home/80030361/ETHOS_Simulations';
-CONFIG.patient_id     = '1194203';
-CONFIG.session        = 'Session_1';
+% Shared simulation defaults come from get_default_config (single source of
+% truth). This sweep overrides only what it needs; every other field uses the
+% default, which already matches this script's previous hard-coded values.
+CONFIG = get_default_config();
 
-CONFIG.dose_filename = 'dose_1194203_Session_1_reference_CT_1_B15_112.mat';
-CONFIG.cbct_filename = 'CBCT1_resampled.mat';
+CONFIG.num_time_reversal_iter = 10;  % more TR iterations than the default (1)
 
-CONFIG.dose_file_override = '';
-CONFIG.cbct_file_override = '';
+% Pulse convolution / noise DISABLED so any gamma difference between runs is
+% attributable to the Nt reduction alone.
+CONFIG.convolution_kernel     = 0;   % 0 => frequency response only, no noise
 
-CONFIG.sensor_placement_method = 'determine_sensor_mask';
-CONFIG.sensor_x_index = 2;
-CONFIG.sensor_y_index = 4;
-
-CONFIG.elements_per_side = 32;
-CONFIG.element_pitch_mm  = 4.35;
-CONFIG.element_size_mm   = 3.65;
-
-CONFIG.gruneisen_method = 'threshold_2';
-
-CONFIG.force_uniform_density     = false;
-CONFIG.force_uniform_sound_speed = false;
-CONFIG.force_uniform_attenuation = false;
-CONFIG.force_uniform_gruneisen   = false;
-
-CONFIG.uniform_density      = 1000;
-CONFIG.uniform_sound_speed  = 1540;
-CONFIG.uniform_alpha_coeff  = 0;
-CONFIG.uniform_alpha_power  = 1.1;
-CONFIG.uniform_gruneisen    = 1.0;
-
-CONFIG.dose_per_pulse_cGy     = 0.16;
-CONFIG.meterset               = 140;
-CONFIG.pml_size               = 10;
-CONFIG.cfl_number             = 0.3;
-CONFIG.use_gpu                = true;
-CONFIG.correction_factor      = 20;
-CONFIG.use_pressure_scale_correction = false;
-CONFIG.mask_recon_to_dose_region     = true;
-
-CONFIG.reconstruction_method = 'tr';
-CONFIG.num_time_reversal_iter = 10;
-CONFIG.convergence_tol        = 1e-3;
-
-% --- Pulse Convolution / Noise / Deconvolution ---
-% DISABLED for this comparison: with noise off, any gamma difference between
-% the two runs is attributable to the air sound-speed change alone.
-CONFIG.convolution_kernel  = 0;      % 0 => frequency response only, no noise
-CONFIG.conv_noise_level    = 0.125;
-CONFIG.conv_deconv_lambda  = 1e-4;
-
-CONFIG.downscale_factor = 1;
-CONFIG.use_grid_padding = true;
-
-CONFIG.save_results = true;
-CONFIG.output_file  = 'nt_convergence_sweep_results.mat';
-CONFIG.plot_results = true;
-
-CONFIG.viz_smooth_sigma = 1.0;
-% Least-squares relative normalization (method from study_pass_rates_allsegments.m):
-% each run's reconstruction is rescaled by the scalar gain that best fits it to
-% the RayStation truth (doseGrid) over that truth's 10% region, before the gamma
-% comparison. Enabled by default.
-CONFIG.normalize = true;
-CONFIG.plot_exclusion_zone = false;
+CONFIG.output_file            = 'nt_convergence_sweep_results.mat';
 
 % --- Nt convergence sweep. Air is fixed at the physically-correct 343 m/s for
 %     every run. Nt_default is computed from minC on the first run; subsequent

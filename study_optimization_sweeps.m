@@ -64,78 +64,30 @@ addpath(genpath(fullfile(fileparts(mfilename('fullpath')), 'utils')));
 %  These are the DEFAULT values. Every sweep changes exactly one field and
 %  leaves the rest at these values. The default run uses all of them.
 
-CONFIG.working_dir    = '/mnt/weka/home/80030361/ETHOS_Simulations';
-CONFIG.patient_id     = '1194203';
-CONFIG.session        = 'Session_1';
+% Shared defaults from get_default_config (single source of truth). Only the
+% fields below differ from the defaults or are study-specific. The swept
+% variables (downscale_factor, pml_size, cfl_number, num_time_reversal_iter,
+% Nt_scaling, convergence_tol) start at their default values and are varied
+% per-run by the sweep harness further below. normalize (lsq) is inherited: it
+% rescales each recon to its own-CT truth over that truth's 10% region before
+% gamma, making the metric scale-invariant across every swept configuration.
+CONFIG = get_default_config();
 
-% Single beam/segment pair to study.
+% Single beam/segment pair to study (CT_3 dose; the default is the CT_1 dose).
 CONFIG.dose_filename = 'dose_1194203_Session_1_reference_CT_3_B15_112.mat';
-
 CONFIG.ct_pair      = [1, 3];
 CONFIG.reference_ct = 1;
 
-CONFIG.dose_file_override = '';
-CONFIG.cbct_file_override = '';
-
-CONFIG.sensor_placement_method = 'determine_sensor_mask';
-CONFIG.sensor_x_index = 2;
-CONFIG.sensor_y_index = 4;
-
-CONFIG.elements_per_side = 32;
-CONFIG.element_pitch_mm  = 4.35;
-CONFIG.element_size_mm   = 3.65;
-
-CONFIG.gruneisen_method = 'threshold_2';
-
-CONFIG.force_uniform_density     = false;
-CONFIG.force_uniform_sound_speed = false;
-CONFIG.force_uniform_attenuation = false;
-CONFIG.force_uniform_gruneisen   = false;
-
-CONFIG.uniform_density      = 1000;
-CONFIG.uniform_sound_speed  = 1540;
-CONFIG.uniform_alpha_coeff  = 0;
-CONFIG.uniform_alpha_power  = 1.1;
-CONFIG.uniform_gruneisen    = 1.0;
-
-CONFIG.dose_per_pulse_cGy     = 0.16;
-CONFIG.meterset               = 140;
-CONFIG.pml_size               = 10;      % DEFAULT  (swept: 9 8 7 6 5)
-CONFIG.cfl_number             = 0.3;     % DEFAULT  (swept: .1 .2 .3 .4 .5)
-CONFIG.Nt_scaling             = 6;       % DEFAULT  (swept: 4 6 8 10 12)
-CONFIG.use_gpu                = true;
-CONFIG.correction_factor      = 20;
-CONFIG.use_pressure_scale_correction = false;
-CONFIG.mask_recon_to_dose_region     = true;
-
-CONFIG.reconstruction_method = 'tr';     % this study only sweeps the TR pipeline
-CONFIG.num_time_reversal_iter = 10;      % DEFAULT  (swept: 3 5 7 10)
-CONFIG.convergence_tol        = 1e-3;    % DEFAULT  (swept: 1e-3 3e-3 1e-2 3e-2 1e-1)
-
-CONFIG.convolution_kernel  = 4e-6;
-CONFIG.conv_noise_level    = 0.125;
-CONFIG.conv_deconv_lambda  = 1e-4;
-
-CONFIG.downscale_factor = 1;             % DEFAULT  (swept: 2^[1/4 1/3 1/2 1 2 3])
-CONFIG.use_grid_padding = true;
+CONFIG.num_time_reversal_iter = 10;      % sweep baseline (swept: 3 5 7 10)
 
 % Study-specific settings (not part of the standalone pipeline).
 CONFIG.rng_seed             = 42;        % deterministic electronic-noise draw
 CONFIG.success_stability_pct = 98;       % criterion-1 threshold (%)
 CONFIG.runtime_tol          = 0.02;      % allow 2% timing jitter for "equal or lower"
 
-% Least-squares relative normalization (scheme from study_pass_rates_allsegments):
-% before gamma, each recon is rescaled by the scalar gain that best matches it to
-% its OWN-CT truth over that truth's 10% region (recon1->dose1, recon2->dose2),
-% cancelling the stored absolute scale (CONFIG.correction_factor). The truths are
-% never rescaled. This makes gamma a consistent, scale-invariant metric across
-% every swept configuration.
-CONFIG.normalize = true;
-
 % Plotting / saving OFF: this runs headless inside a parfor.
 CONFIG.plot_results = false;
 CONFIG.save_results = false;
-CONFIG.log_gamma    = false;
 
 %% ========================= SWEEP / OUTPUT SETTINGS =======================
 
@@ -234,14 +186,8 @@ if ~isfield(CONFIG, 'beam_metadata') || isempty(CONFIG.beam_metadata)
     end
 end
 
-% Shared tissue tables (same builder the pipeline uses).
-CONFIG.tissue_tables = define_tissue_tables();
-CONFIG.tissue_tables.uniform = struct( ...
-    'density',     CONFIG.uniform_density, ...
-    'sound_speed', CONFIG.uniform_sound_speed, ...
-    'alpha_coeff', CONFIG.uniform_alpha_coeff, ...
-    'alpha_power', 1.1, ...
-    'gruneisen',   CONFIG.uniform_gruneisen);
+% Tissue tables (including the '.uniform' row) are already built by
+% get_default_config from the shared define_tissue_tables.m -- no rebuild here.
 
 %% ========================= DEFINE THE SWEEPS ============================
 %  Each sweep: a name, the CONFIG field it changes, and the list of values.

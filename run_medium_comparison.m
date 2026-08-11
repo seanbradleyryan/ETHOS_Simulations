@@ -30,30 +30,21 @@ fprintf('=====================================================\n\n');
 
 %% ========================= CONFIGURATION ================================
 
-CONFIG.working_dir        = '/mnt/weka/home/80030361/ETHOS_Simulations';
-CONFIG.patient_id         = '1194203';
-CONFIG.session            = 'Session_1';
-CONFIG.dose_filename      = 'total_rs_dose.mat';
+% Shared acoustic defaults from get_default_config (single source of truth):
+% meterset, dose_per_pulse_cGy, pml_size, cfl_number, Nt_scaling, use_gpu,
+% normalize, working_dir/patient_id/session all inherit their previous values.
+CONFIG = get_default_config();
 
+CONFIG.dose_filename      = 'total_rs_dose.mat';
 CONFIG.downscale_factor   = 2;      % Spatial downscale for speed (1 = off)
-CONFIG.meterset           = 140;    % Monitor units
-CONFIG.dose_per_pulse_cGy = 0.16;  % cGy per LINAC pulse
-CONFIG.pml_size           = 10;    % PML thickness in voxels
-CONFIG.cfl_number         = 0.3;   % CFL stability number
-CONFIG.Nt_scaling         = 6;     % >0: when air sets minC, divide Nt by this to shorten recording (0 = off)
-CONFIG.use_gpu            = true;  % GPU acceleration
+
+% This study runs its own inline TR reconstruction + gamma (not
+% run_single_field_simulation), so it keeps its own iteration/gamma fields:
 CONFIG.max_tr_iter        = 10;    % Max iterative TR iterations
 CONFIG.conv_tol           = 0.01;  % 1% relative-change convergence threshold
-
-% Gamma analysis parameters
 CONFIG.gamma_pct    = 3;    % Dose difference criterion (%)
 CONFIG.gamma_dta    = 3;    % Distance-to-agreement (mm)
 CONFIG.gamma_cutoff = 10;   % Dose cutoff (% of max) for pass-rate mask
-% Least-squares relative normalization (method from study_pass_rates_allsegments.m):
-% each reconstructed pressure is rescaled by the scalar gain that best fits it to
-% the truth p0 over p0's 10% region, before the gamma comparison. Enabled by
-% default.
-CONFIG.normalize    = true;
 
 % Acoustic tissue properties: density (kg/m^3), sound_speed (m/s), Gruneisen, RGB colour
 PROPS.oil   = struct('name','Oil',   'density',  900, 'sound_speed', 1460, ...

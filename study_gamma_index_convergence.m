@@ -1284,11 +1284,8 @@ end
 function CONFIG = default_config()
 %DEFAULT_CONFIG Default parameters for the gamma-index TR-convergence study.
 %  Any field may be overridden by the CONFIG struct passed to the main function.
-    CONFIG = struct();
-
-    CONFIG.working_dir    = '/mnt/weka/home/80030361/ETHOS_Simulations';
-    CONFIG.patient_id     = '1194203';
-    CONFIG.session        = 'Session_1';
+    % Shared simulation defaults from get_default_config (single source of truth).
+    CONFIG = get_default_config();
 
     % CT_1 field dose. The CT_3 counterpart filename is derived from this by
     % swapping the '_CT_1_' token for '_CT_3_' (same beam/segment, other CT image).
@@ -1298,40 +1295,13 @@ function CONFIG = default_config()
     CONFIG.cbct_filename_ct1 = 'CBCT1_resampled.mat';
     CONFIG.cbct_filename_ct3 = 'CBCT3_resampled.mat';
 
-    CONFIG.sensor_placement_method = 'determine_sensor_mask';
-    CONFIG.sensor_x_index = 2;
-    CONFIG.sensor_y_index = 4;
-
-    % Physical 2D ultrasound array geometry (sparse element mask).
-    CONFIG.elements_per_side = 32;
-    CONFIG.element_pitch_mm  = 4.35;
-    CONFIG.element_size_mm   = 3.65;
-
-    CONFIG.gruneisen_method = 'threshold_2';
-
-    CONFIG.force_uniform_density     = false;
-    CONFIG.force_uniform_sound_speed = false;
-    CONFIG.force_uniform_attenuation = false;
-    CONFIG.force_uniform_gruneisen   = false;
-
-    CONFIG.uniform_density      = 1000;
-    CONFIG.uniform_sound_speed  = 1540;
-    CONFIG.uniform_alpha_coeff  = 0;
-    CONFIG.uniform_alpha_power  = 1.1;
-    CONFIG.uniform_gruneisen    = 1.0;
-
-    CONFIG.dose_per_pulse_cGy   = 0.16;
-    CONFIG.meterset             = 140;
-    CONFIG.pml_size             = 10;
-    CONFIG.cfl_number           = 0.3;
-    CONFIG.Nt_scaling           = 6;      % >0: when air sets minC, shorten Nt by this
-    CONFIG.use_gpu              = true;
-    CONFIG.correction_factor    = 20;     % cancelled by the LSQ normalization below
-    CONFIG.use_pressure_scale_correction = false;
-    CONFIG.mask_recon_to_dose_region     = true;
+    % Sensor geometry, tissue model, forward/reconstruction params, the
+    % convolution/noise chain, use_grid_padding and normalize are all inherited
+    % from get_default_config (they matched this study's previous values). Only
+    % the study-specific overrides and extra output fields are set below.
 
     % --- Convergence study: 20 time-reversal iterations, gamma after each ---
-    CONFIG.num_time_reversal_iter = 20;
+    CONFIG.num_time_reversal_iter = 20;  % more TR iterations than the default (1)
     CONFIG.gamma_n                = 3;    % gamma criterion, evaluated as n%/n mm
 
     % TR iterations snapshotted for the truth-vs-recon dose/gamma panels.
@@ -1344,23 +1314,9 @@ function CONFIG = default_config()
     % uses the first realization). Requires convolution_kernel > 0 to be active.
     CONFIG.null_realizations = 1;
 
-    % --- Pulse Convolution / Noise / Deconvolution (physical measurement chain) ---
-    % Set convolution_kernel to 0 to apply only the sensor frequency response.
-    CONFIG.convolution_kernel  = 4e-6;    % Gaussian sigma in seconds (4 us)
-    CONFIG.conv_noise_level    = 0.125;   % noise amplitude as fraction of peak signal
-    CONFIG.conv_deconv_lambda  = 1e-4;    % Wiener regularization for deconvolution
-
-    CONFIG.use_grid_padding = true;
-
-    % Least-squares normalization of the recon to the truth (from
-    % study_pass_rates_allsegments). Keep true so absolute scale does not drive gamma.
-    CONFIG.normalize = true;
-
     % --- Output ---
-    CONFIG.save_results  = true;
     CONFIG.output_file   = '';   % '' => AnalysisResults/.../gamma_convergence per dose
     CONFIG.results_dir   = '';   % '' => same as figure_dir
-    CONFIG.plot_results  = true;
     CONFIG.save_figures  = false; % batch driver sets true
     CONFIG.close_figures = false; % batch driver sets true (headless)
     CONFIG.figure_dir    = '';   % '' => AnalysisResults/<pt>/<sess>/gamma_convergence

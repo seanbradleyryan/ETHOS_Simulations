@@ -39,59 +39,26 @@ addpath(genpath(fullfile(fileparts(mfilename('fullpath')), 'utils')));
 
 %% ========================= CONFIGURATION ================================
 
-CONFIG.working_dir    = '/mnt/weka/home/80030361/ETHOS_Simulations';
-CONFIG.patient_id     = '1194203';
-CONFIG.session        = 'Session_1';
+% Shared simulation defaults from get_default_config (single source of truth).
+% This upgraded build overrides only the fields that differ from the defaults;
+% all others (sensor indices, elements_per_side, gruneisen_method,
+% force_uniform_*, uniform_*, dose_per_pulse_cGy, meterset, pml_size,
+% cfl_number, Nt_scaling, use_gpu, use_pressure_scale_correction,
+% mask_recon_to_dose_region, cbct_filename, tissue_tables) inherit their
+% previous values. The upgrade-fidelity flags further below are script-specific.
+CONFIG = get_default_config();
 
 CONFIG.dose_filename = 'dose_1194203_Session_1_reference_CT_3_B15_112.mat';
-% TEMPORARY: standalone sim always uses CBCT1 (CT_1) geometry, regardless
-% of which CBCT the dose was actually computed on. Per-dose CBCT selection
-% lives in the multi-field driver, not here.
-CONFIG.cbct_filename = 'CBCT1_resampled.mat';
-
-CONFIG.dose_file_override = '';
-CONFIG.cbct_file_override = '';
-
 
 % 'determine_sensor_mask' 'full_plane_lateral' 'full_plane_anterior'
 CONFIG.sensor_placement_method = 'full_plane_anterior';
-CONFIG.sensor_x_index = 2;
-CONFIG.sensor_y_index = 4;
 
-% Physical 2D ultrasound array geometry (sparse element mask).
-% Kerf is derived inside determine_sensor_mask as (pitch - size).
-CONFIG.elements_per_side = 32;
+% Coarser/wider array geometry than the default (4.35 / 3.65).
 CONFIG.element_pitch_mm  = 7;
 CONFIG.element_size_mm   = 2.43;
 
-CONFIG.gruneisen_method = 'threshold_2';
-
-CONFIG.force_uniform_density     = false;
-CONFIG.force_uniform_sound_speed = false;
-CONFIG.force_uniform_attenuation = false;
-CONFIG.force_uniform_gruneisen   = false;
-
-CONFIG.uniform_density      = 1000;
-CONFIG.uniform_sound_speed  = 1540;
-CONFIG.uniform_alpha_coeff  = 0;
-CONFIG.uniform_alpha_power  = 1.1;
-CONFIG.uniform_gruneisen    = 1.0;
-
-CONFIG.dose_per_pulse_cGy     = 0.16;
-CONFIG.meterset               = 140;
-CONFIG.pml_size               = 10;
-CONFIG.cfl_number             = 0.3;
-CONFIG.Nt_scaling             = 6;     % >0: when air sets minC, divide Nt by this to shorten the recording (0 = disabled)
-CONFIG.use_gpu                = true;
-CONFIG.correction_factor           = 1.9;
-%CONFIG.correction_factor = .0228; 
-
-%CONFIG.correction_factor = .0229
-% Peak-pinning correction (DEFAULT FALSE in upgraded build). Divides
-% reconPressure by max(recon)/max(p0_truth). Disabled by default because it
-% destroys absolute calibration and biases gamma toward the peak voxel.
-CONFIG.use_pressure_scale_correction = false;
-CONFIG.mask_recon_to_dose_region     = true;    % zero recon dose outside the dose mask (>1% of original max). Set false to keep the full reconstruction.
+% Engine internal calibration (get_default_config's canonical value is 20).
+CONFIG.correction_factor = 1.9;
 
 %% ----------------- UPGRADED RECONSTRUCTION-FIDELITY FLAGS ---------------
 %  All default false so each can be validated independently against the

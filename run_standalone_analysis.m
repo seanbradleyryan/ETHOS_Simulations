@@ -25,11 +25,12 @@ addpath(genpath(fullfile(fileparts(mfilename('fullpath')), 'utils')));
 
 %% ========================= CONFIGURATION ================================
 
-CONFIG.working_dir    = '/mnt/weka/home/80030361/ETHOS_Simulations';
-CONFIG.patient_id     = '1194203';
-CONFIG.session        = 'Session_1';
+% Shared simulation defaults from get_default_config (single source of truth).
+% This is an analysis driver (no k-Wave), but it uses create_medium /
+% determine_sensor_mask for the display density and sensor overlay, so it
+% inherits the tissue + sensor defaults and sets only the extras below.
+CONFIG = get_default_config();
 CONFIG.treatment_site = 'Pancreas';
-CONFIG.gruneisen_method = 'threshold_2';
 
 % --- Analysis mode ---
 %   'single'     : single recon vs its RayStation truth (run_standalone_simulation)
@@ -50,41 +51,17 @@ CONFIG.criterion_n = (1:0.5:5)';
 % Explicit recon config-hash override ('' => auto-discover on disk).
 CONFIG.config_hash = '';
 
-% --- Tissue model (needed by create_medium for the density background) ---
-CONFIG.force_uniform_density     = false;
-CONFIG.force_uniform_sound_speed = false;
-CONFIG.force_uniform_attenuation = false;
-CONFIG.force_uniform_gruneisen   = false;
-
-CONFIG.uniform_density      = 1000;
-CONFIG.uniform_sound_speed  = 1540;
-CONFIG.uniform_alpha_coeff  = 0;
-CONFIG.uniform_alpha_power  = 1.1;
-CONFIG.uniform_gruneisen    = 1.0;
-
-% --- Sensor geometry (needed by determine_sensor_mask) ---
-CONFIG.sensor_placement_method = 'determine_sensor_mask';
-CONFIG.elements_per_side = 32;
-CONFIG.element_pitch_mm  = 4.35;   % Kerf derived inside determine_sensor_mask as (pitch - size)
-CONFIG.element_size_mm   = 3.65;
+% --- Tissue model + sensor geometry ---
+% Inherited from get_default_config: force_uniform_*=false, uniform_* water-like,
+% sensor_placement_method='determine_sensor_mask', elements_per_side=32,
+% element_pitch_mm=4.35, element_size_mm=3.65, pml_size=10. normalize (lsq
+% relative normalization to each recon's own RS truth) and viz_smooth_sigma=1.0
+% are also inherited. Only the sensor-placement extras are set here:
 CONFIG.sensor_standoff_mm = 5;
 CONFIG.jaw_margin_mm      = 10;
 CONFIG.sensor_placement   = 'anterior';
-CONFIG.pml_size           = 10;
 CONFIG.aim_at_iso         = true;
 CONFIG.force_turn_angle   = 290;
-
-% --- Normalization ---
-% Least-squares relative normalization (method from study_pass_rates_allsegments.m):
-% each reconstruction is rescaled by the scalar gain that best fits it to its
-% OWN RayStation truth over that truth's 10% low-dose region, before the gamma
-% analysis. RS truth volumes are left in absolute Gy. Enabled by default.
-CONFIG.normalize = true;
-
-% --- Visualization ---
-% Gaussian sigma (voxels) applied to dose slices for DISPLAY ONLY in the dose
-% comparison panels. Fills speckle gaps in a spotty recon. 0 disables.
-CONFIG.viz_smooth_sigma = 1.0;
 
 %% ========================= PRINT CONFIGURATION ===========================
 

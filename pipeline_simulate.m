@@ -32,26 +32,38 @@ clear; clc; close all;
 
 %% ========================= CONFIGURATION =================================
 
+% Shared simulation parameters come from get_default_config (the single source
+% of truth). Below we set only (a) orchestration fields it does not cover,
+% (b) values this pipeline intentionally runs differently, and (c) two fields
+% pinned to preserve this pipeline's prior numerical behavior (see note).
+%
+% Inherited unchanged from get_default_config: working_dir, gruneisen_method,
+% dose_per_pulse_cGy, pml_size, cfl_number, Nt_scaling, use_gpu,
+% sensor_placement_method, convolution_kernel / conv_noise_level /
+% conv_deconv_lambda, and tissue_tables (built from the standalone
+% define_tissue_tables.m, identical to this file's local copy).
+CONFIG = get_default_config();
+
 % --- Patient and Session Selection ---
 CONFIG.patients        = {'1194203'};
 CONFIG.sessions        = {'Session_1'};
 CONFIG.treatment_site  = 'Pancreas';
 
-% --- Directory Paths ---
-CONFIG.working_dir  = '/mnt/weka/home/80030361/ETHOS_Simulations';
+% --- Directory Paths (working_dir inherited from get_default_config) ---
 CONFIG.matrad_path  = '/mnt/weka/home/80030361/MATLAB/Addons/matRad';
 
-% --- Gruneisen Parameter Method ---
-% Options: 'uniform' | 'threshold_1' (9-tissue) | 'threshold_2' (4-tissue)
-CONFIG.gruneisen_method = 'threshold_2';
+% --- Acoustic Simulation Parameters that differ from the defaults ---
+% This pipeline runs 5 time-reversal iterations (get_default_config default: 1).
+CONFIG.num_time_reversal_iter   = 5;
 
-% --- Acoustic Simulation Parameters ---
-CONFIG.dose_per_pulse_cGy       = 0.16;   % cGy per LINAC pulse
-CONFIG.pml_size                 = 10;     % PML thickness (voxels)
-CONFIG.cfl_number               = 0.3;    % CFL stability criterion
-CONFIG.Nt_scaling               = 6;      % >0: when air sets minC, divide Nt by this to shorten recording (0 = off)
-CONFIG.use_gpu                  = true;   % GPU acceleration
-CONFIG.num_time_reversal_iter   = 5;      % Time-reversal iterations per field
+% Preserve prior pipeline behavior. Previously these fields were left unset, so
+% run_single_field_simulation used its own internal defaults: correction_factor
+% = 1.9 and normalize = false. get_default_config's canonical values (20 and
+% true) would change the saved recon scale, and normalize=true would max-scale
+% each per-field recon to 1 -- which this pipeline then SUMS into total_recon,
+% breaking the physical dose sum. Pin both to keep the reconstruction identical.
+CONFIG.correction_factor = 1.9;
+CONFIG.normalize         = false;
 
 % --- Blind-Geometry Reconstruction (CT_3 / adapted fields) ---
 % When true, every CT_3 (adapted) beam/segment field is FORWARD-propagated on
@@ -67,21 +79,11 @@ CONFIG.blind_recon_ct3           = true;
 % CT label of the reference geometry we reconstruct on (default 'CT_1').
 CONFIG.blind_recon_reference_label = 'CT_1';
 
-% --- Sensor Placement ---
-% Controls the k-Wave sensor mask geometry used in every per-field simulation.
-%   'full_plane_anterior' : Full YZ plane at x = sensor_x_index.
-%   'full_plane_lateral'  : Full XZ plane at y = sensor_y_index.
-%   'spherical'           : Spherical shell.
-CONFIG.sensor_placement_method = 'determine_sensor_mask';
+% --- Sensor Placement (indices differ from the defaults: 20 vs 2/4) ---
+% sensor_placement_method inherited ('determine_sensor_mask'). The indices below
+% are used only by the 'full_plane_*' methods.
 CONFIG.sensor_x_index = 20;   % Used by 'full_plane_anterior'
 CONFIG.sensor_y_index = 20;   % Used by 'full_plane_lateral'
-
-% --- Pulse Convolution / Noise / Deconvolution ---
-% Mimics a finite transducer impulse response applied to forward sensor data.
-% Set convolution_kernel to 0 to disable the entire block.
-CONFIG.convolution_kernel  = 4e-6;   % Gaussian sigma in seconds (4 us)
-CONFIG.conv_noise_level    = 0.125;   % Noise amplitude as fraction of peak sensor signal
-CONFIG.conv_deconv_lambda  = 1e-4;   % Wiener regularization for deconvolution
 
 % --- Gamma Analysis Parameters ---
 CONFIG.gamma_dose_pct        = 3.0;    % Dose difference threshold (%)
@@ -116,9 +118,6 @@ CONFIG.stale_claim_minutes   = 30;
 % --- Pipeline Control Flags ---
 CONFIG.run_step2   = true;    % Step 2  : k-Wave simulation
 CONFIG.run_step3   = false;    % Step 3  : Gamma analysis
-
-% --- Define Tissue Property Tables ---
-CONFIG.tissue_tables = define_tissue_tables();
 
 %% ========================= INITIALIZATION ================================
 
