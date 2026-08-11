@@ -28,11 +28,14 @@ CONFIG.reference_ct = 1;        % geometry we (blindly) reconstruct on
 CONFIG.num_tr_iter = 1; 
 CONFIG.conv_noise_level = .01
 
-% Noise-only control: re-run the blind (counterpart-CT) field with the true
-% acoustic signal nulled, so only electronic noise is reconstructed. Compared
-% against the real recon to check the reconstruction is recovering signal, not
-% noise artifacts. Set false to skip the extra simulation.
-CONFIG.include_noise_only = true;
+% Noise-only null hypothesis: instead of a single noise-only run (which jitters
+% ~18-20% from the random noise draw), we run an ENSEMBLE of noise-only
+% reconstructions via noise_ensemble_error_bars and use its mean +/- std gamma
+% pass rate as the null band / error bar. The ensemble is cached (keyed on the
+% sensor + noise + recon config, NOT the dose), so it is computed once per
+% session and reused for every beam/segment. Set false to skip it entirely.
+CONFIG.include_noise_only     = true;
+CONFIG.noise_ensemble_minutes = 30;    % wall-time budget for a fresh ensemble
 
 % --- Example overrides ---
 % CONFIG.dose_filename         = 'dose_1194203_Session_1_reference_CT_1_B15_112.mat';
@@ -132,6 +135,14 @@ for di = 1:2
     out = run_standalone_field(cfg);
     sr  = out.sim_results;
 
+    % Capture the reference-CT (full-access) geometry so the noise-only null
+    % ensemble can build its forward bundle once on the reconstruction geometry.
+    if ~blind
+        sct_ref    = out.sct;
+        beam_meta  = out.beam_metadata;
+        gantry_ref = out.field_dose.gantry_angle;
+    end
+
     RES(di).recon_dose        = out.recon_dose;
     RES(di).doseGrid          = out.doseGrid;
     RES(di).spacing_mm        = out.spacing;
@@ -148,32 +159,7 @@ for di = 1:2
     RES(di).label             = label_list{di};
 end
 
-%% ===================== NOISE-ONLY CONTROL RECONSTRUCTION ================
-%  Re-run the BLIND (counterpart-CT) field with CONFIG.noise_only, which nulls
-%  the true acoustic signal and reconstructs only electronic noise (at the same
-%  amplitude the real run uses). If this looks like the real recon, the
-%  "reconstruction" is dominated by artifacts rather than genuine dose recovery.
-
-recon_noise = [];
-if CONFIG.include_noise_only
-    di_blind = find(ct_list ~= CONFIG.reference_ct, 1);
-    if isempty(di_blind), di_blind = 2; end   % degenerate: reference not in pair
-    ct_blind = ct_list(di_blind);
-
-    fprintf('\n########## NOISE-ONLY CONTROL: CT_%d geometry ##########\n', ct_blind);
-
-    cfg = CONFIG;
-    cfg.dose_file_override       = dose_filepath_list{di_blind};
-    cfg.cbct_file_override       = cbct_filepath_list{di_blind};
-    cfg.blind_recon              = (ct_blind ~= CONFIG.reference_ct);
-    cfg.recon_cbct_file_override = recon_cbct_filepath;
-    cfg.noise_only               = true;
-
-    out_noise   = run_standalone_field(cfg);
-    recon_noise = out_noise.recon_dose;
-end
-
-%% ===================== EXTRACT / MAP / NORMALIZE =========================
+%% ===================== EXTRACT / MAP ====================================
 
 recon_A    = RES(1).recon_dose;
 recon_B    = RES(2).recon_dose;
@@ -194,12 +180,29 @@ dose2  = double(RES(idx2).doseGrid);   recon2 = double(RES(idx2).recon_dose);
 label1 = RES(idx1).label;              label2 = RES(idx2).label;
 sensor1 = RES(idx1).sensor_mask;       sensor2 = RES(idx2).sensor_mask;
 
-% The noise-only control shares the blind field's geometry (idx2), so it lines
-% up with dose2 / recon2 / sensor2 for gamma and plotting.
-if ~isempty(recon_noise)
-    recon_noise = double(recon_noise);
+%% ===================== NOISE-ONLY NULL HYPOTHESIS (ENSEMBLE) ============
+%  Replaces the old single noise-only run. noise_ensemble_error_bars runs the
+%  forward simulation ONCE (on the reference/reconstruction geometry) and then
+%  redraws electronic noise + reconstructs many times, returning the mean +/- std
+%  gamma pass rate vs the CT-ref truth (dose1) -- the null band / error bar. It is
+%  CACHED, keyed on the sensor/noise/recon config (NOT the dose), so it is computed
+%  once per session and reused for every beam/segment.
+%    >>> NOTE: this cache assumes the ultrasound array sits in the SAME place for
+%    every beam/segment. Reexamine -- and re-key the cache on the sensor mask --
+%    if sensor placement ever becomes per-beam (see noise_ensemble_error_bars). <<<
+%
+%  No single noise recon volume is produced anymore, so the per-volume noise gamma
+%  pairs and the noise plot below are skipped; the null band alone is used.
+
+null_ensemble = [];
+recon_noise   = [];   % kept [] -- guards the legacy per-volume noise blocks below
+if CONFIG.include_noise_only
+    fprintf('\n########## NOISE-ONLY NULL ENSEMBLE: CT_%d geometry ##########\n', CONFIG.reference_ct);
+    null_ensemble = noise_ensemble_error_bars(CONFIG, dose1, spacing_mm, ...
+        sct_ref, gantry_ref, beam_meta, 'TimeBudgetMin', CONFIG.noise_ensemble_minutes);
 end
 
+%% ===================== NORMALIZE ========================================
 % Least-squares normalization: scale each recon to its OWN-CT truth.
 if isfield(CONFIG, 'normalize') && CONFIG.normalize
     g1 = least_squares_gain(dose1, recon1);
@@ -290,6 +293,14 @@ if exist('CalcGamma', 'file') == 2
             end
         end
     end
+    if ~isempty(null_ensemble)
+        if null_ensemble.from_cache, cache_tag = ', cached'; else, cache_tag = ''; end
+        fprintf('\n  Noise-only null (ensemble, ref = CT %d truth):\n', ct_ref);
+        fprintf('    %-36s %8.2f%% +/- %.2f%%  (n=%d%s)\n', 'noise-only null band', ...
+            null_ensemble.mean_pass_rate, null_ensemble.std_pass_rate, ...
+            null_ensemble.num_samples, cache_tag);
+        gamma_results.null_ensemble = null_ensemble;   % mean/std null band for error bars
+    end
 else
     warning('CalcGamma not found. Skipping gamma analysis.');
     gamma_results = [];
@@ -318,6 +329,9 @@ if CONFIG.save_results
     if ~isempty(recon_noise)
         results.recon_dose_noise = recon_noise;   % noise-only control (blind geometry)
     end
+    if ~isempty(null_ensemble)
+        results.null_ensemble = null_ensemble;    % mean/std/pass_rates null band
+    end
     results.config          = CONFIG;
     results.spacing_mm      = spacing_mm;
     results.grid_size       = RES(1).gridSize;
@@ -332,33 +346,52 @@ end
 
 %% ========================= POST-SIMULATION PLOTS =======================
 
+%  Each enabled config gets ONE window whose plots are collected as labeled
+%  tabs (uitab) of a single uitabgroup, so related views stay together.
+
 if CONFIG.plot_results
     if PLOTS.dose_panels
+        figDose = figure('Name', 'Dose Panels', 'Color', 'w', ...
+            'NumberTitle', 'off', 'Position', [50, 50, 1380, 720]);
+        tgDose  = uitabgroup(figDose);
+        tabDose = uitab(tgDose, 'Title', 'Reconstructed Doses');
         plot_dose_panels(recon_A, recon_B, RES(1).sensor_mask, RES(1).density, spacing_mm, ...
             'Dose Comparison: Two Reconstructed Doses', CONFIG.viz_smooth_sigma, ...
-            {RES(1).label, RES(2).label});
+            {RES(1).label, RES(2).label}, tabDose);
     end
 
     if PLOTS.convergence && ...
             any(strcmpi(CONFIG.reconstruction_method, {'tr', 'hybrid'})) && ~isempty(RES(1).conv_max_pressure)
+        figConv = figure('Name', 'Convergence', 'Color', 'w', ...
+            'NumberTitle', 'off', 'Position', [150, 520, 760, 430]);
+        tgConv  = uitabgroup(figConv);
+        tabConv = uitab(tgConv, 'Title', 'p_0 Convergence');
         plot_convergence_history(RES(1).conv_max_pressure, RES(1).conv_rel_change, ...
-            RES(1).num_iters_done, CONFIG.convergence_tol, max(RES(1).p0(:)));
+            RES(1).num_iters_done, CONFIG.convergence_tol, max(RES(1).p0(:)), tabConv);
     end
 
     if PLOTS.gamma_maps && ~isempty(gamma_results) && isstruct(gamma_results)
-        pair_fn = fieldnames(gamma_results);
+        figGamma = figure('Name', 'Gamma Maps', 'Color', 'w', ...
+            'NumberTitle', 'off', 'Position', [50, 100, 1450, 400]);
+        tgGamma  = uitabgroup(figGamma);
+        pair_fn  = fieldnames(gamma_results);
         for k = 1:numel(pair_fn)
             gr = gamma_results.(pair_fn{k});
             [~, max_dose_idx] = max(gr.ref(:));
             [~, ~, cz_gamma]  = ind2sub(size(gr.ref), max_dose_idx);
-            plot_gamma_and_error_axial(gr, gr.ref, gr.tgt, gr.sensor_mask, cz_gamma, gr.title);
+            tabGamma = uitab(tgGamma, 'Title', gr.title);
+            plot_gamma_and_error_axial(gr, gr.ref, gr.tgt, gr.sensor_mask, cz_gamma, gr.title, tabGamma);
         end
     end
 
     if PLOTS.noise_only_panels && ~isempty(recon_noise)
+        figNoise = figure('Name', 'Noise-only Control', 'Color', 'w', ...
+            'NumberTitle', 'off', 'Position', [50, 50, 1380, 720]);
+        tgNoise  = uitabgroup(figNoise);
+        tabNoise = uitab(tgNoise, 'Title', sprintf('%s recon vs noise-only', label2));
         plot_dose_panels(recon2, recon_noise, sensor2, RES(idx2).density, spacing_mm, ...
             sprintf('Noise-only control: %s recon vs noise-only recon', label2), ...
-            CONFIG.viz_smooth_sigma, {sprintf('%s recon', label2), 'Noise-only recon'});
+            CONFIG.viz_smooth_sigma, {sprintf('%s recon', label2), 'Noise-only recon'}, tabNoise);
     end
 end
 

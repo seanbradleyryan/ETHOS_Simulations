@@ -915,7 +915,7 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
         sensorData_conv = real(ifft(fft(sensorData_cpu, [], 2) .* H, [], 2));
 
         % 2. Sensor frequency response (band-limit AFTER pulse convolution)
-        sensorData_resp = gaussianFilter(sensorData_conv, FS, 0.35e6, 100, true);
+        sensorData_resp = gaussianFilter(sensorData_conv, FS, 0.35e6, 100, false);
 
         % 3. Add electronic noise (after frequency-response filtering).
         %    noise_amp is set from the TRUE signal peak so a noise_only run adds
@@ -939,7 +939,7 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
         fprintf('        Pulse model complete. Noise amp: %.3e Pa\n', noise_amp);
     else
         % No pulse model: apply only the sensor frequency response.
-        sensorData = gaussianFilter(sensorData, FS, 0.35e6, 100, true);
+        sensorData = gaussianFilter(sensorData, FS, 0.35e6, 100, false);
         if noise_only
             % Null-signal test: keep only electronic noise at the amplitude the
             % true signal would have set (see noise_only note above).
