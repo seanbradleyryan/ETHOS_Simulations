@@ -1,4 +1,4 @@
-function plot_dose_panels(original, recon, sensor_mask, density, spacing_mm, titleStr, smooth_sigma, rowLabels)
+function plot_dose_panels(original, recon, sensor_mask, density, spacing_mm, titleStr, smooth_sigma, rowLabels, parent)
 %PLOT_DOSE_PANELS 2x3 dose comparison: coronal, sagittal, axial.
 %  Row 1 = first volume,  Row 2 = second volume (labelled via rowLabels;
 %  default {'Original','Reconstructed'}).
@@ -11,10 +11,14 @@ function plot_dose_panels(original, recon, sensor_mask, density, spacing_mm, tit
 %  fill speckle gaps in a spotty recon. Pass 0 to disable.
 %
 %  Pass density=[] to show dose only with a black background.
+%  Optional parent (figure / uitab / uipanel) hosts the plot; when omitted a
+%  new figure is created. Passing a uitab lets the caller collect several
+%  panels as tabs of one window.
 %  (Shared copy; formerly a local in the standalone drivers.)
 
     if nargin < 7 || isempty(smooth_sigma), smooth_sigma = 0; end
     if nargin < 8 || isempty(rowLabels),    rowLabels = {'Original', 'Reconstructed'}; end
+    if nargin < 9,                          parent = []; end
 
     gridSize = size(original);
     if ~isequal(size(sensor_mask), gridSize)
@@ -43,9 +47,12 @@ function plot_dose_panels(original, recon, sensor_mask, density, spacing_mm, tit
     wl_min    = wl_center - wl_width / 2;   % 875  kg/m^3
     wl_max    = wl_center + wl_width / 2;   % 1225 kg/m^3 %#ok<NASGU>
 
-    figure('Name', titleStr, 'Color', 'w', 'NumberTitle', 'off', ...
-        'Position', [50, 50, 1380, 700]);
-    sgtitle(sprintf('%s\nIsocenter (max dose): X=%d  Y=%d  Z=%d voxel  |  Dose clim [0, %.4f] Gy', ...
+    if isempty(parent)
+        parent = figure('Name', titleStr, 'Color', 'w', 'NumberTitle', 'off', ...
+            'Position', [50, 50, 1380, 700]);
+    end
+    tl = tiledlayout(parent, 2, 3, 'TileSpacing', 'compact', 'Padding', 'compact');
+    title(tl, sprintf('%s\nIsocenter (max dose): X=%d  Y=%d  Z=%d voxel  |  Dose clim [0, %.4f] Gy', ...
         titleStr, cx, cy, cz, max_dose), 'FontWeight', 'bold', 'FontSize', 11);
 
     row_labels = rowLabels;
@@ -74,7 +81,7 @@ function plot_dose_panels(original, recon, sensor_mask, density, spacing_mm, tit
         end
 
         for col = 1:3
-            ax         = subplot(2, 3, (row-1)*3 + col);
+            ax         = nexttile(tl, (row-1)*3 + col);
             dose_slice = double(dose_slices{col});
             if smooth_sigma > 0
                 dose_slice = imgaussfilt(dose_slice, smooth_sigma);

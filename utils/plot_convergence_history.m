@@ -1,16 +1,25 @@
-function plot_convergence_history(conv_max_pressure, conv_rel_change, num_iters, tol, p0_max_orig)
+function plot_convergence_history(conv_max_pressure, conv_rel_change, num_iters, tol, p0_max_orig, parent)
 %PLOT_CONVERGENCE_HISTORY p0 convergence over TR iterations.
 %  Left axis:  max reconstructed p0 per iteration (blue).
 %              Dashed black line = max of original p0 distribution (reference).
 %  Right axis: relative change between iterations (red, log-scale).
+%  Optional parent (figure / uitab / uipanel) hosts the plot; when omitted a
+%  new figure is created. Passing a uitab lets the caller collect several
+%  panels as tabs of one window.
 %  (Shared copy; formerly a local in the standalone drivers.)
+
+    if nargin < 6, parent = []; end
 
     iters   = 1:num_iters;
     p_vals  = conv_max_pressure(iters);
     rc_vals = conv_rel_change(iters);
 
-    figure('Name', 'p0 Convergence', 'Color', 'w', ...
-        'NumberTitle', 'off', 'Position', [150, 520, 720, 390]);
+    if isempty(parent)
+        figure('Name', 'p0 Convergence', 'Color', 'w', ...
+            'NumberTitle', 'off', 'Position', [150, 520, 720, 390]);
+    else
+        axes('Parent', parent);   % draw into the supplied tab / panel
+    end
 
     yyaxis left;
     plot(iters, p_vals, 'b-o', 'LineWidth', 1.8, 'MarkerSize', 5, ...
