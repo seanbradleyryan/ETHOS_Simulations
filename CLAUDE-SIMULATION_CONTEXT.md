@@ -12,6 +12,24 @@
 | GPU acceleration | `use_gpu = true` |
 | Typical runtime | ~23 min for 7 fields on 256×256×128 grid with GPU |
 
+## Acoustic Medium — single source of truth (MANDATORY)
+
+**All medium construction MUST go through `create_acoustic_medium.m`.** It is the only
+builder that applies the `threshold_2` **in-body air row** (low-HU voxels inside the body
+contour → real air: ρ≈1.2, c=343, Γ=0, so air generates no PA signal and is later masked
+from the recon via `recon_dose(density < 100) = 0`). Do **not** hand-roll a medium from the
+HU thresholds in a driver.
+
+- **Coupling bath:** wrap it as `build_medium_with_bath` (create_acoustic_medium, then force
+  outside-body / couch voxels to the `uniform_*` medium), exactly as `run_standalone_field`
+  and `noise_ensemble_error_bars` do.
+- **Known offender:** `study_pass_rates_individual.m` has a local `create_medium` that omits
+  the air row. It disagrees with the engine and must not be copied into new code. (This was
+  the cause of the noise-null pass rate reading low until the null was pointed back at
+  `create_acoustic_medium`.)
+- When adding a new simulation/analysis script, take the medium from `create_acoustic_medium`
+  (+ bath) — never reimplement HU→property assignment.
+
 ## Tissue / Grüneisen Methods (`sensor_placement_method`)
 
 | Method | Description |

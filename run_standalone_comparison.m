@@ -203,18 +203,21 @@ if CONFIG.include_noise_only
 end
 
 %% ===================== NORMALIZE ========================================
-% Least-squares normalization: scale each recon to its OWN-CT truth.
+% Least-squares normalization: scale EVERY recon to the SAME target, the CT-ref
+% truth (dose1), so all recons and the null share one common scale. (The null
+% ensemble in noise_ensemble_error_bars likewise normalizes to dose1.)
 if isfield(CONFIG, 'normalize') && CONFIG.normalize
     g1 = least_squares_gain(dose1, recon1);
-    g2 = least_squares_gain(dose2, recon2);
+    g2 = least_squares_gain(dose1, recon2);
     recon1 = recon1 * g1;
     recon2 = recon2 * g2;
-    recon_A = recon_A * least_squares_gain(double(RES(1).doseGrid), recon_A);
-    recon_B = recon_B * least_squares_gain(double(RES(2).doseGrid), recon_B);
+    recon_A = recon_A * least_squares_gain(dose1, recon_A);
+    recon_B = recon_B * least_squares_gain(dose1, recon_B);
     if ~isempty(recon_noise)
-        recon_noise = recon_noise * least_squares_gain(dose2, recon_noise);
+        recon_noise = recon_noise * least_squares_gain(dose1, recon_noise);
     end
-    fprintf('\n[NORM] LSQ gains: recon(%s)=%.4g, recon(%s)=%.4g\n', label1, g1, label2, g2);
+    fprintf('\n[NORM] LSQ gains (all to CT %d truth): recon(%s)=%.4g, recon(%s)=%.4g\n', ...
+        CONFIG.reference_ct, label1, g1, label2, g2);
 end
 
 %% ========================= GAMMA ANALYSIS ==============================
