@@ -127,7 +127,9 @@ DIAG.standoff_max_mm  = 120;   % [4] give up (air gap / no contact) beyond this
 DIAG.corr_dead_thresh = 0.50;  % [1] correlation below this => channel counted "dead"
 DIAG.energy_lo        = 0.50;  % [1] energy ratio (CT3/CT1) outside [lo, 1/lo] => flagged
 DIAG.energy_floor_frac = 0.05; % [1] skip elements below this fraction of the peak channel energy
-DIAG.maxlag_samples   = 100;   % [1] lag search half-width for peak cross-correlation
+DIAG.maxlag_samples   = 600;   % [1] lag search half-width (samples). Wide: an 18 mm
+                               %     water-path change alone is ~12 us of lag. FFT
+                               %     cross-correlation makes a big window cheap.
 DIAG.air_hu           = -300;  % [3] HU below this = gas/air along a ray
 DIAG.bone_hu          = 300;   % [3] HU above this = bone along a ray
 DIAG.save_dir         = fullfile(CONFIG.working_dir, 'AnalysisResults', ...
@@ -181,8 +183,8 @@ if max(abs(sct1.origin(:) - sct3.origin(:))) > 1e-3
          'so the fixed rays may be misregistered on CT_3.']);
 end
 
-[Z1, ~]  = build_impedance(sct1, CONFIG);   % Z = rho*c on the CT_1 grid
-[Z3, ~]  = build_impedance(sct3, CONFIG);   % Z = rho*c on the CT_3 grid
+[Z1, med1]  = build_impedance(sct1, CONFIG);   % Z = rho*c on the CT_1 grid
+[Z3, med3]  = build_impedance(sct3, CONFIG);   % Z = rho*c on the CT_3 grid
 body1 = logical(sct1.bodyMask);
 body3 = logical(sct3.bodyMask);
 HU1   = sct1.cubeHU;
@@ -191,6 +193,23 @@ HU3   = sct3.cubeHU;
 doseGrid = out.doseGrid;                    % CT_1-body-masked dose, native grid
 iso_mm   = resolve_iso_mm(sinfo, doseGrid, origin, spacing);
 fprintf('      Isocenter (look target): [%.1f %.1f %.1f] mm\n', iso_mm);
+
+% Bulk medium check: is the whole-body average sound speed shifted between CT_1
+% and CT_3? A coherent shift (not local) points at CBCT HU / segmentation drift
+% rather than moved anatomy, and it is what produces a uniform time-of-flight
+% lag and global TR defocus. Compared inside each body and their intersection.
+bulk = struct();
+bulk.mean_c_CT1  = mean(med1.sound_speed(body1));
+bulk.mean_c_CT3  = mean(med3.sound_speed(body3));
+both = body1 & body3;
+bulk.mean_c_CT1_shared = mean(med1.sound_speed(both));
+bulk.mean_c_CT3_shared = mean(med3.sound_speed(both));
+bulk.dc_shared   = bulk.mean_c_CT3_shared - bulk.mean_c_CT1_shared;
+bulk.mean_rho_CT1_shared = mean(med1.density(both));
+bulk.mean_rho_CT3_shared = mean(med3.density(both));
+fprintf('      Body mean sound speed: CT1 %.1f, CT3 %.1f m/s (shared voxels: %+.1f m/s, %.2f%%)\n', ...
+    bulk.mean_c_CT1, bulk.mean_c_CT3, bulk.dc_shared, ...
+    100 * bulk.dc_shared / max(bulk.mean_c_CT1_shared, eps));
 
 %% =================== DIAGNOSTIC [1]: PER-CHANNEL ====================== %%
 %  Average sensor-voxel traces per element (authoritative voxel->element map),
@@ -376,6 +395,11 @@ n_air      = nnz(airGap);
 blob       = largest_blob(trueDeadImg > 0.5);      % blob of TRULY-lost channels
 maxStand   = max(abs(dStand(valid)));
 med_lag_us = median(lagUs(valid), 'omitnan');
+% Lag-window saturation: if many elements pin near +/- maxlag, the window is too
+% small and "truly lost" is an artifact (widen DIAG.maxlag_samples and re-run).
+rail_frac  = mean(abs(lagMap(valid)) >= 0.9 * DIAG.maxlag_samples);
+lag_lo_us  = min(lagUs(valid));
+lag_hi_us  = max(lagUs(valid));
 
 %% =========================== PLOTS (tabbed) =========================== %%
 %  One window; each diagnostic on its own tab. Array maps are labeled by the
@@ -460,9 +484,11 @@ results.coincidence = struct( ...
     'refl_vs_zerolag', cReflVsDecorr, 'standoff_vs_zerolag', cStandVsDecorr, ...
     'drr_vs_zerolag', cDRRVsDecorr);
 results.placement = placeStats;
+results.medium_bulk = bulk;
 results.summary = struct('n_dead_zerolag', n_dead, 'n_truly_lost', n_truedead, ...
     'n_air_gap', n_air, 'largest_lost_blob', blob, ...
-    'max_abs_d_standoff_mm', maxStand, 'median_lag_us', med_lag_us);
+    'max_abs_d_standoff_mm', maxStand, 'median_lag_us', med_lag_us, ...
+    'lag_rail_fraction', rail_frac, 'lag_range_us', [lag_lo_us, lag_hi_us]);
 out_mat = fullfile(DIAG.save_dir, sprintf('blind_fidelity_%s.mat', dose_tag));
 save(out_mat, 'results', '-v7.3');
 
@@ -471,7 +497,17 @@ fprintf('  Channels dead at zero lag (corr<%.2f/energy)          : %d / %d\n', .
     DIAG.corr_dead_thresh, n_dead, nnz(valid));
 fprintf('  Channels TRULY lost (peak x-corr<%.2f, lag-tolerant)  : %d / %d\n', ...
     DIAG.corr_dead_thresh, n_truedead, nnz(valid));
-fprintf('  Median lag (bulk time-of-flight shift, us)            : %+.2f\n', med_lag_us);
+fprintf('  Median lag (bulk time-of-flight shift, us)            : %+.2f  [range %+.2f..%+.2f]\n', ...
+    med_lag_us, lag_lo_us, lag_hi_us);
+fprintf('  Lag-window saturation (|lag| >= 0.9*maxlag)           : %.0f%%', 100*rail_frac);
+if rail_frac > 0.1
+    fprintf('   <-- WIDEN DIAG.maxlag_samples (%d) AND RE-RUN\n', DIAG.maxlag_samples);
+else
+    fprintf('   (ok)\n');
+end
+fprintf('  Body mean sound speed CT1->CT3 (shared voxels)        : %.1f -> %.1f m/s (%+.2f%%)\n', ...
+    bulk.mean_c_CT1_shared, bulk.mean_c_CT3_shared, ...
+    100 * bulk.dc_shared / max(bulk.mean_c_CT1_shared, eps));
 fprintf('  Largest contiguous TRULY-lost blob (elements)         : %d\n', blob);
 fprintf('  Air-gap / no-contact elements (NaN standoff)          : %d\n', n_air);
 fprintf('  Max |standoff change| CT3 vs CT1 (mm)                 : %.1f\n', maxStand);
@@ -634,31 +670,30 @@ end
 
 
 function [rpk, lpk] = peak_xcorr(a, b, maxlag)
-%PEAK_XCORR Peak normalized cross-correlation of a,b over lags [-maxlag,maxlag].
-%   Returns the peak correlation and the lag (samples) at which it occurs
-%   (positive => b is delayed relative to a). Normalized over the overlap at
-%   each lag, so a pure time shift scores ~1 even when zero-lag Pearson is low.
-%   No Signal Processing Toolbox dependency.
+%PEAK_XCORR Peak normalized cross-correlation of a,b over lags [-maxlag,maxlag],
+%   via FFT so a wide window is cheap. Returns the peak correlation and the lag
+%   (samples) at which it occurs (positive => b delayed relative to a). Globally
+%   normalized (norm(a)*norm(b)), so a pure time shift scores ~1 even when
+%   zero-lag Pearson is low. No Signal Processing Toolbox dependency.
     a = a(:) - mean(a(:));
     b = b(:) - mean(b(:));
-    if norm(a) == 0 || norm(b) == 0
+    na = norm(a); nb = norm(b);
+    if na == 0 || nb == 0
         rpk = 0; lpk = 0; return;
     end
-    rpk = -Inf; lpk = 0;
-    n = numel(a);
-    for L = -maxlag:maxlag
-        if L >= 0
-            aa = a(1:n-L);   bb = b(1+L:n);
-        else
-            aa = a(1-L:n);   bb = b(1:n+L);
-        end
-        if numel(aa) < 8; continue; end
-        d = norm(aa) * norm(bb);
-        if d == 0; continue; end
-        r = (aa' * bb) / d;
-        if r > rpk; rpk = r; lpk = L; end
+    n  = numel(a);
+    nf = 2^nextpow2(2*n - 1);
+    cc = real(ifft(fft(a, nf) .* conj(fft(b, nf))));
+    % Reorder to lags -(n-1) .. (n-1); cc(t) = sum a(k) b(k-lag).
+    cc   = [cc(nf-n+2:nf); cc(1:n)];
+    lags = (-(n-1):(n-1))';
+    if ~isempty(maxlag) && maxlag > 0
+        keep = abs(lags) <= maxlag;
+        cc = cc(keep); lags = lags(keep);
     end
-    if ~isfinite(rpk); rpk = 0; lpk = 0; end
+    [mx, ix] = max(cc);
+    rpk = mx / (na * nb);
+    lpk = lags(ix);
 end
 
 
