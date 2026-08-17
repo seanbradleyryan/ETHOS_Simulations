@@ -887,6 +887,32 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
 
     sensorData_measured = sensorData;
 
+    %% ============ DIAGNOSTIC EXPORT: RAW FORWARD SINOGRAM PAIR (opt-in) ============
+    %  For diagnostic_blind_fidelity. When config.export_forward_sinograms is set,
+    %  hand back the RAW (pre-pulse, pre-noise) sensor data for the SAME p0 and
+    %  SAME sensor propagated through BOTH media: the forward medium (kmedium) and,
+    %  on the blind path, the reconstruction medium (kmedium_rec). This is the
+    %  clean CT1-vs-CT3 channel-by-channel comparison (medium isolated: p0 and
+    %  sensor held fixed). Guarded and inert for every normal caller.
+    if safe_config(config, 'export_forward_sinograms', false)
+        sim_results.sinogram_fwd = gather(double(sensorData));
+        if blind_recon
+            sd_alt = kspaceFirstOrder3D(kgrid, kmedium_rec, source_fwd, sensor, inputArgs{:});
+            sim_results.sinogram_alt = gather(double(sd_alt));
+        else
+            % Full access: no second medium, so the pair is degenerate.
+            sim_results.sinogram_alt = sim_results.sinogram_fwd;
+        end
+        sim_results.sinogram_dt   = kgrid.dt;
+        sim_results.sensor_info   = sensor_info;   % element_positions_mm, voxel_element_idx
+        % Skip the recon entirely when only the sinogram pair is wanted (fast,
+        % and avoids the diverging blind time reversal the diagnostic is probing).
+        if safe_config(config, 'forward_sinograms_only', false)
+            recon_dose = zeros(input_dims_for_crop);
+            return;
+        end
+    end
+
     %% ================= PULSE CONVOLUTION / FREQUENCY RESPONSE / NOISE / DECONV =================
     %  Physical measurement chain in acquisition order:
     %    1. Convolve with the pulse profile (finite radiation pulse)

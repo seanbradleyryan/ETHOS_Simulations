@@ -23,6 +23,7 @@ clear; clc; close all;
 
 % Ensure the moved helper functions in utils/ are on the path (run from root).
 addpath(genpath(fullfile(fileparts(mfilename('fullpath')), 'utils')));
+addpath(genpath(fullfile(fileparts(mfilename('fullpath')), 'pipeline')));  % step* functions live here
 
 fprintf('=====================================================\n');
 fprintf('  Multi-Medium Photoacoustic Reconstruction Study\n');

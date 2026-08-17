@@ -75,8 +75,11 @@ fprintf('  Started: %s\n', datetime('now'));
 fprintf('  Working directory: %s\n', CONFIG.working_dir);
 fprintf('=========================================================\n\n');
 
-% Add pipeline scripts to path (scripts live at the repo root next to this file)
+% Add pipeline scripts to path (run_*/pipeline_* live at the repo root next to
+% this file; step* functions and helpers now live in pipeline/ and utils/).
 addpath(CONFIG.working_dir);
+addpath(genpath(fullfile(CONFIG.working_dir, 'pipeline')));  % step* functions live here
+addpath(genpath(fullfile(CONFIG.working_dir, 'utils')));
 
 % Initialize results structure
 RESULTS           = struct();

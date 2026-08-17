@@ -132,6 +132,7 @@ fprintf('=========================================================\n\n');
 % Add required paths
 addpath(genpath(CONFIG.matrad_path));
 addpath(genpath(fullfile(CONFIG.working_dir, 'PipelineScripts')));
+addpath(genpath(fullfile(CONFIG.working_dir, 'pipeline')));  % step* functions live here
 addpath(genpath(fullfile(CONFIG.working_dir, 'utils')));
 
 % Verify k-Wave installation

@@ -22,6 +22,7 @@ clear; clc; close all;
 % Ensure the moved helper functions in utils/ are on the path when this script
 % is run from the repo root (pipeline flows already genpath PipelineScripts).
 addpath(genpath(fullfile(fileparts(mfilename('fullpath')), 'utils')));
+addpath(genpath(fullfile(fileparts(mfilename('fullpath')), 'pipeline')));  % step* functions live here
 
 %% ========================= CONFIGURATION ================================
 
