@@ -27,8 +27,10 @@
 
 clear; close all; clc;
 
-% Ensure the moved helper functions in utils/ are on the path when run from root.
-addpath(genpath(fullfile(fileparts(mfilename('fullpath')), 'utils')));
+% Script lives one level below the repo root; add utils/ and pipeline/ from there.
+repoRoot = fileparts(fileparts(mfilename('fullpath')));
+addpath(genpath(fullfile(repoRoot, 'utils')));
+addpath(genpath(fullfile(repoRoot, 'pipeline')));
 
 %% =============== CONFIGURATION =================================== %%
 test_patient_id = 'PHANTOM_TEST';

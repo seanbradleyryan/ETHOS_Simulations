@@ -216,16 +216,18 @@ end
 %  FORWARD-BUNDLE MACHINERY
 %
 %  The functions below (build_forward_bundle, pad_medium_p0, apply_grid_expansion,
-%  embed_on_grid, create_medium, redraw_noisy_deconv, reconstruct_recon_dose) are
-%  copied VERBATIM from the in-production noise ensemble in
-%  study_pass_rates_individual.m (the accepted null-hypothesis methodology; see
-%  CLAUDE-SIMULATION_CONTEXT.md). They are duplicated here rather than shared
-%  because MATLAB local functions are not callable across files, and extracting
-%  them would mean editing the working study driver. Keep them in sync if the
-%  study file's versions change.
+%  embed_on_grid, redraw_noisy_deconv, reconstruct_recon_dose) are copied from the
+%  in-production noise ensemble in study_pass_rates_individual.m (the accepted
+%  null-hypothesis methodology; see CLAUDE-SIMULATION_CONTEXT.md). They are
+%  duplicated here rather than shared because MATLAB local functions are not
+%  callable across files, and extracting them would mean editing the working study
+%  driver. Keep them in sync if the study file's versions change.
 %
-%  create_medium uses config.tissue_tables (the canonical tables get_default_config
-%  builds) instead of a private table copy; it is otherwise verbatim.
+%  IMPORTANT: the medium is built by build_medium_with_bath -> create_acoustic_medium
+%  (the single canonical builder, with the in-body air row), NOT the study driver's
+%  local create_medium (which omits air and caused the null to disagree with the
+%  real recon). reconstruct_recon_dose also masks air pockets exactly as the engine
+%  does. This keeps the null on identical physics to run_standalone_field.
 %% ========================================================================
 
 function v = embed_on_grid(vol, dims, off, fillval)
@@ -285,7 +287,10 @@ function B = build_forward_bundle(truthDose, sct, gantry_angle, beam_meta, CONFI
     end
 
     % --- Acoustic medium ---
-    medium = create_medium(sct, CONFIG);
+    % Single source of truth: create_acoustic_medium (+ coupling-bath override),
+    % identical to run_standalone_field. Do NOT reimplement medium construction --
+    % create_acoustic_medium is the only builder that applies the in-body air row.
+    medium = build_medium_with_bath(sct, CONFIG);
 
     if isfield(sct, 'bodyMask')
         doseGrid = doseGrid .* double(sct.bodyMask);
@@ -783,77 +788,34 @@ function recon_dose = reconstruct_recon_dose(B, sensorData_measured)
     else
         recon_dose = reconDosePerPulse * B.num_pulses .* double(B.doseMask) .* body_mask_plot;
     end
+
+    % Mask air pockets (identical to run_single_field_simulation): air-classified
+    % voxels (density ~1.2 kg/m^3) carry no real PA dose and would otherwise
+    % reconstruct as hotspots. Use the conversion medium's density.
+    recon_dose(B.medium_orig.density < 100) = 0;
 end
 
-function medium = create_medium(sct, config)
-%CREATE_MEDIUM Build acoustic medium from SCT data and tissue model config.
-%  (Verbatim from study_pass_rates_individual.m, except the tissue tables come
-%  from config.tissue_tables -- the canonical tables get_default_config builds --
-%  instead of a private copy.)
-
-    HU       = double(sct.cubeHU);
-    gridSize = size(HU);
-    if isfield(config, 'tissue_tables') && ~isempty(config.tissue_tables)
-        tables = config.tissue_tables;
-    else
-        tables = define_tissue_tables();
-    end
-
-    switch lower(config.gruneisen_method)
-        case 'uniform'
-            medium.density     = ones(gridSize) * config.uniform_density;
-            medium.sound_speed = ones(gridSize) * config.uniform_sound_speed;
-            medium.alpha_coeff = ones(gridSize) * config.uniform_alpha_coeff;
-            medium.alpha_power = 1.1;
-            medium.gruneisen   = ones(gridSize) * config.uniform_gruneisen;
-
-        case {'threshold_1', 'threshold_2'}
-            T          = tables.(config.gruneisen_method);
-            nTissues   = length(T.tissue_names);
-            boundaries = T.hu_boundaries;
-
-            medium.density     = ones(gridSize) * 1000;
-            medium.sound_speed = ones(gridSize) * 1540;
-            medium.alpha_coeff = ones(gridSize) * 0.5;
-            medium.alpha_power = 1.1;
-            medium.gruneisen   = ones(gridSize) * 0.11;
-
-            for t = 1:nTissues
-                mask = (HU >= boundaries(t)) & (HU < boundaries(t+1));
-                medium.density(mask)     = T.density(t);
-                medium.sound_speed(mask) = T.sound_speed(t);
-                medium.alpha_coeff(mask) = T.alpha_coeff(t);
-                medium.gruneisen(mask)   = T.gruneisen(t);
-            end
-
-        otherwise
-            error('Unknown gruneisen_method: %s', config.gruneisen_method);
-    end
-
-    if config.force_uniform_density
-        medium.density = ones(gridSize) * config.uniform_density;
-    end
-    if config.force_uniform_sound_speed
-        medium.sound_speed = ones(gridSize) * config.uniform_sound_speed;
-    end
-    if config.force_uniform_attenuation
-        medium.alpha_coeff = ones(gridSize) * config.uniform_alpha_coeff;
-        medium.alpha_power = 1.1;
-    end
-    if config.force_uniform_gruneisen
-        medium.gruneisen = ones(gridSize) * config.uniform_gruneisen;
-    end
-
+function medium = build_medium_with_bath(sct, config)
+%BUILD_MEDIUM_WITH_BATH  create_acoustic_medium (the single, canonical medium
+%  builder -- the only one that applies the in-body air row) + force the coupling
+%  bath (outside body / couch) to the uniform medium. Identical to the local of
+%  the same name in run_standalone_field, so the noise-only null reconstructs on
+%  exactly the medium the real recon uses.
+    medium = create_acoustic_medium(sct, config);
+    ud = getf(config, 'uniform_density',     1000);
+    uc = getf(config, 'uniform_sound_speed', 1540);
+    ua = getf(config, 'uniform_alpha_coeff', 0);
+    ug = getf(config, 'uniform_gruneisen',   1.0);
     if isfield(sct, 'bodyMask')
-        outside_body = ~logical(sct.bodyMask);
-        if isfield(sct, 'couchMask')
-            outside_body = outside_body | logical(sct.couchMask);
+        outside = ~logical(sct.bodyMask);
+        if isfield(sct, 'couchMask') && ~isempty(sct.couchMask)
+            outside = outside | logical(sct.couchMask);
         end
-        medium.density(outside_body)     = config.uniform_density;
-        medium.sound_speed(outside_body) = config.uniform_sound_speed;
-        medium.alpha_coeff(outside_body) = config.uniform_alpha_coeff;
-        medium.gruneisen(outside_body)   = config.uniform_gruneisen;
+        medium.density(outside)     = ud;
+        medium.sound_speed(outside) = uc;
+        if numel(medium.alpha_coeff) > 1
+            medium.alpha_coeff(outside) = ua;
+        end
+        medium.gruneisen(outside)   = ug;
     end
-
-    medium.grid_size = gridSize;
 end

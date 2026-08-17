@@ -89,8 +89,10 @@ function RESULTS = study_gamma_index_convergence(dose_file, CONFIG)
 
 study_timer = tic;
 
-% Ensure the moved helper functions in utils/ are on the path (run from root).
-addpath(genpath(fullfile(fileparts(mfilename('fullpath')), 'utils')));
+% Script lives one level below the repo root; add utils/ and pipeline/ from there.
+repoRoot = fileparts(fileparts(mfilename('fullpath')));
+addpath(genpath(fullfile(repoRoot, 'utils')));
+addpath(genpath(fullfile(repoRoot, 'pipeline')));
 
 %% ========================= CONFIGURATION ================================
 % Start from the shared defaults, then overlay any caller-supplied overrides and
