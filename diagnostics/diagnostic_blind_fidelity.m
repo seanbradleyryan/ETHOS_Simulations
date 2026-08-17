@@ -13,29 +13,39 @@
 %
 %   [1] PER-CHANNEL SIGNAL CHANGE (needs the forward operator).
 %       Hold p0 and the sensor FIXED (both taken from CT_1) and propagate the
-%       identical p0 through the CT_1 medium and the CT_3 medium. Difference
-%       the raw sensor traces element by element:
-%         - Pearson (zero-lag) correlation map: a dead/blocked element shows as
-%           a CONTIGUOUS dark blob (physical occlusion); salt-and-pepper decorr
-%           is numerics, not anatomy.
+%       identical p0 through the CT_1 medium and the CT_3 medium. Per element:
+%         - Zero-lag Pearson correlation map.
+%         - LAG-TOLERANT peak cross-correlation map + a LAG map (us). Together
+%           these separate a bulk time-of-flight shift (sound-speed change: low
+%           zero-lag corr but high peak corr, coherent lag) from TRUE signal loss
+%           (low even after lag alignment => "truly lost" channels). A contiguous
+%           truly-lost blob = physical occlusion; scatter = numerics.
 %         - Energy-ratio map: amplitude loss even when the waveform shape holds.
 %
-%   [2] IMPEDANCE / REFLECTION RAY INTEGRAL (geometry only, no k-Wave).
+%   [2] IMPEDANCE / REFLECTION + TISSUE RAY INTEGRAL (geometry only, no k-Wave).
 %       For each element, cast rays from the high-dose (beam) source set to the
 %       element through the CT_1 and CT_3 media and accumulate a reflection
-%       proxy R = sum_i ((Z_{i+1}-Z_i)/(Z_{i+1}+Z_i))^2 (Z = rho*c). The map is
-%       the CT_3 - CT_1 difference. It is SELF-CALIBRATED against [1]: a scatter
-%       of dR vs (1 - corr) per element gives the reflection change at which
-%       channels actually die — no need to guess an absolute impedance cutoff.
+%       proxy R = sum_i ((Z_{i+1}-Z_i)/(Z_{i+1}+Z_i))^2 (Z = rho*c), plus the
+%       GAS and BONE fractions along the ray. Maps are CT_3 - CT_1 differences.
+%       Reflection-up with gas-up but bone-flat = a gas pocket (near-total
+%       acoustic wall, invisible on a radiograph); bone-up raises both. The
+%       reflection scatter vs (1 - peak corr) SELF-CALIBRATES the "how much
+%       change kills a channel" threshold against [1].
 %
 %   [4] STANDOFF / COUPLING + SENSOR-EYE PROJECTION (geometry only, no k-Wave).
-%       Per element, distance along its inward look-direction (toward iso) to
-%       the first body voxel, for CT_1 and CT_3 (32x32 maps + difference). An
-%       air gap (large or NaN standoff) is an unambiguous, catastrophic coupling
-%       failure. A per-element sensor-eye DRR (integrated HU along the same ray)
-%       shows structure that moved into an element's line of sight. Coincidence
-%       of these maps with the [1] dead-channel blob localizes the cause
-%       (coupling gap vs anatomy in path vs bulk impedance).
+%       Per element, ABSOLUTE distance along its inward look-direction (toward
+%       iso) to the first body voxel, for CT_1 and CT_3 (32x32 maps + diff). An
+%       air gap (NaN standoff) is an unambiguous, catastrophic coupling failure.
+%       A per-element sensor-eye DRR (integrated HU along the ray) shows total
+%       structure in an element's line of sight. Coincidence of these with the
+%       [1] loss localizes the cause (coupling gap vs anatomy vs bulk impedance).
+%
+%   [F] SENSOR PLACEMENT CT_1 vs CT_3 (geometry only, no k-Wave).
+%       The maps above froze the sensor to isolate the medium. [F] instead
+%       RE-PLACES the array on each geometry (determine_sensor_mask, same dose,
+%       only bodyMask differs) and maps the per-element displacement plus the
+%       center shift, aim-normal angle, and tilt change -- the direct test of
+%       "does the sensor tilt/shift between CT_1 and CT_3".
 %
 %       ([3] "reconstruct CT_3 data on the CT_3 medium" is intentionally omitted:
 %        the matched case is already known to converge, better than CT_1.)
@@ -54,10 +64,15 @@
 %   run (F5). HIPAA: execute on the remote device, not locally.
 %
 % OUTPUTS:
-%   - 3 figures (one per diagnostic) + a saved results .mat (all maps + metrics).
-%   - Console summary: #dead channels, largest contiguous blob, max standoff
-%     change, air-gap count, and the three coincidence correlations that say
-%     whether the dead-channel pattern is coupling-, anatomy-, or impedance-driven.
+%   - ONE figure window with four tabs ([1] per-channel, [2] reflection & tissue,
+%     [4] coupling & sensor-eye, [F] sensor placement) + a saved results .mat
+%     (all maps + metrics). Array maps are labeled by the physical direction each
+%     element axis points (from element_positions_mm), so image up/down maps to
+%     real anatomy despite the array tilt.
+%   - Console summary: truly-lost channel count, median bulk lag, air-gap count,
+%     max standoff change, sensor re-placement shift, and the coincidence
+%     correlations that say whether the loss is gas-, bone-, coupling-, or
+%     bulk-impedance-driven.
 %
 % DEPENDENCIES:
 %   run_standalone_field, run_single_field_simulation (export hook),
@@ -109,9 +124,12 @@ DIAG.max_src_points  = 64;     % [2] cap on source points per element (thinned i
 DIAG.ray_nsamp       = 200;    % samples per ray for [2] reflection and [4] DRR
 DIAG.standoff_step_mm = 0.5;   % [4] march step toward iso
 DIAG.standoff_max_mm  = 120;   % [4] give up (air gap / no contact) beyond this
-DIAG.corr_dead_thresh = 0.50;  % [1] Pearson below this => channel counted "dead"
+DIAG.corr_dead_thresh = 0.50;  % [1] correlation below this => channel counted "dead"
 DIAG.energy_lo        = 0.50;  % [1] energy ratio (CT3/CT1) outside [lo, 1/lo] => flagged
 DIAG.energy_floor_frac = 0.05; % [1] skip elements below this fraction of the peak channel energy
+DIAG.maxlag_samples   = 100;   % [1] lag search half-width for peak cross-correlation
+DIAG.air_hu           = -300;  % [3] HU below this = gas/air along a ray
+DIAG.bone_hu          = 300;   % [3] HU above this = bone along a ray
 DIAG.save_dir         = fullfile(CONFIG.working_dir, 'AnalysisResults', ...
                                  CONFIG.patient_id, CONFIG.session);
 
@@ -157,6 +175,11 @@ origin  = sct1.origin(:)';
 spacing = sct1.spacing(:)';
 assert(isequal(size(sct1.cubeHU), size(sct3.cubeHU)), ...
     'CT_1 and CT_3 grids differ; they must share the dose grid.');
+if max(abs(sct1.origin(:) - sct3.origin(:))) > 1e-3
+    warning('diagnostic_blind_fidelity:OriginMismatch', ...
+        ['CT_1 and CT_3 origins differ; [2]/[4] sample CT_3 with the CT_1 origin, ' ...
+         'so the fixed rays may be misregistered on CT_3.']);
+end
 
 [Z1, ~]  = build_impedance(sct1, CONFIG);   % Z = rho*c on the CT_1 grid
 [Z3, ~]  = build_impedance(sct3, CONFIG);   % Z = rho*c on the CT_3 grid
@@ -179,7 +202,9 @@ if numel(velem) ~= size(sino1, 1)
         'voxel_element_idx (%d) ~= sinogram rows (%d); channel map may be misaligned.', ...
         numel(velem), size(sino1, 1));
 end
-corrMap = nan(Ntot, 1);      % Pearson(CT1 trace, CT3 trace)
+corrMap = nan(Ntot, 1);      % zero-lag Pearson(CT1 trace, CT3 trace)
+peakMap = nan(Ntot, 1);      % peak normalized cross-correlation over lags
+lagMap  = nan(Ntot, 1);      % lag (samples) at the peak; sign = CT3 delayed vs CT1
 enerMap = nan(Ntot, 1);      % ||CT3|| / ||CT1||
 E1      = nan(Ntot, 1);      % CT1 trace energy (for the low-signal floor)
 for e = 1:Ntot
@@ -189,6 +214,7 @@ for e = 1:Ntot
     t3 = mean(sino3(rows, :), 1);
     E1(e) = norm(t1);
     corrMap(e) = pearson(t1, t3);
+    [peakMap(e), lagMap(e)] = peak_xcorr(t1, t3, DIAG.maxlag_samples);
     if E1(e) > 0
         enerMap(e) = norm(t3) / E1(e);
     end
@@ -198,17 +224,29 @@ end
 if any(~isnan(E1))
     sig_floor = DIAG.energy_floor_frac * max(E1(~isnan(E1)));
     lowsig = E1 < sig_floor;
-    corrMap(lowsig) = NaN;
-    enerMap(lowsig) = NaN;
+    corrMap(lowsig) = NaN;  peakMap(lowsig) = NaN;
+    lagMap(lowsig)  = NaN;  enerMap(lowsig) = NaN;
 end
-decorr = 1 - corrMap;                                    % 0 = identical, up to 2
+% Lag in microseconds (bulk sound-speed / time-of-flight change).
+dt_us  = getf(sr, 'sinogram_dt', NaN) * 1e6;
+lagUs  = lagMap * dt_us;
+% Two "decorrelation" measures: zero-lag (swamped by any bulk time shift) and
+% lag-tolerant (true signal loss after removing a uniform shift).
+decorr      = 1 - corrMap;      % zero-lag
+decorr_peak = 1 - peakMap;      % lag-tolerant: this is the physical "signal lost"
+% Zero-lag dead (may just be shifted) vs truly-lost (low even after alignment).
 deadMask = (corrMap < DIAG.corr_dead_thresh) | ...
            (enerMap < DIAG.energy_lo) | (enerMap > 1/DIAG.energy_lo);
-deadMask(isnan(corrMap)) = false;                        % aliased elements: no signal
+deadMask(isnan(corrMap)) = false;
+trueDead = peakMap < DIAG.corr_dead_thresh;               % lost even allowing a lag
+trueDead(isnan(peakMap)) = false;
 
-corrImg = reshape(corrMap, [N, N]);   % rows = ez, cols = ex
-enerImg = reshape(enerMap, [N, N]);
-deadImg = reshape(double(deadMask), [N, N]);
+corrImg  = reshape(corrMap,  [N, N]);   % rows = ez, cols = ex
+peakImg  = reshape(peakMap,  [N, N]);
+lagImg   = reshape(lagUs,    [N, N]);
+enerImg  = reshape(enerMap,  [N, N]);
+deadImg  = reshape(double(deadMask), [N, N]);
+trueDeadImg = reshape(double(trueDead), [N, N]);
 
 %% =================== DIAGNOSTIC [2]: REFLECTION RAY ==================== %%
 %  Cumulative reflection proxy along source->element rays, CT_1 and CT_3.
@@ -219,22 +257,30 @@ src_mm = beam_source_points(doseGrid, origin, spacing, ...
 fprintf('      Source points (beam >= %.0f%% max dose): %d\n', ...
     100*DIAG.src_dose_frac, size(src_mm,1));
 
-refl1 = nan(Ntot, 1);
-refl3 = nan(Ntot, 1);
+refl1 = nan(Ntot, 1);  refl3 = nan(Ntot, 1);
+air1  = nan(Ntot, 1);  air3  = nan(Ntot, 1);   % [3] gas fraction along the ray
+bone1 = nan(Ntot, 1);  bone3 = nan(Ntot, 1);   % [3] bone fraction along the ray
+nsrc  = size(src_mm, 1);
 for e = 1:Ntot
     pe = epos(e, :);
-    r1 = 0; r3 = 0;
-    for s = 1:size(src_mm, 1)
-        r1 = r1 + reflection_along_ray(Z1, origin, spacing, src_mm(s,:), pe, DIAG.ray_nsamp);
-        r3 = r3 + reflection_along_ray(Z3, origin, spacing, src_mm(s,:), pe, DIAG.ray_nsamp);
+    acc1 = [0 0 0]; acc3 = [0 0 0];   % [reflection, airFrac, boneFrac]
+    for s = 1:nsrc
+        acc1 = acc1 + ray_metrics(Z1, HU1, origin, spacing, src_mm(s,:), pe, ...
+            DIAG.ray_nsamp, DIAG.air_hu, DIAG.bone_hu);
+        acc3 = acc3 + ray_metrics(Z3, HU3, origin, spacing, src_mm(s,:), pe, ...
+            DIAG.ray_nsamp, DIAG.air_hu, DIAG.bone_hu);
     end
-    refl1(e) = r1 / size(src_mm, 1);
-    refl3(e) = r3 / size(src_mm, 1);
+    refl1(e) = acc1(1)/nsrc;  air1(e) = acc1(2)/nsrc;  bone1(e) = acc1(3)/nsrc;
+    refl3(e) = acc3(1)/nsrc;  air3(e) = acc3(2)/nsrc;  bone3(e) = acc3(3)/nsrc;
 end
 dRefl = refl3 - refl1;
+dAir  = air3  - air1;      % gas that entered (or left) each element's paths
+dBone = bone3 - bone1;     % bone that entered (or left) each element's paths
 refl1Img = reshape(refl1, [N, N]);
 refl3Img = reshape(refl3, [N, N]);
 dReflImg = reshape(dRefl, [N, N]);
+dAirImg  = reshape(dAir,  [N, N]);
+dBoneImg = reshape(dBone, [N, N]);
 
 %% =================== DIAGNOSTIC [4]: STANDOFF + SENSOR-EYE ============ %%
 %  Per element: distance to body along the inward look-direction (toward iso),
@@ -267,52 +313,131 @@ drr1Img   = reshape(drr1,   [N, N]);
 drr3Img   = reshape(drr3,   [N, N]);
 dDRRImg   = reshape(dDRR,   [N, N]);
 
+%% =================== [F] SENSOR PLACEMENT: CT_1 vs CT_3 =============== %%
+%  The maps above froze the sensor (CT_1 placement) to isolate the medium. This
+%  block instead RE-PLACES the array on each geometry (same dose, only bodyMask
+%  differs) to test whether the sensor itself tilts/shifts between CT_1 and CT_3.
+%  Placement is computed natively here, so it may differ slightly from the
+%  engine's internal feed; the CT_1 -> CT_3 delta is what matters.
+
+fprintf('[F]   Sensor placement comparison (CT_1 vs CT_3)...\n');
+placeShiftImg = []; placeStats = struct('ok', false);
+try
+    beam_md = load_beam_metadata_local(processed_dir);
+    fd_place = struct('dose_Gy', doseGrid, 'gantry_angle', 0, ...
+        'origin', origin, 'spacing', spacing, 'dimensions', size(doseGrid));
+    [~, si1] = determine_sensor_mask(sct1, fd_place, beam_md, CONFIG);
+    [~, si3] = determine_sensor_mask(sct3, fd_place, beam_md, CONFIG);
+    ep1 = si1.element_positions_mm;
+    ep3 = si3.element_positions_mm;
+    placeStats.tilt1_deg   = getf(si1, 'tilt_angle_deg', NaN);
+    placeStats.tilt3_deg   = getf(si3, 'tilt_angle_deg', NaN);
+    placeStats.center1_mm  = getf(si1, 'sensor_center_mm', [NaN NaN NaN]);
+    placeStats.center3_mm  = getf(si3, 'sensor_center_mm', [NaN NaN NaN]);
+    placeStats.center_shift_mm = norm(placeStats.center3_mm - placeStats.center1_mm);
+    placeStats.normal_angle_deg = vec_angle_deg( ...
+        getf(si1, 'aim_normal', [0 -1 0]), getf(si3, 'aim_normal', [0 -1 0]));
+    if isequal(size(ep1), size(ep3)) && size(ep1,1) == Ntot
+        shift = sqrt(sum((ep3 - ep1).^2, 2));    % per-element displacement (mm)
+        placeShiftImg = reshape(shift, [N, N]);
+        placeStats.median_elem_shift_mm = median(shift);
+        placeStats.max_elem_shift_mm    = max(shift);
+    else
+        warning('diagnostic_blind_fidelity:PlacementSizeMismatch', ...
+            'CT_1/CT_3 element counts differ (%d vs %d); per-element shift map skipped.', ...
+            size(ep1,1), size(ep3,1));
+    end
+    placeStats.ok = true;
+catch ME
+    warning('diagnostic_blind_fidelity:PlacementCompareFail', ...
+        'Sensor placement comparison failed: %s', ME.message);
+end
+
 %% =================== COINCIDENCE / SELF-CALIBRATION =================== %%
-%  Do the geometry changes explain the dead channels? Correlate each candidate
-%  cause with the per-channel decorrelation from [1], over elements that have a
-%  valid signal AND valid geometry.
+%  Do the geometry changes explain the SIGNAL LOSS? Correlate each candidate
+%  cause with the lag-tolerant decorrelation (1 - peak xcorr) from [1] -- i.e.
+%  true signal loss after removing any bulk time shift -- over elements with a
+%  valid signal. Zero-lag versions kept alongside for comparison.
 
-valid = ~isnan(decorr);
-cReflVsDecorr  = pearson_masked(dRefl,  decorr, valid);
-cStandVsDecorr = pearson_masked(dStand, decorr, valid);
-cDRRVsDecorr   = pearson_masked(dDRR,   decorr, valid);
+valid = ~isnan(decorr_peak);
+cReflVsLoss  = pearson_masked(dRefl,  decorr_peak, valid);
+cAirVsLoss   = pearson_masked(dAir,   decorr_peak, valid);
+cBoneVsLoss  = pearson_masked(dBone,  decorr_peak, valid);
+cStandVsLoss = pearson_masked(dStand, decorr_peak, valid);
+cDRRVsLoss   = pearson_masked(dDRR,   decorr_peak, valid);
+% Zero-lag reference (comparable to the earlier run).
+cReflVsDecorr  = pearson_masked(dRefl,  decorr, ~isnan(decorr));
+cStandVsDecorr = pearson_masked(dStand, decorr, ~isnan(decorr));
+cDRRVsDecorr   = pearson_masked(dDRR,   decorr, ~isnan(decorr));
 
-n_dead = nnz(deadMask);
-n_air  = nnz(airGap);
-blob   = largest_blob(deadImg > 0.5);
-maxStand = max(abs(dStand(valid)));
+n_dead     = nnz(deadMask);
+n_truedead = nnz(trueDead);
+n_air      = nnz(airGap);
+blob       = largest_blob(trueDeadImg > 0.5);      % blob of TRULY-lost channels
+maxStand   = max(abs(dStand(valid)));
+med_lag_us = median(lagUs(valid), 'omitnan');
 
-%% =========================== PLOTS ==================================== %%
+%% =========================== PLOTS (tabbed) =========================== %%
+%  One window; each diagnostic on its own tab. Array maps are labeled by the
+%  physical direction each element axis (ex, ez) points, derived from
+%  element_positions_mm, so "up/down in the image" maps to real anatomy.
 
-% Figure 1 — Diagnostic [1]
-figure('Name', '[1] Per-channel signal change', 'Color', 'w');
-subplot(1,3,1); show_map(corrImg, 'Pearson corr (CT1 vs CT3)', [0 1]);      colormap(gca, 'parula');
-subplot(1,3,2); show_map(enerImg, 'Energy ratio CT3/CT1', [0 2]);          colormap(gca, 'parula');
-subplot(1,3,3); show_map(deadImg, sprintf('Dead channels (%d)', n_dead), [0 1]); colormap(gca, 'hot');
-sgtitle('Diagnostic [1]: contiguous dark blob = physical occlusion; scatter = numerics');
+[xlab, ylab] = array_axis_labels(epos, N);
+hFig = figure('Name', 'Blind Fidelity Diagnostic (CT_1 vs CT_3)', 'Color', 'w');
+tg = uitabgroup(hFig);
 
-% Figure 2 — Diagnostic [2] + self-calibration
-figure('Name', '[2] Reflection ray integral', 'Color', 'w');
-subplot(2,2,1); show_map(refl1Img, 'Reflection proxy CT1', []);
-subplot(2,2,2); show_map(refl3Img, 'Reflection proxy CT3', []);
-subplot(2,2,3); show_map(dReflImg, '\Delta Reflection (CT3-CT1)', []); colormap(gca, diverging_map());
-subplot(2,2,4);
-scatter(dRefl(valid), decorr(valid), 14, 'filled'); grid on;
-xlabel('\Delta reflection proxy (CT3 - CT1)'); ylabel('1 - Pearson corr');
-title(sprintf('Self-calibration: r = %.2f', cReflVsDecorr));
-sgtitle('Diagnostic [2]: which reflection change kills channels (read off the scatter)');
+% --- Tab [1]: per-channel ---
+tabA = uitab(tg, 'Title', '[1] Per-channel');
+tl = tiledlayout(tabA, 2, 3, 'Padding', 'compact', 'TileSpacing', 'compact');
+nexttile(tl); show_map(corrImg, 'Zero-lag corr', [0 1], xlab, ylab);
+nexttile(tl); show_map(peakImg, 'Peak x-corr (lag-tolerant)', [0 1], xlab, ylab);
+nexttile(tl); show_map(lagImg,  'Lag at peak (\mus)', [], xlab, ylab); colormap(gca, diverging_map());
+nexttile(tl); show_map(enerImg, 'Energy ratio CT3/CT1', [0 2], xlab, ylab);
+nexttile(tl); show_map(deadImg, sprintf('Zero-lag dead (%d)', n_dead), [0 1], xlab, ylab); colormap(gca, 'hot');
+nexttile(tl); show_map(trueDeadImg, sprintf('Truly lost (%d)', n_truedead), [0 1], xlab, ylab); colormap(gca, 'hot');
+title(tl, 'Diagnostic [1]: low zero-lag but high peak x-corr = bulk time shift, not loss');
 
-% Figure 3 — Diagnostic [4]
-figure('Name', '[4] Standoff + sensor-eye', 'Color', 'w');
-subplot(2,3,1); show_map(stand1Img, 'Standoff CT1 (mm)', []);
-subplot(2,3,2); show_map(stand3Img, 'Standoff CT3 (mm)', []);
-subplot(2,3,3); show_map(dStandImg, '\Delta Standoff (mm)', []); colormap(gca, diverging_map());
-subplot(2,3,4); show_map(drr1Img, 'Sensor-eye DRR CT1', []);
-subplot(2,3,5); show_map(drr3Img, 'Sensor-eye DRR CT3', []);
-subplot(2,3,6); show_map(dDRRImg, '\Delta DRR (CT3-CT1)', []); colormap(gca, diverging_map());
-sgtitle(sprintf(['Diagnostic [4]: air-gap channels = %d | ' ...
-    'coincidence r(\\Deltastandoff,decorr)=%.2f, r(\\DeltaDRR,decorr)=%.2f'], ...
-    n_air, cStandVsDecorr, cDRRVsDecorr));
+% --- Tab [2]: reflection + tissue ---
+tabB = uitab(tg, 'Title', '[2] Reflection & tissue');
+tl = tiledlayout(tabB, 2, 3, 'Padding', 'compact', 'TileSpacing', 'compact');
+nexttile(tl); show_map(refl1Img, 'Reflection proxy CT1', [], xlab, ylab);
+nexttile(tl); show_map(refl3Img, 'Reflection proxy CT3', [], xlab, ylab);
+nexttile(tl); show_map(dReflImg, '\Delta Reflection (CT3-CT1)', [], xlab, ylab); colormap(gca, diverging_map());
+nexttile(tl); show_map(dAirImg,  '\Delta gas fraction in path', [], xlab, ylab); colormap(gca, diverging_map());
+nexttile(tl); show_map(dBoneImg, '\Delta bone fraction in path', [], xlab, ylab); colormap(gca, diverging_map());
+nexttile(tl);
+scatter(dRefl(valid), decorr_peak(valid), 14, 'filled'); grid on;
+xlabel('\Delta reflection proxy (CT3 - CT1)'); ylabel('1 - peak x-corr');
+title(sprintf('Self-calibration: r = %.2f', cReflVsLoss));
+title(tl, 'Diagnostic [2]: \Deltareflection up with \Deltagas up & \Deltabone flat = gas moved in');
+
+% --- Tab [4]: coupling + sensor-eye ---
+tabC = uitab(tg, 'Title', '[4] Coupling & sensor-eye');
+tl = tiledlayout(tabC, 2, 3, 'Padding', 'compact', 'TileSpacing', 'compact');
+nexttile(tl); show_map(stand1Img, 'Standoff CT1 (mm)', [], xlab, ylab);
+nexttile(tl); show_map(stand3Img, 'Standoff CT3 (mm)', [], xlab, ylab);
+nexttile(tl); show_map(dStandImg, '\Delta Standoff (mm)', [], xlab, ylab); colormap(gca, diverging_map());
+nexttile(tl); show_map(drr1Img, 'Sensor-eye DRR CT1', [], xlab, ylab);
+nexttile(tl); show_map(drr3Img, 'Sensor-eye DRR CT3', [], xlab, ylab);
+nexttile(tl); show_map(dDRRImg, '\Delta DRR (CT3-CT1)', [], xlab, ylab); colormap(gca, diverging_map());
+title(tl, sprintf('Diagnostic [4]: air-gap (no-contact) channels = %d', n_air));
+
+% --- Tab [F]: sensor placement CT_1 vs CT_3 ---
+tabD = uitab(tg, 'Title', '[F] Sensor placement');
+if placeStats.ok && ~isempty(placeShiftImg)
+    tl = tiledlayout(tabD, 1, 1, 'Padding', 'compact');
+    nexttile(tl); show_map(placeShiftImg, 'Per-element placement shift CT1\rightarrowCT3 (mm)', ...
+        [], xlab, ylab); colormap(gca, 'parula');
+    title(tl, sprintf(['center shift %.1f mm | aim-normal angle %.1f deg | ' ...
+        'tilt %.0f\\rightarrow%.0f deg | median/max elem shift %.1f/%.1f mm'], ...
+        placeStats.center_shift_mm, placeStats.normal_angle_deg, ...
+        placeStats.tilt1_deg, placeStats.tilt3_deg, ...
+        getf(placeStats,'median_elem_shift_mm',NaN), getf(placeStats,'max_elem_shift_mm',NaN)));
+else
+    ax = axes('Parent', tabD); axis(ax, 'off');
+    text(ax, 0.5, 0.5, 'Sensor placement comparison unavailable (see warning).', ...
+        'HorizontalAlignment', 'center');
+end
 
 %% =========================== SAVE + SUMMARY ========================== %%
 
@@ -322,29 +447,50 @@ results = struct();
 results.config       = CONFIG;
 results.diag_params  = DIAG;
 results.elements_per_side = N;
-results.maps = struct('corr', corrImg, 'energy', enerImg, 'dead', deadImg, ...
+results.maps = struct('corr', corrImg, 'peak_xcorr', peakImg, 'lag_us', lagImg, ...
+    'energy', enerImg, 'dead', deadImg, 'true_dead', trueDeadImg, ...
     'refl_CT1', refl1Img, 'refl_CT3', refl3Img, 'd_refl', dReflImg, ...
+    'd_air_frac', dAirImg, 'd_bone_frac', dBoneImg, ...
     'standoff_CT1', stand1Img, 'standoff_CT3', stand3Img, 'd_standoff', dStandImg, ...
-    'drr_CT1', drr1Img, 'drr_CT3', drr3Img, 'd_drr', dDRRImg);
-results.coincidence = struct('refl_vs_decorr', cReflVsDecorr, ...
-    'standoff_vs_decorr', cStandVsDecorr, 'drr_vs_decorr', cDRRVsDecorr);
-results.summary = struct('n_dead', n_dead, 'n_air_gap', n_air, ...
-    'largest_dead_blob', blob, 'max_abs_d_standoff_mm', maxStand);
+    'drr_CT1', drr1Img, 'drr_CT3', drr3Img, 'd_drr', dDRRImg, ...
+    'placement_shift', placeShiftImg);
+results.coincidence = struct( ...
+    'refl_vs_loss', cReflVsLoss, 'air_vs_loss', cAirVsLoss, 'bone_vs_loss', cBoneVsLoss, ...
+    'standoff_vs_loss', cStandVsLoss, 'drr_vs_loss', cDRRVsLoss, ...
+    'refl_vs_zerolag', cReflVsDecorr, 'standoff_vs_zerolag', cStandVsDecorr, ...
+    'drr_vs_zerolag', cDRRVsDecorr);
+results.placement = placeStats;
+results.summary = struct('n_dead_zerolag', n_dead, 'n_truly_lost', n_truedead, ...
+    'n_air_gap', n_air, 'largest_lost_blob', blob, ...
+    'max_abs_d_standoff_mm', maxStand, 'median_lag_us', med_lag_us);
 out_mat = fullfile(DIAG.save_dir, sprintf('blind_fidelity_%s.mat', dose_tag));
 save(out_mat, 'results', '-v7.3');
 
 fprintf('\n%s\n  SUMMARY\n%s\n', bar, bar);
-fprintf('  Dead channels (corr<%.2f or energy out of [%.2f,%.2f]) : %d / %d\n', ...
-    DIAG.corr_dead_thresh, DIAG.energy_lo, 1/DIAG.energy_lo, n_dead, nnz(valid));
-fprintf('  Largest contiguous dead blob (elements)               : %d\n', blob);
+fprintf('  Channels dead at zero lag (corr<%.2f/energy)          : %d / %d\n', ...
+    DIAG.corr_dead_thresh, n_dead, nnz(valid));
+fprintf('  Channels TRULY lost (peak x-corr<%.2f, lag-tolerant)  : %d / %d\n', ...
+    DIAG.corr_dead_thresh, n_truedead, nnz(valid));
+fprintf('  Median lag (bulk time-of-flight shift, us)            : %+.2f\n', med_lag_us);
+fprintf('  Largest contiguous TRULY-lost blob (elements)         : %d\n', blob);
 fprintf('  Air-gap / no-contact elements (NaN standoff)          : %d\n', n_air);
 fprintf('  Max |standoff change| CT3 vs CT1 (mm)                 : %.1f\n', maxStand);
-fprintf('  --- coincidence with per-channel decorrelation (Pearson r) ---\n');
-fprintf('    reflection change  vs decorr : %+.2f   (bulk impedance / occlusion)\n', cReflVsDecorr);
-fprintf('    standoff  change   vs decorr : %+.2f   (coupling gap)\n', cStandVsDecorr);
-fprintf('    sensor-eye DRR chg vs decorr : %+.2f   (anatomy in line of sight)\n', cDRRVsDecorr);
-fprintf('  Reading: a large contiguous blob + a high coincidence r on ONE of the\n');
-fprintf('  three causes = a real, localized medium/coupling change, not TR noise.\n');
+if placeStats.ok
+    fprintf('  Sensor re-placement CT1->CT3: center %.1f mm, normal %.1f deg, ', ...
+        placeStats.center_shift_mm, placeStats.normal_angle_deg);
+    fprintf('max elem shift %.1f mm\n', getf(placeStats, 'max_elem_shift_mm', NaN));
+end
+fprintf('  --- coincidence with TRUE signal loss (1 - peak x-corr), Pearson r ---\n');
+fprintf('    reflection change  : %+.2f   (bulk impedance / occlusion)\n', cReflVsLoss);
+fprintf('    gas fraction chg   : %+.2f   (bowel/stomach gas moved into path)\n', cAirVsLoss);
+fprintf('    bone fraction chg  : %+.2f   (bone moved into path)\n', cBoneVsLoss);
+fprintf('    standoff change    : %+.2f   (coupling gap)\n', cStandVsLoss);
+fprintf('    sensor-eye DRR chg : %+.2f   (total anatomy in line of sight)\n', cDRRVsLoss);
+fprintf('  (zero-lag reference: refl %+.2f, standoff %+.2f, drr %+.2f)\n', ...
+    cReflVsDecorr, cStandVsDecorr, cDRRVsDecorr);
+fprintf('  Reading: whichever cause has the highest r vs TRUE loss is the mechanism;\n');
+fprintf('  gas high + bone flat = a gas pocket, not bone. A large median lag with\n');
+fprintf('  high peak x-corr means the medium mainly shifted timing (bulk c change).\n');
 fprintf('  Saved: %s\n%s\n\n', out_mat, bar);
 
 
@@ -427,19 +573,24 @@ function src_mm = beam_source_points(doseGrid, origin, spacing, frac, maxpts)
 end
 
 
-function R = reflection_along_ray(Zvol, origin, spacing, p_src, p_dst, nsamp)
-%REFLECTION_ALONG_RAY Cumulative reflection proxy sum_i ((dZ)/(sumZ))^2 along
-%   a straight ray. Out-of-bounds samples fall back to water impedance so the
-%   coupling bath does not manufacture spurious interfaces.
+function m = ray_metrics(Zvol, HUvol, origin, spacing, p_src, p_dst, nsamp, air_hu, bone_hu)
+%RAY_METRICS Along one straight source->element ray, return
+%   m = [reflection_proxy, gas_fraction, bone_fraction]:
+%     - reflection proxy = sum_i ((dZ)/(sumZ))^2 (Z = rho*c); out-of-bounds
+%       samples fall back to water so the coupling bath adds no false interface.
+%     - gas/bone fraction = fraction of IN-BODY-range samples below air_hu /
+%       above bone_hu (HU, so gas and bone are told apart: gas spikes reflection
+%       but not radiographic thickness, bone raises both).
     Z0  = 1000 * 1540;
     t   = linspace(0, 1, nsamp)';
     pts = p_src + t .* (p_dst - p_src);          % nsamp x 3 (implicit expansion)
-    Zs  = sample_pts(Zvol, origin, spacing, pts, Z0);
+    Zs  = sample_pts(Zvol,  origin, spacing, pts, Z0);
+    HUs = sample_pts(HUvol, origin, spacing, pts, -1000);
     dZ  = diff(Zs);
     sZ  = Zs(1:end-1) + Zs(2:end);
     sZ(sZ == 0) = eps;
-    r   = dZ ./ sZ;
-    R   = sum(r.^2);
+    R   = sum((dZ ./ sZ).^2);
+    m   = [R, mean(HUs < air_hu), mean(HUs > bone_hu)];
 end
 
 
@@ -478,6 +629,79 @@ function vals = sample_pts(vol, origin, spacing, pts, oob_val)
     if any(inb)
         lin = sub2ind(sz, r(inb), c(inb), s(inb));
         vals(inb) = double(vol(lin));
+    end
+end
+
+
+function [rpk, lpk] = peak_xcorr(a, b, maxlag)
+%PEAK_XCORR Peak normalized cross-correlation of a,b over lags [-maxlag,maxlag].
+%   Returns the peak correlation and the lag (samples) at which it occurs
+%   (positive => b is delayed relative to a). Normalized over the overlap at
+%   each lag, so a pure time shift scores ~1 even when zero-lag Pearson is low.
+%   No Signal Processing Toolbox dependency.
+    a = a(:) - mean(a(:));
+    b = b(:) - mean(b(:));
+    if norm(a) == 0 || norm(b) == 0
+        rpk = 0; lpk = 0; return;
+    end
+    rpk = -Inf; lpk = 0;
+    n = numel(a);
+    for L = -maxlag:maxlag
+        if L >= 0
+            aa = a(1:n-L);   bb = b(1+L:n);
+        else
+            aa = a(1-L:n);   bb = b(1:n+L);
+        end
+        if numel(aa) < 8; continue; end
+        d = norm(aa) * norm(bb);
+        if d == 0; continue; end
+        r = (aa' * bb) / d;
+        if r > rpk; rpk = r; lpk = L; end
+    end
+    if ~isfinite(rpk); rpk = 0; lpk = 0; end
+end
+
+
+function [xlab, ylab] = array_axis_labels(epos, N)
+%ARRAY_AXIS_LABELS Physical direction each element axis (ex cols, ez rows)
+%   points, from element_positions_mm. e = (ex-1)*N + ez, so reshape([N,N,3])
+%   gives E(ez, ex, :). Lets the reader map "up/down in the image" to anatomy.
+    E   = reshape(epos, [N, N, 3]);              % E(ez, ex, :)
+    gex = squeeze(mean(mean(diff(E, 1, 2), 1), 2));   % mm per +1 ex (columns)
+    gez = squeeze(mean(mean(diff(E, 1, 1), 1), 2));   % mm per +1 ez (rows)
+    xlab = sprintf('ex \\rightarrow %s', anatomy_of(gex));
+    ylab = sprintf('ez \\rightarrow %s', anatomy_of(gez));
+end
+
+
+function s = anatomy_of(v)
+%ANATOMY_OF Dominant HFS/DICOM anatomical direction of a physical vector
+%   v = [x y z] mm: +x LEFT, +y POSTERIOR, +z SUPERIOR.
+    names = {'RIGHT', 'LEFT'; 'ANTERIOR', 'POSTERIOR'; 'INFERIOR', 'SUPERIOR'};
+    [~, k] = max(abs(v));
+    if v(k) >= 0; s = names{k, 2}; else; s = names{k, 1}; end
+end
+
+
+function ang = vec_angle_deg(u, w)
+%VEC_ANGLE_DEG Angle (deg) between two vectors; NaN-safe.
+    u = u(:); w = w(:);
+    du = norm(u) * norm(w);
+    if du == 0; ang = NaN; return; end
+    ang = acosd(max(-1, min(1, (u' * w) / du)));
+end
+
+
+function bm = load_beam_metadata_local(processed_dir)
+%LOAD_BEAM_METADATA_LOCAL Beam metadata for determine_sensor_mask exclusion
+%   zones. Reads processed/metadata.mat (metadata.beam_metadata); [] if absent.
+    bm = [];
+    f = fullfile(processed_dir, 'metadata.mat');
+    if isfile(f)
+        md = load(f, 'metadata');
+        if isfield(md, 'metadata') && isfield(md.metadata, 'beam_metadata')
+            bm = md.metadata.beam_metadata;
+        end
     end
 end
 
@@ -521,12 +745,16 @@ function n = largest_blob(bw)
 end
 
 
-function show_map(img, ttl, clim)
+function show_map(img, ttl, clim, xlab, ylab)
 %SHOW_MAP imagesc a 32x32 element map with a colorbar and equal aspect.
-    imagesc(img);
+%   NaN elements (aliased / no signal) render as the axes background.
+    if nargin < 4 || isempty(xlab); xlab = 'element col (ex)'; end
+    if nargin < 5 || isempty(ylab); ylab = 'element row (ez)'; end
+    h = imagesc(img);
+    set(h, 'AlphaData', ~isnan(img));            % aliased/no-signal -> transparent
     if nargin >= 3 && ~isempty(clim); caxis(clim); end
     axis image; colorbar; title(ttl, 'Interpreter', 'tex');
-    xlabel('element col (ex)'); ylabel('element row (ez)');
+    xlabel(xlab, 'Interpreter', 'tex'); ylabel(ylab, 'Interpreter', 'tex');
 end
 
 

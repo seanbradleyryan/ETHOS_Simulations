@@ -71,7 +71,8 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
 %                                                  'fixed_anterior'.
 %           .sensor_x_index             [1]      - YZ plane x-index
 %           .sensor_y_index             [1]      - XZ plane y-index
-%           .convolution_kernel         [4e-6]   - Gaussian pulse sigma (s); 0 disables
+%           .pulse_shape                ['gaussian'] - 'gaussian'|'rectangular' pulse profile
+%           .convolution_kernel         [4e-6]   - Gaussian sigma / rectangular width (s); 0 disables
 %           .conv_noise_level           [0.01]   - Noise fraction of peak sensor
 %           .conv_deconv_lambda         [1e-4]   - Wiener deconvolution regularisation
 %           .noise_only                 [false]  - Null-signal control: run the
@@ -179,6 +180,7 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
     correction_factor   = safe_config(config, 'correction_factor', 1.9);
     use_grid_padding    = safe_config(config, 'use_grid_padding', true);
     conv_kernel_sigma   = safe_config(config, 'convolution_kernel', 4e-6);
+    pulse_shape         = safe_config(config, 'pulse_shape', 'gaussian');
     conv_noise_level    = safe_config(config, 'conv_noise_level', 0.01);
     conv_deconv_lambda  = safe_config(config, 'conv_deconv_lambda', 1e-4);
     noise_only          = safe_config(config, 'noise_only', false);
@@ -921,19 +923,15 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
     %    4. Wiener-deconvolve the pulse kernel to recover the broadband signal
 
     if conv_kernel_sigma > 0
-        fprintf('        Pulse model: sigma=%.1f us, noise=%.1f%%, lambda=%.1e\n', ...
-            conv_kernel_sigma * 1e6, conv_noise_level * 100, conv_deconv_lambda);
+        fprintf('        Pulse model: %s, width=%.1f us, noise=%.1f%%, lambda=%.1e\n', ...
+            pulse_shape, conv_kernel_sigma * 1e6, conv_noise_level * 100, conv_deconv_lambda);
 
-        sigma_samples = conv_kernel_sigma / dt;
-        kernel_half   = ceil(4 * sigma_samples);
-        t_kernel      = (-kernel_half : kernel_half)';
-        gauss_kernel  = exp(-t_kernel.^2 / (2 * sigma_samples^2));
-        gauss_kernel  = gauss_kernel / sum(gauss_kernel);
+        pulse_kernel = build_pulse_kernel(pulse_shape, conv_kernel_sigma, dt);
 
         sensorData_cpu = double(gather(sensorData));
         Nt_data        = size(sensorData_cpu, 2);
 
-        H       = fft(gauss_kernel, Nt_data).';
+        H       = fft(pulse_kernel, Nt_data).';
         H_conj  = conj(H);
         H_power = abs(H).^2;
 

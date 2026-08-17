@@ -1,4 +1,4 @@
-%% =========================================================================
+﻿%% =========================================================================
 %  RUN_STANDALONE_SIMULATION_UPGRADED.m
 %  Standalone k-Wave Photoacoustic Forward + Time-Reversal Simulation
 %  Adds CONFIG-gated reconstruction-fidelity upgrades. All upgrade flags
@@ -137,7 +137,12 @@ CONFIG.convergence_tol        = 1e-3;
 % --- Pulse Convolution / Noise / Deconvolution ---
 % Mimics a finite transducer impulse response applied to forward sensor data.
 % Set convolution_kernel to 0 to disable the entire block.
-CONFIG.convolution_kernel  = 4e-6;   % Gaussian sigma in seconds (4 us)
+% pulse_shape selects the radiation-pulse profile:
+%   'gaussian'    -> convolution_kernel is the Gaussian sigma (s)
+%   'rectangular' -> convolution_kernel is the full pulse width (s), closer to
+%                    a clinical linac's flat-top beam-on burst
+CONFIG.pulse_shape         = 'gaussian';
+CONFIG.convolution_kernel  = 4e-6;   % Gaussian sigma / rectangular width (s), 4 us
 CONFIG.conv_noise_level    = 0.01;   % Noise amplitude as fraction of peak sensor signal
 CONFIG.conv_deconv_lambda  = 1e-4;   % Wiener regularization for deconvolution
 
@@ -917,23 +922,20 @@ if CONFIG.convolution_kernel > 0
     conv_kernel_sigma  = CONFIG.convolution_kernel;
     conv_noise_level   = CONFIG.conv_noise_level;
     conv_deconv_lambda = CONFIG.conv_deconv_lambda;
+    pulse_shape        = CONFIG.pulse_shape;
 
-    fprintf('       Pulse model: sigma=%.1f us, noise=%.1f%%, lambda=%.1e\n', ...
-        conv_kernel_sigma * 1e6, conv_noise_level * 100, conv_deconv_lambda);
+    fprintf('       Pulse model: %s, width=%.1f us, noise=%.1f%%, lambda=%.1e\n', ...
+        pulse_shape, conv_kernel_sigma * 1e6, conv_noise_level * 100, conv_deconv_lambda);
 
-    % Build normalized Gaussian kernel in time (truncated at 4 sigma)
-    sigma_samples = conv_kernel_sigma / dt;
-    kernel_half   = ceil(4 * sigma_samples);
-    t_kernel      = (-kernel_half : kernel_half)';
-    gauss_kernel  = exp(-t_kernel.^2 / (2 * sigma_samples^2));
-    gauss_kernel  = gauss_kernel / sum(gauss_kernel);   % unit-sum normalization
+    % Build normalized pulse kernel in time ('gaussian' sigma or 'rectangular' width)
+    pulse_kernel = build_pulse_kernel(pulse_shape, conv_kernel_sigma, dt);
 
     % Move to CPU for FFT operations
     sensorData_cpu = double(gather(sensorData));
     Nt_data        = size(sensorData_cpu, 2);
 
     % Kernel transfer function (zero-padded to signal length)
-    H       = fft(gauss_kernel, Nt_data).';   % row vector [1 x Nt_data]
+    H       = fft(pulse_kernel, Nt_data).';   % row vector [1 x Nt_data]
     H_conj  = conj(H);
     H_power = abs(H).^2;
 
