@@ -73,7 +73,11 @@ function out = misc_UBP(num_sensors)
 
     %% ============================ CONFIG ============================
     % Geometry (metres). Domain is square; everything is centred on (0,0).
-    CONFIG.dx              = 0.25e-3;   % grid spacing (m) -> sub-mm imaging
+    CONFIG.dx              = 0.25e-3;   % BASE grid spacing (m) -> sub-mm imaging
+    CONFIG.grid_scale      = 1;         % resample factor C: every axis goes from
+                                        % Nx to round(C*Nx) points over the SAME
+                                        % physical domain (dx -> dx/C). C > 1
+                                        % upsamples (finer), C < 1 downsamples.
     CONFIG.domain_mm       = 100;       % square domain side length (mm)
     CONFIG.fat_radius_mm   = 35;        % fat cylinder radius (mm)
     CONFIG.ring_radius_mm  = 28;        % sensor-ring radius (mm), < fat radius
@@ -116,7 +120,10 @@ function out = misc_UBP(num_sensors)
     fprintf('\n=== misc_UBP: Universal Back-Projection PA demo ===\n');
 
     %% ======================= K-WAVE GRID ===========================
-    dx = CONFIG.dx;
+    if ~isscalar(CONFIG.grid_scale) || CONFIG.grid_scale <= 0
+        error('misc_UBP:InvalidInput', 'CONFIG.grid_scale must be a positive scalar.');
+    end
+    dx = CONFIG.dx / CONFIG.grid_scale;         % resample: Nx -> round(C*Nx) points
     N  = round(CONFIG.domain_mm * 1e-3 / dx);   % voxels per side
     kgrid = kWaveGrid(N, dx, N, dx);            % dim1 = x, dim2 = y
 
