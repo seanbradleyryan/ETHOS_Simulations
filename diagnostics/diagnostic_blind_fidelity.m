@@ -132,6 +132,9 @@ DIAG.maxlag_samples   = 600;   % [1] lag search half-width (samples). Wide: an 1
                                %     cross-correlation makes a big window cheap.
 DIAG.air_hu           = -300;  % [3] HU below this = gas/air along a ray
 DIAG.bone_hu          = 300;   % [3] HU above this = bone along a ray
+DIAG.onset_frac       = 0.20;  % [1e] first-arrival onset = |t1| exceeds this * its peak
+DIAG.early_window_frac = 0.15; % [1e] early-arrival window length as a fraction of Nt
+DIAG.n_trace_plots    = 6;     % [1t] element trace pairs to overlay for eyeballing
 DIAG.save_dir         = fullfile(CONFIG.working_dir, 'AnalysisResults', ...
                                  CONFIG.patient_id, CONFIG.session);
 
@@ -221,11 +224,13 @@ if numel(velem) ~= size(sino1, 1)
         'voxel_element_idx (%d) ~= sinogram rows (%d); channel map may be misaligned.', ...
         numel(velem), size(sino1, 1));
 end
-corrMap = nan(Ntot, 1);      % zero-lag Pearson(CT1 trace, CT3 trace)
-peakMap = nan(Ntot, 1);      % peak normalized cross-correlation over lags
-lagMap  = nan(Ntot, 1);      % lag (samples) at the peak; sign = CT3 delayed vs CT1
-enerMap = nan(Ntot, 1);      % ||CT3|| / ||CT1||
-E1      = nan(Ntot, 1);      % CT1 trace energy (for the low-signal floor)
+corrMap  = nan(Ntot, 1);     % zero-lag Pearson(CT1 trace, CT3 trace)
+peakMap  = nan(Ntot, 1);     % peak normalized cross-correlation over lags (full trace)
+lagMap   = nan(Ntot, 1);     % lag (samples) at the peak; sign = CT3 delayed vs CT1
+earlyMap = nan(Ntot, 1);     % peak x-corr over the FIRST-ARRIVAL window only
+enerMap  = nan(Ntot, 1);     % ||CT3|| / ||CT1||
+E1       = nan(Ntot, 1);     % CT1 trace energy (for the low-signal floor)
+Wearly   = max(8, round(DIAG.early_window_frac * size(sino1, 2)));
 for e = 1:Ntot
     rows = find(velem == e);
     if isempty(rows); continue; end
@@ -234,6 +239,7 @@ for e = 1:Ntot
     E1(e) = norm(t1);
     corrMap(e) = pearson(t1, t3);
     [peakMap(e), lagMap(e)] = peak_xcorr(t1, t3, DIAG.maxlag_samples);
+    earlyMap(e) = early_corr(t1, t3, DIAG.onset_frac, Wearly, DIAG.maxlag_samples);
     if E1(e) > 0
         enerMap(e) = norm(t3) / E1(e);
     end
@@ -243,8 +249,9 @@ end
 if any(~isnan(E1))
     sig_floor = DIAG.energy_floor_frac * max(E1(~isnan(E1)));
     lowsig = E1 < sig_floor;
-    corrMap(lowsig) = NaN;  peakMap(lowsig) = NaN;
-    lagMap(lowsig)  = NaN;  enerMap(lowsig) = NaN;
+    corrMap(lowsig) = NaN;  peakMap(lowsig)  = NaN;
+    lagMap(lowsig)  = NaN;  enerMap(lowsig)  = NaN;
+    earlyMap(lowsig) = NaN;
 end
 % Lag in microseconds (bulk sound-speed / time-of-flight change).
 dt_us  = getf(sr, 'sinogram_dt', NaN) * 1e6;
@@ -263,6 +270,7 @@ trueDead(isnan(peakMap)) = false;
 corrImg  = reshape(corrMap,  [N, N]);   % rows = ez, cols = ex
 peakImg  = reshape(peakMap,  [N, N]);
 lagImg   = reshape(lagUs,    [N, N]);
+earlyImg = reshape(earlyMap, [N, N]);
 enerImg  = reshape(enerMap,  [N, N]);
 deadImg  = reshape(double(deadMask), [N, N]);
 trueDeadImg = reshape(double(trueDead), [N, N]);
@@ -400,6 +408,9 @@ med_lag_us = median(lagUs(valid), 'omitnan');
 rail_frac  = mean(abs(lagMap(valid)) >= 0.9 * DIAG.maxlag_samples);
 lag_lo_us  = min(lagUs(valid));
 lag_hi_us  = max(lagUs(valid));
+lag_iqr_us = iqr_nan(lagUs(valid));           % tight = bulk shift; wide = decorrelation
+med_full   = median(peakMap(valid),  'omitnan');
+med_early  = median(earlyMap(valid), 'omitnan');
 
 %% =========================== PLOTS (tabbed) =========================== %%
 %  One window; each diagnostic on its own tab. Array maps are labeled by the
@@ -413,13 +424,14 @@ tg = uitabgroup(hFig);
 % --- Tab [1]: per-channel ---
 tabA = uitab(tg, 'Title', '[1] Per-channel');
 tl = tiledlayout(tabA, 2, 3, 'Padding', 'compact', 'TileSpacing', 'compact');
-nexttile(tl); show_map(corrImg, 'Zero-lag corr', [0 1], xlab, ylab);
-nexttile(tl); show_map(peakImg, 'Peak x-corr (lag-tolerant)', [0 1], xlab, ylab);
-nexttile(tl); show_map(lagImg,  'Lag at peak (\mus)', [], xlab, ylab); colormap(gca, diverging_map());
-nexttile(tl); show_map(enerImg, 'Energy ratio CT3/CT1', [0 2], xlab, ylab);
-nexttile(tl); show_map(deadImg, sprintf('Zero-lag dead (%d)', n_dead), [0 1], xlab, ylab); colormap(gca, 'hot');
+nexttile(tl); show_map(corrImg,  'Zero-lag corr', [0 1], xlab, ylab);
+nexttile(tl); show_map(peakImg,  'Peak x-corr, full trace', [0 1], xlab, ylab);
+nexttile(tl); show_map(earlyImg, 'Peak x-corr, FIRST arrival', [0 1], xlab, ylab);
+nexttile(tl); show_map(lagImg,   'Lag at peak (\mus)', [], xlab, ylab); colormap(gca, diverging_map());
+nexttile(tl); show_map(enerImg,  'Energy ratio CT3/CT1', [0 2], xlab, ylab);
 nexttile(tl); show_map(trueDeadImg, sprintf('Truly lost (%d)', n_truedead), [0 1], xlab, ylab); colormap(gca, 'hot');
-title(tl, 'Diagnostic [1]: low zero-lag but high peak x-corr = bulk time shift, not loss');
+title(tl, ['Diagnostic [1]: first-arrival corr high + full-trace corr low ' ...
+    '= scattered coda decorrelates (DAS-friendly, TR-hostile)']);
 
 % --- Tab [2]: reflection + tissue ---
 tabB = uitab(tg, 'Title', '[2] Reflection & tissue');
@@ -463,6 +475,41 @@ else
         'HorizontalAlignment', 'center');
 end
 
+% --- Tab [1t]: raw trace overlays (see what "decorrelated" looks like) ---
+%  Pick elements spread across the full-trace peak-corr range so the panel spans
+%  the worst to the best channel. Overlay CT_1 vs CT_3 (and CT_3 shifted by its
+%  lag) so a "similar-but-shifted" trace is instantly distinguishable from a
+%  genuinely different waveform.
+tabE = uitab(tg, 'Title', '[1t] Traces');
+vidx = find(~isnan(peakMap));
+if ~isempty(vidx)
+    [~, ord] = sort(peakMap(vidx));
+    picks = vidx(unique(round(linspace(1, numel(vidx), DIAG.n_trace_plots))));
+    nT = size(sino1, 2);
+    tvec = (0:nT-1) * getf(sr, 'sinogram_dt', 1) * 1e6;   % us
+    tl = tiledlayout(tabE, 2, ceil(numel(picks)/2), 'Padding', 'compact', 'TileSpacing', 'compact');
+    for pk = picks(:)'
+        rows = find(velem == pk);
+        a = mean(sino1(rows, :), 1);
+        b = mean(sino3(rows, :), 1);
+        L = lagMap(pk);
+        bs = circshift(b, -L);                 % align CT_3 back by its own lag
+        nexttile(tl);
+        plot(tvec, a, 'b', 'LineWidth', 1); hold on;
+        plot(tvec, b, 'r');
+        plot(tvec, bs, 'r:', 'LineWidth', 1); hold off;
+        title(sprintf('elem %d: full r=%.2f, early r=%.2f, lag %.1f us', ...
+            pk, peakMap(pk), earlyMap(pk), L * getf(sr,'sinogram_dt',1) * 1e6));
+        xlabel('t (\mus)'); axis tight;
+    end
+    lg = legend({'CT1', 'CT3', 'CT3 shifted'}, 'Orientation', 'horizontal');
+    lg.Layout.Tile = 'north';
+    title(tl, 'Diagnostic [1t]: raw sensor traces, CT_1 vs CT_3');
+else
+    ax = axes('Parent', tabE); axis(ax, 'off');
+    text(ax, 0.5, 0.5, 'No valid channels to plot.', 'HorizontalAlignment', 'center');
+end
+
 %% =========================== SAVE + SUMMARY ========================== %%
 
 if ~isfolder(DIAG.save_dir); mkdir(DIAG.save_dir); end
@@ -471,7 +518,8 @@ results = struct();
 results.config       = CONFIG;
 results.diag_params  = DIAG;
 results.elements_per_side = N;
-results.maps = struct('corr', corrImg, 'peak_xcorr', peakImg, 'lag_us', lagImg, ...
+results.maps = struct('corr', corrImg, 'peak_xcorr', peakImg, ...
+    'early_xcorr', earlyImg, 'lag_us', lagImg, ...
     'energy', enerImg, 'dead', deadImg, 'true_dead', trueDeadImg, ...
     'refl_CT1', refl1Img, 'refl_CT3', refl3Img, 'd_refl', dReflImg, ...
     'd_air_frac', dAirImg, 'd_bone_frac', dBoneImg, ...
@@ -488,7 +536,9 @@ results.medium_bulk = bulk;
 results.summary = struct('n_dead_zerolag', n_dead, 'n_truly_lost', n_truedead, ...
     'n_air_gap', n_air, 'largest_lost_blob', blob, ...
     'max_abs_d_standoff_mm', maxStand, 'median_lag_us', med_lag_us, ...
-    'lag_rail_fraction', rail_frac, 'lag_range_us', [lag_lo_us, lag_hi_us]);
+    'lag_rail_fraction', rail_frac, 'lag_range_us', [lag_lo_us, lag_hi_us], ...
+    'lag_iqr_us', lag_iqr_us, 'median_peak_xcorr', med_full, ...
+    'median_early_xcorr', med_early);
 out_mat = fullfile(DIAG.save_dir, sprintf('blind_fidelity_%s.mat', dose_tag));
 save(out_mat, 'results', '-v7.3');
 
@@ -497,8 +547,16 @@ fprintf('  Channels dead at zero lag (corr<%.2f/energy)          : %d / %d\n', .
     DIAG.corr_dead_thresh, n_dead, nnz(valid));
 fprintf('  Channels TRULY lost (peak x-corr<%.2f, lag-tolerant)  : %d / %d\n', ...
     DIAG.corr_dead_thresh, n_truedead, nnz(valid));
-fprintf('  Median lag (bulk time-of-flight shift, us)            : %+.2f  [range %+.2f..%+.2f]\n', ...
-    med_lag_us, lag_lo_us, lag_hi_us);
+fprintf('  Median full-trace peak x-corr / FIRST-arrival x-corr  : %.2f / %.2f\n', ...
+    med_full, med_early);
+if med_early - med_full > 0.2
+    fprintf('     -> direct wave survives, scattered coda decorrelates: DAS-friendly, TR-hostile\n');
+end
+fprintf('  Median lag (us): %+.2f  [range %+.2f..%+.2f, IQR %.2f]\n', ...
+    med_lag_us, lag_lo_us, lag_hi_us, lag_iqr_us);
+if lag_iqr_us > 5
+    fprintf('     -> lags scattered (not a single bulk shift): waveforms genuinely decorrelated\n');
+end
 fprintf('  Lag-window saturation (|lag| >= 0.9*maxlag)           : %.0f%%', 100*rail_frac);
 if rail_frac > 0.1
     fprintf('   <-- WIDEN DIAG.maxlag_samples (%d) AND RE-RUN\n', DIAG.maxlag_samples);
@@ -669,6 +727,23 @@ function vals = sample_pts(vol, origin, spacing, pts, oob_val)
 end
 
 
+function r = early_corr(a, b, onset_frac, W, maxlag)
+%EARLY_CORR Peak x-corr over the first-arrival window only. Onset = first sample
+%   where |a| exceeds onset_frac * max|a|; window is W samples after onset. If
+%   the direct wave survives (high early r) while the full trace decorrelates,
+%   the loss is in the scattered coda -- DAS-friendly, TR-hostile.
+    a = a(:); b = b(:);
+    n = numel(a);
+    [pk, ip] = max(abs(a));
+    if pk == 0; r = 0; return; end
+    on = find(abs(a) >= onset_frac * pk, 1, 'first');
+    if isempty(on); on = ip; end
+    hi = min(n, on + W);
+    if hi - on < 8; r = 0; return; end
+    r = peak_xcorr(a(on:hi), b(on:hi), maxlag);
+end
+
+
 function [rpk, lpk] = peak_xcorr(a, b, maxlag)
 %PEAK_XCORR Peak normalized cross-correlation of a,b over lags [-maxlag,maxlag],
 %   via FFT so a wide window is cheap. Returns the peak correlation and the lag
@@ -800,6 +875,17 @@ function cmap = diverging_map()
     top = [t, t, ones(n,1)];                 % blue -> white
     bot = [ones(n,1), flipud(t), flipud(t)]; % white -> red
     cmap = [top; bot];
+end
+
+
+function q = iqr_nan(x)
+%IQR_NAN Interquartile range ignoring NaN (no Statistics Toolbox needed).
+    x = x(~isnan(x));
+    if numel(x) < 4; q = NaN; return; end
+    x = sort(x);
+    lo = interp1(linspace(0, 1, numel(x)), x, 0.25);
+    hi = interp1(linspace(0, 1, numel(x)), x, 0.75);
+    q = hi - lo;
 end
 
 
