@@ -50,9 +50,16 @@ function CONFIG = get_default_config(varargin)
     CONFIG.cbct_file_override = '';
 
     % --- Sensor placement ---
+    % Options: 'full_plane_anterior', 'full_plane_lateral', 'spherical', 'box',
+    % 'determine_sensor_mask' (anterior auto-placement),
+    % 'determine_sensor_mask_lateral' (right/left-flank auto-placement), or
+    % 'fixed_anterior'.
     CONFIG.sensor_placement_method = 'determine_sensor_mask';
     CONFIG.sensor_x_index = 2;
     CONFIG.sensor_y_index = 4;
+
+    % Used only by 'determine_sensor_mask_lateral': which flank to place on.
+    CONFIG.sensor_side = 'right';   % 'right' | 'left'
 
     % Physical 2D ultrasound array geometry (sparse element mask).
     % Kerf is derived inside determine_sensor_mask as (pitch - size).
@@ -91,7 +98,13 @@ function CONFIG = get_default_config(varargin)
     CONFIG.use_pressure_scale_correction = false;   % rescale by max(p0)/max(recon) before dose conversion
     CONFIG.mask_recon_to_dose_region     = true;    % zero recon dose outside the >1% dose mask
 
-    % --- Reconstruction method: 'tr' (iterative time reversal) | 'das' | 'hybrid' ---
+    % --- Reconstruction method: 'tr' (iterative time reversal) | 'das' | 'ubp' ---
+    %   'ubp' = universal back-projection (utils/ubp3d.m). Its options default via
+    %   safe_config in run_single_field_simulation (like the das_* options) and
+    %   may be overridden here: ubp_use_elements (true), ubp_band_limit ('auto' |
+    %   'none' | cutoff Hz), ubp_aperture_cos (0), ubp_area_weight (true),
+    %   ubp_interp ('linear'). Non-ideal sensors (determine_sensor_mask) are
+    %   corrected automatically inside ubp3d.
     CONFIG.reconstruction_method  = 'tr';
     CONFIG.num_time_reversal_iter = 1;
     CONFIG.convergence_tol        = 1e-3;

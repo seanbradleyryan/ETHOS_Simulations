@@ -68,6 +68,7 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
 %                                                  Options: 'full_plane_anterior',
 %                                                  'full_plane_lateral', 'spherical',
 %                                                  'box', 'determine_sensor_mask',
+%                                                  'determine_sensor_mask_lateral',
 %                                                  'fixed_anterior'.
 %           .sensor_x_index             [1]      - YZ plane x-index
 %           .sensor_y_index             [1]      - XZ plane y-index
@@ -83,7 +84,12 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
 %                                                  comes out is pure noise artifact,
 %                                                  a baseline for "is the recon
 %                                                  actually recovering signal?".
-%           .reconstruction_method      ['tr']   - 'tr' or 'das'
+%           .reconstruction_method      ['tr']   - 'tr', 'das', or 'ubp'
+%                                                  ('ubp' = universal back-
+%                                                  projection via ubp3d; honors
+%                                                  ubp_use_elements, ubp_band_limit,
+%                                                  ubp_aperture_cos, ubp_area_weight,
+%                                                  ubp_interp)
 %           .blind_recon                [false]  - When true (and medium_recon is
 %                                                  supplied), forward on `medium`
 %                                                  but reconstruct on medium_recon.
@@ -143,7 +149,7 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
 %           .conv_max_pressure  - Per-iteration max pressure
 %           .conv_rel_change    - Per-iteration relative change
 %           .grid_padding       - Original / padded / expanded sizes
-%           .recon_method       - Which branch ran ('tr' | 'das')
+%           .recon_method       - Which branch ran ('tr' | 'das' | 'ubp')
 %           .blind_recon        - Logical: true when forward and reconstruction
 %                                 media differed (blind geometry)
 %
@@ -505,11 +511,15 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
             fprintf('        Sensor: box faces at x=[%d,%d], y=[%d,%d], z=[%d,%d]\n', ...
                 bx_lo, bx_hi_x, bx_lo, bx_hi_y, bx_lo, bx_hi_z);
 
-        case 'determine_sensor_mask'
-            % Automatic placement via determine_sensor_mask: tilts a 2D array
-            % toward the beam isocenter avoiding beam exclusion zones. May
-            % expand the simulation grid in X/Y/Z with water padding to place
-            % the sensor outside the exclusion zone.
+        case {'determine_sensor_mask', 'determine_sensor_mask_lateral'}
+            % Automatic placement: tilts a 2D array toward the dose centroid
+            % avoiding beam exclusion zones. 'determine_sensor_mask' presses the
+            % array against the ANTERIOR abdomen; 'determine_sensor_mask_lateral'
+            % presses it against the RIGHT/LEFT flank (config.sensor_side). Both
+            % return the same [sensor_mask, sensor_info] contract (including
+            % sensor_info.grid_pad) and may expand the simulation grid in X/Y/Z
+            % with water padding to place the sensor outside the exclusion zone.
+            lateral_sensor = strcmp(sensor_method, 'determine_sensor_mask_lateral');
             sct_for_sensor = struct();
             if isfield(cbct_resampled, 'cubeHU')
                 sct_for_sensor.cubeHU = cbct_resampled.cubeHU;
@@ -552,6 +562,9 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
                 sensor_info_orig = precomputed_sensor.sensor_info;
                 fprintf('        Sensor: using precomputed plan sensor mask (%d active points)\n', ...
                     sum(sensor_mask_orig(:)));
+            elseif lateral_sensor
+                [sensor_mask_orig, sensor_info_orig] = determine_sensor_mask_lateral( ...
+                    sct_for_sensor, field_dose_for_sensor, beam_metadata, config);
             else
                 [sensor_mask_orig, sensor_info_orig] = determine_sensor_mask( ...
                     sct_for_sensor, field_dose_for_sensor, beam_metadata, config);
@@ -702,8 +715,8 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
             m2 = min(Ny, size(sensor_mask_orig, 2));
             m3 = min(Nz, size(sensor_mask_orig, 3));
             sensor.mask(1:m1, 1:m2, 1:m3) = double(sensor_mask_orig(1:m1, 1:m2, 1:m3));
-            fprintf('        Sensor: determine_sensor_mask - %d active points\n', ...
-                sum(sensor_mask_orig(:)));
+            fprintf('        Sensor: %s - %d active points\n', ...
+                sensor_method, sum(sensor_mask_orig(:)));
 
         case 'fixed_anterior'
             % Deterministic placement: anterior, inferior to beam field,
@@ -730,7 +743,8 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
             error('run_single_field_simulation:UnknownSensorMethod', ...
                 ['Unknown sensor_placement_method: "%s". Expected ' ...
                  '''full_plane_anterior'', ''full_plane_lateral'', ''spherical'', ' ...
-                 '''box'', ''determine_sensor_mask'', or ''fixed_anterior''.'], ...
+                 '''box'', ''determine_sensor_mask'', ''determine_sensor_mask_lateral'', ' ...
+                 'or ''fixed_anterior''.'], ...
                 sensor_method);
     end
 
@@ -1140,9 +1154,39 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
                 return;
             end
 
+        case 'ubp'
+            fprintf('        Running Universal Back-Projection reconstruction...\n');
+            try
+                ubp_tic = tic;
+                ubp_opts = struct( ...
+                    'use_elements', safe_config(config, 'ubp_use_elements', true), ...
+                    'band_limit',   safe_config(config, 'ubp_band_limit',   'auto'), ...
+                    'aperture_cos', safe_config(config, 'ubp_aperture_cos', 0), ...
+                    'area_weight',  safe_config(config, 'ubp_area_weight',  true), ...
+                    'interp',       safe_config(config, 'ubp_interp',       'linear'));
+                % Non-ideal sensor (determine_sensor_mask) corrections happen
+                % inside ubp3d: element averaging, band-limited derivative, and
+                % the directivity/obliquity weight are driven by sensor_info.
+                if blind_recon, ubp_medium = medium_recon; else, ubp_medium = medium; end
+                reconPressure = ubp3d(sensorData, sensor, sensor_info, ubp_medium, ...
+                                      Nx, Ny, Nz, dx, dy, dz, dt, ubp_opts);
+                reconPressure = reconPressure * correction_factor;
+                conv_max_pressure(1) = max(reconPressure(:));
+                num_iters_done       = 1;
+                tr_time              = toc(ubp_tic);
+                fprintf('        UBP complete (%.1f s).\n', tr_time);
+                fprintf('        Reconstructed pressure: [%.2e, %.2e] Pa\n', ...
+                    min(reconPressure(:)), max(reconPressure(:)));
+            catch ME
+                warning('run_single_field_simulation:UBPFail', ...
+                    'UBP reconstruction failed: %s', ME.message);
+                recon_dose = zeros(input_dims_for_crop);
+                return;
+            end
+
         otherwise
             error('run_single_field_simulation:UnknownReconMethod', ...
-                'Unknown reconstruction_method: "%s" (use ''tr'' or ''das'')', recon_method);
+                'Unknown reconstruction_method: "%s" (use ''tr'', ''das'', or ''ubp'')', recon_method);
     end
 
     sim_results.tr_time_s         = tr_time;

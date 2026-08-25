@@ -804,10 +804,11 @@ end
 function precomp = compute_plan_sensor_mask(patient_id, session, cbct_by_label, ...
         dose_metadata, beam_metadata, config, hash8)
     % COMPUTE_PLAN_SENSOR_MASK  Build the sensor mask ONCE for the whole plan.
-    %   Only the 'determine_sensor_mask' placement method is precomputed here:
-    %   its placement is meant to be deterministic across every field/segment
-    %   (driven by the SUMMED plan dose), so recomputing it per field is pure
-    %   waste. The other methods build trivial grid-dependent masks inline.
+    %   Only the 'determine_sensor_mask' / 'determine_sensor_mask_lateral'
+    %   placement methods are precomputed here: their placement is meant to be
+    %   deterministic across every field/segment (driven by the SUMMED plan
+    %   dose), so recomputing it per field is pure waste. The other methods
+    %   build trivial grid-dependent masks inline.
     %
     %   Single-mask policy: one geometry for the whole plan (CT_1 preferred)
     %   and the summed plan dose (total_rs_dose) for placement; the resulting
@@ -819,9 +820,11 @@ function precomp = compute_plan_sensor_mask(patient_id, session, cbct_by_label, 
     precomp = [];
 
     if ~isfield(config, 'sensor_placement_method') || ...
-            ~strcmp(config.sensor_placement_method, 'determine_sensor_mask')
+            ~ismember(config.sensor_placement_method, ...
+                      {'determine_sensor_mask', 'determine_sensor_mask_lateral'})
         return;
     end
+    lateral_sensor = strcmp(config.sensor_placement_method, 'determine_sensor_mask_lateral');
 
     % Reuse a previously saved mask for this config hash.
     sensor_path = expected_sensor_mask_path(patient_id, session, config, hash8);
@@ -885,8 +888,13 @@ function precomp = compute_plan_sensor_mask(patient_id, session, cbct_by_label, 
     fd.spacing       = dose_metadata.spacing;
     fd.dimensions    = dose_metadata.dimensions;
 
-    fprintf('         Computing plan sensor mask once (geometry %s, summed plan dose)...\n', chosen);
-    [sensor_mask, sensor_info] = determine_sensor_mask(sct, fd, beam_metadata, config);
+    fprintf('         Computing plan sensor mask once (geometry %s, summed plan dose, method %s)...\n', ...
+        chosen, config.sensor_placement_method);
+    if lateral_sensor
+        [sensor_mask, sensor_info] = determine_sensor_mask_lateral(sct, fd, beam_metadata, config);
+    else
+        [sensor_mask, sensor_info] = determine_sensor_mask(sct, fd, beam_metadata, config);
+    end
 
     precomp                 = struct();
     precomp.sensor_mask     = sensor_mask;

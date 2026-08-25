@@ -1,7 +1,7 @@
-function [sensor_mask, sensor_info] = determine_sensor_placement_lateral(sct_resampled, field_dose, beam_metadata, config)
-%DETERMINE_SENSOR_PLACEMENT_LATERAL  Place a 2D ultrasound array on the patient's side
+function [sensor_mask, sensor_info] = determine_sensor_mask_lateral(sct_resampled, field_dose, beam_metadata, config)
+%DETERMINE_SENSOR_MASK_LATERAL  Place a 2D ultrasound array on the patient's side
 %
-%   [sensor_mask, sensor_info] = determine_sensor_placement_lateral(sct_resampled, field_dose, beam_metadata, config)
+%   [sensor_mask, sensor_info] = determine_sensor_mask_lateral(sct_resampled, field_dose, beam_metadata, config)
 %
 %   PURPOSE:
 %   Lateral counterpart to DETERMINE_SENSOR_MASK. Instead of pressing the rigid
@@ -123,14 +123,14 @@ bone_penalty_mm   = get_field(config, 'bone_penalty_mm',   30);
 bone_margin_mm    = get_field(config, 'bone_search_margin_mm', 30);
 
 if ~ismember(sensor_side, {'right', 'left'})
-    warning('determine_sensor_placement_lateral:BadSide', ...
+    warning('determine_sensor_mask_lateral:BadSide', ...
         'config.sensor_side "%s" not recognised; defaulting to right.', sensor_side);
     sensor_side = 'right';
 end
 
 kerf_mm = element_pitch_mm - element_size_mm;
 if kerf_mm < 0
-    error('determine_sensor_placement_lateral:InvalidGeometry', ...
+    error('determine_sensor_mask_lateral:InvalidGeometry', ...
         'element_size_mm (%.3f) cannot exceed element_pitch_mm (%.3f).', ...
         element_size_mm, element_pitch_mm);
 end
@@ -200,7 +200,7 @@ placement_dose = resolve_placement_dose(field_dose, config, [Ny, Nx, Nz]);
 
 dose_max = max(placement_dose(:));
 if isempty(placement_dose) || dose_max <= 0
-    warning('determine_sensor_placement_lateral:NoDose', ...
+    warning('determine_sensor_mask_lateral:NoDose', ...
         'Placement dose empty or zero; returning empty sensor mask.');
     [sensor_mask, sensor_info] = empty_result(grid_dims, sensor_side);
     return;
@@ -271,7 +271,7 @@ for iy = 1:Ny
 end
 surface_valid = ~isnan(lateral_surface);
 if ~any(surface_valid(:))
-    warning('determine_sensor_placement_lateral:NoSurface', ...
+    warning('determine_sensor_mask_lateral:NoSurface', ...
         'No lateral body surface found; returning empty sensor mask.');
     [sensor_mask, sensor_info] = empty_result(grid_dims, sensor_side);
     sensor_info.exclusion_zone = exclusion_zone;
@@ -288,7 +288,7 @@ fit_ny = max(1, floor((Ny * dy) / element_pitch_mm));
 fit_nz = max(1, floor((Nz * dz) / element_pitch_mm));
 N_fit  = min([elements_per_side, fit_ny, fit_nz]);
 if N_fit < elements_per_side
-    warning('determine_sensor_placement_lateral:ApertureShrunk', ...
+    warning('determine_sensor_mask_lateral:ApertureShrunk', ...
         'Grid fits %dx%d elements at pitch %.2f mm; reducing from %dx%d.', ...
         N_fit, N_fit, element_pitch_mm, elements_per_side, elements_per_side);
     elements_per_side = N_fit;
@@ -525,7 +525,7 @@ placement_valid = true;
 overlap_body = sensor_mask & body;
 if any(overlap_body(:))
     n_over = sum(overlap_body(:));
-    warning('determine_sensor_placement_lateral:BodyOverlap', ...
+    warning('determine_sensor_mask_lateral:BodyOverlap', ...
         'Sensor overlaps body at %d voxels. Removing overlapping voxels.', n_over);
     sensor_mask = sensor_mask & ~body;
     sensor_element_label(overlap_body) = 0;
@@ -533,7 +533,7 @@ if any(overlap_body(:))
 end
 num_sensor_voxels = sum(sensor_mask(:));
 if num_sensor_voxels == 0
-    warning('determine_sensor_placement_lateral:EmptySensor', ...
+    warning('determine_sensor_mask_lateral:EmptySensor', ...
         'Sensor mask empty after placement (side %s). Check body mask / dose.', sensor_side);
 end
 fprintf('        [SensorLat] Final sensor: %d voxels (valid: %s)\n', ...
@@ -578,7 +578,7 @@ end
 fprintf('        [SensorLat] Elements: %d/%d effective, %d aliased/removed; fill %.1f%%\n', ...
     effective_element_count, N_total_elements, aliased_element_count, 100 * fill_factor_actual);
 if aliased_element_count > 0
-    warning('determine_sensor_placement_lateral:ElementAliasing', ...
+    warning('determine_sensor_mask_lateral:ElementAliasing', ...
         '%d of %d elements collapsed (grid coarser than pitch or voxels removed).', ...
         aliased_element_count, N_total_elements);
 end
@@ -827,7 +827,7 @@ function out = accept_if_matches(arr, expected_dims, label)
     if isequal(size(arr), expected_dims)
         out = double(arr);
     else
-        warning('determine_sensor_placement_lateral:PlacementDoseSizeMismatch', ...
+        warning('determine_sensor_mask_lateral:PlacementDoseSizeMismatch', ...
             '%s size %s ~= grid %s; ignoring for placement.', ...
             label, mat2str(size(arr)), mat2str(expected_dims));
     end
@@ -847,7 +847,7 @@ function dose = load_total_dose_file(fpath)
     elseif isfield(S, 'ct_total_sparse') && isfield(S, 'ct_total_dims')
         dose = reshape(full(S.ct_total_sparse), S.ct_total_dims(:)');
     else
-        warning('determine_sensor_placement_lateral:UnknownTotalDoseFile', ...
+        warning('determine_sensor_mask_lateral:UnknownTotalDoseFile', ...
             'No recognised total-dose variable in %s.', fpath);
     end
     dose = double(dose);
