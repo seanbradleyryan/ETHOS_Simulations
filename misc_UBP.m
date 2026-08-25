@@ -4,6 +4,10 @@ function out = misc_UBP(num_sensors)
 %   out = misc_UBP()            % 60 sensors (default)
 %   out = misc_UBP(num_sensors) % choose the number of ring sensors
 %
+%   Set CONFIG.movie = true (below) to instead sweep the sensor count from
+%   CONFIG.movie_min_sensors to CONFIG.movie_max_sensors and animate the
+%   reconstruction, with a slider to swoop through num_sensors by hand.
+%
 %   PURPOSE:
 %       Stand-alone teaching / sanity demo of the Universal Back-Projection
 %       reconstruction of Xu & Wang, "Universal back-projection algorithm for
@@ -32,26 +36,22 @@ function out = misc_UBP(num_sensors)
 %       solid-angle weight. CT/Radon back-projection instead smears along
 %       straight lines, which is wrong for a diverging acoustic wavefront.
 %
+%   MOVIE MODE (CONFIG.movie = true):
+%       ONE dense forward simulation is run at CONFIG.movie_max_sensors. Because
+%       point sensors are passive receivers, any equidistant SUBSET of those
+%       traces is identical to having simulated only that subset. Frame sensor
+%       counts are the divisors of movie_max_sensors (>= movie_min_sensors), so
+%       every frame is exactly equidistant while costing just one simulation.
+%
 %   INPUTS:
 %       num_sensors - (optional) number of equally-spaced point sensors on the
-%                     ring. Positive integer, default 60.
+%                     ring. Positive integer, default 60. Ignored in movie mode.
 %
 %   OUTPUTS:
-%       out - struct with:
-%           .recon           - reconstructed pressure image (Pa), [nx_img x ny_img]
-%           .p0_true         - ground-truth initial pressure on the same grid
-%           .img_x, .img_y   - image axis coordinates (m)
-%           .sensor_xy       - [2 x N] sensor coordinates (m)
-%           .resolution_mm   - measured reconstruction resolution (LSF FWHM, mm)
-%           .config          - the CONFIG struct actually used
-%
-%   ALGORITHM:
-%       1. Build fat-disc-in-water medium and the beam cross-section p0.
-%       2. Place N point sensors on a circle inside the fat, beam through centre.
-%       3. k-Wave forward sim -> pressure trace at every sensor.
-%       4. UBP: filter each trace (b = 2p - 2t dp/dt) and back-project onto the
-%          circular arcs t = |r - r0|/c, weighted by solid angle.
-%       5. Resolution = FWHM of the line-spread function at a reconstructed edge.
+%       out - single mode: struct with .recon/.p0_true/.img_x/.img_y/.sensor_xy/
+%             .resolution_mm/.resolution_edge_mm/.config.
+%             movie  mode: struct with .frames (cell of recon images),
+%             .num_sensors, .resolution_mm (per frame), .img_x/.img_y/.config.
 %
 %   EXAMPLE:
 %       out = misc_UBP(120);   fprintf('res = %.2f mm\n', out.resolution_mm);
@@ -59,8 +59,8 @@ function out = misc_UBP(num_sensors)
 %   DEPENDENCIES: k-Wave (kWaveGrid, kspaceFirstOrder2D). No project data / CT.
 %
 %   NOTE (>200 lines): one self-contained file so the phantom, the forward sim,
-%   the UBP maths, the resolution measurement and the figure stay readable side
-%   by side; splitting would only add single-use files.
+%   the UBP maths, the resolution measurement, the figure and the sensor-sweep
+%   movie stay readable side by side; splitting would only add single-use files.
 %
 %   See also: run_single_field_simulation, kspaceFirstOrder2D
 
@@ -97,8 +97,15 @@ function out = misc_UBP(num_sensors)
     CONFIG.record_factor   = 1.2;       % record 1.2 x ring-diameter transit time
     CONFIG.plot            = true;
 
-    fprintf('\n=== misc_UBP: Universal Back-Projection PA demo (%d sensors) ===\n', ...
-        CONFIG.num_sensors);
+    % Movie: sweep num_sensors and animate the reconstruction.
+    CONFIG.movie             = false;   % true -> run the sensor-count sweep
+    CONFIG.movie_min_sensors = 10;      % smallest ring in the sweep
+    CONFIG.movie_max_sensors = 360;     % largest ring; frames = its divisors
+    CONFIG.movie_fps         = 8;       % animation / export frame rate
+    CONFIG.movie_save        = false;   % also write an MP4 of the sweep
+    CONFIG.movie_file        = 'misc_UBP_movie.mp4';
+
+    fprintf('\n=== misc_UBP: Universal Back-Projection PA demo ===\n');
 
     %% ======================= K-WAVE GRID ===========================
     dx = CONFIG.dx;
@@ -141,94 +148,167 @@ function out = misc_UBP(num_sensors)
         N, N, dx*1e3, CONFIG.fat_radius_mm, CONFIG.ring_radius_mm, CONFIG.field_size_mm);
     fprintf('  Peak p0 = %.3e Pa\n', max(p0(:)));
 
-    %% =================== SENSORS: RING OF POINTS ====================
-    % Equally spaced points on a circle of radius ring_R, inside the fat, with
-    % inward normals (pointing at the ring centre) for the UBP solid-angle term.
-    theta   = (0:CONFIG.num_sensors-1) * (2*pi / CONFIG.num_sensors);
-    sensor_xy = [ring_R * cos(theta); ring_R * sin(theta)];   % [2 x N], centred
-    sensor_n  = [-cos(theta);         -sin(theta)];           % inward unit normals
-
-    sensor = struct();
-    sensor.mask = sensor_xy;    % Cartesian sensor mask (k-Wave interpolates points)
-
     %% ===================== TIME STEPPING ===========================
     dt = CONFIG.cfl * dx / max(CONFIG.water_c, CONFIG.fat_c);
     % Record long enough for any in-ring pixel to hear any sensor: up to one ring
     % diameter of travel in fat, times a safety factor.
-    t_end = CONFIG.record_factor * (2 * ring_R) / CONFIG.fat_c;
-    Nt    = ceil(t_end / dt);
+    t_end  = CONFIG.record_factor * (2 * ring_R) / CONFIG.fat_c;
+    Nt     = ceil(t_end / dt);
     kgrid.setTime(Nt, dt);
     t_axis = (0:Nt-1) * dt;
     fprintf('  dt = %.2e s, Nt = %d (T = %.2e s)\n', dt, Nt, t_end);
 
-    %% ===================== FORWARD SIMULATION ======================
     if CONFIG.use_gpu
         try, gpuDevice; dataCast = 'gpuArray-single'; catch, dataCast = 'single'; end
     else
         dataCast = 'single';
     end
-    fprintf('  Forward simulation (DataCast = %s)...\n', dataCast);
 
-    sensorData = kspaceFirstOrder2D(kgrid, medium, source, sensor, ...
-        'PMLInside', false, 'PMLSize', CONFIG.pml_size, ...
+    %% =============== IMAGE GRID (inside the ring) ===================
+    fov    = 0.98 * ring_R;
+    ix_sel = find(abs(kgrid.x_vec) <= fov);
+    iy_sel = find(abs(kgrid.y_vec) <= fov);
+    img_x  = kgrid.x_vec(ix_sel);
+    img_y  = kgrid.y_vec(iy_sel);
+    p0_true = p0(ix_sel, iy_sel);
+
+    %% ==================== MOVIE MODE (branch) =======================
+    if CONFIG.movie
+        out = run_sensor_movie(CONFIG, kgrid, medium, source, ring_R, ...
+            t_axis, img_x, img_y, p0_true, dataCast);
+        return;
+    end
+
+    %% ============ SINGLE RECONSTRUCTION (num_sensors) ===============
+    fprintf('  Single reconstruction with %d sensors.\n', CONFIG.num_sensors);
+    [sensor_xy, sensor_n] = ring_sensors(CONFIG.num_sensors, ring_R);
+
+    fprintf('  Forward simulation (DataCast = %s)...\n', dataCast);
+    sensorData = kspaceFirstOrder2D(kgrid, medium, source, ...
+        struct('mask', sensor_xy), 'PMLInside', false, 'PMLSize', CONFIG.pml_size, ...
         'DataCast', dataCast, 'PlotSim', false);
     sensorData = double(gather(sensorData));     % [N x Nt], row i = sensor i
-
-    %% ================ UNIVERSAL BACK-PROJECTION =====================
-    % Reconstruct just inside the ring (recon is only valid there).
-    fov     = 0.98 * ring_R;
-    ix_sel  = find(abs(kgrid.x_vec) <= fov);
-    iy_sel  = find(abs(kgrid.y_vec) <= fov);
-    img_x   = kgrid.x_vec(ix_sel);
-    img_y   = kgrid.y_vec(iy_sel);
 
     fprintf('  UBP reconstruction on %d x %d image...\n', numel(img_x), numel(img_y));
     recon = universal_backprojection_2d(sensorData, t_axis, sensor_xy, sensor_n, ...
         img_x, img_y, CONFIG.fat_c, ring_R);
 
-    p0_true = p0(ix_sel, iy_sel);   % ground truth on the image grid
-
-    %% ================== RESOLUTION MEASUREMENT ======================
-    % Line-spread function at the +x field edge on the central row (y ~ 0).
-    [~, iy0]  = min(abs(img_y));
-    xmm       = img_x(:) * 1e3;
-    prof      = recon(:, iy0);
-    prof      = prof / max(prof);                 % normalise
-    lsf       = abs(gradient(prof, xmm));         % edge -> line-spread function
-
-    edge_win  = abs(xmm - 0.5*CONFIG.field_size_mm) <= 4;   % ~4 mm around +x edge
-    xw        = xmm(edge_win);
-    lw        = lsf(edge_win);
-    res_edge_mm = local_fwhm(xw, lw);              % measured edge LSF FWHM (mm)
-
-    % Isolate the reconstruction's own resolution by removing the known input
-    % edge softness in quadrature (Gaussian LSFs: FWHM_meas^2 = FWHM_in^2 + FWHM_sys^2).
-    input_lsf_mm = 2.3548 * CONFIG.penumbra_mm;    % FWHM of the erf edge's LSF
-    res_mm       = sqrt(max(res_edge_mm^2 - input_lsf_mm^2, 0));
-
-    arc_mm    = 2*pi*CONFIG.ring_radius_mm / CONFIG.num_sensors;   % sensor spacing on ring
+    R = measure_edge_resolution(recon, img_x, img_y, CONFIG);
+    arc_mm = 2*pi*CONFIG.ring_radius_mm / CONFIG.num_sensors;
 
     fprintf('\n  --- RESOLUTION REPORT ---\n');
     fprintf('  Reconstruction resolution (edge FWHM, input removed): %.2f mm  (%.1f voxels)\n', ...
-        res_mm, res_mm / (dx*1e3));
-    fprintf('  Raw measured edge LSF FWHM                          : %.2f mm\n', res_edge_mm);
-    fprintf('  Input beam edge LSF FWHM (removed)                  : %.2f mm\n', input_lsf_mm);
+        R.res_mm, R.res_mm / (dx*1e3));
+    fprintf('  Raw measured edge LSF FWHM                          : %.2f mm\n', R.res_edge_mm);
+    fprintf('  Input beam edge LSF FWHM (removed)                  : %.2f mm\n', R.input_lsf_mm);
     fprintf('  Grid/Nyquist floor (2*dx)                          : %.2f mm\n', 2*dx*1e3);
     fprintf('  Sensor spacing along ring (2*pi*R/N)               : %.2f mm\n', arc_mm);
     fprintf('  Sound speed used for UBP (fat)                     : %d m/s\n', CONFIG.fat_c);
     fprintf('  -------------------------\n\n');
 
-    %% ========================= FIGURE ==============================
     if CONFIG.plot
         draw_summary(kgrid, p0, medium, sensor_xy, fat_R, ring_R, ...
-            sensorData, t_axis, recon, p0_true, img_x, img_y, iy0, ...
-            xmm, prof, xw, lw, res_mm, res_edge_mm, CONFIG);
+            sensorData, t_axis, recon, p0_true, img_x, img_y, R, CONFIG);
     end
 
-    %% ========================= OUTPUT ==============================
     out = struct('recon', recon, 'p0_true', p0_true, 'img_x', img_x, ...
-        'img_y', img_y, 'sensor_xy', sensor_xy, 'resolution_mm', res_mm, ...
-        'resolution_edge_mm', res_edge_mm, 'config', CONFIG);
+        'img_y', img_y, 'sensor_xy', sensor_xy, 'resolution_mm', R.res_mm, ...
+        'resolution_edge_mm', R.res_edge_mm, 'config', CONFIG);
+end
+
+% ====================================================================
+function out = run_sensor_movie(CONFIG, kgrid, medium, source, ring_R, ...
+        t_axis, img_x, img_y, p0_true, dataCast)
+%RUN_SENSOR_MOVIE  Sweep the sensor count, animate the reconstruction.
+%   One dense forward sim at movie_max_sensors; each frame reconstructs from an
+%   exactly-equidistant subset (frame counts = divisors of movie_max_sensors).
+
+    Nmax = CONFIG.movie_max_sensors;
+    d    = 1:Nmax;
+    frame_Ns = d(mod(Nmax, d) == 0 & d >= CONFIG.movie_min_sensors);   % divisors
+    nF = numel(frame_Ns);
+    fprintf('  [MOVIE] %d frames, N = %s\n', nF, mat2str(frame_Ns));
+
+    % ---- one dense forward simulation ----
+    [sxy_max, sn_max] = ring_sensors(Nmax, ring_R);
+    fprintf('  [MOVIE] Dense forward simulation, %d sensors (DataCast = %s)...\n', Nmax, dataCast);
+    dense = kspaceFirstOrder2D(kgrid, medium, source, ...
+        struct('mask', sxy_max), 'PMLInside', false, 'PMLSize', CONFIG.pml_size, ...
+        'DataCast', dataCast, 'PlotSim', false);
+    dense = double(gather(dense));          % [Nmax x Nt]
+
+    % ---- reconstruct every frame ----
+    frames = cell(1, nF);
+    res_mm = zeros(1, nF);
+    for f = 1:nF
+        idx = 1 : (Nmax / frame_Ns(f)) : Nmax;     % exactly frame_Ns(f) equidistant
+        recon = universal_backprojection_2d(dense(idx, :), t_axis, ...
+            sxy_max(:, idx), sn_max(:, idx), img_x, img_y, CONFIG.fat_c, ring_R);
+        frames{f} = recon;
+        R = measure_edge_resolution(recon, img_x, img_y, CONFIG);
+        res_mm(f) = R.res_mm;
+        fprintf('    N = %3d  ->  resolution %.2f mm\n', frame_Ns(f), res_mm(f));
+    end
+
+    % ---- interactive slider figure ----
+    cmax = max(cellfun(@(r) max(r(:)), frames));
+    fig  = figure('Name', 'misc_UBP movie', 'Color', 'w', 'Position', [80 80 1120 620]);
+
+    axR  = axes('Parent', fig, 'Position', [0.06 0.24 0.50 0.70]);
+    hImg = imagesc(axR, img_y*1e3, img_x*1e3, frames{1});
+    axis(axR, 'image'); set(axR, 'YDir', 'normal', 'CLim', [0 cmax]);
+    colormap(axR, 'hot'); colorbar(axR);
+    xlabel(axR, 'Y (mm)'); ylabel(axR, 'X (mm)'); tR = title(axR, '');
+
+    axC = axes('Parent', fig, 'Position', [0.66 0.24 0.30 0.70]);
+    plot(axC, frame_Ns, res_mm, '-o', 'Color', [0.3 0.3 0.3]); hold(axC, 'on');
+    hMark = plot(axC, frame_Ns(1), res_mm(1), 'ro', 'MarkerFaceColor', 'r', 'MarkerSize', 9);
+    xlabel(axC, 'number of sensors'); ylabel(axC, 'resolution (mm)');
+    title(axC, 'resolution vs sensors'); grid(axC, 'on');
+
+    sld = uicontrol('Parent', fig, 'Style', 'slider', 'Units', 'normalized', ...
+        'Position', [0.06 0.08 0.50 0.05], 'Min', 1, 'Max', nF, 'Value', 1, ...
+        'SliderStep', [1 1] / max(nF-1, 1));
+    txt = uicontrol('Parent', fig, 'Style', 'text', 'Units', 'normalized', ...
+        'Position', [0.06 0.02 0.50 0.04], 'BackgroundColor', 'w', ...
+        'String', 'drag the slider to sweep num\_sensors');
+    set(sld, 'Callback', @(s,~) show_frame(round(get(s,'Value'))));
+    addlistener(sld, 'ContinuousValueChange', @(s,~) show_frame(round(get(s,'Value'))));
+
+    show_frame(1);
+
+    % ---- auto-play once (and optionally save an MP4), then leave slider live ----
+    do_save = CONFIG.movie_save;
+    if do_save
+        vw = VideoWriter(CONFIG.movie_file, 'MPEG-4');
+        vw.FrameRate = CONFIG.movie_fps; open(vw);
+    end
+    for f = 1:nF
+        set(sld, 'Value', f); show_frame(f); drawnow;
+        if do_save, writeVideo(vw, getframe(fig)); else, pause(1/CONFIG.movie_fps); end
+    end
+    if do_save, close(vw); fprintf('  [MOVIE] saved %s\n', CONFIG.movie_file); end
+
+    out = struct('frames', {frames}, 'num_sensors', frame_Ns, ...
+        'resolution_mm', res_mm, 'img_x', img_x, 'img_y', img_y, ...
+        'p0_true', p0_true, 'config', CONFIG);
+
+    function show_frame(k)
+        k = min(max(k, 1), nF);
+        set(hImg, 'CData', frames{k});
+        set(hMark, 'XData', frame_Ns(k), 'YData', res_mm(k));
+        set(tR, 'String', sprintf('UBP recon:  N = %d sensors,  resolution = %.2f mm', ...
+            frame_Ns(k), res_mm(k)));
+        set(txt, 'String', sprintf('frame %d / %d   (N = %d sensors)', k, nF, frame_Ns(k)));
+    end
+end
+
+% ====================================================================
+function [sxy, sn] = ring_sensors(N, ring_R)
+%RING_SENSORS  N equally-spaced ring points (2 x N) and their inward normals.
+    theta = (0:N-1) * (2*pi / N);
+    sxy = [ring_R * cos(theta); ring_R * sin(theta)];
+    sn  = [-cos(theta);         -sin(theta)];
 end
 
 % ====================================================================
@@ -271,6 +351,28 @@ function recon = universal_backprojection_2d(p, t_axis, s_xy, s_n, img_x, img_y,
 end
 
 % ====================================================================
+function R = measure_edge_resolution(recon, img_x, img_y, CONFIG)
+%MEASURE_EDGE_RESOLUTION  Reconstruction resolution from a reconstructed edge.
+%   FWHM of the line-spread function (|d/dx| of the central row) at the +x field
+%   edge, with the known input beam edge removed in quadrature.
+    [~, iy0] = min(abs(img_y));
+    xmm  = img_x(:) * 1e3;
+    prof = recon(:, iy0);
+    prof = prof / max(prof);                     % normalise
+    lsf  = abs(gradient(prof, xmm));             % edge -> line-spread function
+
+    win = abs(xmm - 0.5*CONFIG.field_size_mm) <= 4;   % ~4 mm around +x edge
+    xw  = xmm(win); lw = lsf(win);
+    res_edge = local_fwhm(xw, lw);
+
+    input_lsf = 2.3548 * CONFIG.penumbra_mm;     % FWHM of the erf edge's LSF
+    res       = sqrt(max(res_edge^2 - input_lsf^2, 0));
+
+    R = struct('res_mm', res, 'res_edge_mm', res_edge, 'input_lsf_mm', input_lsf, ...
+        'iy0', iy0, 'xmm', xmm, 'prof', prof, 'xw', xw, 'lw', lw);
+end
+
+% ====================================================================
 function w = local_fwhm(x, y)
 %LOCAL_FWHM  Full width at half maximum of a single positive peak y(x).
     x = x(:); y = y(:);
@@ -289,8 +391,8 @@ end
 
 % ====================================================================
 function draw_summary(kgrid, p0, medium, s_xy, fat_R, ring_R, sensorData, ...
-        t_axis, recon, p0_true, img_x, img_y, iy0, xmm, prof, xw, lw, res_mm, res_edge_mm, CONFIG)
-%DRAW_SUMMARY  Six-panel overview (2 rows x 3 cols).
+        t_axis, recon, p0_true, img_x, img_y, R, CONFIG)
+%DRAW_SUMMARY  Six-panel overview (2 rows x 3 cols) for the single-N run.
     xg = kgrid.x_vec * 1e3;  yg = kgrid.y_vec * 1e3;   % mm
     th = linspace(0, 2*pi, 200);
     figure('Name', 'misc_UBP', 'Color', 'w', 'Position', [80 80 1300 760]);
@@ -321,16 +423,16 @@ function draw_summary(kgrid, p0, medium, s_xy, fat_R, ring_R, sensorData, ...
 
     % (5) Central-row profile: truth vs recon (normalised).
     subplot(2,3,5);
-    pt = p0_true(:, iy0); pt = pt / max(pt);
-    plot(xmm, pt, 'k-', 'LineWidth', 1.5); hold on;
-    plot(xmm, prof, 'r-', 'LineWidth', 1.5);
+    pt = p0_true(:, R.iy0); pt = pt / max(pt);
+    plot(R.xmm, pt, 'k-', 'LineWidth', 1.5); hold on;
+    plot(R.xmm, R.prof, 'r-', 'LineWidth', 1.5);
     xlabel('X (mm)'); ylabel('normalised'); legend('truth','recon','Location','south');
-    title('Central profile (y \approx 0)'); grid on; xlim([min(xmm) max(xmm)]);
+    title('Central profile (y \approx 0)'); grid on; xlim([min(R.xmm) max(R.xmm)]);
 
     % (6) Line-spread function at the +x edge with FWHM.
     subplot(2,3,6);
-    plot(xw, lw, 'b-', 'LineWidth', 1.5); hold on;
+    plot(R.xw, R.lw, 'b-', 'LineWidth', 1.5); hold on;
     yl = ylim; plot([1 1]*0.5*CONFIG.field_size_mm, yl, 'k:');
     xlabel('X (mm)'); ylabel('|d(recon)/dx|');
-    title(sprintf('Edge LSF: meas %.2f mm, recon %.2f mm', res_edge_mm, res_mm)); grid on;
+    title(sprintf('Edge LSF: meas %.2f mm, recon %.2f mm', R.res_edge_mm, R.res_mm)); grid on;
 end
