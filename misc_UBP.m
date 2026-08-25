@@ -38,10 +38,12 @@ function out = misc_UBP(num_sensors)
 %
 %   MOVIE MODE (CONFIG.movie = true):
 %       ONE dense forward simulation is run at CONFIG.movie_max_sensors. Because
-%       point sensors are passive receivers, any equidistant SUBSET of those
-%       traces is identical to having simulated only that subset. Frame sensor
-%       counts are the divisors of movie_max_sensors (>= movie_min_sensors), so
-%       every frame is exactly equidistant while costing just one simulation.
+%       point sensors are passive receivers, a SUBSET of those traces is identical
+%       to having simulated only that subset, so the whole sweep costs one sim.
+%       By default frame counts are the divisors of movie_max_sensors (each frame
+%       exactly equidistant). Set CONFIG.movie_all_counts = true to show EVERY
+%       count from movie_min_sensors to movie_max_sensors (step movie_step); non-
+%       divisor counts pick the nearest dense sensors (<= half the dense spacing).
 %
 %   INPUTS:
 %       num_sensors - (optional) number of equally-spaced point sensors on the
@@ -100,7 +102,13 @@ function out = misc_UBP(num_sensors)
     % Movie: sweep num_sensors and animate the reconstruction.
     CONFIG.movie             = false;   % true -> run the sensor-count sweep
     CONFIG.movie_min_sensors = 10;      % smallest ring in the sweep
-    CONFIG.movie_max_sensors = 360;     % largest ring; frames = its divisors
+    CONFIG.movie_max_sensors = 360;     % largest ring (and the dense-sim ring)
+    CONFIG.movie_all_counts  = false;   % false -> only divisors of the max (each
+                                        %   frame exactly equidistant, prettiest).
+                                        % true  -> EVERY count from min to max;
+                                        %   non-divisors use the nearest dense
+                                        %   sensors (<= half the dense spacing off).
+    CONFIG.movie_step        = 1;       % count increment when movie_all_counts
     CONFIG.movie_fps         = 8;       % animation / export frame rate
     CONFIG.movie_save        = false;   % also write an MP4 of the sweep
     CONFIG.movie_file        = 'misc_UBP_movie.mp4';
@@ -220,14 +228,20 @@ end
 function out = run_sensor_movie(CONFIG, kgrid, medium, source, ring_R, ...
         t_axis, img_x, img_y, p0_true, dataCast)
 %RUN_SENSOR_MOVIE  Sweep the sensor count, animate the reconstruction.
-%   One dense forward sim at movie_max_sensors; each frame reconstructs from an
-%   exactly-equidistant subset (frame counts = divisors of movie_max_sensors).
+%   One dense forward sim at movie_max_sensors; each frame reconstructs from a
+%   subset of those traces (divisors of the max, or every count when
+%   movie_all_counts is set). See the header MOVIE MODE note.
 
     Nmax = CONFIG.movie_max_sensors;
-    d    = 1:Nmax;
-    frame_Ns = d(mod(Nmax, d) == 0 & d >= CONFIG.movie_min_sensors);   % divisors
+    if CONFIG.movie_all_counts
+        frame_Ns = CONFIG.movie_min_sensors : CONFIG.movie_step : Nmax;   % every count
+    else
+        d = 1:Nmax;
+        frame_Ns = d(mod(Nmax, d) == 0 & d >= CONFIG.movie_min_sensors); % exact divisors
+    end
     nF = numel(frame_Ns);
-    fprintf('  [MOVIE] %d frames, N = %s\n', nF, mat2str(frame_Ns));
+    fprintf('  [MOVIE] %d frames, N = %d ... %d (all_counts = %d)\n', ...
+        nF, frame_Ns(1), frame_Ns(end), CONFIG.movie_all_counts);
 
     % ---- one dense forward simulation ----
     [sxy_max, sn_max] = ring_sensors(Nmax, ring_R);
@@ -241,13 +255,19 @@ function out = run_sensor_movie(CONFIG, kgrid, medium, source, ring_R, ...
     frames = cell(1, nF);
     res_mm = zeros(1, nF);
     for f = 1:nF
-        idx = 1 : (Nmax / frame_Ns(f)) : Nmax;     % exactly frame_Ns(f) equidistant
+        N = frame_Ns(f);
+        % Nearest dense sensor to each of N equidistant target angles. Because
+        % Nmax >= N these indices are always distinct; when N divides Nmax they
+        % land exactly on an equidistant subset (identical to simulating only N).
+        idx = round((0:N-1) * Nmax / N) + 1;
         recon = universal_backprojection_2d(dense(idx, :), t_axis, ...
             sxy_max(:, idx), sn_max(:, idx), img_x, img_y, CONFIG.fat_c, ring_R);
         frames{f} = recon;
         R = measure_edge_resolution(recon, img_x, img_y, CONFIG);
         res_mm(f) = R.res_mm;
-        fprintf('    N = %3d  ->  resolution %.2f mm\n', frame_Ns(f), res_mm(f));
+        if nF <= 40 || mod(f, ceil(nF/20)) == 0 || f == nF
+            fprintf('    [%3d/%3d] N = %3d  ->  resolution %.2f mm\n', f, nF, N, res_mm(f));
+        end
     end
 
     % ---- interactive slider figure ----
@@ -277,17 +297,20 @@ function out = run_sensor_movie(CONFIG, kgrid, medium, source, ring_R, ...
 
     show_frame(1);
 
-    % ---- auto-play once (and optionally save an MP4), then leave slider live ----
-    do_save = CONFIG.movie_save;
-    if do_save
+    % ---- optionally save a complete MP4, then a short on-screen preview ----
+    if CONFIG.movie_save
         vw = VideoWriter(CONFIG.movie_file, 'MPEG-4');
         vw.FrameRate = CONFIG.movie_fps; open(vw);
+        for f = 1:nF                       % every frame, for a smooth movie file
+            set(sld, 'Value', f); show_frame(f); drawnow; writeVideo(vw, getframe(fig));
+        end
+        close(vw); fprintf('  [MOVIE] saved %s\n', CONFIG.movie_file);
     end
-    for f = 1:nF
-        set(sld, 'Value', f); show_frame(f); drawnow;
-        if do_save, writeVideo(vw, getframe(fig)); else, pause(1/CONFIG.movie_fps); end
+    stride = max(1, round(nF / 60));       % preview <= ~60 frames so it stays brief
+    for f = 1:stride:nF
+        set(sld, 'Value', f); show_frame(f); drawnow; pause(1/CONFIG.movie_fps);
     end
-    if do_save, close(vw); fprintf('  [MOVIE] saved %s\n', CONFIG.movie_file); end
+    set(sld, 'Value', nF); show_frame(nF); % leave the slider live at the finest ring
 
     out = struct('frames', {frames}, 'num_sensors', frame_Ns, ...
         'resolution_mm', res_mm, 'img_x', img_x, 'img_y', img_y, ...
