@@ -54,9 +54,9 @@ function CONFIG = get_default_config(varargin)
     % 'determine_sensor_mask' (anterior auto-placement),
     % 'determine_sensor_mask_lateral' (right/left-flank auto-placement), or
     % 'fixed_anterior'.
-    CONFIG.sensor_placement_method = 'determine_sensor_mask';
-    CONFIG.sensor_x_index = 2;
-    CONFIG.sensor_y_index = 4;
+    CONFIG.sensor_placement_method = 'determine_sensor_mask_lateral';
+    CONFIG.sensor_x_index = 10;
+    CONFIG.sensor_y_index = 10;
 
     % Used only by 'determine_sensor_mask_lateral': which flank to place on.
     CONFIG.sensor_side = 'right';   % 'right' | 'left'

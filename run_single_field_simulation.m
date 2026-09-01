@@ -475,22 +475,158 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
             fprintf('        Sensor: full_plane_lateral - XZ plane at y = %d\n', sensor_y);
 
         case 'spherical'
-            sph_radius  = floor(min([Nx, Ny, Nz]) / 2) - pml_size;
-            sensor.mask = makeSphere(Nx, Ny, Nz, sph_radius);
-            % Zero p0 outside the enclosing ball: anything outside is
-            % unobservable by this geometry and would otherwise pollute the
-            % forward simulation and downstream pressure scaling.
-            sph_cx = floor(Nx/2) + 1;
-            sph_cy = floor(Ny/2) + 1;
-            sph_cz = floor(Nz/2) + 1;
-            [Xg_sph, Yg_sph, Zg_sph] = ndgrid(1:Nx, 1:Ny, 1:Nz);
-            ball_mask = (Xg_sph - sph_cx).^2 + (Yg_sph - sph_cy).^2 + ...
-                        (Zg_sph - sph_cz).^2 <= sph_radius^2;
-            n_zeroed = nnz(p0 ~= 0 & ~ball_mask);
-            p0 = p0 .* ball_mask;
-            clear Xg_sph Yg_sph Zg_sph
-            fprintf('        Sensor: spherical, radius %d voxels (zeroed %d p0 voxels outside)\n', ...
-                sph_radius, n_zeroed);
+            % A sphere inscribed in the grid clips the corners: any initial
+            % pressure sitting there falls outside the sensor and used to be
+            % zeroed, losing real data. Instead, center the original data box
+            % in a larger grid and grow it with WATER until a grid-centered
+            % sphere CIRCUMSCRIBES the whole box, so no p0 voxel is lost.
+            %
+            % Uses the same strip -> water-expand -> re-FFT-pad bookkeeping as
+            % the determine_sensor_mask grid-expansion path, so the recon still
+            % crops back to the caller's dose size at the end of the function.
+
+            % Half-extent of the original (pre-FFT-pad) data box, in voxels,
+            % from its center to a corner. makeSphere measures radius in voxel
+            % index space, so the enclosing radius is measured the same way.
+            % +2 voxels of slack so the box sits strictly inside the shell even
+            % after the (<=1 voxel) box-center vs sphere-center rounding offset.
+            hx = (Nx_orig - 1) / 2;
+            hy = (Ny_orig - 1) / 2;
+            hz = (Nz_orig - 1) / 2;
+            R_enclose = ceil(sqrt(hx^2 + hy^2 + hz^2)) + 2;
+
+            % Cube big enough that a centered sphere of radius R_enclose still
+            % clears the PML on every side: floor(N_cube/2) - pml_size >= R_enclose.
+            N_cube = 2 * (R_enclose + pml_size) + 1;
+
+            % Strip the FFT padding back to the original data box (it is
+            % corner-anchored at 1:N_orig after the padding above).
+            density_unp    = medium.density(1:Nx_orig, 1:Ny_orig, 1:Nz_orig);
+            soundSpeed_unp = medium.sound_speed(1:Nx_orig, 1:Ny_orig, 1:Nz_orig);
+            if numel(medium.alpha_coeff) > 1
+                alphaCoeff_unp = medium.alpha_coeff(1:Nx_orig, 1:Ny_orig, 1:Nz_orig);
+            else
+                alphaCoeff_unp = medium.alpha_coeff;
+            end
+            gruneisen_unp = medium.gruneisen(1:Nx_orig, 1:Ny_orig, 1:Nz_orig);
+            p0_unp        = p0(1:Nx_orig, 1:Ny_orig, 1:Nz_orig);
+
+            % Center the data box inside the cube.
+            xr = floor((N_cube - Nx_orig) / 2) + (1:Nx_orig);
+            yr = floor((N_cube - Ny_orig) / 2) + (1:Ny_orig);
+            zr = floor((N_cube - Nz_orig) / 2) + (1:Nz_orig);
+
+            density_exp    = ones(N_cube, N_cube, N_cube) * 1000;
+            soundSpeed_exp = ones(N_cube, N_cube, N_cube) * 1540;
+            alphaCoeff_exp = zeros(N_cube, N_cube, N_cube);
+            gruneisen_exp  = zeros(N_cube, N_cube, N_cube);
+            p0_exp         = zeros(N_cube, N_cube, N_cube);
+
+            density_exp(xr, yr, zr)    = density_unp;
+            soundSpeed_exp(xr, yr, zr) = soundSpeed_unp;
+            if numel(alphaCoeff_unp) > 1
+                alphaCoeff_exp(xr, yr, zr) = alphaCoeff_unp;
+            else
+                alphaCoeff_exp(:) = alphaCoeff_unp;
+            end
+            gruneisen_exp(xr, yr, zr)  = gruneisen_unp;
+            p0_exp(xr, yr, zr)         = p0_unp;
+
+            medium.density     = density_exp;
+            medium.sound_speed = soundSpeed_exp;
+            medium.alpha_coeff = alphaCoeff_exp;
+            medium.gruneisen   = gruneisen_exp;
+            p0 = p0_exp;
+
+            % medium_orig drives the post-recon pressure->dose conversion; it
+            % must match the expanded-but-unpadded grid (size of the cropped
+            % reconPressure).
+            medium_orig = struct( ...
+                'density',     density_exp, ...
+                'sound_speed', soundSpeed_exp, ...
+                'alpha_coeff', alphaCoeff_exp, ...
+                'gruneisen',   gruneisen_exp, ...
+                'alpha_power', medium.alpha_power, ...
+                'grid_size',   [N_cube, N_cube, N_cube]);
+
+            % Blind: mirror strip->water-expand onto the reconstruction medium.
+            if blind_recon
+                medium_recon = crop_medium(medium_recon, [Nx_orig, Ny_orig, Nz_orig]);
+                medium_recon = expand_medium(medium_recon, [N_cube, N_cube, N_cube], xr, yr, zr);
+                medium_recon.alpha_power = alpha_power_value;
+                medium_recon.grid_size   = [N_cube, N_cube, N_cube];
+                medium_recon_orig = medium_recon;
+            end
+
+            % Expand doseGrid / doseMask / body / couch onto the cube.
+            doseGrid_exp = zeros(N_cube, N_cube, N_cube);
+            doseGrid_exp(xr, yr, zr) = doseGrid;
+            doseGrid = doseGrid_exp;
+
+            doseMask_exp = false(N_cube, N_cube, N_cube);
+            doseMask_exp(xr, yr, zr) = doseMask;
+            doseMask = doseMask_exp;
+
+            if isfield(cbct_resampled, 'bodyMask') && ...
+                    isequal(size(cbct_resampled.bodyMask), [Nx_orig, Ny_orig, Nz_orig])
+                body_exp = false(N_cube, N_cube, N_cube);
+                body_exp(xr, yr, zr) = cbct_resampled.bodyMask;
+                cbct_resampled.bodyMask = body_exp;
+            end
+            if isfield(cbct_resampled, 'couchMask') && ~isempty(cbct_resampled.couchMask) && ...
+                    isequal(size(cbct_resampled.couchMask), [Nx_orig, Ny_orig, Nz_orig])
+                couch_exp = false(N_cube, N_cube, N_cube);
+                couch_exp(xr, yr, zr) = cbct_resampled.couchMask;
+                cbct_resampled.couchMask = couch_exp;
+            end
+
+            % Record where the data landed so recon_dose crops back to input
+            % size. input_dims_for_crop stays the caller's dose size (set above).
+            expansion_offsets = [xr(1) - 1, yr(1) - 1, zr(1) - 1];
+
+            Nx_orig = N_cube; Ny_orig = N_cube; Nz_orig = N_cube;
+            gridSize_orig = [N_cube, N_cube, N_cube];
+
+            % Re-run FFT-optimal padding on the cube (appends water at the high
+            % indices, keeping the data + sphere corner-anchored at 1:N_cube).
+            if use_grid_padding
+                Nx_pad2 = find_optimal_kwave_size(N_cube, pml_size);
+                Ny_pad2 = find_optimal_kwave_size(N_cube, pml_size);
+                Nz_pad2 = find_optimal_kwave_size(N_cube, pml_size);
+            else
+                Nx_pad2 = N_cube; Ny_pad2 = N_cube; Nz_pad2 = N_cube;
+            end
+
+            if ~isequal([Nx_pad2, Ny_pad2, Nz_pad2], [N_cube, N_cube, N_cube])
+                [medium, p0] = pad_medium_and_p0(medium, p0, ...
+                    N_cube, N_cube, N_cube, Nx_pad2, Ny_pad2, Nz_pad2);
+                if blind_recon
+                    medium_recon = pad_medium_to(medium_recon, [Nx_pad2, Ny_pad2, Nz_pad2]);
+                end
+                did_pad = true;
+            else
+                did_pad = false;
+            end
+
+            Nx = Nx_pad2; Ny = Ny_pad2; Nz = Nz_pad2;
+            gridSize = [Nx, Ny, Nz];
+
+            % Sphere shell that circumscribes the centered data box. Built on
+            % the cube and embedded at the corner block so its center stays at
+            % the cube center regardless of any high-side FFT padding above.
+            sph_radius  = floor(N_cube / 2) - pml_size;
+            sensor.mask = zeros(Nx, Ny, Nz);
+            sensor.mask(1:N_cube, 1:N_cube, 1:N_cube) = ...
+                makeSphere(N_cube, N_cube, N_cube, sph_radius);
+
+            sim_results.grid_padding = struct( ...
+                'original_size', [N_cube, N_cube, N_cube], ...
+                'padded_size',   [Nx, Ny, Nz], ...
+                'expanded',      true);
+
+            fprintf(['        Sensor: spherical, radius %d voxels; grid expanded to ' ...
+                     'enclose data (cube %d^3 -> [%d %d %d], no p0 clipped)\n'], ...
+                sph_radius, N_cube, Nx, Ny, Nz);
 
         case 'box'
             % Six-face bounding box: planes at index 3 and (N-3) on each axis.

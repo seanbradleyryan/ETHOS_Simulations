@@ -20,7 +20,7 @@ function gamma_results = compute_gamma(original, recon, spacing_mm, varargin)
 %
 %   See also: CalcGamma, run_standalone_field, run_standalone_simulation
 
-    p = struct('Criteria', {{10,10,'10%/10mm'; 5,5,'5%/5mm'; 3,3,'3%/3mm'}}, ...
+    p = struct('Criteria', {{3,3,'3%/3mm'}}, ...
                'Cutoff', 0.10, 'Local', 0, 'Restrict', 1);
     for i = 1:2:numel(varargin)
         p.(varargin{i}) = varargin{i+1};

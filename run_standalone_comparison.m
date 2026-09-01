@@ -48,6 +48,7 @@ CONFIG.noise_ensemble_minutes = 30;    % wall-time budget for a fresh ensemble
 %  this PLOTS struct is local to this script.
 PLOTS = struct();
 PLOTS.dose_panels       = true;   % 3-view panels: the two reconstructed doses
+PLOTS.sensor_planes     = true;   % sensor mask on a DRR-like CT radiograph, 3 planes
 PLOTS.convergence       = false;   % TR max-pressure / relative-change history
 PLOTS.gamma_maps        = false;   % per-pair gamma + error axial maps
 PLOTS.noise_only_panels = false;   % 3-view panels: blind recon vs noise-only recon
@@ -362,6 +363,15 @@ if CONFIG.plot_results
         plot_dose_panels(recon_A, recon_B, RES(1).sensor_mask, RES(1).density, spacing_mm, ...
             'Dose Comparison: Two Reconstructed Doses', CONFIG.viz_smooth_sigma, ...
             {RES(1).label, RES(2).label}, tabDose);
+    end
+
+    if PLOTS.sensor_planes
+        % Sensor mask over a DRR-like CT radiograph (mean-projection) in all
+        % three anatomical planes, with the >=10% dose region for context. Uses
+        % the reference-CT (full-access) geometry the sensor is placed on.
+        sensor_dose_mask = dose1 >= 0.10 * max(dose1(:));
+        plot_sensor_dose_planes(sensor_dose_mask, sensor1, spacing_mm, ...
+            RES(idx1).density, CONFIG);
     end
 
     if PLOTS.convergence && ...

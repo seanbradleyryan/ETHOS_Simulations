@@ -504,7 +504,7 @@ switch CONFIG.sensor_placement_method
         sph_radius  = floor(min([Nx, Ny, Nz]) / 2) - CONFIG.pml_size;
         sensor.mask = makeSphere(Nx, Ny, Nz, sph_radius);
         % Anything outside the enclosing sphere is unobservable by this
-        % sensor geometry  zero p0 there so it doesn't pollute the forward
+        % sensor geometry - zero p0 there so it doesn't pollute the forward
         % simulation or downstream pressure scaling.
         sph_cx = floor(Nx/2) + 1;
         sph_cy = floor(Ny/2) + 1;

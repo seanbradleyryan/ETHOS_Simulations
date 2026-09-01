@@ -51,7 +51,7 @@ HU thresholds in a driver.
 |-------|-------------|
 | `'full_plane_anterior'` | Full YZ plane at `sensor_x_index` *(default)* |
 | `'full_plane_lateral'` | Full XZ plane at `sensor_y_index` |
-| `'spherical'` | Spherical shell geometry |
+| `'spherical'` | Spherical shell geometry. The grid is water-padded and the data box re-centered so the sphere **circumscribes** the whole data volume (no p0 clipped in the corners). This expansion can grow the grid substantially (~5x voxels for a cube) — use `downscale_factor` if memory-bound. Handled in `run_single_field_simulation.m`. |
 
 ## Gotchas
 
