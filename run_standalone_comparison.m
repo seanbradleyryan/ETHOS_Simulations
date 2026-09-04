@@ -18,7 +18,10 @@ addpath(genpath(fullfile(fileparts(mfilename('fullpath')), 'pipeline')));  % ste
 
 %% ========================= CONFIGURATION ================================
 
+
 CONFIG = get_default_config();
+    CONFIG.dose_filename  = 'dose_1194203_Session_1_reference_CT_1_B15_112.mat';
+
 CONFIG.mask_recon_to_dose_region     = false;    % zero recon dose outside the >1% dose mask
 
 
@@ -27,7 +30,9 @@ CONFIG.ct_pair      = [1, 3];   % the two CT images paired for comparison
 CONFIG.reference_ct = 1;        % geometry we (blindly) reconstruct on
 
 CONFIG.num_tr_iter = 1; 
-CONFIG.conv_noise_level = .01
+CONFIG.conv_noise_level = .01;
+CONFIG.reconstruction_method = 'tr'; 
+CONFIG.sensor_side = 'right'; 
 
 % Noise-only null hypothesis: instead of a single noise-only run (which jitters
 % ~18-20% from the random noise draw), we run an ENSEMBLE of noise-only
@@ -35,8 +40,8 @@ CONFIG.conv_noise_level = .01
 % pass rate as the null band / error bar. The ensemble is cached (keyed on the
 % sensor + noise + recon config, NOT the dose), so it is computed once per
 % session and reused for every beam/segment. Set false to skip it entirely.
-CONFIG.include_noise_only     = true;
-CONFIG.noise_ensemble_minutes = 30;    % wall-time budget for a fresh ensemble
+CONFIG.include_noise_only     = false;
+CONFIG.noise_ensemble_minutes = 1;    % wall-time budget for a fresh ensemble
 
 % --- Example overrides ---
 % CONFIG.dose_filename         = 'dose_1194203_Session_1_reference_CT_1_B15_112.mat';
@@ -50,8 +55,8 @@ PLOTS = struct();
 PLOTS.dose_panels       = true;   % 3-view panels: the two reconstructed doses
 PLOTS.sensor_planes     = true;   % sensor mask on a DRR-like CT radiograph, 3 planes
 PLOTS.convergence       = false;   % TR max-pressure / relative-change history
-PLOTS.gamma_maps        = false;   % per-pair gamma + error axial maps
-PLOTS.noise_only_panels = false;   % 3-view panels: blind recon vs noise-only recon
+PLOTS.gamma_maps        = true;   % per-pair gamma + error axial maps
+PLOTS.noise_only_panels = true;   % 3-view panels: blind recon vs noise-only recon
 
 %% ===================== RESOLVE DOSE PAIR & CBCT PATHS ====================
 %  Resolve the listed dose (A), then derive its counterpart (B) on the other CT

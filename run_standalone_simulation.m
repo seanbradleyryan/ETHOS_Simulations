@@ -20,6 +20,10 @@ addpath(genpath(fullfile(fileparts(mfilename('fullpath')), 'pipeline')));  % ste
 %  Override only what you want to change for this run below.
 
 CONFIG = get_default_config();
+CONFIG.sensor_placement_method = 'spherical';
+CONFIG.reconstruction_method = 'ubp'; 
+CONFIG.gruneisen_method = 'uniform';
+
 
 % --- Example overrides (uncomment / edit as needed) ---
 % CONFIG.dose_filename          = 'dose_1194203_Session_1_reference_CT_1_B15_112.mat';

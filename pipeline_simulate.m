@@ -30,6 +30,8 @@
 
 clear; clc; close all;
 
+addpath(genpath('/mnt/weka/home/80030361/ETHOS_Simulations/utils')); 
+
 %% ========================= CONFIGURATION =================================
 
 % Shared simulation parameters come from get_default_config (the single source
@@ -54,7 +56,7 @@ CONFIG.matrad_path  = '/mnt/weka/home/80030361/MATLAB/Addons/matRad';
 
 % --- Acoustic Simulation Parameters that differ from the defaults ---
 % This pipeline runs 5 time-reversal iterations (get_default_config default: 1).
-CONFIG.num_time_reversal_iter   = 5;
+% CONFIG.num_time_reversal_iter   = 5;
 
 % Preserve prior pipeline behavior. Previously these fields were left unset, so
 % run_single_field_simulation used its own internal defaults: correction_factor
@@ -62,8 +64,8 @@ CONFIG.num_time_reversal_iter   = 5;
 % true) would change the saved recon scale, and normalize=true would max-scale
 % each per-field recon to 1 -- which this pipeline then SUMS into total_recon,
 % breaking the physical dose sum. Pin both to keep the reconstruction identical.
-CONFIG.correction_factor = 1.9;
-CONFIG.normalize         = false;
+%CONFIG.correction_factor = 1.9;
+%CONFIG.normalize         = false;
 
 % --- Blind-Geometry Reconstruction (CT_3 / adapted fields) ---
 % When true, every CT_3 (adapted) beam/segment field is FORWARD-propagated on
@@ -82,8 +84,8 @@ CONFIG.blind_recon_reference_label = 'CT_1';
 % --- Sensor Placement (indices differ from the defaults: 20 vs 2/4) ---
 % sensor_placement_method inherited ('determine_sensor_mask'). The indices below
 % are used only by the 'full_plane_*' methods.
-CONFIG.sensor_x_index = 20;   % Used by 'full_plane_anterior'
-CONFIG.sensor_y_index = 20;   % Used by 'full_plane_lateral'
+%CONFIG.sensor_x_index = 20;   % Used by 'full_plane_anterior'
+%CONFIG.sensor_y_index = 20;   % Used by 'full_plane_lateral'
 
 % --- Gamma Analysis Parameters ---
 CONFIG.gamma_dose_pct        = 3.0;    % Dose difference threshold (%)
