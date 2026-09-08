@@ -40,8 +40,8 @@ CONFIG.sensor_side = 'right';
 % pass rate as the null band / error bar. The ensemble is cached (keyed on the
 % sensor + noise + recon config, NOT the dose), so it is computed once per
 % session and reused for every beam/segment. Set false to skip it entirely.
-CONFIG.include_noise_only     = false;
-CONFIG.noise_ensemble_minutes = 1;    % wall-time budget for a fresh ensemble
+CONFIG.include_noise_only     = true;
+CONFIG.noise_ensemble_minutes = 10;    % wall-time budget for a fresh ensemble
 
 % --- Example overrides ---
 % CONFIG.dose_filename         = 'dose_1194203_Session_1_reference_CT_1_B15_112.mat';
