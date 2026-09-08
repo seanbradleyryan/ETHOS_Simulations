@@ -32,20 +32,28 @@
 %  region (recon_CT1->rs_CT1, recon_CT3->rs_CT3), cancelling the stored absolute
 %  scale (CONFIG.correction_factor); the RS truths are never rescaled.
 %
-%  FIGURE 1 - change detection (x = beam number, y = pass rate %, single crit):
-%    - recon_CT1 vs truth_CT1  (green markers, std error bars),
-%    - recon_CT3 vs truth_CT1  (red markers, std error bars),
-%    - truth_CT1 vs truth_CT3  (blue markers, std error bars),
-%    - a per-beam vertical connector between the two recon means, coloured like
-%      whichever mean is greater.
+%  FIGURE 1 - change detection, a TABBED window (x = beam number):
+%    Tab "Pass rates" (y = pass rate %, single crit):
+%      - recon_CT1 vs truth_CT1  (green markers, std error bars),
+%      - recon_CT3 vs truth_CT1  (red markers, std error bars),
+%      - truth_CT1 vs truth_CT3  (blue markers, std error bars),
+%      - a per-beam vertical connector between the two recon means, coloured like
+%        whichever mean is greater,
+%      - when CONFIG.include_noise_floor is on, the noise-only null (from
+%        noise_ensemble_error_bars) as a horizontal mean +/- std band.
+%    Tab "Differentials" (y = pass-rate differential %):
+%      - recon differential (recon_CT1 - recon_CT3, both vs truth_CT1): green
+%        where >= 0 (change detected the correct way), red where < 0,
+%      - truth differential 100 - (truth_CT1 vs truth_CT3), the true change
+%        magnitude, in blue. Both carry std error bars (paired per-segment std).
 %
 %  FIGURE 2 - reconstruction fidelity (each recon vs its OWN-CT truth):
 %    - truth_CT1 vs recon_CT1 (green), truth_CT3 vs recon_CT3 (red), each series
 %      joined by straight lines across beams. No vertical connectors.
 %
-%  Both figures carry a trailing "All" x-axis entry: the mean +/- std pooled over
-%  EVERY segment of EVERY processed beam, separated from the per-beam entries by
-%  a dashed vertical rule.
+%  All tabs/figures carry a trailing "All" x-axis entry: the mean +/- std pooled
+%  over EVERY segment of EVERY processed beam, separated from the per-beam entries
+%  by a dashed vertical rule.
 %
 %  OPERATIONAL:
 %    - Progress notifications + a total-runtime record are printed to console.
@@ -56,7 +64,10 @@
 %    - Missing entries (absent beam, absent segment, missing CT_1/CT_3 pair or
 %      recon file, grid mismatch) are skipped rather than raised.
 %    - Per-beam segment gamma runs in parallel (parfor) or serially per
-%      CONFIG.use_parallel.
+%      CONFIG.use_parallel; the pool is auto-sized to the machine's physical cores
+%      (CONFIG.auto_detect_workers) with CONFIG.num_workers as the fallback.
+%    - Optional noise-only null "floor" via noise_ensemble_error_bars, cached by
+%      the simulation config hash (CONFIG.include_noise_floor / noise_sim_config).
 %
 %  NOTE: HIPAA / remote-execution - this file is WRITTEN here but must be RUN on
 %  the remote device. Do not execute locally.
@@ -125,7 +136,24 @@ CONFIG.normalize = true;
 % Parallelization: true -> parfor over a beam's segments; false -> serial.
 % CPU gamma (see quiet_gamma_pass), so workers scale with physical cores.
 CONFIG.use_parallel = true;
-CONFIG.num_workers  = 64;   % default local pool size
+% When auto_detect_workers is true the pool is sized to the machine's physical
+% core count (detect_num_cores); num_workers is only the fallback used when that
+% detection is unavailable (no Parallel Computing Toolbox / query fails).
+CONFIG.auto_detect_workers = true;
+CONFIG.num_workers         = 64;   % fallback local pool size
+
+% --- Noise floor (noise-only null hypothesis) --------------------------------
+% When true (and eval_method is 'gamma_index'), run noise_ensemble_error_bars
+% ONCE for this session and draw its mean +/- std gamma pass rate as a horizontal
+% "noise floor" band on the across-beams pass-rate tab. The ensemble is cached by
+% the SIMULATION config hash (compute_sim_config_hash), so it is computed once and
+% reused. noise_sim_config supplies that simulation CONFIG (sensor / recon / noise
+% knobs); [] builds it from get_default_config(). NOTE: the floor is only
+% meaningful when this simulation CONFIG matches the settings that produced the
+% recons being plotted (CONFIG.config_hash) -- a mismatch is warned about below.
+CONFIG.include_noise_floor    = true;
+CONFIG.noise_ensemble_minutes = 30;    % TimeBudgetMin handed to the ensemble
+CONFIG.noise_sim_config       = [];    % [] => get_default_config(); else a struct
 
 % --- Output ---
 % Results and the console log are cached beside the recon doses, i.e. in
@@ -283,7 +311,12 @@ end
 if ~loaded_from_cache
 
 if CONFIG.use_parallel
-    ensure_pool(CONFIG.num_workers);
+    nworkers = CONFIG.num_workers;
+    if isfield(CONFIG, 'auto_detect_workers') && CONFIG.auto_detect_workers
+        nworkers = detect_num_cores(CONFIG.num_workers);
+        fprintf('  [Pool] Auto-detected %d core(s) for the worker pool.\n', nworkers);
+    end
+    ensure_pool(nworkers);
 end
 
 % Per-beam aggregates (trimmed to processed beams afterwards).
@@ -420,12 +453,25 @@ fprintf('\n=============================================================\n');
 x_pos    = 1:(nproc + 1);
 x_labels = [arrayfun(@(b) sprintf('%d', b), beam_list, 'UniformOutput', false), {'All'}];
 
-% Figure 1: change detection (both recons vs the CT_1 truth, plus truth-vs-truth).
-plot_beam_pass_rate_summary(x_pos, x_labels, ...
-    [mean_pass(:, d_r1); all_mean(d_r1)], [std_pass(:, d_r1); all_std(d_r1)], ...
-    [mean_pass(:, d_r3); all_mean(d_r3)], [std_pass(:, d_r3); all_std(d_r3)], ...
-    [mean_pass(:, d_tt); all_mean(d_tt)], [std_pass(:, d_tt); all_std(d_tt)], ...
-    metric, CONFIG.patient_id, CONFIG.session);
+% Noise-only null floor (computed once, cached by the sim config hash). Only the
+% gamma metric has a meaningful noise floor; skipped for SSIM and on any failure.
+noise_floor = [];
+if CONFIG.include_noise_floor
+    if metric.is_ssim
+        fprintf('\n[NOISE FLOOR] Skipped: no noise floor defined for the SSIM metric.\n');
+    else
+        noise_floor = compute_study_noise_floor(CONFIG, crit);
+    end
+end
+
+% Figure 1: tabbed change-detection figure.
+%   Tab 1 "Pass rates" - both recons vs the CT_1 truth plus truth-vs-truth, with
+%                        the noise floor drawn as a horizontal band (like before).
+%   Tab 2 "Differentials" - per-beam recon1-recon3 (green if >0, else red) and the
+%                        true change 100-(truth1 vs truth3) (blue), std error bars.
+plot_change_detection_tabs(x_pos, x_labels, mean_pass, std_pass, ...
+    all_mean, all_std, seg_pass_by_beam, all_seg_pass, ...
+    d_r1, d_r3, d_tt, noise_floor, metric, CONFIG.patient_id, CONFIG.session);
 
 % Figure 2: reconstruction fidelity (each recon against its OWN-CT truth).
 plot_recon_fidelity_summary(x_pos, x_labels, ...
@@ -503,6 +549,32 @@ function ensure_pool(desired_workers)
     catch ME
         fprintf('  [WARN] Could not start parallel pool (%s). Running serially.\n', ME.message);
     end
+end
+
+function n = detect_num_cores(default_workers)
+%DETECT_NUM_CORES Physical CPU core count for sizing the worker pool.
+%  Tries the local cluster profile's NumWorkers first (the value parpool would
+%  use by default), then feature('numcores'); falls back to default_workers if
+%  neither is available or returns something nonsensical.
+    if nargin < 1 || isempty(default_workers), default_workers = 64; end
+    n = [];
+    try
+        c = parcluster('local');
+        n = c.NumWorkers;
+    catch
+        n = [];
+    end
+    if isempty(n) || ~isfinite(n) || n < 1
+        try
+            n = feature('numcores');   % undocumented but widely available
+        catch
+            n = [];
+        end
+    end
+    if isempty(n) || ~isfinite(n) || n < 1
+        n = default_workers;
+    end
+    n = double(round(n));
 end
 
 function name = add_name_suffix(name, suffix)
@@ -676,6 +748,81 @@ function out = load_beam_set(CONFIG, beam)
     out = load_recon_dose_data(CONFIG.patient_id, CONFIG.session, CONFIG, args{:});
 end
 
+function ens = compute_study_noise_floor(CONFIG, crit)
+%COMPUTE_STUDY_NOISE_FLOOR Run (cached) noise_ensemble_error_bars for this session.
+%  Builds/obtains the simulation CONFIG, loads the reference-CT geometry + summed
+%  RayStation truth + beam metadata via load_recon_dose_data (total mode), and
+%  returns the noise-only null ensemble (mean/std gamma pass rate). Returns [] on
+%  any failure so the caller simply omits the floor band. The ensemble itself is
+%  cached (keyed on the sim config hash), so this is cheap on repeat runs.
+    ens = [];
+    try
+        % Simulation CONFIG (its sensor/recon/noise knobs set the ensemble cache
+        % key). Default: get_default_config(); override the machine/data fields to
+        % this study's patient/session so the floor uses the same geometry.
+        if isstruct(CONFIG.noise_sim_config) && ~isempty(fieldnames(CONFIG.noise_sim_config))
+            sim_cfg = CONFIG.noise_sim_config;
+        else
+            sim_cfg = get_default_config();
+        end
+        sim_cfg.working_dir      = CONFIG.working_dir;
+        sim_cfg.patient_id       = CONFIG.patient_id;
+        sim_cfg.session          = CONFIG.session;
+        sim_cfg.treatment_site   = CONFIG.treatment_site;
+        sim_cfg.gruneisen_method = CONFIG.gruneisen_method;
+
+        % Warn if the sim config does not correspond to the plotted recons.
+        sim_hash = compute_sim_config_hash(sim_cfg);
+        if ~isempty(CONFIG.config_hash) && ~strcmp(sim_hash, CONFIG.config_hash)
+            warning('study_pass_rates_allsegments:NoiseFloorHashMismatch', ...
+                ['Noise-floor sim config hash %s ~= recon hash %s. The floor may not ' ...
+                 'match the plotted recons; set CONFIG.noise_sim_config to the sim ' ...
+                 'CONFIG used for these recons.'], sim_hash, CONFIG.config_hash);
+        end
+
+        % Reference-CT geometry + summed RS truth + beam metadata (total mode).
+        args = {'Mode', 'total', 'IncludeCBCT', true, 'IncludeEthos', false};
+        if ~isempty(CONFIG.config_hash), args = [args, {'Hash', CONFIG.config_hash}]; end
+        tot = load_recon_dose_data(CONFIG.patient_id, CONFIG.session, CONFIG, args{:});
+
+        ct1_field = sprintf('CT_%d', min(CONFIG.ct_pair));
+        if ~isfield(tot, 'cbct') || ~isfield(tot.cbct, ct1_field)
+            error('study_pass_rates_allsegments:NoiseFloorNoCBCT', ...
+                'Reference CBCT geometry %s not available for the noise floor.', ct1_field);
+        end
+        sct        = tot.cbct.(ct1_field);
+        ref_truth  = double(tot.rs_dose);
+        spacing_mm = tot.metadata.spacing(:)';
+        if ~isfield(sct, 'spacing') || isempty(sct.spacing), sct.spacing = spacing_mm; end
+        if ~isfield(sct, 'origin') || isempty(sct.origin)
+            if isfield(tot.metadata, 'origin'), sct.origin = tot.metadata.origin;
+            else, sct.origin = [0, 0, 0]; end
+        end
+
+        beam_meta = [];
+        if isfield(tot.metadata, 'beam_metadata'), beam_meta = tot.metadata.beam_metadata; end
+        gantry_angle = 0;   % plan-level floor: placement uses summed dose + all beams
+        if ~isempty(beam_meta) && isfield(beam_meta(1), 'gantry_angle') ...
+                && ~isempty(beam_meta(1).gantry_angle)
+            gantry_angle = beam_meta(1).gantry_angle;
+        end
+
+        % Run (cached) noise-only null ensemble at the study's gamma criterion.
+        crit_label = sprintf('%g%%/%g mm', crit, crit);
+        ens = noise_ensemble_error_bars(sim_cfg, ref_truth, spacing_mm, sct, ...
+            gantry_angle, beam_meta, ...
+            'TimeBudgetMin', CONFIG.noise_ensemble_minutes, ...
+            'GammaCriteria', {crit, crit, crit_label}, ...
+            'Normalize', logical(CONFIG.normalize));
+        fprintf('[NOISE FLOOR] Null gamma %.2f +/- %.2f %% over %d samples (hash %s).\n', ...
+            ens.mean_pass_rate, ens.std_pass_rate, ens.num_samples, ens.config_hash);
+    catch ME
+        warning('study_pass_rates_allsegments:NoiseFloorFailed', ...
+            'Noise floor computation failed (%s); plotting without it.', ME.message);
+        ens = [];
+    end
+end
+
 function s = seg_of_field(fld)
 %SEG_OF_FIELD Segment number of a loaded field (rtplan, else filename token).
     s = NaN;
@@ -820,61 +967,182 @@ function d = comp_col(comparisons, name)
     end
 end
 
-function plot_beam_pass_rate_summary(x_pos, x_labels, m_r1, s_r1, m_r3, s_r3, ...
-        m_tt, s_tt, metric, patient_id, session)
-%PLOT_BEAM_PASS_RATE_SUMMARY Mean metric score (%) per beam, std error bars.
-%  Three series at the given n%/n mm criterion:
-%    recon_CT1 vs truth_CT1 (green), recon_CT3 vs truth_CT1 (red),
-%    truth_CT1 vs truth_CT3 (blue), each with std error bars. A per-beam vertical
-%    connector joins the two recon means, coloured like whichever mean is greater.
-%  x_pos are consecutive slots and x_labels their tick labels; the final slot is
-%  the pooled "All" entry and is fenced off by a dashed vertical rule.
+function plot_change_detection_tabs(x_pos, x_labels, mean_pass, std_pass, ...
+        all_mean, all_std, seg_pass_by_beam, all_seg_pass, ...
+        d_r1, d_r3, d_tt, noise_floor, metric, patient_id, session)
+%PLOT_CHANGE_DETECTION_TABS One figure, two tabs on the shared beam x-axis:
+%    Tab 1 "Pass rates"    - the per-beam pass-rate summary (recon1/recon3/truth-
+%                            truth) with the noise-only null floor as a band.
+%    Tab 2 "Differentials" - the per-beam recon1-recon3 and 100-(truth1_vs_truth3)
+%                            differentials.
+%  The final x slot on both tabs is the pooled "All" entry.
+    fig = figure('Name', 'Change Detection (all segments)', 'Color', 'w', ...
+        'NumberTitle', 'off', ...
+        'Position', [100, 100, max(760, 55 * numel(x_pos) + 240), 500]);
+    tg = uitabgroup(fig);
+
+    tab1 = uitab(tg, 'Title', 'Pass rates');
+    ax1  = axes('Parent', tab1); %#ok<LAXES>
+    render_beam_pass_rate(ax1, x_pos, x_labels, ...
+        [mean_pass(:, d_r1); all_mean(d_r1)], [std_pass(:, d_r1); all_std(d_r1)], ...
+        [mean_pass(:, d_r3); all_mean(d_r3)], [std_pass(:, d_r3); all_std(d_r3)], ...
+        [mean_pass(:, d_tt); all_mean(d_tt)], [std_pass(:, d_tt); all_std(d_tt)], ...
+        noise_floor, metric, patient_id, session);
+
+    tab2 = uitab(tg, 'Title', 'Differentials');
+    ax2  = axes('Parent', tab2); %#ok<LAXES>
+    [rd_m, rd_s, td_m, td_s] = beam_differentials(seg_pass_by_beam, all_seg_pass, ...
+        d_r1, d_r3, d_tt);
+    render_differentials(ax2, x_pos, x_labels, rd_m, rd_s, td_m, td_s, ...
+        metric, patient_id, session);
+
+    drawnow;
+end
+
+function render_beam_pass_rate(ax, x_pos, x_labels, m_r1, s_r1, m_r3, s_r3, ...
+        m_tt, s_tt, noise_floor, metric, patient_id, session)
+%RENDER_BEAM_PASS_RATE Per-beam mean metric (%) with std error bars, into axes ax.
+%  Three series (recon1 green, recon3 red, truth-truth blue), a per-beam connector
+%  between the two recon means (colour = greater one), and -- when noise_floor is
+%  supplied -- the noise-only null as a horizontal mean +/- std band behind them.
     green = [0.15, 0.60, 0.20];
     red   = [0.80, 0.15, 0.15];
     blue  = [0.20, 0.40, 0.80];
+    grey  = [0.35, 0.35, 0.35];
 
     x_pos = x_pos(:)';
     m_r1 = m_r1(:)'; s_r1 = s_r1(:)';
     m_r3 = m_r3(:)'; s_r3 = s_r3(:)';
     m_tt = m_tt(:)'; s_tt = s_tt(:)';
 
-    figure('Name', 'Beam Pass-Rate Summary (all segments)', 'Color', 'w', ...
-        'NumberTitle', 'off', ...
-        'Position', [100, 100, max(720, 55 * numel(x_pos) + 220), 480]);
-    hold on;
+    axes(ax); hold(ax, 'on');
+
+    % Noise-floor band (drawn first so it sits behind the markers).
+    h_nf = [];
+    if ~isempty(noise_floor)
+        nf_m = noise_floor.mean_pass_rate;
+        nf_s = noise_floor.std_pass_rate;
+        xl   = [min(x_pos) - 0.5, max(x_pos) + 0.5];
+        h_nf = patch(ax, [xl(1), xl(2), xl(2), xl(1)], ...
+            [nf_m - nf_s, nf_m - nf_s, nf_m + nf_s, nf_m + nf_s], grey, ...
+            'FaceAlpha', 0.15, 'EdgeColor', 'none');
+        plot(ax, xl, [nf_m, nf_m], ':', 'Color', grey, 'LineWidth', 1.3);
+    end
 
     % Per-beam connector between the two recon means (colour = greater one).
     for n = 1:numel(x_pos)
-        a = m_r1(n);
-        b = m_r3(n);
+        a = m_r1(n); b = m_r3(n);
         if isfinite(a) && isfinite(b)
             if a >= b, lc = green; else, lc = red; end
-            plot([x_pos(n), x_pos(n)], [a, b], '-', 'Color', lc, 'LineWidth', 1.5);
+            plot(ax, [x_pos(n), x_pos(n)], [a, b], '-', 'Color', lc, 'LineWidth', 1.5);
         end
     end
 
-    h_r1 = errorbar(x_pos, m_r1, s_r1, 'o', 'Color', green, 'MarkerFaceColor', green, ...
+    h_r1 = errorbar(ax, x_pos, m_r1, s_r1, 'o', 'Color', green, 'MarkerFaceColor', green, ...
         'MarkerSize', 8, 'LineStyle', 'none', 'CapSize', 7, 'LineWidth', 1.2);
-    h_r3 = errorbar(x_pos, m_r3, s_r3, 'o', 'Color', red, 'MarkerFaceColor', red, ...
+    h_r3 = errorbar(ax, x_pos, m_r3, s_r3, 'o', 'Color', red, 'MarkerFaceColor', red, ...
         'MarkerSize', 8, 'LineStyle', 'none', 'CapSize', 7, 'LineWidth', 1.2);
-    h_tt = errorbar(x_pos, m_tt, s_tt, 'o', 'Color', blue, 'MarkerFaceColor', blue, ...
+    h_tt = errorbar(ax, x_pos, m_tt, s_tt, 'o', 'Color', blue, 'MarkerFaceColor', blue, ...
         'MarkerSize', 7, 'LineStyle', 'none', 'CapSize', 7, 'LineWidth', 1.2);
 
     yline(90, 'k--', '90%', 'LineWidth', 1.0, 'FontSize', 8, ...
         'LabelHorizontalAlignment', 'left');
     apply_beam_axis(x_pos, x_labels);
 
-    hold off; grid on; box on;
-    ylim([0, 105]);
-    xlabel('Beam number');
-    ylabel(metric.axis_label);
-    title(sprintf('Beam %s Summary (mean \\pm std over segments)   |   %s / %s', ...
+    hold(ax, 'off'); grid(ax, 'on'); box(ax, 'on');
+    ylim(ax, [0, 105]);
+    xlabel(ax, 'Beam number');
+    ylabel(ax, metric.axis_label);
+    title(ax, sprintf('Beam %s Summary (mean \\pm std over segments)   |   %s / %s', ...
         metric.title, strrep(patient_id, '_', '\_'), strrep(session, '_', '\_')), ...
         'FontWeight', 'bold', 'FontSize', 12, 'Interpreter', 'tex');
-    legend([h_r1, h_r3, h_tt], ...
-        {'Recon CT\_1 vs Truth CT\_1', 'Recon CT\_3 vs Truth CT\_1', ...
-         'Truth CT\_1 vs Truth CT\_3'}, 'Location', 'best', 'FontSize', 9);
-    drawnow;
+
+    leg_h = [h_r1, h_r3, h_tt];
+    leg_s = {'Recon CT\_1 vs Truth CT\_1', 'Recon CT\_3 vs Truth CT\_1', ...
+             'Truth CT\_1 vs Truth CT\_3'};
+    if ~isempty(h_nf)
+        leg_h(end + 1) = h_nf;
+        leg_s{end + 1} = sprintf('Noise floor %.1f \\pm %.1f%%', ...
+            noise_floor.mean_pass_rate, noise_floor.std_pass_rate);
+    end
+    legend(leg_h, leg_s, 'Location', 'best', 'FontSize', 9);
+end
+
+function render_differentials(ax, x_pos, x_labels, rd_m, rd_s, td_m, td_s, ...
+        metric, patient_id, session)
+%RENDER_DIFFERENTIALS Per-beam pass-rate differentials into axes ax.
+%  Recon differential (recon1 - recon3): green where >= 0 (change detected the
+%  correct way), red where < 0. Truth differential 100 - (truth1 vs truth3), the
+%  true change magnitude referenced to truth CT_1, in blue. Both carry std error
+%  bars; the trailing slot is the pooled "All" entry.
+    green = [0.15, 0.60, 0.20];
+    red   = [0.80, 0.15, 0.15];
+    blue  = [0.20, 0.40, 0.80];
+
+    x_pos = x_pos(:)';
+    rd_m = rd_m(:)'; rd_s = rd_s(:)';
+    td_m = td_m(:)'; td_s = td_s(:)';
+
+    axes(ax); hold(ax, 'on');
+    yline(0, 'k-', 'LineWidth', 1.0);
+
+    % Recon differential: colour each point by the sign of its mean.
+    for i = 1:numel(x_pos)
+        if ~isfinite(rd_m(i)), continue; end
+        if rd_m(i) >= 0, c = green; else, c = red; end
+        errorbar(ax, x_pos(i), rd_m(i), rd_s(i), 'o', 'Color', c, 'MarkerFaceColor', c, ...
+            'MarkerSize', 8, 'LineStyle', 'none', 'CapSize', 7, 'LineWidth', 1.2);
+    end
+
+    % Truth differential (blue).
+    h_td = errorbar(ax, x_pos, td_m, td_s, 's', 'Color', blue, 'MarkerFaceColor', blue, ...
+        'MarkerSize', 7, 'LineStyle', 'none', 'CapSize', 7, 'LineWidth', 1.2);
+
+    % Legend proxies for the two-colour recon differential.
+    h_pos = plot(ax, nan, nan, 'o', 'Color', green, 'MarkerFaceColor', green, ...
+        'LineStyle', 'none', 'MarkerSize', 8);
+    h_neg = plot(ax, nan, nan, 'o', 'Color', red, 'MarkerFaceColor', red, ...
+        'LineStyle', 'none', 'MarkerSize', 8);
+
+    apply_beam_axis(x_pos, x_labels);
+    hold(ax, 'off'); grid(ax, 'on'); box(ax, 'on');
+    xlabel(ax, 'Beam number');
+    ylabel(ax, sprintf('%s differential (%%)', metric.title));
+    title(ax, sprintf(['Change-Detection Differentials (mean \\pm std over segments)' ...
+        '   |   %s / %s'], strrep(patient_id, '_', '\_'), strrep(session, '_', '\_')), ...
+        'FontWeight', 'bold', 'FontSize', 12, 'Interpreter', 'tex');
+    legend([h_pos, h_neg, h_td], ...
+        {'Recon CT\_1 - CT\_3 > 0 (correct)', 'Recon CT\_1 - CT\_3 < 0', ...
+         '100 - (Truth CT\_1 vs CT\_3)'}, 'Location', 'best', 'FontSize', 9);
+end
+
+function [rd_m, rd_s, td_m, td_s] = beam_differentials(seg_pass_by_beam, ...
+        all_seg_pass, d_r1, d_r3, d_tt)
+%BEAM_DIFFERENTIALS Per-beam mean/std of the paired differentials, plus a trailing
+%  pooled "All" entry. Differentials are formed per SEGMENT and then reduced, so
+%  the std is the spread of the per-segment difference (a paired statistic), not a
+%  quadrature sum of two series' stds.
+    nB   = numel(seg_pass_by_beam);
+    rd_m = nan(1, nB + 1); rd_s = nan(1, nB + 1);
+    td_m = nan(1, nB + 1); td_s = nan(1, nB + 1);
+    for n = 1:nB
+        [rd_m(n), rd_s(n), td_m(n), td_s(n)] = diff_stats(seg_pass_by_beam{n}, d_r1, d_r3, d_tt);
+    end
+    [rd_m(end), rd_s(end), td_m(end), td_s(end)] = diff_stats(all_seg_pass, d_r1, d_r3, d_tt);
+end
+
+function [rd_m, rd_s, td_m, td_s] = diff_stats(M, d_r1, d_r3, d_tt)
+%DIFF_STATS Mean/std of the recon and truth differentials over a [nSeg x nComp] set.
+%  recon diff = (recon1 vs truth1) - (recon3 vs truth1); truth diff = 100 - (truth1
+%  vs truth3). Empty input yields NaNs.
+    if isempty(M)
+        rd_m = NaN; rd_s = NaN; td_m = NaN; td_s = NaN;
+        return;
+    end
+    recon_d = M(:, d_r1) - M(:, d_r3);   % paired, per segment
+    truth_d = 100 - M(:, d_tt);
+    rd_m = mean(recon_d, 'omitnan'); rd_s = std(recon_d, 0, 'omitnan');
+    td_m = mean(truth_d, 'omitnan'); td_s = std(truth_d, 0, 'omitnan');
 end
 
 %% =========================================================================

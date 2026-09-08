@@ -474,7 +474,7 @@ function B = build_forward_bundle(truthDose, sct, gantry_angle, beam_meta, CONFI
     H_power = abs(H).^2;
 
     sensorData_conv = real(ifft(fft(sensorData_cpu, [], 2) .* H, [], 2));
-    sensorData_resp = gaussianFilter(sensorData_conv, FS, 0.35e6, 100, true);
+    sensorData_resp = gaussianFilter(sensorData_conv, FS, 0.35e6, 100, false);
     noise_amp       = CONFIG.conv_noise_level * max(abs(sensorData_resp(:)));
 
     fprintf('  [Bundle %s] forward done. Sensor [%d x %d], noise amp %.3e Pa\n', ...
