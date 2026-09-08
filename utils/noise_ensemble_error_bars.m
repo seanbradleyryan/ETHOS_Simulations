@@ -343,7 +343,15 @@ function B = build_forward_bundle(truthDose, sct, gantry_angle, beam_meta, CONFI
             sensor.mask(CONFIG.sensor_x_index, :, :) = 1;
             sensor_info_orig = struct('num_elements', 0);
 
-        case 'determine_sensor_mask'
+        case {'determine_sensor_mask', 'determine_sensor_mask_lateral'}
+            % Automatic placement. 'determine_sensor_mask' presses the array
+            % against the ANTERIOR abdomen; 'determine_sensor_mask_lateral'
+            % presses it against the RIGHT/LEFT flank (config.sensor_side). Both
+            % return the same [sensor_mask, sensor_info] contract (including
+            % sensor_info.grid_pad), so the grid-expansion handling below is
+            % identical for either.
+            lateral_sensor = strcmp(CONFIG.sensor_placement_method, ...
+                'determine_sensor_mask_lateral');
             sct_for_sensor = sct;
             if ~isfield(sct_for_sensor, 'couchMask') || isempty(sct_for_sensor.couchMask)
                 sct_for_sensor.couchMask = false(size(sct_for_sensor.bodyMask));
@@ -360,8 +368,13 @@ function B = build_forward_bundle(truthDose, sct, gantry_angle, beam_meta, CONFI
             field_dose_for_sensor.spacing      = spacing_mm;
             field_dose_for_sensor.dimensions   = [Nx_orig, Ny_orig, Nz_orig];
 
-            [sensor_mask_orig, sensor_info_orig] = determine_sensor_mask( ...
-                sct_for_sensor, field_dose_for_sensor, beam_meta, CONFIG);
+            if lateral_sensor
+                [sensor_mask_orig, sensor_info_orig] = determine_sensor_mask_lateral( ...
+                    sct_for_sensor, field_dose_for_sensor, beam_meta, CONFIG);
+            else
+                [sensor_mask_orig, sensor_info_orig] = determine_sensor_mask( ...
+                    sct_for_sensor, field_dose_for_sensor, beam_meta, CONFIG);
+            end
 
             % --- Grid expansion handling (water padding to clear the exclusion
             % zone), then re-run FFT-optimal padding.
