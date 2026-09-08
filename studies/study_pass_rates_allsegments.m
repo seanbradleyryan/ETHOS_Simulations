@@ -67,7 +67,9 @@
 %      CONFIG.use_parallel; the pool is auto-sized to the machine's physical cores
 %      (CONFIG.auto_detect_workers) with CONFIG.num_workers as the fallback.
 %    - Optional noise-only null "floor" via noise_ensemble_error_bars, cached by
-%      the simulation config hash (CONFIG.include_noise_floor / noise_sim_config).
+%      the simulation config hash (CONFIG.include_noise_floor / noise_sim_config)
+%      AND stored in the results .mat so repeat runs reuse it without reloading
+%      geometry (recomputed only if the criterion or sim-config hash changes).
 %
 %  NOTE: HIPAA / remote-execution - this file is WRITTEN here but must be RUN on
 %  the remote device. Do not execute locally.
@@ -288,6 +290,7 @@ std_pass  = [];
 nseg_used = [];
 nproc     = 0;
 total_seg_evals = 0;
+noise_floor_cached = [];   % noise floor restored from the results cache, if any
 
 if CONFIG.use_cache && exist(out_path, 'file') == 2
     [ok, cached, why] = try_load_cache(out_path, CONFIG, crit);
@@ -297,6 +300,7 @@ if CONFIG.use_cache && exist(out_path, 'file') == 2
         std_pass  = cached.std_pass;
         nseg_used = cached.n_segments;
         seg_pass_by_beam = cached.seg_pass;   % {1 x nBeams}, each [nSeg x nComp]
+        if isfield(cached, 'noise_floor'), noise_floor_cached = cached.noise_floor; end
         nproc     = numel(beam_list);
         total_seg_evals = sum(nseg_used) * nComp;
         loaded_from_cache = true;
@@ -453,14 +457,22 @@ fprintf('\n=============================================================\n');
 x_pos    = 1:(nproc + 1);
 x_labels = [arrayfun(@(b) sprintf('%d', b), beam_list, 'UniformOutput', false), {'All'}];
 
-% Noise-only null floor (computed once, cached by the sim config hash). Only the
-% gamma metric has a meaningful noise floor; skipped for SSIM and on any failure.
-noise_floor = [];
+% Noise-only null floor. Reused from the results cache when a matching one is
+% stored (same sim-config hash + criterion); otherwise computed once (the ensemble
+% itself is also cached by the sim-config hash) and appended to the cache below.
+% Only the gamma metric has a meaningful noise floor; skipped for SSIM.
+noise_floor        = [];
+noise_floor_is_new = false;
 if CONFIG.include_noise_floor
     if metric.is_ssim
         fprintf('\n[NOISE FLOOR] Skipped: no noise floor defined for the SSIM metric.\n');
+    elseif noise_floor_matches(noise_floor_cached, CONFIG, crit)
+        noise_floor = noise_floor_cached;
+        fprintf('\n[NOISE FLOOR] Reusing cached floor: %.2f +/- %.2f %% over %d samples.\n', ...
+            noise_floor.mean_pass_rate, noise_floor.std_pass_rate, noise_floor.num_samples);
     else
-        noise_floor = compute_study_noise_floor(CONFIG, crit);
+        noise_floor        = compute_study_noise_floor(CONFIG, crit);
+        noise_floor_is_new = ~isempty(noise_floor);
     end
 end
 
@@ -507,9 +519,15 @@ if CONFIG.save_results && ~loaded_from_cache
     RESULTS.all_n_segments = all_nseg;
     RESULTS.log_file      = log_path;
     RESULTS.total_runtime_s = total_runtime;
+    RESULTS.noise_floor   = noise_floor;   % [] when disabled; ens struct otherwise
 
     save(out_path, '-struct', 'RESULTS', '-v7.3');   % out_path resolved above
     fprintf('\nResults saved to: %s\n', out_path);
+elseif CONFIG.save_results && loaded_from_cache && noise_floor_is_new
+    % Results came from cache but the noise floor was (re)computed this run; add it
+    % to the existing cache so later runs reuse it without touching geometry.
+    save(out_path, 'noise_floor', '-append');
+    fprintf('\n[NOISE FLOOR] Appended to results cache: %s\n', out_path);
 end
 
 fprintf('\nTotal runtime: %.1f s (%.2f min) | %d beam(s), %d segment-evaluation(s).\n', ...
@@ -748,6 +766,47 @@ function out = load_beam_set(CONFIG, beam)
     out = load_recon_dose_data(CONFIG.patient_id, CONFIG.session, CONFIG, args{:});
 end
 
+function sim_cfg = build_noise_sim_config(CONFIG)
+%BUILD_NOISE_SIM_CONFIG Simulation CONFIG handed to noise_ensemble_error_bars.
+%  CONFIG.noise_sim_config when a struct; otherwise get_default_config(). The
+%  machine/data fields are forced to this study's patient/session so the floor
+%  uses the same geometry and its cache key matches across runs.
+    if isstruct(CONFIG.noise_sim_config) && ~isempty(fieldnames(CONFIG.noise_sim_config))
+        sim_cfg = CONFIG.noise_sim_config;
+    else
+        sim_cfg = get_default_config();
+    end
+    sim_cfg.working_dir      = CONFIG.working_dir;
+    sim_cfg.patient_id       = CONFIG.patient_id;
+    sim_cfg.session          = CONFIG.session;
+    sim_cfg.treatment_site   = CONFIG.treatment_site;
+    sim_cfg.gruneisen_method = CONFIG.gruneisen_method;
+end
+
+function tf = noise_floor_matches(nf, CONFIG, crit)
+%NOISE_FLOOR_MATCHES True iff a cached noise-floor ensemble still applies: same
+%  gamma criterion and same simulation-config hash as the current settings would
+%  produce. Guards reuse of a stored floor after a sim-config / criterion change.
+    tf = false;
+    if isempty(nf) || ~isstruct(nf) || ~isfield(nf, 'criteria') || isempty(nf.criteria)
+        return;
+    end
+    c = nf.criteria;
+    if ~(isequal(c{1}, crit) && isequal(c{2}, crit))
+        return;
+    end
+    if isfield(nf, 'config_hash') && ~isempty(nf.config_hash)
+        try
+            if ~strcmp(nf.config_hash, compute_sim_config_hash(build_noise_sim_config(CONFIG)))
+                return;
+            end
+        catch
+            return;
+        end
+    end
+    tf = true;
+end
+
 function ens = compute_study_noise_floor(CONFIG, crit)
 %COMPUTE_STUDY_NOISE_FLOOR Run (cached) noise_ensemble_error_bars for this session.
 %  Builds/obtains the simulation CONFIG, loads the reference-CT geometry + summed
@@ -760,16 +819,7 @@ function ens = compute_study_noise_floor(CONFIG, crit)
         % Simulation CONFIG (its sensor/recon/noise knobs set the ensemble cache
         % key). Default: get_default_config(); override the machine/data fields to
         % this study's patient/session so the floor uses the same geometry.
-        if isstruct(CONFIG.noise_sim_config) && ~isempty(fieldnames(CONFIG.noise_sim_config))
-            sim_cfg = CONFIG.noise_sim_config;
-        else
-            sim_cfg = get_default_config();
-        end
-        sim_cfg.working_dir      = CONFIG.working_dir;
-        sim_cfg.patient_id       = CONFIG.patient_id;
-        sim_cfg.session          = CONFIG.session;
-        sim_cfg.treatment_site   = CONFIG.treatment_site;
-        sim_cfg.gruneisen_method = CONFIG.gruneisen_method;
+        sim_cfg = build_noise_sim_config(CONFIG);
 
         % Warn if the sim config does not correspond to the plotted recons.
         sim_hash = compute_sim_config_hash(sim_cfg);
