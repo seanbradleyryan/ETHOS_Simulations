@@ -141,3 +141,24 @@ and the ultrasound array as solid red. The dose-panel figure (`plot_truth_recon_
 symmetric blue-white-red diverging colormap (alpha-ramped by magnitude) so over-/under-estimates are
 distinguishable. All display volumes are embedded onto the sensor display grid so the red sensor contour
 co-registers with the dose.
+
+## Per-Segment Metrics Step (`step25_segment_metrics.m`)
+
+Pipeline Step 2.5. The batch computation of `study_pass_rates_allsegments.m` (its `gamma_index` **and**
+`ssim` eval methods, run together) turned into a data-only pipeline step — no figures. Runs after Step 2,
+CPU-parallel (`parfor` over a beam's segments); reuses `load_recon_dose_data(Mode='set',Beam=b)` to pair
+CT_1/CT_3, `least_squares_gain` for the recon→own-CT-truth normalization, the study's global-gamma
+`CalcGamma(...,'local',0,'limit',2*dist,'restrict',1,'cpu',1)` call, and the new `compute_local_ssim.m`
+util for the local-SSIM map/mean over the 10% mask.
+
+- **Four comparisons per segment**, reference builds the `gamma_dose_cutoff_pct` (10%) eval mask:
+  `truth1_vs_truth3` (rs_CT1 vs rs_CT3), `truth1_vs_recon1` (rs_CT1 vs recon_CT1), `truth1_vs_recon3`
+  (rs_CT1 vs recon_CT3), `truth3_vs_recon3` (rs_CT3 vs recon_CT3). Each yields a gamma pass rate + gamma
+  index and a mean local SSIM + SSIM map.
+- **Storage:** masked-region-only, folded into the segment's **CT_1** recon `.mat` as `segment_metrics`
+  (see CLAUDE-PIPELINE_CONTEXT.md "Step 2.5" for the exact schema and re-expansion). Keyed by the sim
+  `CONFIG_HASH` via the recon filename; resumable per segment; `segment_metrics_summary_<hash>.mat` rollup
+  beside the recons.
+- **SSIM note:** `compute_local_ssim` is the study's *local SSIM over the 10% region* (per-voxel `ssim`
+  map averaged over the mask), directly comparable to a gamma pass rate. It is **not** `step3_analysis`'s
+  global/per-slice `compute_dose_ssim` — do not conflate the two.

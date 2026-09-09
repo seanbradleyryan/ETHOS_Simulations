@@ -153,6 +153,24 @@ Reuses `compute_sim_config_hash`, `list_processed_field_doses`, and `load_field_
 recon outputs from `SimulationResults/[PatientID]/[Session]/[method]/` (`<base>_recon_<hash>.mat`,
 `total_recon_dose_<hash>.mat`) and RayStation/CBCT inputs from `RayStationFiles/[PatientID]/[Session]/processed/`.
 
+### `compute_local_ssim.m` — local SSIM map + masked mean
+
+`[ssim_map, mean_over_mask] = compute_local_ssim(reference, target, mask)`. The study-style *local* SSIM:
+the per-voxel `ssim` map (dynamic range from the reference), averaged over the eval mask so it reads like a
+gamma pass rate. Returns `[]`/`NaN` when neither volume has signal. **Not** the same as `step3_analysis`'s
+global/per-slice `compute_dose_ssim` — keep them distinct.
+
+### `step25_segment_metrics.m` — per-segment gamma + SSIM (Step 2.5)
+
+`results = step25_segment_metrics(patient_id, session, config)`. Adapts `study_pass_rates_allsegments.m`
+into a data-only pipeline step (no plots): the four study comparisons per beam/segment, both gamma index
+and local SSIM, parallelized across CPUs after Step 2's GPU work. **Raw results are folded into each
+segment's CT_1 recon `.mat`** as a `segment_metrics` variable (masked-region-only: `mask_idx` + `gamma_vals`
+/ `ssim_vals` + scalars), keyed by the sim `CONFIG_HASH`; a `segment_metrics_summary_<hash>.mat` rollup is
+written beside the recons. Resumable per segment. See `CLAUDE-PIPELINE_CONTEXT.md` ("Step 2.5") and
+`CLAUDE-SIMULATION_CONTEXT.md` for the schema, the pairing rationale (cross-CT comparisons cannot run
+inside the per-field sim `parfor`), and re-expansion of a stored map.
+
 ## Visualization Preferences
 
 - Subplots: **maximum 3 rows** on screen; 3–4 columns fine.

@@ -92,6 +92,19 @@ CONFIG.gamma_dose_pct        = 3.0;    % Dose difference threshold (%)
 CONFIG.gamma_dist_mm         = 3.0;    % Distance-to-agreement (mm)
 CONFIG.gamma_dose_cutoff_pct = 10.0;   % Ignore voxels below this % of max
 
+% --- Per-Segment Metrics (Step 2.5) ---
+% After Step 2, step25_segment_metrics runs the four study comparisons per
+% beam/segment (gamma + local SSIM) and FOLDS the raw masked result into each
+% segment's CT_1 recon .mat (variable 'segment_metrics'), keyed by CONFIG_HASH.
+% Resumable per segment (skips already-folded ones). CPU-parallel over a beam's
+% segments; reuses gamma_dose_pct / gamma_dist_mm / gamma_dose_cutoff_pct above.
+CONFIG.metrics_plan_type     = 'reference'; % 'reference' | 'adapted' | 'any'
+CONFIG.metrics_ct_pair       = [1, 3];      % lower -> CT_1 vols, higher -> CT_3
+CONFIG.metrics_normalize     = true;        % LS gain recon -> own-CT truth
+CONFIG.metrics_beams         = [];          % [] => every beam found on disk
+CONFIG.metrics_overwrite     = false;       % recompute even if already folded in
+CONFIG.metrics_write_summary = true;        % write segment_metrics_summary_<hash>.mat
+
 % --- SSIM & Visualization Parameters ---
 CONFIG.analysis_compute_ssim = true;   % Compute SSIM alongside gamma
 CONFIG.analysis_plot_results = true;   % Generate PNG figures
@@ -118,8 +131,9 @@ CONFIG.num_parallel_workers  = 8;
 CONFIG.stale_claim_minutes   = 30;
 
 % --- Pipeline Control Flags ---
-CONFIG.run_step2   = true;    % Step 2  : k-Wave simulation
-CONFIG.run_step3   = false;    % Step 3  : Gamma analysis
+CONFIG.run_step2   = true;    % Step 2   : k-Wave simulation
+CONFIG.run_step25  = true;    % Step 2.5 : per-segment gamma + SSIM (folded in)
+CONFIG.run_step3   = false;    % Step 3   : Gamma analysis
 
 %% ========================= INITIALIZATION ================================
 
@@ -500,6 +514,23 @@ for p_idx = 1:length(CONFIG.patients)
             else
                 fprintf('\n[STEP 2] Loading previously computed reconstruction...\n');
                 [total_recon, ~] = load_total_reconstruction(patient_id, session, CONFIG, CONFIG_HASH);
+            end
+
+            %% ============================================================
+            %  STEP 2.5: Per-Segment Gamma + SSIM Metrics (folded into recons)
+            %% ============================================================
+            % Runs the study's four per-beam/segment comparisons (gamma + local
+            % SSIM) over the per-field recons now on disk and folds the raw
+            % masked result into each segment's CT_1 recon .mat. Independent of
+            % the total reconstruction above; keyed on the same CONFIG_HASH.
+            if CONFIG.run_step25
+                fprintf('\n[STEP 2.5] Running per-segment gamma + SSIM metrics...\n');
+                metrics_summary = step25_segment_metrics(patient_id, session, CONFIG);
+                RESULTS.patients.(result_key).segment_metrics_summary = metrics_summary;
+                log_msg(log_fid, ['Step 2.5 complete: %d beam(s), %d segment(s) ' ...
+                    'folded into CT_1 recon files [%s]'], ...
+                    numel(metrics_summary.beams), metrics_summary.all_n_segments, ...
+                    CONFIG_HASH);
             end
 
             %% ============================================================
