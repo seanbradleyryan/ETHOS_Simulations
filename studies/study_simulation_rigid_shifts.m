@@ -186,6 +186,18 @@ if ~loaded_from_cache
 
 % ---- Segment selection: one random segment per beam. ----
 [field_index, ~] = list_processed_field_doses(CONFIG.patient_id, CONFIG.session, CONFIG);
+
+% Legacy DICOM-derived dose files carry no _CT_n token (field_dose.ct_label is
+% empty); only NPZ-derived ones do. When the filenames have no CT token the doses
+% are not split by CT, so the CT_1 selection reduces to using CBCT1 geometry.
+has_ct_tokens = any(~cellfun(@isempty, ...
+    regexp({field_index.source_mat_filename}, '_CT_\d+_', 'once')));
+if ~strcmpi(CONFIG.ct_label, 'any') && ~has_ct_tokens
+    fprintf(['\n[NOTE] Dose filenames carry no CT token (legacy export); field ', ...
+             'doses are not split by CT.\n       CT_1 is applied via CBCT1 ', ...
+             'geometry and the ct_label filter is treated as ''any''.\n']);
+end
+
 chosen = pick_random_segment_per_beam(field_index, CONFIG.beams, ...
     CONFIG.plan_type, CONFIG.ct_label);
 if isempty(chosen)
@@ -401,7 +413,11 @@ function chosen = pick_random_segment_per_beam(field_index, beams, plan_type, ct
             if field_index(i).beam_index ~= b, continue; end
             [pt, ct] = parse_dose_tokens(field_index(i).source_mat_filename);
             if ~strcmpi(plan_type, 'any') && ~strcmpi(pt, plan_type), continue; end
-            if ~strcmpi(ct_label, 'any') && ~strcmpi(ct, ct_label), continue; end
+            % Reject on CT only when the file actually carries a CT label that
+            % differs. Legacy DICOM-derived doses have no CT token (ct = ''); they
+            % are not split by CT, so "CT_1" is expressed by the CBCT1 geometry
+            % alone and an empty label must not be filtered out.
+            if ~strcmpi(ct_label, 'any') && ~isempty(ct) && ~strcmpi(ct, ct_label), continue; end
             cand(end+1) = i; %#ok<AGROW>
         end
         if isempty(cand)
