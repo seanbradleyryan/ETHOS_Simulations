@@ -167,7 +167,9 @@ into a data-only pipeline step (no plots): the four study comparisons per beam/s
 and local SSIM, parallelized across CPUs after Step 2's GPU work. **Raw results are folded into each
 segment's CT_1 recon `.mat`** as a `segment_metrics` variable (masked-region-only: `mask_idx` + `gamma_vals`
 / `ssim_vals` + scalars), keyed by the sim `CONFIG_HASH`; a `segment_metrics_summary_<hash>.mat` rollup is
-written beside the recons. Resumable per segment. See `CLAUDE-PIPELINE_CONTEXT.md` ("Step 2.5") and
+written beside the recons. Resumable per segment. It also computes the **noise-only null floor** once per
+session (`noise_ensemble_error_bars`: CT_1 truth vs a noise-only recon, mean ± std pass rate) and stores it
+on the summary as `.noise_floor`. See `CLAUDE-PIPELINE_CONTEXT.md` ("Step 2.5") and
 `CLAUDE-SIMULATION_CONTEXT.md` for the schema, the pairing rationale (cross-CT comparisons cannot run
 inside the per-field sim `parfor`), and re-expansion of a stored map.
 

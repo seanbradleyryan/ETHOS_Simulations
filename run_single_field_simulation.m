@@ -74,7 +74,20 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
 %           .sensor_y_index             [1]      - XZ plane y-index
 %           .pulse_shape                ['gaussian'] - 'gaussian'|'rectangular' pulse profile
 %           .convolution_kernel         [4e-6]   - Gaussian sigma / rectangular width (s); 0 disables
-%           .conv_noise_level           [0.01]   - Noise fraction of peak sensor
+%           .conv_noise_level           [0.01]   - Legacy noise fraction of THIS
+%                                                  field's peak (used only when
+%                                                  noise_amp_Pa is unset)
+%           .noise_amp_Pa               []       - Fixed absolute electronic-noise
+%                                                  amplitude (Pa). When >0 it is
+%                                                  used for every field (SNR then
+%                                                  floats field to field); when
+%                                                  empty, conv_noise_level is used.
+%                                                  Set it via calibrate_noise_amp.
+%           .forward_peak_only          [false]  - Calibration fast-path: return
+%                                                  after computing the pre-noise
+%                                                  sensor peak (sim_results
+%                                                  .sensor_signal_peak); skips
+%                                                  noise, deconv, and reconstruction.
 %           .conv_deconv_lambda         [1e-4]   - Wiener deconvolution regularisation
 %           .noise_only                 [false]  - Null-signal control: run the
 %                                                  forward sim to fix the noise
@@ -144,6 +157,11 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
 %           .tr_time_s          - Reconstruction wall time (TR or DAS)
 %           .num_pulses         - Number of LINAC pulses
 %           .p0_max             - Maximum initial pressure (Pa)
+%           .sensor_signal_peak - Pre-noise peak sensor pressure (Pa); the
+%                                 signal the SNR/noise amplitude is measured
+%                                 against (pulse-model path)
+%           .noise_amp          - Electronic-noise amplitude applied (Pa)
+%           .snr                - This field's SNR (sensor_signal_peak/noise_amp)
 %           .recon_max          - Maximum reconstructed pressure (Pa)
 %           .num_iters_done     - Iterations completed
 %           .conv_max_pressure  - Per-iteration max pressure
@@ -937,8 +955,8 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
     %    4. Wiener-deconvolve the pulse kernel to recover the broadband signal
 
     if conv_kernel_sigma > 0
-        fprintf('        Pulse model: %s, width=%.1f us, noise=%.1f%%, lambda=%.1e\n', ...
-            pulse_shape, conv_kernel_sigma * 1e6, conv_noise_level * 100, conv_deconv_lambda);
+        fprintf('        Pulse model: %s, width=%.1f us, lambda=%.1e\n', ...
+            pulse_shape, conv_kernel_sigma * 1e6, conv_deconv_lambda);
 
         pulse_kernel = build_pulse_kernel(pulse_shape, conv_kernel_sigma, dt);
 
@@ -955,16 +973,44 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
         % 2. Sensor frequency response (band-limit AFTER pulse convolution)
         sensorData_resp = gaussianFilter(sensorData_conv, FS, 0.35e6, 100, false);
 
+        % Pre-noise peak of THIS field's sensor signal (Pa). This is the quantity
+        % the noise amplitude is measured against, and what calibrate_noise_amp
+        % samples to fix a single blanket noise amplitude for a target mean SNR.
+        sensor_signal_peak             = max(abs(sensorData_resp(:)));
+        sim_results.sensor_signal_peak = sensor_signal_peak;
+
+        % Calibration fast-path: calibrate_noise_amp only needs the pre-noise
+        % signal peak, so skip noise, deconvolution, and the expensive
+        % time-reversal reconstruction entirely.
+        if safe_config(config, 'forward_peak_only', false)
+            recon_dose = zeros(input_dims_for_crop);
+            fprintf('        [FORWARD PEAK ONLY] Signal peak %.3e Pa; skipping recon.\n', ...
+                sensor_signal_peak);
+            return;
+        end
+
         % 3. Add electronic noise (after frequency-response filtering).
-        %    noise_amp is set from the TRUE signal peak so a noise_only run adds
-        %    the exact noise the real run would have; then, when noise_only, the
-        %    true signal is discarded so ONLY noise reaches the reconstruction.
-        noise_amp = conv_noise_level * max(abs(sensorData_resp(:)));
+        %    noise_amp is the FIXED absolute amplitude (config.noise_amp_Pa) once
+        %    the pipeline has been calibrated, else the legacy per-field fraction
+        %    of this field's own peak (config.conv_noise_level). A noise_only run
+        %    keeps that same amplitude but discards the true signal so ONLY noise
+        %    reaches the reconstruction (see resolve_noise_amp below).
+        noise_amp = resolve_noise_amp(config, sensor_signal_peak, conv_noise_level);
         if noise_only
             sensorData_resp(:) = 0;
             fprintf('        [NOISE ONLY] True signal nulled; reconstructing noise alone.\n');
         end
         sensorData_noisy = sensorData_resp + noise_amp * randn(size(sensorData_resp));
+
+        % Record the SNR this field actually saw (peak signal / noise amplitude).
+        % With a fixed absolute noise this floats field to field; recorded so it
+        % can later be correlated with the per-segment gamma index.
+        sim_results.noise_amp = noise_amp;
+        if noise_amp > 0
+            sim_results.snr = sensor_signal_peak / noise_amp;
+        else
+            sim_results.snr = Inf;
+        end
 
         % 4. Wiener deconvolution of the pulse kernel
         sensorData_deconv = real(ifft( ...
@@ -974,16 +1020,36 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
         sensorData          = single(sensorData_deconv);
         sensorData_measured = single(sensorData_deconv);
 
-        fprintf('        Pulse model complete. Noise amp: %.3e Pa\n', noise_amp);
+        fprintf('        Pulse model complete. Signal peak %.3e Pa, noise amp %.3e Pa, SNR %.2f\n', ...
+            sensor_signal_peak, noise_amp, sim_results.snr);
     else
         % No pulse model: apply only the sensor frequency response.
         sensorData = gaussianFilter(sensorData, FS, 0.35e6, 100, false);
+
+        sensor_signal_peak             = max(abs(sensorData(:)));
+        sim_results.sensor_signal_peak = sensor_signal_peak;
+
+        % Calibration fast-path (see the pulse branch above).
+        if safe_config(config, 'forward_peak_only', false)
+            recon_dose = zeros(input_dims_for_crop);
+            fprintf('        [FORWARD PEAK ONLY] Signal peak %.3e Pa; skipping recon.\n', ...
+                sensor_signal_peak);
+            return;
+        end
         if noise_only
             % Null-signal test: keep only electronic noise at the amplitude the
-            % true signal would have set (see noise_only note above).
-            noise_amp     = conv_noise_level * max(abs(sensorData(:)));
+            % real run would have (fixed absolute amp when calibrated, else the
+            % legacy per-field fraction). Electronic noise otherwise enters only
+            % through the pulse model, so a normal no-pulse run stays noise-free.
+            noise_amp     = resolve_noise_amp(config, sensor_signal_peak, conv_noise_level);
             sensorData(:) = 0;
             sensorData    = sensorData + noise_amp * randn(size(sensorData));
+            sim_results.noise_amp = noise_amp;
+            if noise_amp > 0
+                sim_results.snr = sensor_signal_peak / noise_amp;
+            else
+                sim_results.snr = Inf;
+            end
             fprintf('        [NOISE ONLY] True signal nulled; reconstructing noise alone (amp %.3e Pa).\n', ...
                 noise_amp);
         end
@@ -1420,6 +1486,24 @@ function val = safe_config(config, field_name, default_val)
         val = config.(field_name);
     else
         val = default_val;
+    end
+end
+
+
+function amp = resolve_noise_amp(config, signal_peak, conv_noise_level)
+%RESOLVE_NOISE_AMP  Electronic-noise amplitude (Pa) added to the sensor data.
+%   Returns the FIXED absolute amplitude config.noise_amp_Pa when it is set to a
+%   positive scalar -- the calibrated blanket noise used across every
+%   beam/segment, so the SNR floats field to field. Otherwise falls back to the
+%   legacy behavior: a fraction (conv_noise_level) of THIS field's own signal
+%   peak, which pins every field to the same SNR = 1/conv_noise_level.
+%   calibrate_noise_amp.m computes noise_amp_Pa for a target mean SNR.
+    if isfield(config, 'noise_amp_Pa') && ~isempty(config.noise_amp_Pa) ...
+            && isnumeric(config.noise_amp_Pa) && isscalar(config.noise_amp_Pa) ...
+            && config.noise_amp_Pa > 0
+        amp = double(config.noise_amp_Pa);
+    else
+        amp = conv_noise_level * signal_peak;
     end
 end
 

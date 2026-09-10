@@ -56,6 +56,18 @@ function [hash_hex, canonical] = compute_sim_config_hash(config)
         canonical.sensor_side = '__unset__';
     end
 
+    % Backward compatibility: an empty (or absent) noise_amp_Pa means the legacy
+    % per-field noise model (noise scaled to each field's own peak via
+    % conv_noise_level) -- the only behavior that existed before this field. In
+    % that case REMOVE the field from the canonical struct entirely, so the hash
+    % input is byte-identical to the pre-noise_amp_Pa era and every existing recon
+    % cache stays valid. Only a fixed absolute amplitude (>0) adds the field and
+    % gets its own set of output files.
+    if isfield(canonical, 'noise_amp_Pa') && ...
+            (isempty(canonical.noise_amp_Pa) || isequal(canonical.noise_amp_Pa, '__unset__'))
+        canonical = rmfield(canonical, 'noise_amp_Pa');
+    end
+
     json     = jsonencode(canonical);
     md       = java.security.MessageDigest.getInstance('MD5');
     md.update(uint8(json));
@@ -86,6 +98,7 @@ function fields = sim_config_fields()
         'force_uniform_gruneisen', ...
         'force_uniform_speed', ...
         'gruneisen_method', ...
+        'noise_amp_Pa', ...
         'normalize', ...
         'num_time_reversal_iter', ...
         'pml_size', ...

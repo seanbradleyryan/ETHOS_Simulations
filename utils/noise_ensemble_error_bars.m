@@ -21,8 +21,9 @@ function ens = noise_ensemble_error_bars(config, ref_truth, spacing_mm, sct, gan
 %
 %     This is faithful because for the noise-only null the forward's true signal
 %     is discarded; its ONLY dose-dependent contribution is the noise amplitude
-%     (noise_amp = conv_noise_level * peak true signal), and that overall scale is
-%     divided straight back out by the least-squares normalization before gamma.
+%     (a fixed CONFIG.noise_amp_Pa when calibrated, else conv_noise_level * peak
+%     true signal), and that overall scale is divided straight back out by the
+%     least-squares normalization before gamma.
 %     So only the RECONSTRUCTION geometry/medium matters, which is fixed. The
 %     bundle is therefore built on the reconstruction (reference) geometry passed
 %     in via sct -- a single-medium bundle, no blind forward/recon split needed.
@@ -475,7 +476,17 @@ function B = build_forward_bundle(truthDose, sct, gantry_angle, beam_meta, CONFI
 
     sensorData_conv = real(ifft(fft(sensorData_cpu, [], 2) .* H, [], 2));
     sensorData_resp = gaussianFilter(sensorData_conv, FS, 0.35e6, 100, false);
-    noise_amp       = CONFIG.conv_noise_level * max(abs(sensorData_resp(:)));
+    % Match run_single_field_simulation's noise model so the null band reflects
+    % the same electronic noise the real recon saw: a FIXED absolute amplitude
+    % (CONFIG.noise_amp_Pa, from calibrate_noise_amp) when set, else the legacy
+    % per-field fraction of this field's own peak (CONFIG.conv_noise_level).
+    if isfield(CONFIG, 'noise_amp_Pa') && ~isempty(CONFIG.noise_amp_Pa) ...
+            && isnumeric(CONFIG.noise_amp_Pa) && isscalar(CONFIG.noise_amp_Pa) ...
+            && CONFIG.noise_amp_Pa > 0
+        noise_amp = double(CONFIG.noise_amp_Pa);
+    else
+        noise_amp = CONFIG.conv_noise_level * max(abs(sensorData_resp(:)));
+    end
 
     fprintf('  [Bundle %s] forward done. Sensor [%d x %d], noise amp %.3e Pa\n', ...
         label, size(sensorData,1), size(sensorData,2), noise_amp);

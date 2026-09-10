@@ -162,3 +162,9 @@ util for the local-SSIM map/mean over the 10% mask.
 - **SSIM note:** `compute_local_ssim` is the study's *local SSIM over the 10% region* (per-voxel `ssim`
   map averaged over the mask), directly comparable to a gamma pass rate. It is **not** `step3_analysis`'s
   global/per-slice `compute_dose_ssim` — do not conflate the two.
+- **Noise-only null floor:** the same `noise_ensemble_error_bars` null the study draws as a floor is
+  computed here once per session (reference CT_1 truth vs a noise-only recon; mean ± std pass rate) and
+  stored on the summary as `.noise_floor`. It reuses the util's own hash cache, so it costs one ~30 min
+  ensemble per session and is shared across every beam/segment. No plot is drawn (Step 2.5 is data-only) —
+  the value is saved for a downstream plotting script (horizontal null line + the `recon1 − noise`
+  differential).

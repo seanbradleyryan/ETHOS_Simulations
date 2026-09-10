@@ -58,6 +58,10 @@ function results = step25_segment_metrics(patient_id, session, config)
 %           .metrics_beams         []     Beams to process ([] => all on disk).
 %           .metrics_overwrite     [false] Recompute even if already folded in.
 %           .metrics_write_summary [true] Write the per-beam rollup .mat.
+%           .metrics_noise_floor   [true] Compute the noise-only null pass rate
+%                                  (once per session; cached by the sim hash).
+%           .metrics_noise_minutes [30]   Ensemble time budget (min) handed to
+%                                  noise_ensemble_error_bars (TimeBudgetMin).
 %           .use_parallel          [true] parfor over a beam's segments (CPU).
 %           .num_parallel_workers  [8]    Pool size when none is running.
 %
@@ -65,11 +69,16 @@ function results = step25_segment_metrics(patient_id, session, config)
 %       results - Summary struct (also saved to segment_metrics_summary_<hash>.mat
 %                 when metrics_write_summary): per-beam and pooled mean/std of the
 %                 gamma pass rate (%) and mean local SSIM (%), per comparison,
-%                 plus the per-segment matrices. This is the data the study's
-%                 plots are built from -- no figures are produced here.
+%                 plus the per-segment matrices and `.noise_floor` (the noise-only
+%                 null ensemble: mean/std pass rate for the session, or [] when
+%                 disabled/unavailable). This is the data the study's plots are
+%                 built from -- no figures are produced here. A plotting script
+%                 draws `.noise_floor.mean_pass_rate` as the horizontal null line
+%                 and the differential (truth1_vs_recon1 pass) - (noise mean).
 %
 %   DEPENDENCIES:
 %       - CalcGamma.m, compute_local_ssim.m (utils), load_recon_dose_data.m
+%       - noise_ensemble_error_bars.m (utils) for the noise-only null floor.
 %       - Pipeline outputs from pipeline_simulate (per-field recon files).
 %
 %   See also: study_pass_rates_allsegments, load_recon_dose_data,
@@ -101,6 +110,8 @@ function results = step25_segment_metrics(patient_id, session, config)
     config = default_field(config, 'metrics_beams',         []);
     config = default_field(config, 'metrics_overwrite',     false);
     config = default_field(config, 'metrics_write_summary', true);
+    config = default_field(config, 'metrics_noise_floor',   true);
+    config = default_field(config, 'metrics_noise_minutes', 30);
     config = default_field(config, 'use_parallel',          true);
     config = default_field(config, 'num_parallel_workers',  8);
 
@@ -238,11 +249,32 @@ function results = step25_segment_metrics(patient_id, session, config)
     seg_gamma_pass = seg_gamma_pass(1:nproc);
     seg_ssim_mean  = seg_ssim_mean(1:nproc);
 
+    %% ======================== NOISE-ONLY NULL FLOOR ========================
+    % Null hypothesis: the gamma pass rate of the CT_1 truth against a NOISE-ONLY
+    % reconstruction (true acoustic signal nulled). noise_ensemble_error_bars runs
+    % an ensemble of such reconstructions and returns the mean +/- std pass rate.
+    % Computed ONCE for the whole session (the ensemble is cached by the sim config
+    % hash -- the same hash the recons use -- so every beam/segment shares it), and
+    % stored on the summary as `noise_floor` for later comparison with the per-beam
+    % pass rates. Only meaningful for gamma, so it uses gamma_dose_pct/gamma_dist_mm.
+    noise_floor = [];
+    if config.metrics_noise_floor
+        fprintf('\n[STEP 2.5] Computing noise-only null floor (once per session)...\n');
+        noise_floor = compute_session_noise_floor(patient_id, session, config, ...
+            dose_pct, dist_mm, hash8);
+        if ~isempty(noise_floor)
+            fprintf('[STEP 2.5] Noise floor: %.2f +/- %.2f %% over %d sample(s).\n', ...
+                noise_floor.mean_pass_rate, noise_floor.std_pass_rate, ...
+                noise_floor.num_samples);
+        end
+    end
+
     %% ======================== SUMMARY ROLLUP ========================
     % Per-beam mean/std over segments, plus a pooled "all segments" aggregate.
     % This is the data the study's plots are drawn from -- no figures here.
     results = build_summary(patient_id, session, hash8, config, comparisons, ...
         beam_list, n_segments, seg_gamma_pass, seg_ssim_mean);
+    results.noise_floor = noise_floor;   % [] when disabled/unavailable
 
     if config.metrics_write_summary && ~isempty(sim_dir)
         summary_path = fullfile(sim_dir, ...
@@ -602,6 +634,104 @@ function S = build_summary(patient_id, session, hash8, config, comparisons, ...
     S.ssim.all_mean   = mean(all_ssim, 1, 'omitnan');
     S.ssim.all_std    = std(all_ssim, 0, 1, 'omitnan');
     S.ssim.seg_mean   = seg_ssim_mean;    % {1 x nBeam}, each [nSeg x nComp]
+end
+
+
+%% =========================================================================
+%  NOISE-ONLY NULL FLOOR
+%% =========================================================================
+
+function ens = compute_session_noise_floor(patient_id, session, config, ...
+        dose_pct, dist_mm, hash8)
+%COMPUTE_SESSION_NOISE_FLOOR Noise-only null ensemble for the whole session.
+%  Returns the noise_ensemble_error_bars struct (mean/std pass rate etc.) or []
+%  on failure. The ensemble is cached by the sim config hash, so it is computed
+%  once and reused across every beam/segment. Because several pipeline_simulate
+%  instances can reach Step 2.5 together, the FIRST (uncached) ~30 min compute is
+%  guarded by a lock so only one instance pays it; siblings skip and pick up the
+%  cached value on a later run. A present cache is loaded without locking.
+    ens = [];
+
+    % noise_ensemble_error_bars caches under config.patient_id/session.
+    config.patient_id = patient_id;
+    config.session    = session;
+
+    nf_hash    = compute_sim_config_hash(config);   % equals hash8 for the sim CONFIG
+    cache_file = fullfile(config.working_dir, 'AnalysisResults', patient_id, ...
+        session, sprintf('noise_ensemble_%s_%s_%s.mat', patient_id, session, nf_hash));
+
+    have_lock = false;
+    lock_dir  = [cache_file, '.lock'];
+    if ~isfile(cache_file)
+        [ok, ~, msgid] = mkdir(lock_dir);
+        have_lock = ok && ~strcmpi(msgid, 'MATLAB:MKDIR:DirectoryExists');
+        if ~have_lock && ~isfile(cache_file)
+            fprintf('[STEP 2.5] Noise floor: a sibling instance is computing it; skipping this run.\n');
+            return;
+        end
+    end
+
+    try
+        ens = run_noise_ensemble(patient_id, session, config, dose_pct, dist_mm, hash8);
+    catch ME
+        warning('step25_segment_metrics:NoiseFloorFailed', ...
+            'Noise floor failed (%s); the summary will omit it.', ME.message);
+        ens = [];
+    end
+
+    if have_lock && isfolder(lock_dir)
+        rmdir(lock_dir, 's');
+    end
+end
+
+function ens = run_noise_ensemble(patient_id, session, config, dose_pct, dist_mm, hash8)
+%RUN_NOISE_ENSEMBLE Load the reference-CT geometry + summed RS truth and hand them
+%  to noise_ensemble_error_bars. Mirrors study_pass_rates_allsegments' noise-floor
+%  setup, but uses the real sim CONFIG (so the ensemble hash already matches the
+%  recon hash -- no build_noise_sim_config indirection needed).
+    tot = load_recon_dose_data(patient_id, session, config, ...
+        'Mode', 'total', 'IncludeCBCT', true, 'IncludeEthos', false, ...
+        'IncludeRS', true, 'Hash', hash8);
+
+    ct1_field = sprintf('CT_%d', min(config.metrics_ct_pair));
+    if ~isfield(tot, 'cbct') || ~isfield(tot.cbct, ct1_field)
+        error('step25_segment_metrics:NoiseFloorNoCBCT', ...
+            'Reference CBCT geometry %s not available for the noise floor.', ct1_field);
+    end
+
+    sct        = tot.cbct.(ct1_field);
+    ref_truth  = double(tot.rs_dose);
+    spacing_mm = tot.metadata.spacing(:)';
+    if ~isfield(sct, 'spacing') || isempty(sct.spacing)
+        sct.spacing = spacing_mm;
+    end
+    if ~isfield(sct, 'origin') || isempty(sct.origin)
+        if isfield(tot.metadata, 'origin') && ~isempty(tot.metadata.origin)
+            sct.origin = tot.metadata.origin;
+        else
+            sct.origin = [0, 0, 0];
+        end
+    end
+
+    beam_meta = [];
+    if isfield(tot.metadata, 'beam_metadata')
+        beam_meta = tot.metadata.beam_metadata;
+    end
+
+    % Plan-level floor: placement uses the summed dose + all beams, so a single
+    % representative gantry is fine (the reference beam's, else 0).
+    gantry_angle = 0;
+    if ~isempty(beam_meta) && isfield(beam_meta(1), 'gantry_angle') ...
+            && ~isempty(beam_meta(1).gantry_angle)
+        gantry_angle = beam_meta(1).gantry_angle;
+    end
+
+    crit_label = sprintf('%g%%/%g mm', dose_pct, dist_mm);
+    ens = noise_ensemble_error_bars(config, ref_truth, spacing_mm, sct, ...
+        gantry_angle, beam_meta, ...
+        'TimeBudgetMin', config.metrics_noise_minutes, ...
+        'GammaCriteria', {dose_pct, dist_mm, crit_label}, ...
+        'Normalize', logical(config.metrics_normalize));
 end
 
 

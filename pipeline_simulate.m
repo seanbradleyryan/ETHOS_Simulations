@@ -30,7 +30,12 @@
 
 clear; clc; close all;
 
-addpath(genpath('/mnt/weka/home/80030361/ETHOS_Simulations/utils')); 
+% Put the utils folder (get_default_config, calibrate_noise_amp, the engine
+% helpers, ...) on the path FIRST, before get_default_config is called. Derived
+% from this script's own location so it works regardless of the launch cwd.
+this_script_dir = fileparts(mfilename('fullpath'));
+if isempty(this_script_dir), this_script_dir = pwd; end
+addpath(genpath(fullfile(this_script_dir, 'utils')));
 
 %% ========================= CONFIGURATION =================================
 
@@ -104,6 +109,12 @@ CONFIG.metrics_normalize     = true;        % LS gain recon -> own-CT truth
 CONFIG.metrics_beams         = [];          % [] => every beam found on disk
 CONFIG.metrics_overwrite     = false;       % recompute even if already folded in
 CONFIG.metrics_write_summary = true;        % write segment_metrics_summary_<hash>.mat
+% Noise-only null floor: the pass rate of CT_1 truth vs a noise-only recon,
+% computed ONCE per session via noise_ensemble_error_bars (cached by the sim
+% hash) and stored on the summary as .noise_floor for comparison with the
+% per-beam pass rates.
+CONFIG.metrics_noise_floor   = true;        % compute the noise-only null once/session
+CONFIG.metrics_noise_minutes = 30;          % ensemble time budget (min)
 
 % --- SSIM & Visualization Parameters ---
 CONFIG.analysis_compute_ssim = true;   % Compute SSIM alongside gamma
@@ -162,6 +173,25 @@ end
 % reusing stale ones.
 [CONFIG_HASH, CONFIG_CANONICAL] = compute_sim_config_hash(CONFIG);
 fprintf('  Config hash: %s\n', CONFIG_HASH);
+
+% Report which electronic-noise model this run uses. A fixed absolute amplitude
+% (from calibrate_noise_amp) lets the SNR float field to field; the legacy
+% fallback pins every field to SNR = 1/conv_noise_level.
+if isfield(CONFIG, 'noise_amp_Pa') && ~isempty(CONFIG.noise_amp_Pa) && CONFIG.noise_amp_Pa > 0
+    if isfield(CONFIG, 'target_snr') && ~isempty(CONFIG.target_snr)
+        target_snr_report = CONFIG.target_snr;
+    else
+        target_snr_report = 8;
+    end
+    fprintf('  Noise model: FIXED absolute amplitude %.4e Pa (target mean SNR %.2f)\n', ...
+        CONFIG.noise_amp_Pa, target_snr_report);
+elseif isfield(CONFIG, 'conv_noise_level') && CONFIG.conv_noise_level > 0
+    fprintf(['  Noise model: legacy per-field (SNR pinned at 1/conv_noise_level = %.2f). ' ...
+             'Run calibrate_noise_amp to set a fixed CONFIG.noise_amp_Pa.\n'], ...
+        1 / CONFIG.conv_noise_level);
+else
+    fprintf('  Noise model: none (no pulse-model noise added).\n');
+end
 fprintf('=========================================================\n\n');
 
 % Initialize results structure
@@ -378,10 +408,10 @@ for p_idx = 1:length(CONFIG.patients)
                         % on CT_1); CT_1 fields keep the standard single-field
                         % simulation. Selection of the field's own CBCT/medium
                         % happens inside the dispatcher.
-                        rd = run_field_dispatch(fd, cbct_by_label, medium_by_label, ...
+                        [rd, sd] = run_field_dispatch(fd, cbct_by_label, medium_by_label, ...
                             beam_metadata, CONFIG, precomputed_sensor);
                         rd = gather(rd);
-                        save_field_reconstruction(rd, fd, patient_id, session, CONFIG, CONFIG_HASH);
+                        save_field_reconstruction(rd, sd, fd, patient_id, session, CONFIG, CONFIG_HASH);
                         save_simulated_dose(rd, fd, patient_id, session, CONFIG, CONFIG_HASH);
 
                         % Overwrite IN PROGRESS with COMPLETE.
@@ -451,9 +481,9 @@ for p_idx = 1:length(CONFIG.patients)
                         t_field = tic;
                         % CT_3 fields -> blind-geometry second-field simulation;
                         % CT_1 fields -> standard single-field simulation.
-                        recon_dose = run_field_dispatch(fd, cbct_by_label, ...
+                        [recon_dose, sim_results] = run_field_dispatch(fd, cbct_by_label, ...
                             medium_by_label, beam_metadata, CONFIG, precomputed_sensor);
-                        save_field_reconstruction(recon_dose, fd, patient_id, session, CONFIG, CONFIG_HASH);
+                        save_field_reconstruction(recon_dose, sim_results, fd, patient_id, session, CONFIG, CONFIG_HASH);
                         save_simulated_dose(recon_dose, fd, patient_id, session, CONFIG, CONFIG_HASH);
 
                         % Overwrite IN PROGRESS with COMPLETE.
@@ -707,7 +737,7 @@ function [cbct, medium] = select_cbct_for_field(field_dose, cbct_by_label, mediu
     medium = medium_by_label.(lbl);
 end
 
-function recon_dose = run_field_quietly(field_dose, cbct_resampled, medium, ...
+function [recon_dose, sim_results] = run_field_quietly(field_dose, cbct_resampled, medium, ...
         beam_metadata, config, precomputed_sensor)
     % Run one field's k-Wave simulation but swallow ALL of its console output
     % (the k-Wave forward/time-reversal banners plus run_single_field_simulation's
@@ -720,11 +750,12 @@ function recon_dose = run_field_quietly(field_dose, cbct_resampled, medium, ...
     % argument a normal function input, so parfor's variable classification still
     % ships beam_metadata / precomputed_sensor to the workers -- a bare evalc
     % string in the loop body would hide those uses and break the broadcast.
-    [~, recon_dose] = evalc(['run_single_field_simulation(field_dose, ' ...
+    % sim_results carries the per-field noise stats (sensor_signal_peak / snr).
+    [~, recon_dose, sim_results] = evalc(['run_single_field_simulation(field_dose, ' ...
         'cbct_resampled, medium, beam_metadata, config, precomputed_sensor)']);
 end
 
-function recon_dose = run_field_dispatch(field_dose, cbct_by_label, medium_by_label, ...
+function [recon_dose, sim_results] = run_field_dispatch(field_dose, cbct_by_label, medium_by_label, ...
         beam_metadata, config, precomputed_sensor)
     % Route a single field to the correct reconstruction mode of the merged
     % run_single_field_simulation:
@@ -751,10 +782,10 @@ function recon_dose = run_field_dispatch(field_dose, cbct_by_label, medium_by_la
     if blind_on && ~isempty(fld_label) && ~strcmp(fld_label, ref_label) ...
             && isfield(medium_by_label, ref_label)
         medium_recon = medium_by_label.(ref_label);
-        recon_dose = run_blind_field_quietly(field_dose, cbct_fd, medium_fwd, ...
+        [recon_dose, sim_results] = run_blind_field_quietly(field_dose, cbct_fd, medium_fwd, ...
             medium_recon, beam_metadata, config, precomputed_sensor);
     else
-        recon_dose = run_field_quietly(field_dose, cbct_fd, medium_fwd, ...
+        [recon_dose, sim_results] = run_field_quietly(field_dose, cbct_fd, medium_fwd, ...
             beam_metadata, config, precomputed_sensor);
     end
 end
@@ -769,7 +800,7 @@ function lbl = blind_recon_reference_label(config)
     end
 end
 
-function recon_dose = run_blind_field_quietly(field_dose, cbct_resampled, medium_fwd, ...
+function [recon_dose, sim_results] = run_blind_field_quietly(field_dose, cbct_resampled, medium_fwd, ...
         medium_recon, beam_metadata, config, precomputed_sensor)
     % Blind-geometry per-field simulation with the same console suppression as
     % run_field_quietly. medium_fwd is the TRUE (CT_3) forward medium; the
@@ -780,17 +811,48 @@ function recon_dose = run_blind_field_quietly(field_dose, cbct_resampled, medium
     % precomputed_sensor / medium_recon to the workers (a bare evalc string would
     % hide those uses).
     config.blind_recon = true;
-    [~, recon_dose] = evalc(['run_single_field_simulation(field_dose, ' ...
+    [~, recon_dose, sim_results] = evalc(['run_single_field_simulation(field_dose, ' ...
         'cbct_resampled, medium_fwd, beam_metadata, config, precomputed_sensor, medium_recon)']);
 end
 
-function save_field_reconstruction(recon_dose, field_dose, patient_id, session, config, hash8)
+function save_field_reconstruction(recon_dose, sim_results, field_dose, patient_id, session, config, hash8)
     % Save reconstruction as <input_basename>_recon_<hash8>.mat next to other
     % per-config outputs.  Only the hash is embedded; the full config lives
     % in <sim_dir>/config_registry.json.
+    %
+    % noise_stats records the per-field electronic-noise SNR (pre-noise sensor
+    % peak, applied noise amplitude, and their ratio) so the SNR each beam/segment
+    % actually saw can later be correlated with its gamma index. With a fixed
+    % absolute noise amplitude this SNR floats field to field.
     out_path    = expected_recon_path(field_dose, patient_id, session, config, hash8);
     config_hash = hash8;  %#ok<NASGU>  saved variable name
-    save(out_path, 'recon_dose', 'config_hash', '-v7.3');
+    noise_stats = extract_noise_stats(sim_results);  %#ok<NASGU>  saved variable name
+    save(out_path, 'recon_dose', 'config_hash', 'noise_stats', '-v7.3');
+end
+
+function ns = extract_noise_stats(sim_results)
+    % Pull the per-field noise diagnostics out of run_single_field_simulation's
+    % sim_results, gathered to plain doubles (they may be gpuArray scalars).
+    % Missing fields (e.g. no pulse-model noise) come back as NaN.
+    ns = struct('sensor_signal_peak', NaN, 'noise_amp', NaN, 'snr', NaN);
+    if ~isstruct(sim_results), return; end
+    if isfield(sim_results, 'sensor_signal_peak')
+        ns.sensor_signal_peak = gather_scalar(sim_results.sensor_signal_peak);
+    end
+    if isfield(sim_results, 'noise_amp')
+        ns.noise_amp = gather_scalar(sim_results.noise_amp);
+    end
+    if isfield(sim_results, 'snr')
+        ns.snr = gather_scalar(sim_results.snr);
+    end
+end
+
+function v = gather_scalar(x)
+    if isempty(x)
+        v = NaN;
+    else
+        v = double(gather(x));
+    end
 end
 
 function save_simulated_dose(recon_dose, field_dose, patient_id, session, config, hash8)

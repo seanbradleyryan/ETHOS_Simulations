@@ -106,6 +106,17 @@ run standalone like `step3_analysis`.
 - **Summary rollup:** `segment_metrics_summary_<hash>.mat` (per-beam & pooled mean/std of gamma pass % and
   mean local SSIM %, per comparison) is written beside the recons — the data the study's plots are built
   from. Segments needing a CT_1/CT_3 pair that is missing are skipped (matching the study).
+- **Noise-only null floor** (`CONFIG.metrics_noise_floor`, default on): the null hypothesis is the gamma
+  pass rate of the CT_1 truth vs a NOISE-ONLY reconstruction. `noise_ensemble_error_bars` runs an ensemble
+  of noise-only recons and returns the mean ± std pass rate; it is computed **once per session** (the util
+  caches by the sim config hash, so every beam/segment shares it) and stored on the summary as
+  `results.noise_floor` (`.mean_pass_rate`, `.std_pass_rate`, `.num_samples`, …). `metrics_noise_minutes`
+  (30) is the ensemble `TimeBudgetMin`. The reference geometry/summed truth come from
+  `load_recon_dose_data(Mode='total')`. Since Step 2.5 draws no figures, the floor is only *saved*; a
+  plotting script would draw `noise_floor.mean_pass_rate` as the horizontal null line on the pass-rate-by-
+  beam plot and, on the differentials, the point (`truth1_vs_recon1` pass) − (noise mean). The first
+  (uncached) ~30 min compute is guarded by a `<noise_ensemble_cache>.lock` so only one instance pays it;
+  siblings skip and pick up the cache on a later run.
 
 ## Gotchas
 

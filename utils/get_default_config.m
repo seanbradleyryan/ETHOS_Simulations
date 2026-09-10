@@ -116,8 +116,27 @@ function CONFIG = get_default_config(varargin)
     %                    to a clinical linac's flat-top beam-on burst
     CONFIG.pulse_shape         = 'gaussian';
     CONFIG.convolution_kernel  = 4e-6;   % Gaussian sigma / rectangular width (s)
-    CONFIG.conv_noise_level    = 0.125;  % noise amplitude as fraction of peak sensor signal
+    CONFIG.conv_noise_level    = 0.125;  % legacy noise amp as fraction of THIS field's peak
     CONFIG.conv_deconv_lambda  = 1e-4;   % Wiener regularization for deconvolution
+
+    % --- Absolute (blanket) electronic-noise amplitude ---
+    % By default (noise_amp_Pa empty) the pulse-model noise is a fraction
+    % (conv_noise_level) of EACH field's own peak signal, so every beam/segment
+    % is pinned to the same SNR (= 1/conv_noise_level). That is not physical:
+    % real electronic noise is a fixed amplitude set by the hardware, so weak
+    % (low-MU) segments should have a lower SNR than strong ones.
+    %
+    % Set noise_amp_Pa (in Pa) to use ONE blanket noise amplitude for every
+    % field instead; the SNR then floats above/below the target. Obtain the
+    % value from calibrate_noise_amp, which samples num_calibration_fields random
+    % fields and returns the amplitude whose MEAN SNR across them equals
+    % target_snr:
+    %   cal = calibrate_noise_amp(patient_id, session, CONFIG);
+    %   CONFIG.noise_amp_Pa = cal.noise_amp_Pa;
+    % Leave noise_amp_Pa empty to keep the legacy per-field behavior.
+    CONFIG.noise_amp_Pa           = [];   % [] = legacy per-field noise; >0 = fixed Pa
+    CONFIG.target_snr             = 8;    % mean SNR calibrate_noise_amp targets
+    CONFIG.num_calibration_fields = 5;    % random fields sampled by calibrate_noise_amp
 
     CONFIG.downscale_factor = 1;
     CONFIG.use_grid_padding = true;
