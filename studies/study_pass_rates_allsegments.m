@@ -69,10 +69,11 @@
 %    - Per-beam segment gamma runs in parallel (parfor) or serially per
 %      CONFIG.use_parallel; the pool is auto-sized to the machine's physical cores
 %      (CONFIG.auto_detect_workers) with CONFIG.num_workers as the fallback.
-%    - Optional noise-only null "floor" via noise_ensemble_error_bars, cached by
-%      the simulation config hash (CONFIG.include_noise_floor / noise_sim_config)
-%      AND stored in the results .mat so repeat runs reuse it without reloading
-%      geometry (recomputed only if the criterion or sim-config hash changes).
+%    - Optional noise-only null "floor" LOADED from a cached noise_ensemble_error_bars
+%      run (located by CONFIG.noise_config_hash) AND stored in the results .mat so
+%      repeat runs reuse it. If the cached samples are not found, the floor falls
+%      back to the constant CONFIG.noise_fallback_pass_rate (%). This script never
+%      runs the ensemble itself.
 %
 %  NOTE: HIPAA / remote-execution - this file is WRITTEN here but must be RUN on
 %  the remote device. Do not execute locally.
@@ -116,7 +117,7 @@ CONFIG.plan_type = 'reference';   % 'reference' | 'adapted' | 'any'
 CONFIG.ct_pair = [1, 3];
 
 % Explicit recon config-hash override ('' => auto-discover on disk via loader).
-CONFIG.config_hash = '505ae853';
+CONFIG.config_hash = 'a9a3e1e6';
 
 % Needed by load_recon_dose_data to resolve the method folder / hash on disk.
 CONFIG.gruneisen_method = 'threshold_2';
@@ -148,17 +149,21 @@ CONFIG.auto_detect_workers = true;
 CONFIG.num_workers         = 64;   % fallback local pool size
 
 % --- Noise floor (noise-only null hypothesis) --------------------------------
-% When true (and eval_method is 'gamma_index'), run noise_ensemble_error_bars
-% ONCE for this session and draw its mean +/- std gamma pass rate as a horizontal
-% "noise floor" band on the across-beams pass-rate tab. The ensemble is cached by
-% the SIMULATION config hash (compute_sim_config_hash), so it is computed once and
-% reused. noise_sim_config supplies that simulation CONFIG (sensor / recon / noise
-% knobs); [] builds it from get_default_config(). NOTE: the floor is only
-% meaningful when this simulation CONFIG matches the settings that produced the
-% recons being plotted (CONFIG.config_hash) -- a mismatch is warned about below.
-CONFIG.include_noise_floor    = true;
-CONFIG.noise_ensemble_minutes = 30;    % TimeBudgetMin handed to the ensemble
-CONFIG.noise_sim_config       = [];    % [] => get_default_config(); else a struct
+% When true (and eval_method is 'gamma_index'), draw a noise-only "floor" on the
+% change-detection tabs. The noise samples are LOADED from a cached
+% noise_ensemble_error_bars run (noise_ensemble_<patient>_<session>_<hash>.mat
+% under AnalysisResults); this script does NOT run the ensemble itself. The cache
+% is located by CONFIG.noise_config_hash. If the samples are not found, the floor
+% falls back to the constant CONFIG.noise_fallback_pass_rate (%), and all noise
+% calculations / plotting use that value.
+CONFIG.include_noise_floor      = true;
+% Hash locating the cached noise-ensemble samples. When empty, the sim-config hash
+% (compute_sim_config_hash of noise_sim_config) is used instead.
+CONFIG.noise_config_hash        = 'a9a3e1e6';
+% Pass rate (%) used as the noise floor when the cached samples are not found.
+CONFIG.noise_fallback_pass_rate = 17;
+% Simulation CONFIG whose hash is used only when noise_config_hash is empty.
+CONFIG.noise_sim_config         = [];    % [] => get_default_config(); else a struct
 
 % --- Output ---
 % Results and the console log are cached beside the recon doses, i.e. in
@@ -800,7 +805,7 @@ function tf = noise_floor_matches(nf, CONFIG, crit)
     end
     if isfield(nf, 'config_hash') && ~isempty(nf.config_hash)
         try
-            if ~strcmp(nf.config_hash, compute_sim_config_hash(build_noise_sim_config(CONFIG)))
+            if ~strcmp(nf.config_hash, resolve_noise_hash(CONFIG))
                 return;
             end
         catch
@@ -810,70 +815,75 @@ function tf = noise_floor_matches(nf, CONFIG, crit)
     tf = true;
 end
 
-function ens = compute_study_noise_floor(CONFIG, crit)
-%COMPUTE_STUDY_NOISE_FLOOR Run (cached) noise_ensemble_error_bars for this session.
-%  Builds/obtains the simulation CONFIG, loads the reference-CT geometry + summed
-%  RayStation truth + beam metadata via load_recon_dose_data (total mode), and
-%  returns the noise-only null ensemble (mean/std gamma pass rate). Returns [] on
-%  any failure so the caller simply omits the floor band. The ensemble itself is
-%  cached (keyed on the sim config hash), so this is cheap on repeat runs.
-    ens = [];
-    try
-        % Simulation CONFIG (its sensor/recon/noise knobs set the ensemble cache
-        % key). Default: get_default_config(); override the machine/data fields to
-        % this study's patient/session so the floor uses the same geometry.
-        sim_cfg = build_noise_sim_config(CONFIG);
-
-        % Warn if the sim config does not correspond to the plotted recons.
-        sim_hash = compute_sim_config_hash(sim_cfg);
-        if ~isempty(CONFIG.config_hash) && ~strcmp(sim_hash, CONFIG.config_hash)
-            warning('study_pass_rates_allsegments:NoiseFloorHashMismatch', ...
-                ['Noise-floor sim config hash %s ~= recon hash %s. The floor may not ' ...
-                 'match the plotted recons; set CONFIG.noise_sim_config to the sim ' ...
-                 'CONFIG used for these recons.'], sim_hash, CONFIG.config_hash);
-        end
-
-        % Reference-CT geometry + summed RS truth + beam metadata (total mode).
-        args = {'Mode', 'total', 'IncludeCBCT', true, 'IncludeEthos', false};
-        if ~isempty(CONFIG.config_hash), args = [args, {'Hash', CONFIG.config_hash}]; end
-        tot = load_recon_dose_data(CONFIG.patient_id, CONFIG.session, CONFIG, args{:});
-
-        ct1_field = sprintf('CT_%d', min(CONFIG.ct_pair));
-        if ~isfield(tot, 'cbct') || ~isfield(tot.cbct, ct1_field)
-            error('study_pass_rates_allsegments:NoiseFloorNoCBCT', ...
-                'Reference CBCT geometry %s not available for the noise floor.', ct1_field);
-        end
-        sct        = tot.cbct.(ct1_field);
-        ref_truth  = double(tot.rs_dose);
-        spacing_mm = tot.metadata.spacing(:)';
-        if ~isfield(sct, 'spacing') || isempty(sct.spacing), sct.spacing = spacing_mm; end
-        if ~isfield(sct, 'origin') || isempty(sct.origin)
-            if isfield(tot.metadata, 'origin'), sct.origin = tot.metadata.origin;
-            else, sct.origin = [0, 0, 0]; end
-        end
-
-        beam_meta = [];
-        if isfield(tot.metadata, 'beam_metadata'), beam_meta = tot.metadata.beam_metadata; end
-        gantry_angle = 0;   % plan-level floor: placement uses summed dose + all beams
-        if ~isempty(beam_meta) && isfield(beam_meta(1), 'gantry_angle') ...
-                && ~isempty(beam_meta(1).gantry_angle)
-            gantry_angle = beam_meta(1).gantry_angle;
-        end
-
-        % Run (cached) noise-only null ensemble at the study's gamma criterion.
-        crit_label = sprintf('%g%%/%g mm', crit, crit);
-        ens = noise_ensemble_error_bars(sim_cfg, ref_truth, spacing_mm, sct, ...
-            gantry_angle, beam_meta, ...
-            'TimeBudgetMin', CONFIG.noise_ensemble_minutes, ...
-            'GammaCriteria', {crit, crit, crit_label}, ...
-            'Normalize', logical(CONFIG.normalize));
-        fprintf('[NOISE FLOOR] Null gamma %.2f +/- %.2f %% over %d samples (hash %s).\n', ...
-            ens.mean_pass_rate, ens.std_pass_rate, ens.num_samples, ens.config_hash);
-    catch ME
-        warning('study_pass_rates_allsegments:NoiseFloorFailed', ...
-            'Noise floor computation failed (%s); plotting without it.', ME.message);
-        ens = [];
+function hash = resolve_noise_hash(CONFIG)
+%RESOLVE_NOISE_HASH Hash used to locate the cached noise-ensemble samples.
+%  CONFIG.noise_config_hash when set; otherwise the sim-config hash that
+%  noise_ensemble_error_bars would compute from this study's sim CONFIG. Returns
+%  '' only if neither is available.
+    hash = '';
+    if isfield(CONFIG, 'noise_config_hash') && ~isempty(CONFIG.noise_config_hash)
+        hash = char(CONFIG.noise_config_hash);
+        return;
     end
+    try
+        hash = compute_sim_config_hash(build_noise_sim_config(CONFIG));
+    catch
+        hash = '';
+    end
+end
+
+function ens = compute_study_noise_floor(CONFIG, crit)
+%COMPUTE_STUDY_NOISE_FLOOR Obtain the noise-only null floor WITHOUT recomputing it.
+%  Looks for a cached noise-ensemble file (noise_ensemble_<patient>_<session>_
+%  <hash>.mat under AnalysisResults) located by CONFIG.noise_config_hash (or the
+%  sim-config hash when that is empty). If found, returns its stored mean/std pass
+%  rate. If the samples are NOT found, falls back to the constant
+%  CONFIG.noise_fallback_pass_rate (default 17%) with zero spread so all downstream
+%  calculations and plotting still have a noise floor. This never runs the (slow)
+%  k-Wave ensemble; generate the samples separately via noise_ensemble_error_bars.
+    hash       = resolve_noise_hash(CONFIG);
+    cache_dir  = fullfile(CONFIG.working_dir, 'AnalysisResults', ...
+        CONFIG.patient_id, CONFIG.session);
+    cache_file = fullfile(cache_dir, sprintf('noise_ensemble_%s_%s_%s.mat', ...
+        CONFIG.patient_id, CONFIG.session, hash));
+
+    % ---- Load the cached samples if present. ----
+    if ~isempty(hash) && isfile(cache_file)
+        try
+            S   = load(cache_file);
+            ens = S.ens;
+            ens.from_cache = true;
+            ens.is_fallback = false;
+            ens.cache_file = cache_file;
+            fprintf(['[NOISE FLOOR] Loaded cached samples: %s\n' ...
+                     '              Null gamma %.2f +/- %.2f %% over %d samples.\n'], ...
+                cache_file, ens.mean_pass_rate, ens.std_pass_rate, ens.num_samples);
+            return;
+        catch ME
+            warning('study_pass_rates_allsegments:NoiseCacheLoad', ...
+                'Noise cache %s could not be loaded (%s); using the fallback.', ...
+                cache_file, ME.message);
+        end
+    end
+
+    % ---- Samples not found: constant fallback pass rate. ----
+    fb = 17;
+    if isfield(CONFIG, 'noise_fallback_pass_rate') && ~isempty(CONFIG.noise_fallback_pass_rate)
+        fb = CONFIG.noise_fallback_pass_rate;
+    end
+    ens = struct();
+    ens.mean_pass_rate = fb;
+    ens.std_pass_rate  = 0;      % no spread known for an assumed value
+    ens.pass_rates     = fb;
+    ens.num_samples    = 0;
+    ens.criteria       = {crit, crit, sprintf('%g%%/%g mm', crit, crit)};
+    ens.config_hash    = hash;
+    ens.is_fallback    = true;
+    ens.from_cache     = false;
+    ens.cache_file     = cache_file;
+    fprintf(['[NOISE FLOOR] Cached noise samples not found (%s).\n' ...
+             '              Falling back to a constant %.1f%% pass rate.\n'], ...
+        cache_file, fb);
 end
 
 function s = seg_of_field(fld)
@@ -1121,8 +1131,13 @@ function render_beam_pass_rate(ax, x_pos, x_labels, m_r1, s_r1, m_r3, s_r3, ...
              'Truth CT\_1 vs Truth CT\_3'};
     if ~isempty(h_np)
         leg_h(end + 1) = h_np;
-        leg_s{end + 1} = sprintf('Noise pass rate %.1f \\pm %.1f%%', ...
-            noise_floor.mean_pass_rate, noise_floor.std_pass_rate);
+        if isfield(noise_floor, 'is_fallback') && noise_floor.is_fallback
+            leg_s{end + 1} = sprintf('Noise pass rate %.1f%% (assumed)', ...
+                noise_floor.mean_pass_rate);
+        else
+            leg_s{end + 1} = sprintf('Noise pass rate %.1f \\pm %.1f%%', ...
+                noise_floor.mean_pass_rate, noise_floor.std_pass_rate);
+        end
     end
     legend(leg_h, leg_s, 'Location', 'best', 'FontSize', 9);
 end
