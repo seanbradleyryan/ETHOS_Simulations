@@ -40,12 +40,15 @@
 %      - a per-beam vertical connector between the two recon means, coloured like
 %        whichever mean is greater,
 %      - when CONFIG.include_noise_floor is on, the noise-only null (from
-%        noise_ensemble_error_bars) as a horizontal mean +/- std band.
+%        noise_ensemble_error_bars) as a horizontal mean +/- std band plus an
+%        explicit noise pass-rate data point at every beam slot.
 %    Tab "Differentials" (y = pass-rate differential %):
 %      - recon differential (recon_CT1 - recon_CT3, both vs truth_CT1): green
 %        where >= 0 (change detected the correct way), red where < 0,
 %      - truth differential 100 - (truth_CT1 vs truth_CT3), the true change
-%        magnitude, in blue. Both carry std error bars (paired per-segment std).
+%        magnitude, in blue. Both carry std error bars (paired per-segment std),
+%      - when CONFIG.include_noise_floor is on, a noise-reconstruction differential
+%        (recon_CT1 pass rate - noise pass rate) as a data point per beam slot.
 %
 %  FIGURE 2 - reconstruction fidelity (each recon vs its OWN-CT truth):
 %    - truth_CT1 vs recon_CT1 (green), truth_CT3 vs recon_CT3 (red), each series
@@ -1043,8 +1046,9 @@ function plot_change_detection_tabs(x_pos, x_labels, mean_pass, std_pass, ...
     ax2  = axes('Parent', tab2); %#ok<LAXES>
     [rd_m, rd_s, td_m, td_s] = beam_differentials(seg_pass_by_beam, all_seg_pass, ...
         d_r1, d_r3, d_tt);
+    m_r1_all = [mean_pass(:, d_r1); all_mean(d_r1)];   % CT_1 pass rate per x slot
     render_differentials(ax2, x_pos, x_labels, rd_m, rd_s, td_m, td_s, ...
-        metric, patient_id, session);
+        m_r1_all, noise_floor, metric, patient_id, session);
 
     drawnow;
 end
@@ -1067,8 +1071,11 @@ function render_beam_pass_rate(ax, x_pos, x_labels, m_r1, s_r1, m_r3, s_r3, ...
 
     axes(ax); hold(ax, 'on');
 
-    % Noise-floor band (drawn first so it sits behind the markers).
+    % Noise-floor band (drawn first so it sits behind the markers) plus explicit
+    % noise pass-rate data points at every beam slot. The noise-only null is a
+    % single session-level value, so the points sit at a constant level across beams.
     h_nf = [];
+    h_np = [];
     if ~isempty(noise_floor)
         nf_m = noise_floor.mean_pass_rate;
         nf_s = noise_floor.std_pass_rate;
@@ -1077,6 +1084,8 @@ function render_beam_pass_rate(ax, x_pos, x_labels, m_r1, s_r1, m_r3, s_r3, ...
             [nf_m - nf_s, nf_m - nf_s, nf_m + nf_s, nf_m + nf_s], grey, ...
             'FaceAlpha', 0.15, 'EdgeColor', 'none');
         plot(ax, xl, [nf_m, nf_m], ':', 'Color', grey, 'LineWidth', 1.3);
+        h_np = plot(ax, x_pos, nf_m * ones(size(x_pos)), 'd', 'Color', grey, ...
+            'MarkerFaceColor', grey, 'MarkerSize', 6, 'LineStyle', 'none');
     end
 
     % Per-beam connector between the two recon means (colour = greater one).
@@ -1110,28 +1119,32 @@ function render_beam_pass_rate(ax, x_pos, x_labels, m_r1, s_r1, m_r3, s_r3, ...
     leg_h = [h_r1, h_r3, h_tt];
     leg_s = {'Recon CT\_1 vs Truth CT\_1', 'Recon CT\_3 vs Truth CT\_1', ...
              'Truth CT\_1 vs Truth CT\_3'};
-    if ~isempty(h_nf)
-        leg_h(end + 1) = h_nf;
-        leg_s{end + 1} = sprintf('Noise floor %.1f \\pm %.1f%%', ...
+    if ~isempty(h_np)
+        leg_h(end + 1) = h_np;
+        leg_s{end + 1} = sprintf('Noise pass rate %.1f \\pm %.1f%%', ...
             noise_floor.mean_pass_rate, noise_floor.std_pass_rate);
     end
     legend(leg_h, leg_s, 'Location', 'best', 'FontSize', 9);
 end
 
 function render_differentials(ax, x_pos, x_labels, rd_m, rd_s, td_m, td_s, ...
-        metric, patient_id, session)
+        m_r1, noise_floor, metric, patient_id, session)
 %RENDER_DIFFERENTIALS Per-beam pass-rate differentials into axes ax.
 %  Recon differential (recon1 - recon3): green where >= 0 (change detected the
 %  correct way), red where < 0. Truth differential 100 - (truth1 vs truth3), the
 %  true change magnitude referenced to truth CT_1, in blue. Both carry std error
-%  bars; the trailing slot is the pooled "All" entry.
+%  bars; the trailing slot is the pooled "All" entry. When noise_floor is supplied,
+%  a noise-reconstruction differential (m_r1 CT_1 pass rate minus the session noise
+%  pass rate) is drawn as one grey data point per slot.
     green = [0.15, 0.60, 0.20];
     red   = [0.80, 0.15, 0.15];
     blue  = [0.20, 0.40, 0.80];
+    grey  = [0.35, 0.35, 0.35];
 
     x_pos = x_pos(:)';
     rd_m = rd_m(:)'; rd_s = rd_s(:)';
     td_m = td_m(:)'; td_s = td_s(:)';
+    m_r1 = m_r1(:)';
 
     axes(ax); hold(ax, 'on');
     yline(0, 'k-', 'LineWidth', 1.0);
@@ -1148,6 +1161,16 @@ function render_differentials(ax, x_pos, x_labels, rd_m, rd_s, td_m, td_s, ...
     h_td = errorbar(ax, x_pos, td_m, td_s, 's', 'Color', blue, 'MarkerFaceColor', blue, ...
         'MarkerSize', 7, 'LineStyle', 'none', 'CapSize', 7, 'LineWidth', 1.2);
 
+    % Noise-reconstruction differential: how far the real CT_1 recon sits above the
+    % noise-only null (CT_1 pass rate minus the session noise pass rate). One grey
+    % point per beam slot (plus the pooled "All"); the noise level is a single value.
+    h_nd = [];
+    if ~isempty(noise_floor)
+        nd   = m_r1 - noise_floor.mean_pass_rate;
+        h_nd = plot(ax, x_pos, nd, 'd', 'Color', grey, 'MarkerFaceColor', grey, ...
+            'MarkerSize', 7, 'LineStyle', 'none');
+    end
+
     % Legend proxies for the two-colour recon differential.
     h_pos = plot(ax, nan, nan, 'o', 'Color', green, 'MarkerFaceColor', green, ...
         'LineStyle', 'none', 'MarkerSize', 8);
@@ -1161,9 +1184,14 @@ function render_differentials(ax, x_pos, x_labels, rd_m, rd_s, td_m, td_s, ...
     title(ax, sprintf(['Change-Detection Differentials (mean \\pm std over segments)' ...
         '   |   %s / %s'], strrep(patient_id, '_', '\_'), strrep(session, '_', '\_')), ...
         'FontWeight', 'bold', 'FontSize', 12, 'Interpreter', 'tex');
-    legend([h_pos, h_neg, h_td], ...
-        {'Recon CT\_1 - CT\_3 > 0 (correct)', 'Recon CT\_1 - CT\_3 < 0', ...
-         '100 - (Truth CT\_1 vs CT\_3)'}, 'Location', 'best', 'FontSize', 9);
+    leg_h = [h_pos, h_neg, h_td];
+    leg_s = {'Recon CT\_1 - CT\_3 > 0 (correct)', 'Recon CT\_1 - CT\_3 < 0', ...
+             '100 - (Truth CT\_1 vs CT\_3)'};
+    if ~isempty(h_nd)
+        leg_h(end + 1) = h_nd;
+        leg_s{end + 1} = 'Recon CT\_1 - Noise';
+    end
+    legend(leg_h, leg_s, 'Location', 'best', 'FontSize', 9);
 end
 
 function [rd_m, rd_s, td_m, td_s] = beam_differentials(seg_pass_by_beam, ...

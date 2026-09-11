@@ -15,9 +15,12 @@
 %         once the dose centroid leaves the computational grid. Every shifted
 %         recon is scored against the SAME original (un-shifted) truth.
 %      3. Plots gamma pass rate and mean local SSIM as functions of the signed
-%         lateral shift, one curve per beam, in a single figure (FIGURE 1).
-%      4. Plots, per beam, a coronal max-projection overlay of the true dose
-%         (green) over one representative translated dose (red), all beams in a
+%         lateral shift in a single TABBED figure (FIGURE 1): an "All beams" tab
+%         overlaying every beam (the total), then one tab per beam showing that
+%         beam's individual gamma and SSIM curves.
+%      4. Plots, per beam, an AXIAL max-projection overlay: the CT radiograph in
+%         grayscale with the true dose outline (white) and every shifted dose
+%         outline (one color per shift) drawn on top. One tab per beam in a
 %         single, SEPARATE figure (FIGURE 2).
 %
 %    The per-shift reconstructions are the expensive part; they are run in a
@@ -108,12 +111,6 @@ CONFIG.normalize = true;            % lsq-scale each recon to its own source dos
 CONFIG.use_parallel = true;
 CONFIG.num_workers  = [];
 
-% --- Overlay figure (FIGURE 2) ---
-% Signed shift (mm) whose translated dose is drawn (red) over the true dose
-% (green). [] = each beam's largest available leftward (+) shift. A number picks
-% the nearest available shift for every beam.
-CONFIG.overlay_shift_mm = [];
-
 % --- Output / cache ---
 CONFIG.save_results = true;
 % When true and a matching results .mat already exists (same sim-affecting
@@ -168,7 +165,11 @@ out_mat  = [out_stem, '.mat'];
 loaded_from_cache = false;
 if CONFIG.use_cache && isfile(out_mat)
     S = load(out_mat);
-    if isfield(S, 'config') && isfield(S, 'results') && cache_is_valid(S.config, CONFIG)
+    % Also require the axial-overlay fields: a cache written by an older version
+    % (single-shift coronal overlay) cannot feed the new tabbed axial figure.
+    has_axial = isfield(S, 'results') && ~isempty(S.results) && ...
+        all(isfield(S.results, {'axial_truth', 'axial_shifts', 'axial_ct'}));
+    if isfield(S, 'config') && has_axial && cache_is_valid(S.config, CONFIG)
         results    = S.results;
         spacing_mm = S.spacing_mm;
         lat_dim    = S.lat_dim;
@@ -264,8 +265,7 @@ body_mask_shifted = CONFIG.body_mask_shifted;
 %% ===================== PER-BEAM SHIFT SWEEP =============================
 
 results = struct('beam', {}, 'segment', {}, 'shift_mm', {}, 'shift_vox', {}, ...
-    'gamma', {}, 'ssim', {}, 'overlay_truth_mip', {}, 'overlay_shift_mip', {}, ...
-    'overlay_shift_mm', {});
+    'gamma', {}, 'ssim', {}, 'axial_truth', {}, 'axial_shifts', {}, 'axial_ct', {});
 
 for bi = 1:numel(chosen)
     b = chosen(bi).beam;
@@ -332,20 +332,24 @@ for bi = 1:numel(chosen)
             shift_mm_list(si), shift_vox_list(si), gamma_vals(si), ssim_vals(si));
     end
 
-    % ---- Overlay projections for FIGURE 2 (cheap; no reconstruction). ----
-    ov_mm  = choose_overlay_shift(shift_mm_list, CONFIG.overlay_shift_mm);
-    ov_vox = shift_vox_list(find(shift_mm_list == ov_mm, 1));
-    ov_src = translate_volume(base_dose, ov_vox, lat_dim);
-    if CONFIG.body_mask_shifted
-        ov_src = ov_src .* double(sct.bodyMask);
+    % ---- Axial projections for FIGURE 2 (cheap; no reconstruction). ----
+    % One axial max-projection per shift, plus the fixed truth and a CT
+    % radiograph, so the tabbed overlay can draw every shifted dose outline.
+    axial_shifts = zeros([size(truth0, 1), size(truth0, 2), nShift], 'single');
+    for si = 1:nShift
+        src = translate_volume(base_dose, shift_vox_list(si), lat_dim);
+        if CONFIG.body_mask_shifted
+            src = src .* double(sct.bodyMask);
+        end
+        axial_shifts(:, :, si) = axial_mip(src);
     end
 
     results(end+1) = struct('beam', b, 'segment', chosen(bi).segment, ...
         'shift_mm', shift_mm_list, 'shift_vox', shift_vox_list, ...
         'gamma', gamma_vals, 'ssim', ssim_vals, ...
-        'overlay_truth_mip', coronal_mip(truth0), ...
-        'overlay_shift_mip', coronal_mip(ov_src), ...
-        'overlay_shift_mm', ov_mm); %#ok<SAGROW>
+        'axial_truth', axial_mip(truth0), ...
+        'axial_shifts', axial_shifts, ...
+        'axial_ct', axial_ct_radiograph(sct.cubeHU)); %#ok<SAGROW>
 
     fprintf('  Beam #%d done | elapsed %.0f s\n', b, toc(run_timer));
 end
@@ -359,8 +363,8 @@ end   % if ~loaded_from_cache
 
 %% ========================= PLOTS (two figures) =========================
 
-fig_metrics = plot_shift_sensitivity(results, CONFIG);   % FIGURE 1
-fig_overlay = plot_overlay_grid(results, CONFIG);        % FIGURE 2 (separate)
+fig_metrics = plot_shift_sensitivity_tabbed(results, CONFIG);   % FIGURE 1 (tabbed)
+fig_overlay = plot_shift_overlays_tabbed(results, CONFIG);      % FIGURE 2 (tabbed, separate)
 
 %% ========================= SAVE RESULTS ================================
 
@@ -633,30 +637,17 @@ function c = lateral_centroid(dose, dim)
     c = sum((1:numel(profile))' .* profile) / total;
 end
 
-function mm = choose_overlay_shift(shift_mm_list, requested)
-%CHOOSE_OVERLAY_SHIFT Signed shift (mm) to draw in FIGURE 2 for this beam.
-%  requested = [] -> the largest available leftward (+) shift, else the largest
-%  magnitude; a number -> the nearest available shift.
-    if isempty(requested)
-        pos = shift_mm_list(shift_mm_list > 0);
-        if ~isempty(pos)
-            mm = max(pos);
-        else
-            [~, ix] = max(abs(shift_mm_list));
-            mm = shift_mm_list(ix);
-        end
-    else
-        [~, ix] = min(abs(shift_mm_list - requested));
-        mm = shift_mm_list(ix);
-    end
+function mip = axial_mip(vol)
+%AXIAL_MIP Axial max-intensity projection (project along dim 3 = Z).
+%  Returns a single-precision [Y x X] image (rows = Y anterior->posterior,
+%  columns = X = lateral), so a lateral shift shows as horizontal motion.
+    mip = single(max(double(vol), [], 3));    % [Y x X]
 end
 
-function mip = coronal_mip(vol)
-%CORONAL_MIP Coronal max-intensity projection (project along dim 1 = Y).
-%  Returns a single-precision [Z x X] image with superior at the top and the
-%  lateral (X) axis horizontal, so a lateral shift shows as horizontal motion.
-    m   = squeeze(max(double(vol), [], 1));   % [X x Z]
-    mip = single(flipud(m'));                 % [Z x X], superior up
+function rad = axial_ct_radiograph(cubeHU)
+%AXIAL_CT_RADIOGRAPH DRR-style axial CT background (mean HU along dim 3 = Z).
+%  Returns a single-precision [Y x X] image aligned with axial_mip.
+    rad = single(mean(double(cubeHU), 3));    % [Y x X]
 end
 
 function p = gamma_pass_rate(ref, tgt, mask, crit, spacing)
@@ -681,9 +672,9 @@ end
 
 function tf = cache_is_valid(saved, CONFIG)
 %CACHE_IS_VALID True when a saved run's CONFIG matches the sim-affecting fields.
-%  Overlay-only knobs (overlay_shift_mm) are intentionally excluded: they change
-%  the picture, not the reconstructions, but the overlay projections are baked
-%  into the cache at their chosen shift -- clear the .mat to redraw a new shift.
+%  Only fields that change the reconstructions are compared; the figures (and the
+%  cached axial projections that feed them) are rebuilt from the same results on
+%  every run, so pure plotting choices are not part of the cache key.
     tf = false;
     keys = {'patient_id', 'session', 'beams', 'plan_type', 'ct_label', ...
         'random_seed', 'num_time_reversal_iter', 'reconstruction_method', ...
@@ -703,17 +694,21 @@ function v = pick_field(s, f, d)
     if isfield(s, f) && ~isempty(s.(f)); v = s.(f); else; v = d; end
 end
 
-function fig = plot_shift_sensitivity(results, CONFIG)
-%PLOT_SHIFT_SENSITIVITY FIGURE 1: gamma and SSIM vs signed shift, one line/beam.
-%  Two panels; x = 0 baseline; a 90% reference line on the gamma panel.
+function fig = plot_shift_sensitivity_tabbed(results, CONFIG)
+%PLOT_SHIFT_SENSITIVITY_TABBED FIGURE 1: gamma and SSIM vs signed shift, tabbed.
+%  Tab "All beams" overlays every beam (the total); one further tab per beam
+%  shows that beam's individual gamma and SSIM curves. Each tab has two panels
+%  (gamma left, SSIM right); x = 0 baseline; 90% reference line on gamma.
 %  + shift = patient left, - shift = patient right.
     fig = figure('Name', 'Rigid lateral-shift sensitivity', 'Color', 'w', ...
-        'NumberTitle', 'off', 'Position', [100, 100, 1200, 520]);
-
-    ax1 = subplot(1, 2, 1); hold(ax1, 'on'); grid(ax1, 'on');
-    ax2 = subplot(1, 2, 2); hold(ax2, 'on'); grid(ax2, 'on');
-
+        'NumberTitle', 'off', 'Position', [100, 100, 1200, 560]);
+    tg = uitabgroup(fig);
     colors = lines(numel(results));
+
+    % ---- Tab 1: all beams overlaid (the total). ----
+    tabAll = uitab(tg, 'Title', 'All beams');
+    ax1 = subplot(1, 2, 1, 'Parent', tabAll); hold(ax1, 'on'); grid(ax1, 'on');
+    ax2 = subplot(1, 2, 2, 'Parent', tabAll); hold(ax2, 'on'); grid(ax2, 'on');
     for bi = 1:numel(results)
         R = results(bi);
         [xs, ord] = sort(R.shift_mm);
@@ -723,61 +718,93 @@ function fig = plot_shift_sensitivity(results, CONFIG)
         plot(ax2, xs, R.ssim(ord),  '-o', 'Color', colors(bi, :), ...
             'MarkerFaceColor', colors(bi, :), 'DisplayName', lbl);
     end
-
-    yline(ax1, 90, '--r', '90%');
-    xline(ax1, 0, ':', 'Color', [0.5 0.5 0.5]);
-    xline(ax2, 0, ':', 'Color', [0.5 0.5 0.5]);
-
-    xlabel(ax1, 'Lateral shift (mm)   [+ = patient LEFT]');
-    ylabel(ax1, sprintf('Gamma pass rate (%%)  @ %g%%/%g mm', CONFIG.gamma_n, CONFIG.gamma_n));
-    title(ax1, 'Gamma vs rigid lateral shift');
-    ylim(ax1, [0, 100]);
-
-    xlabel(ax2, 'Lateral shift (mm)   [+ = patient LEFT]');
-    ylabel(ax2, 'Mean local SSIM (%)');
-    title(ax2, 'SSIM vs rigid lateral shift');
-
+    style_metric_axes(ax1, ax2, CONFIG, 'all beams');
     legend(ax1, 'show', 'Location', 'southoutside', 'NumColumns', 3, 'FontSize', 8);
-    sgtitle(sprintf('Rigid lateral-shift sensitivity  |  %s / %s  |  %s, %d-iter TR', ...
-        CONFIG.patient_id, CONFIG.session, CONFIG.reconstruction_method, ...
-        CONFIG.num_time_reversal_iter), 'FontWeight', 'bold');
-    drawnow;
-end
 
-function fig = plot_overlay_grid(results, CONFIG)
-%PLOT_OVERLAY_GRID FIGURE 2 (separate): true dose (green) over translated dose
-%  (red), coronal max-projection, one panel per beam in a single figure. Overlap
-%  reads yellow, so the green/red separation is the rigid lateral shift.
-    nB = numel(results);
-    ncols = min(6, nB);
-    nrows = ceil(nB / ncols);
-
-    fig = figure('Name', 'Truth (green) vs translated dose (red)', 'Color', 'w', ...
-        'NumberTitle', 'off', 'Position', [120, 120, 240 * ncols + 80, 240 * nrows + 80]);
-
-    for bi = 1:nB
+    % ---- One tab per beam: that beam's individual gamma and SSIM. ----
+    for bi = 1:numel(results)
         R = results(bi);
-        ax = subplot(nrows, ncols, bi);
-        image(ax, overlay_rgb(R.overlay_truth_mip, R.overlay_shift_mip));
-        axis(ax, 'image'); set(ax, 'XTick', [], 'YTick', []);
-        title(ax, sprintf('Beam %d  (%+g mm)', R.beam, R.overlay_shift_mm), 'FontSize', 8);
+        tab = uitab(tg, 'Title', sprintf('Beam %d', R.beam));
+        a1 = subplot(1, 2, 1, 'Parent', tab); hold(a1, 'on'); grid(a1, 'on');
+        a2 = subplot(1, 2, 2, 'Parent', tab); hold(a2, 'on'); grid(a2, 'on');
+        [xs, ord] = sort(R.shift_mm);
+        c = colors(bi, :);
+        plot(a1, xs, R.gamma(ord), '-o', 'Color', c, 'MarkerFaceColor', c);
+        plot(a2, xs, R.ssim(ord),  '-o', 'Color', c, 'MarkerFaceColor', c);
+        style_metric_axes(a1, a2, CONFIG, sprintf('beam %d (seg %d)', R.beam, R.segment));
     end
-
-    sgtitle(sprintf(['Truth (green) vs translated dose (red), coronal MIP  |  %s / %s' ...
-        '   [X horizontal: + = patient LEFT]'], CONFIG.patient_id, CONFIG.session), ...
-        'FontWeight', 'bold');
     drawnow;
 end
 
-function rgb = overlay_rgb(truth_mip, shift_mip)
-%OVERLAY_RGB RGB composite: red = translated dose, green = truth (each max-normed).
-    t = double(truth_mip);
-    s = double(shift_mip);
-    if max(t(:)) > 0, t = t / max(t(:)); end
-    if max(s(:)) > 0, s = s / max(s(:)); end
-    rgb = zeros([size(t), 3]);
-    rgb(:, :, 1) = s;   % red   = translated dose
-    rgb(:, :, 2) = t;   % green = truth
+function style_metric_axes(ax_gamma, ax_ssim, CONFIG, ttl)
+%STYLE_METRIC_AXES Shared labels/limits for a gamma + SSIM panel pair.
+    yline(ax_gamma, 90, '--r', '90%');
+    xline(ax_gamma, 0, ':', 'Color', [0.5 0.5 0.5]);
+    xline(ax_ssim,  0, ':', 'Color', [0.5 0.5 0.5]);
+    xlabel(ax_gamma, 'Lateral shift (mm)   [+ = patient LEFT]');
+    ylabel(ax_gamma, sprintf('Gamma pass rate (%%)  @ %g%%/%g mm', CONFIG.gamma_n, CONFIG.gamma_n));
+    title(ax_gamma, sprintf('Gamma vs shift  |  %s', ttl));
+    ylim(ax_gamma, [0, 100]);
+    xlabel(ax_ssim, 'Lateral shift (mm)   [+ = patient LEFT]');
+    ylabel(ax_ssim, 'Mean local SSIM (%)');
+    title(ax_ssim, sprintf('SSIM vs shift  |  %s', ttl));
+    ylim(ax_ssim, [0, 100]);
+end
+
+function fig = plot_shift_overlays_tabbed(results, CONFIG)
+%PLOT_SHIFT_OVERLAYS_TABBED FIGURE 2 (separate): axial overlay, one tab per beam.
+%  Each tab shows the CT radiograph (grayscale axial max/mean projection) with
+%  the true dose outline (white) and every shifted dose outline (one color per
+%  shift) drawn on top, at 50% of each dose's own max. The lateral (X) shift
+%  reads as horizontal separation of the colored outlines. + = patient LEFT.
+    fig = figure('Name', 'Shifted dose vs truth (axial)', 'Color', 'w', ...
+        'NumberTitle', 'off', 'Position', [120, 120, 960, 820]);
+    tg = uitabgroup(fig);
+
+    for bi = 1:numel(results)
+        R = results(bi);
+        tab = uitab(tg, 'Title', sprintf('Beam %d', R.beam));
+        ax  = axes('Parent', tab); %#ok<LAXES>
+        hold(ax, 'on');
+
+        % CT radiograph background (row 1 = anterior at top via reversed YDir).
+        imagesc(ax, double(R.axial_ct));
+        colormap(ax, gray);
+        axis(ax, 'image'); set(ax, 'YDir', 'reverse', 'XTick', [], 'YTick', []);
+
+        % Each shifted dose as a colored 50% outline (0-shift is the truth, drawn
+        % once below in white, so it is skipped here).
+        [xs, ord] = sort(R.shift_mm);
+        cmap = jet(numel(ord));
+        handles = gobjects(0);
+        labels  = {};
+        for jj = 1:numel(ord)
+            if xs(jj) == 0, continue; end
+            img = double(R.axial_shifts(:, :, ord(jj)));
+            if max(img(:)) <= 0, continue; end
+            lvl = 0.5 * max(img(:));
+            [~, hc] = contour(ax, img, [lvl, lvl], 'LineColor', cmap(jj, :), 'LineWidth', 1.2);
+            handles(end+1) = hc;                    %#ok<AGROW>
+            labels{end+1}  = sprintf('%+g mm', xs(jj)); %#ok<AGROW>
+        end
+
+        % Truth outline on top (thick white).
+        t = double(R.axial_truth);
+        if max(t(:)) > 0
+            [~, ht] = contour(ax, t, [0.5 * max(t(:)), 0.5 * max(t(:))], ...
+                'LineColor', 'w', 'LineWidth', 2.5);
+            handles(end+1) = ht;          %#ok<AGROW>
+            labels{end+1}  = 'Truth';     %#ok<AGROW>
+        end
+
+        title(ax, sprintf('Beam %d (seg %d)  |  axial MIP, all shifts', R.beam, R.segment));
+        xlabel(ax, 'X (columns)  [+ = patient LEFT]');
+        ylabel(ax, 'Y (rows)  [anterior = top]');
+        if ~isempty(handles)
+            legend(ax, handles, labels, 'Location', 'eastoutside', 'FontSize', 7);
+        end
+    end
+    drawnow;
 end
 
 function medium = build_medium_with_bath(sct, config)
