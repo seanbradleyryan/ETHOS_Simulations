@@ -359,16 +359,11 @@ if isempty(results)
         'No beams produced results (all skipped).');
 end
 
-end   % if ~loaded_from_cache
-
-%% ========================= PLOTS (two figures) =========================
-
-fig_metrics = plot_shift_sensitivity_tabbed(results, CONFIG);   % FIGURE 1 (tabbed)
-fig_overlay = plot_shift_overlays_tabbed(results, CONFIG);      % FIGURE 2 (tabbed, separate)
-
-%% ========================= SAVE RESULTS ================================
-
-if CONFIG.save_results && ~loaded_from_cache
+%% ==== SAVE RESULTS (before plotting, so the cache survives plot errors) ====
+% The k-Wave sweep is the expensive part; write it to disk the moment it is
+% done, BEFORE any figure is drawn. Otherwise a plotting error would discard the
+% whole sweep and the next run would recompute instead of loading this cache.
+if CONFIG.save_results
     RESULTS = struct();
     RESULTS.config          = CONFIG;
     RESULTS.results         = results;
@@ -378,7 +373,19 @@ if CONFIG.save_results && ~loaded_from_cache
 
     save(out_mat, '-struct', 'RESULTS', '-v7.3');
     fprintf('\nResults saved to: %s\n', out_mat);
+end
 
+end   % if ~loaded_from_cache
+
+%% ========================= PLOTS (two figures) =========================
+
+fig_metrics = plot_shift_sensitivity_tabbed(results, CONFIG);   % FIGURE 1 (tabbed)
+fig_overlay = plot_shift_overlays_tabbed(results, CONFIG);      % FIGURE 2 (tabbed, separate)
+
+%% ========================= SAVE FIGURES ================================
+% Figures are cheap to redraw, so refresh them on every run -- including a cache
+% hit, which is exactly the "load the cache and just make the plots" path.
+if CONFIG.save_results
     savefig(fig_metrics, [out_stem, '_metrics.fig']);
     saveas(fig_metrics,  [out_stem, '_metrics.png']);
     savefig(fig_overlay, [out_stem, '_overlay.fig']);
