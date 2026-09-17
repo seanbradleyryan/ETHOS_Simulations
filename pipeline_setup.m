@@ -133,10 +133,10 @@ for p_idx = 1:length(CONFIG.patients)
             end
 
             %% ============================================================
-            %  STEP 0.6: Explode Beam Segments (Reference + Adapted)
+            %  STEP 0.6: Explode Beam Segments (Reference only)
             %% ============================================================
             if CONFIG.run_step06
-                fprintf('\n[STEP 0.6] Exploding beam segments (reference + adapted)...\n');
+                fprintf('\n[STEP 0.6] Exploding beam segments (reference only)...\n');
 
                 exploded = step06_explode_segments(patient_id, session, CONFIG);
 

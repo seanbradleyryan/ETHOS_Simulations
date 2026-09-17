@@ -1,79 +1,52 @@
 %% =========================================================================
 %  STUDY_PASS_RATES_ALLSEGMENTS.m
-%  Per-BEAM photoacoustic gamma summary, averaged over ALL segments in the beam.
+%  Per-BEAM photoacoustic gamma / SSIM summary, averaged over ALL segments.
 %
-%  A companion to study_pass_rates_individual.m. Instead of one field per beam,
-%  this loads EVERY segment of each beam (both CT images) from the already-
-%  reconstructed doses on disk, computes the gamma pass rate of each configured
-%  comparison for every segment, then reduces to a per-beam MEAN +/- STD across
-%  segments. Outputs are two per-beam summary figures (change detection and
-%  reconstruction fidelity) plus an OPTIONAL window of N random per-segment panels
-%  (truth | recon | gamma index). Both the pass-rate results and the random panels
-%  are cached so a matching re-run replots without recomputing gamma.
+%  This script is now a PLOTTER: it DEFERS every gamma-index and SSIM
+%  calculation to Step 2.5 (step25_segment_metrics.m), which runs after the
+%  k-Wave reconstruction and stores the four per-segment comparisons keyed to
+%  the simulation config hash. Here we only LOAD those precomputed results and
+%  draw the summary figures + optional random per-segment panels. Nothing is
+%  recomputed -- a segment with no Step-2.5 result on disk is skipped / blank.
+%
+%  Where Step 2.5 stores its results (read here):
+%    - segment_metrics_summary_<hash>.mat  (beside the recon doses in
+%      SimulationResults/[PatientID]/[Session]/[method]/) -- per-beam & pooled
+%      mean/std of the gamma pass rate (%) and mean local SSIM (%) per
+%      comparison, the per-segment matrices, and the noise-only null floor.
+%      This drives the summary figures and the console table.
+%    - each segment's CT_1 recon .mat carries a 'segment_metrics' variable with
+%      the masked-region gamma-index / SSIM values (mask_idx + *_vals). The
+%      random per-segment panels re-expand these maps on demand.
 %
 %  EVALUATION METRIC (CONFIG.eval_method):
-%    'gamma_index' (default) - the behaviour described above: global gamma pass
-%                              rate (%) at CONFIG.gamma_n %/mm.
-%    'ssim'                  - identical execution / plotting flow, but each
-%                              segment's score is the mean local SSIM (%) over the
-%                              same 10% reference eval mask, and the random-panel
-%                              metric map becomes the local-SSIM map instead of the
-%                              gamma-index map. SSIM outputs use *_ssim-suffixed
-%                              cache/log files so the two metrics never collide.
+%    'gamma_index' (default) - per-segment global gamma pass rate (%).
+%    'ssim'                  - per-segment mean local SSIM (%) over the 10%
+%                              reference eval mask.
+%  Both are read from the SAME summary file; the criterion is whatever Step 2.5
+%  used (CONFIG.gamma_n is validated against it, never used to recompute).
 %
-%  Comparisons (CONFIG.comparisons), each per segment:
-%    truth1_vs_truth3  RayStation truth CT_1 vs truth CT_3   (green connector ref)
-%    truth1_vs_recon1  RayStation truth CT_1 vs recon CT_1   (green)
-%    truth1_vs_recon3  RayStation truth CT_1 vs recon CT_3   (red)
-%    truth3_vs_recon3  RayStation truth CT_3 vs recon CT_3   (own-CT fidelity)
-%
-%  When CONFIG.normalize is true, each recon is first rescaled by the least-
-%  squares gain that best matches it to its OWN-CT truth over that truth's 10%
-%  region (recon_CT1->rs_CT1, recon_CT3->rs_CT3), cancelling the stored absolute
-%  scale (CONFIG.correction_factor); the RS truths are never rescaled.
+%  Comparisons (per segment, in the summary's stored order):
+%    truth1_vs_truth3  RayStation truth CT_1 vs truth CT_3
+%    truth1_vs_recon1  RayStation truth CT_1 vs recon CT_1
+%    truth1_vs_recon3  RayStation truth CT_1 vs recon CT_3
+%    truth3_vs_recon3  RayStation truth CT_3 vs recon CT_3
 %
 %  FIGURE 1 - change detection, a TABBED window (x = beam number):
-%    Tab "Pass rates" (y = pass rate %, single crit):
-%      - recon_CT1 vs truth_CT1  (green markers, std error bars),
-%      - recon_CT3 vs truth_CT1  (red markers, std error bars),
-%      - truth_CT1 vs truth_CT3  (blue markers, std error bars),
-%      - a per-beam vertical connector between the two recon means, coloured like
-%        whichever mean is greater,
-%      - when CONFIG.include_noise_floor is on, the noise-only null (from
-%        noise_ensemble_error_bars) as a horizontal mean +/- std band plus an
-%        explicit noise pass-rate data point at every beam slot.
-%    Tab "Differentials" (y = pass-rate differential %):
-%      - recon differential (recon_CT1 - recon_CT3, both vs truth_CT1): green
-%        where >= 0 (change detected the correct way), red where < 0,
-%      - truth differential 100 - (truth_CT1 vs truth_CT3), the true change
-%        magnitude, in blue. Both carry std error bars (paired per-segment std),
-%      - when CONFIG.include_noise_floor is on, a noise-reconstruction differential
-%        (recon_CT1 pass rate - noise pass rate) as a data point per beam slot.
+%    Tab "Pass rates"    - recon_CT1 (green), recon_CT3 (red) and truth_CT1-vs-
+%                          truth_CT3 (blue), std error bars, a per-beam connector
+%                          between the two recon means, and (gamma only, when
+%                          CONFIG.include_noise_floor) the noise-only null band.
+%    Tab "Differentials" - recon_CT1 - recon_CT3 (green >=0 / red <0), the true
+%                          change 100 - (truth_CT1 vs truth_CT3) in blue, and
+%                          (gamma only) recon_CT1 - noise.
+%  FIGURE 2 - reconstruction fidelity (each recon vs its OWN-CT truth).
+%  Both carry a trailing pooled "All" entry over every plotted segment.
 %
-%  FIGURE 2 - reconstruction fidelity (each recon vs its OWN-CT truth):
-%    - truth_CT1 vs recon_CT1 (green), truth_CT3 vs recon_CT3 (red), each series
-%      joined by straight lines across beams. No vertical connectors.
-%
-%  All tabs/figures carry a trailing "All" x-axis entry: the mean +/- std pooled
-%  over EVERY segment of EVERY processed beam, separated from the per-beam entries
-%  by a dashed vertical rule.
-%
-%  OPERATIONAL:
-%    - Progress notifications + a total-runtime record are printed to console.
-%    - The whole console session is mirrored to CONFIG.log_file via diary, and
-%      results + log are written beside the recon doses in
-%      SimulationResults/[PatientID]/[Session]/[method]/.
-%    - ALL CalcGamma console output is suppressed (evalc wrapper).
-%    - Missing entries (absent beam, absent segment, missing CT_1/CT_3 pair or
-%      recon file, grid mismatch) are skipped rather than raised.
-%    - Per-beam segment gamma runs in parallel (parfor) or serially per
-%      CONFIG.use_parallel; the pool is auto-sized to the machine's physical cores
-%      (CONFIG.auto_detect_workers) with CONFIG.num_workers as the fallback.
-%    - Optional noise-only null "floor" LOADED from a cached noise_ensemble_error_bars
-%      run (located by CONFIG.noise_config_hash) AND stored in the results .mat so
-%      repeat runs reuse it. If the cached samples are not found, the floor falls
-%      back to the constant CONFIG.noise_fallback_pass_rate (%). This script never
-%      runs the ensemble itself.
+%  OPTIONAL random per-segment panels: N random segments, each a tab of
+%  truth | recon | metric-map rows. The metric map is the Step-2.5 folded
+%  gamma/SSIM map re-expanded from disk (never recomputed); recon volumes are
+%  loaded only for the truth/recon image columns.
 %
 %  NOTE: HIPAA / remote-execution - this file is WRITTEN here but must be RUN on
 %  the remote device. Do not execute locally.
@@ -89,17 +62,10 @@ run_timer = tic;   % program runtime record
 
 %% ========================= CONFIGURATION ================================
 
-% --- Evaluation metric -------------------------------------------------------
-% Which per-segment metric drives the pass matrices, summary charts, console
-% tables and random panels:
-%   'gamma_index' - global gamma pass rate (%) at CONFIG.gamma_n %/mm (default;
-%                   the original behaviour of this script).
-%   'ssim'        - mean local structural similarity (%) over the same 10%
-%                   reference eval mask. Identical execution / plotting flow, but
-%                   the plotted metric (and the random-panel maps) become SSIM
-%                   instead of gamma. CONFIG.gamma_n is unused in this mode.
-% SSIM outputs are written to *_ssim-suffixed cache/log files so the two metrics
-% never clobber each other.
+% Which precomputed per-segment metric drives the charts / console table:
+%   'gamma_index' - global gamma pass rate (%);  'ssim' - mean local SSIM (%).
+% Both are read from the Step-2.5 summary; the SSIM run uses *_ssim-suffixed
+% log/cache filenames so the two metrics never clobber each other.
 CONFIG.eval_method = 'gamma_index';   % 'gamma_index' | 'ssim'
 
 CONFIG.working_dir    = '/mnt/weka/home/80030361/ETHOS_Simulations';
@@ -107,25 +73,24 @@ CONFIG.patient_id     = '1194203';
 CONFIG.session        = 'Session_1';
 CONFIG.treatment_site = 'Pancreas';
 
-% Beams to summarize (all segments of each are loaded and averaged).
+% Beams to summarize (must be a subset of the beams Step 2.5 processed).
 CONFIG.beams = 1:17;
 
-% Restrict to a single plan type so segment grouping is unambiguous.
+% Restrict to a single plan type (validated against the summary).
 CONFIG.plan_type = 'reference';   % 'reference' | 'adapted' | 'any'
 
 % The two CT image indices (lower -> *_CT1 volumes, higher -> *_CT3 volumes).
 CONFIG.ct_pair = [1, 3];
 
-% Explicit recon config-hash override ('' => auto-discover on disk via loader).
+% Recon config-hash. '' => auto-discover the single summary on disk.
 CONFIG.config_hash = 'a9a3e1e6';
 
-% Needed by load_recon_dose_data to resolve the method folder / hash on disk.
+% Needed by load_recon_dose_data (random panels) to resolve the method folder.
 CONFIG.gruneisen_method = 'threshold_2';
 
-% --- Comparisons to run (configurable list) ---------------------------------
-%  {name, ref_field, tgt_field, ref_label, tgt_label}. ref/tgt name a per-segment
-%  volume: 'rs_CT1' | 'rs_CT3' | 'recon_CT1' | 'recon_CT3'. Gamma uses ref_field
-%  as the reference and builds the 10% eval mask from it.
+% Comparison display labels {name, ref, tgt, ref_label, tgt_label}. The column
+% order here only labels the random panels; the summary's own column order
+% drives the summary figures.
 CONFIG.comparisons = { ...
     'truth1_vs_truth3', 'rs_CT1', 'rs_CT3',    'Truth CT\_1', 'Truth CT\_3'; ...
     'truth1_vs_recon1', 'rs_CT1', 'recon_CT1', 'Truth CT\_1', 'Recon CT\_1'; ...
@@ -133,69 +98,34 @@ CONFIG.comparisons = { ...
     'truth3_vs_recon3', 'rs_CT3', 'recon_CT3', 'Truth CT\_3', 'Recon CT\_3'  ...
 };
 
-% Gamma criterion n (evaluated as n%/n mm). Single value for the summary.
-CONFIG.gamma_n = 3;   % 3%/3 mm
+% Gamma criterion n (n%/n mm) EXPECTED from Step 2.5. Validated against the
+% summary; a mismatch warns and the summary's value is used (never recomputed).
+CONFIG.gamma_n = 3;
 
-% Least-squares relative normalization of each recon to its own-CT truth.
+% Least-squares recon->own-truth normalization. Must match what Step 2.5 used
+% (validated); also applied to the recon volumes shown in the random panels.
 CONFIG.normalize = true;
 
-% Parallelization: true -> parfor over a beam's segments; false -> serial.
-% CPU gamma (see quiet_gamma_pass), so workers scale with physical cores.
-CONFIG.use_parallel = true;
-% When auto_detect_workers is true the pool is sized to the machine's physical
-% core count (detect_num_cores); num_workers is only the fallback used when that
-% detection is unavailable (no Parallel Computing Toolbox / query fails).
-CONFIG.auto_detect_workers = true;
-CONFIG.num_workers         = 64;   % fallback local pool size
+% Draw the Step-2.5 noise-only null floor (gamma metric only) when present.
+CONFIG.include_noise_floor = true;
 
-% --- Noise floor (noise-only null hypothesis) --------------------------------
-% When true (and eval_method is 'gamma_index'), draw a noise-only "floor" on the
-% change-detection tabs. The noise samples are LOADED from a cached
-% noise_ensemble_error_bars run (noise_ensemble_<patient>_<session>_<hash>.mat
-% under AnalysisResults); this script does NOT run the ensemble itself. The cache
-% is located by CONFIG.noise_config_hash. If the samples are not found, the floor
-% falls back to the constant CONFIG.noise_fallback_pass_rate (%), and all noise
-% calculations / plotting use that value.
-CONFIG.include_noise_floor      = true;
-% Hash locating the cached noise-ensemble samples. When empty, the sim-config hash
-% (compute_sim_config_hash of noise_sim_config) is used instead.
-CONFIG.noise_config_hash        = 'a9a3e1e6';
-% Pass rate (%) used as the noise floor when the cached samples are not found.
-CONFIG.noise_fallback_pass_rate = 17;
-% Simulation CONFIG whose hash is used only when noise_config_hash is empty.
-CONFIG.noise_sim_config         = [];    % [] => get_default_config(); else a struct
-
-% --- Output ---
-% Results and the console log are cached beside the recon doses, i.e. in
-% SimulationResults/[PatientID]/[Session]/[gruneisen_method]/. Set output_dir to
-% a path to override that location.
-CONFIG.save_results = true;
-CONFIG.output_dir   = '';   % '' => the recon-dose directory
-CONFIG.output_file  = 'pass_rates_allsegments_results.mat';
-CONFIG.log_file     = 'pass_rates_allsegments_log.txt';
-
-% --- Cache ---
-% When true, if CONFIG.output_file already exists AND its saved run matches the
-% current CONFIG (hash, criterion, comparisons, beams, normalize), the per-beam
-% gamma is SKIPPED and the summary plot / console table are regenerated straight
-% from the cached results. Set false to always recompute.
-CONFIG.use_cache = true;
+% --- Output / logging ---
+% The console log is written beside the recon doses unless output_dir is set.
+CONFIG.output_dir = '';   % '' => the recon-dose directory
+CONFIG.log_file   = 'pass_rates_allsegments_log.txt';
 
 % --- Random per-segment panel visualization ---
-% When true, ALSO show N randomly chosen segments, each in its own tab of a single
-% window, with one row of panels per tab: truth dose | reconstruction | gamma index
-% for every comparison in CONFIG.random_comparisons. The selected panels are cached
-% to CONFIG.random_cache_file (keyed by hash/criterion/comparisons/N/seed/normalize)
-% so a re-run with the same settings replots WITHOUT recomputing gamma; on a miss
-% the recon volumes are (re)loaded from disk and the gamma maps recomputed. This
-% cache is INDEPENDENT of the pass-rate results cache above (which stores no volumes).
+% N random segments, each a tab of truth | recon | metric-map rows. The metric
+% map is the Step-2.5 folded gamma/SSIM map re-expanded from disk (never
+% recomputed); recon volumes are loaded only for the truth/recon image columns.
+% Selected panels are cached so a matching re-run replots without reloading.
 CONFIG.plot_random_segments = true;
 CONFIG.n_random             = 5;     % number of random segments to display
-CONFIG.random_seed          = 42;    % reproducible selection (used in the cache key)
-% Which comparisons to draw per segment (names from CONFIG.comparisons). Default:
-% the two recon comparisons -> "Dose 1 on recon 1" and "Dose 2 on recon 1".
+CONFIG.random_seed          = 42;    % reproducible selection (in the cache key)
 CONFIG.random_comparisons   = {'truth1_vs_recon1', 'truth1_vs_recon3'};
 CONFIG.random_cache_file    = 'pass_rates_allsegments_random_viz.mat';
+CONFIG.use_cache            = true;  % reuse the random-panel cache when it matches
+CONFIG.save_results         = true;  % save the selected random panels to that cache
 
 %% ===================== SETUP ============================================
 
@@ -208,12 +138,11 @@ if ~ismember(CONFIG.eval_method, {'gamma_index', 'ssim'})
         CONFIG.eval_method);
 end
 if strcmp(CONFIG.eval_method, 'ssim')
-    CONFIG.output_file       = add_name_suffix(CONFIG.output_file, '_ssim');
     CONFIG.log_file          = add_name_suffix(CONFIG.log_file, '_ssim');
     CONFIG.random_cache_file = add_name_suffix(CONFIG.random_cache_file, '_ssim');
 end
 
-% Cache directory: the recon-dose folder unless explicitly overridden.
+% Cache/log directory: the recon-dose folder unless explicitly overridden.
 if isempty(CONFIG.output_dir)
     CONFIG.output_dir = fullfile(CONFIG.working_dir, 'SimulationResults', ...
         CONFIG.patient_id, CONFIG.session, CONFIG.gruneisen_method);
@@ -236,189 +165,106 @@ ct_hi   = max(CONFIG.ct_pair);
 ct1_str = sprintf('CT_%d', ct_lo);
 ct3_str = sprintf('CT_%d', ct_hi);
 
-beams   = CONFIG.beams(:)';
-nBeams  = numel(beams);
-nComp   = size(CONFIG.comparisons, 1);
-crit    = CONFIG.gamma_n(1);
+%% ===================== LOAD PRECOMPUTED STEP 2.5 SUMMARY ================
+% Everything the summary figures need is precomputed by step25_segment_metrics
+% and stored in segment_metrics_summary_<hash>.mat beside the recon doses.
 
-% Metric-specific labels (axis text, chart-title word, console header) resolved
-% once and threaded to every plotting / printing site.
-metric = build_metric_descriptor(CONFIG.eval_method, crit);
+[summary_path, hash_used] = find_summary_file(CONFIG.output_dir, CONFIG.config_hash);
+CONFIG.config_hash = hash_used;   % pin the resolved hash for the random panels
+fprintf('[STEP 2.5] Loading precomputed metrics: %s\n', summary_path);
+SM = load(summary_path);
 
-% Required toolbox per metric: CalcGamma for gamma, ssim (IP Toolbox) for SSIM.
-if strcmp(CONFIG.eval_method, 'gamma_index')
-    if exist('CalcGamma', 'file') ~= 2
-        error('study_pass_rates_allsegments:NoCalcGamma', ...
-            'CalcGamma not found on the path; cannot compute gamma pass rates.');
-    end
-else
-    if exist('ssim', 'file') ~= 2
-        error('study_pass_rates_allsegments:NoSSIM', ...
-            'ssim not found (Image Processing Toolbox required for CONFIG.eval_method=''ssim'').');
-    end
+req  = {'comparisons', 'beams', 'n_segments', 'gamma', 'ssim'};
+miss = req(~isfield(SM, req));
+if ~isempty(miss)
+    error('study_pass_rates_allsegments:BadSummary', ...
+        'Summary %s missing field(s): %s', summary_path, strjoin(miss, ', '));
 end
 
-% Column indices (into CONFIG.comparisons / the pass matrices) for the plots.
-d_tt = comp_col(CONFIG.comparisons, 'truth1_vs_truth3');   % fig 1, blue
-d_r1 = comp_col(CONFIG.comparisons, 'truth1_vs_recon1');   % fig 1 green, fig 2 green
-d_r3 = comp_col(CONFIG.comparisons, 'truth1_vs_recon3');   % fig 1, red
-d_33 = comp_col(CONFIG.comparisons, 'truth3_vs_recon3');   % fig 2, red
+% Validate the settings that must match what Step 2.5 computed. We cannot
+% recompute here, so a mismatch is either an error or adopt-the-summary + warn.
+if isfield(SM, 'normalize') && ~isequal(logical(SM.normalize), logical(CONFIG.normalize))
+    warning('study_pass_rates_allsegments:NormalizeMismatch', ...
+        ['CONFIG.normalize=%d but the summary was computed with normalize=%d; ' ...
+         'using the summary as-is.'], logical(CONFIG.normalize), logical(SM.normalize));
+    CONFIG.normalize = logical(SM.normalize);
+end
+if isfield(SM, 'plan_type') && ~strcmpi(char(SM.plan_type), char(CONFIG.plan_type))
+    warning('study_pass_rates_allsegments:PlanTypeMismatch', ...
+        'CONFIG.plan_type=%s but the summary is %s; using the summary.', ...
+        char(CONFIG.plan_type), char(SM.plan_type));
+    CONFIG.plan_type = char(SM.plan_type);
+end
 
+% Criterion: the gamma metric is labelled with whatever Step 2.5 used.
+crit = CONFIG.gamma_n(1);
+if strcmp(CONFIG.eval_method, 'gamma_index') ...
+        && isfield(SM, 'gamma_dose_pct') && ~isempty(SM.gamma_dose_pct)
+    if ~isequal(SM.gamma_dose_pct, crit)
+        warning('study_pass_rates_allsegments:CritMismatch', ...
+            ['CONFIG.gamma_n=%g but Step 2.5 used %g%%/%g mm; ' ...
+             'labelling with the summary value.'], ...
+            crit, SM.gamma_dose_pct, SM.gamma_dist_mm);
+    end
+    crit = SM.gamma_dose_pct;
+end
+
+% Metric-specific labels (axis text, chart-title word, console header) resolved
+% once the criterion is known, then threaded to every plotting / printing site.
+metric = build_metric_descriptor(CONFIG.eval_method, crit);
+
+% Column indices INTO THE SUMMARY for the comparisons the summary figures need.
+d_tt = comp_col_names(SM.comparisons, 'truth1_vs_truth3');   % fig 1, blue
+d_r1 = comp_col_names(SM.comparisons, 'truth1_vs_recon1');   % fig 1 green, fig 2 green
+d_r3 = comp_col_names(SM.comparisons, 'truth1_vs_recon3');   % fig 1, red
+d_33 = comp_col_names(SM.comparisons, 'truth3_vs_recon3');   % fig 2, red
 if any(isnan([d_tt, d_r1, d_r3, d_33]))
     error('study_pass_rates_allsegments:MissingComparison', ...
-        ['CONFIG.comparisons must define truth1_vs_truth3, truth1_vs_recon1, ' ...
+        ['The Step-2.5 summary must define truth1_vs_truth3, truth1_vs_recon1, ' ...
          'truth1_vs_recon3 and truth3_vs_recon3 for the summary figures.']);
 end
 
+% Pick the metric block (per-beam mean/std + per-segment matrices) that matches
+% CONFIG.eval_method. Both live in the same summary.
+if metric.is_ssim
+    sm_mean = SM.ssim.mean;        sm_std = SM.ssim.std;        sm_seg = SM.ssim.seg_mean;
+else
+    sm_mean = SM.gamma.mean_pass;  sm_std = SM.gamma.std_pass;  sm_seg = SM.gamma.seg_pass;
+end
+
+% Restrict to the requested beams (all must be present in the summary).
+[tf, loc] = ismember(CONFIG.beams(:)', SM.beams(:)');
+if ~all(tf)
+    error('study_pass_rates_allsegments:BeamsNotInSummary', ...
+        'Requested beam(s) %s are not in the Step-2.5 summary. Re-run Step 2.5 or edit CONFIG.beams.', ...
+        mat2str(CONFIG.beams(~tf)));
+end
+beam_list        = SM.beams(loc);
+mean_pass        = sm_mean(loc, :);
+std_pass         = sm_std(loc, :);
+nseg_used        = SM.n_segments(loc);
+seg_pass_by_beam = sm_seg(loc);      % {1 x nBeam}, each [nSeg x nComp]
+nComp            = numel(SM.comparisons);
+nproc            = numel(beam_list);
+
+% Noise-only null floor (gamma metric only): taken straight from the summary.
+noise_floor = [];
+if CONFIG.include_noise_floor && ~metric.is_ssim && isfield(SM, 'noise_floor')
+    noise_floor = SM.noise_floor;
+end
+
 fprintf('============================================================\n');
-fprintf(' STUDY_PASS_RATES_ALLSEGMENTS\n');
+fprintf(' STUDY_PASS_RATES_ALLSEGMENTS (plots Step-2.5 results)\n');
 fprintf(' Patient %s | %s | plan=%s | hash=%s\n', ...
     CONFIG.patient_id, CONFIG.session, CONFIG.plan_type, CONFIG.config_hash);
-fprintf(' Beams: %s  (%d)\n', mat2str(beams), nBeams);
-fprintf(' Metric: %s%s | normalize=%d | parallel=%d\n', ...
-    metric.name, metric.crit_suffix, CONFIG.normalize, CONFIG.use_parallel);
-fprintf(' Cache dir: %s\n', CONFIG.output_dir);
-fprintf(' Log file : %s\n', log_path);
+fprintf(' Beams: %s  (%d)\n', mat2str(beam_list), nproc);
+fprintf(' Metric: %s%s | normalize=%d\n', ...
+    metric.name, metric.crit_suffix, CONFIG.normalize);
+fprintf(' Summary : %s\n', summary_path);
+fprintf(' Log file: %s\n', log_path);
 fprintf('============================================================\n');
 
-% Resolve the results/cache path once (used for both cache-read and save). Results
-% live beside the recon doses (CONFIG.output_dir) unless an absolute name is given.
-out_path = CONFIG.output_file;
-if isempty(fileparts(out_path))
-    out_path = fullfile(CONFIG.output_dir, out_path);
-end
-
-%% ===================== CACHE CHECK =====================================
-% If a matching cached run exists, load it and skip straight to plotting.
-
-loaded_from_cache = false;
-beam_list = [];
-mean_pass = [];
-std_pass  = [];
-nseg_used = [];
-nproc     = 0;
-total_seg_evals = 0;
-noise_floor_cached = [];   % noise floor restored from the results cache, if any
-
-if CONFIG.use_cache && exist(out_path, 'file') == 2
-    [ok, cached, why] = try_load_cache(out_path, CONFIG, crit);
-    if ok
-        beam_list = cached.beams;
-        mean_pass = cached.mean_pass;
-        std_pass  = cached.std_pass;
-        nseg_used = cached.n_segments;
-        seg_pass_by_beam = cached.seg_pass;   % {1 x nBeams}, each [nSeg x nComp]
-        if isfield(cached, 'noise_floor'), noise_floor_cached = cached.noise_floor; end
-        nproc     = numel(beam_list);
-        total_seg_evals = sum(nseg_used) * nComp;
-        loaded_from_cache = true;
-        fprintf('\n[CACHE] Reusing results from: %s\n', out_path);
-        fprintf('[CACHE] %d beam(s), %d segment(s); skipping gamma recomputation.\n', ...
-            nproc, sum(nseg_used));
-    else
-        fprintf('\n[CACHE] Existing file not reusable (%s); recomputing.\n', why);
-    end
-end
-
-if ~loaded_from_cache
-
-if CONFIG.use_parallel
-    nworkers = CONFIG.num_workers;
-    if isfield(CONFIG, 'auto_detect_workers') && CONFIG.auto_detect_workers
-        nworkers = detect_num_cores(CONFIG.num_workers);
-        fprintf('  [Pool] Auto-detected %d core(s) for the worker pool.\n', nworkers);
-    end
-    ensure_pool(nworkers);
-end
-
-% Per-beam aggregates (trimmed to processed beams afterwards).
-beam_list = nan(1, nBeams);
-mean_pass = nan(nBeams, nComp);
-std_pass  = nan(nBeams, nComp);
-nseg_used = zeros(1, nBeams);
-nproc     = 0;
-total_seg_evals = 0;
-
-% Per-segment pass rates kept per beam ([nSeg x nComp] each) so the pooled "All"
-% entry is a true mean/std over every segment rather than a mean of beam means.
-seg_pass_by_beam = cell(1, nBeams);
-
-%% ===================== PER-BEAM PROCESSING ==============================
-
-for bi = 1:nBeams
-    b = beams(bi);
-    fprintf('\n[Beam %d/%d] beam #%d: loading all segments...\n', bi, nBeams, b);
-
-    % ---- Load every segment of this beam (both CTs). Skip on any load error. ----
-    try
-        out = load_beam_set(CONFIG, b);
-    catch ME
-        warning('study_pass_rates_allsegments:SkipBeam', ...
-            'Skipping beam #%d (load failed): %s', b, ME.message);
-        continue;
-    end
-
-    fields  = out.fields;
-    spacing = out.metadata.spacing(:)';
-
-    % ---- Group fields by segment; build a normalized volume set per segment. ----
-    seg_data = group_beam_segments(fields, spacing, ct1_str, ct3_str, ...
-        CONFIG.normalize, b);
-
-    ns = numel(seg_data);
-    if ns == 0
-        warning('study_pass_rates_allsegments:NoSegments', ...
-            'Beam #%d: no usable segments found; skipping beam.', b);
-        continue;
-    end
-
-    % ---- Gamma pass rate per (segment x comparison). CalcGamma is silenced. ----
-    comparisons = CONFIG.comparisons;
-    eval_method = CONFIG.eval_method;
-    pass_seg    = nan(ns, nComp);
-    if CONFIG.use_parallel
-        parfor si = 1:ns
-            pass_seg(si, :) = seg_pass_rates(seg_data{si}, comparisons, crit, eval_method);
-        end
-    else
-        for si = 1:ns
-            pass_seg(si, :) = seg_pass_rates(seg_data{si}, comparisons, crit, eval_method);
-        end
-    end
-
-    % ---- Reduce to per-beam mean +/- std across segments. ----
-    nproc = nproc + 1;
-    beam_list(nproc)   = b;
-    mean_pass(nproc,:) = mean(pass_seg, 1, 'omitnan');
-    std_pass(nproc,:)  = std(pass_seg, 0, 1, 'omitnan');
-    nseg_used(nproc)   = ns;
-    seg_pass_by_beam{nproc} = pass_seg;
-    total_seg_evals    = total_seg_evals + ns * nComp;
-
-    elapsed = toc(run_timer);
-    eta     = elapsed / bi * (nBeams - bi);
-    fprintf(['  beam #%d done: %d segment(s) used | mean pass ' ...
-             'recon1=%.1f%% recon3=%.1f%% truth3=%.1f%% | elapsed %.1fs, ETA %.1fs\n'], ...
-        b, ns, mean_pass(nproc, d_r1), mean_pass(nproc, d_r3), ...
-        mean_pass(nproc, d_tt), elapsed, eta);
-end
-
-% Trim aggregates to processed beams.
-beam_list = beam_list(1:nproc);
-mean_pass = mean_pass(1:nproc, :);
-std_pass  = std_pass(1:nproc, :);
-nseg_used = nseg_used(1:nproc);
-seg_pass_by_beam = seg_pass_by_beam(1:nproc);
-
-if nproc == 0
-    error('study_pass_rates_allsegments:NoBeams', ...
-        'No beams could be processed (all skipped).');
-end
-
-end   % if ~loaded_from_cache
-
 % Sort so the axis is well-defined regardless of how CONFIG.beams was written.
-% Applies to both the freshly-computed and the cache-loaded paths.
 [beam_list, ord]  = sort(beam_list);
 mean_pass         = mean_pass(ord, :);
 std_pass          = std_pass(ord, :);
@@ -426,10 +272,9 @@ nseg_used         = nseg_used(ord);
 seg_pass_by_beam  = seg_pass_by_beam(ord);
 
 %% ===================== POOLED "ALL BEAMS" AGGREGATE =====================
-%  Mean +/- std over every segment of every processed beam (each segment weighted
-%  equally), plotted as the trailing "All" x-axis entry on both figures. Computed
-%  for both the freshly-computed and the cache-loaded paths (seg_pass_by_beam is
-%  restored from the cache in the latter).
+%  Mean +/- std over every plotted segment (each segment weighted equally),
+%  recomputed from the selected beams so the trailing "All" entry reflects
+%  exactly what is drawn (rather than the summary's all-beam pool).
 
 all_seg_pass = vertcat(seg_pass_by_beam{:});   % [sum(nseg_used) x nComp]
 all_mean     = mean(all_seg_pass, 1, 'omitnan');
@@ -438,23 +283,21 @@ all_nseg     = size(all_seg_pass, 1);
 
 %% ===================== CONSOLE SUMMARY (BY BEAM) =======================
 
+comp_names = SM.comparisons(:)';
 fprintf('\n==================== BEAM %s (mean over segments) ====================\n', ...
     upper(metric.title));
 fprintf('(%s, mean +/- std over segments)\n', metric.header_detail);
 for n = 1:nproc
     fprintf('\n----- [beam #%d]  (%d segments) -----\n', beam_list(n), nseg_used(n));
     for d = 1:nComp
-        fprintf('  %-18s (%s vs %s)   %6.2f%% +/- %5.2f%%\n', ...
-            CONFIG.comparisons{d,1}, CONFIG.comparisons{d,2}, CONFIG.comparisons{d,3}, ...
-            mean_pass(n, d), std_pass(n, d));
+        fprintf('  %-18s   %6.2f%% +/- %5.2f%%\n', ...
+            comp_names{d}, mean_pass(n, d), std_pass(n, d));
     end
 end
 
 fprintf('\n----- [ALL BEAMS]  (%d segments over %d beams) -----\n', all_nseg, nproc);
 for d = 1:nComp
-    fprintf('  %-18s (%s vs %s)   %6.2f%% +/- %5.2f%%\n', ...
-        CONFIG.comparisons{d,1}, CONFIG.comparisons{d,2}, CONFIG.comparisons{d,3}, ...
-        all_mean(d), all_std(d));
+    fprintf('  %-18s   %6.2f%% +/- %5.2f%%\n', comp_names{d}, all_mean(d), all_std(d));
 end
 fprintf('\n=============================================================\n');
 
@@ -465,30 +308,11 @@ fprintf('\n=============================================================\n');
 x_pos    = 1:(nproc + 1);
 x_labels = [arrayfun(@(b) sprintf('%d', b), beam_list, 'UniformOutput', false), {'All'}];
 
-% Noise-only null floor. Reused from the results cache when a matching one is
-% stored (same sim-config hash + criterion); otherwise computed once (the ensemble
-% itself is also cached by the sim-config hash) and appended to the cache below.
-% Only the gamma metric has a meaningful noise floor; skipped for SSIM.
-noise_floor        = [];
-noise_floor_is_new = false;
-if CONFIG.include_noise_floor
-    if metric.is_ssim
-        fprintf('\n[NOISE FLOOR] Skipped: no noise floor defined for the SSIM metric.\n');
-    elseif noise_floor_matches(noise_floor_cached, CONFIG, crit)
-        noise_floor = noise_floor_cached;
-        fprintf('\n[NOISE FLOOR] Reusing cached floor: %.2f +/- %.2f %% over %d samples.\n', ...
-            noise_floor.mean_pass_rate, noise_floor.std_pass_rate, noise_floor.num_samples);
-    else
-        noise_floor        = compute_study_noise_floor(CONFIG, crit);
-        noise_floor_is_new = ~isempty(noise_floor);
-    end
-end
-
 % Figure 1: tabbed change-detection figure.
-%   Tab 1 "Pass rates" - both recons vs the CT_1 truth plus truth-vs-truth, with
-%                        the noise floor drawn as a horizontal band (like before).
-%   Tab 2 "Differentials" - per-beam recon1-recon3 (green if >0, else red) and the
-%                        true change 100-(truth1 vs truth3) (blue), std error bars.
+%   Tab 1 "Pass rates"    - both recons vs the CT_1 truth plus truth-vs-truth,
+%                           with the noise floor drawn as a horizontal band.
+%   Tab 2 "Differentials" - per-beam recon1-recon3 (green if >0, else red) and
+%                           the true change 100-(truth1 vs truth3) (blue).
 plot_change_detection_tabs(x_pos, x_labels, mean_pass, std_pass, ...
     all_mean, all_std, seg_pass_by_beam, all_seg_pass, ...
     d_r1, d_r3, d_tt, noise_floor, metric, CONFIG.patient_id, CONFIG.session);
@@ -500,46 +324,19 @@ plot_recon_fidelity_summary(x_pos, x_labels, ...
     metric, CONFIG.patient_id, CONFIG.session);
 
 %% ============= RANDOM PER-SEGMENT PANEL VISUALIZATION ==================
-% N random segments, each in its own tab: one row of truth | recon | gamma per
-% requested comparison. Uses its own cache (recomputes gamma only on a miss).
+% N random segments, each in its own tab: one row of truth | recon | metric per
+% requested comparison. The metric map is the Step-2.5 folded map re-expanded
+% from disk; only the recon/truth volumes are loaded here (no metric recompute).
 
 if CONFIG.plot_random_segments
     show_random_segment_panels(CONFIG, crit, ct1_str, ct3_str, metric);
 end
 
-%% ========================= SAVE RESULTS ================================
+%% ========================= WRAP UP =====================================
 
 total_runtime = toc(run_timer);
-
-if CONFIG.save_results && ~loaded_from_cache
-    RESULTS = struct();
-    RESULTS.config        = CONFIG;
-    RESULTS.eval_method   = CONFIG.eval_method;
-    RESULTS.gamma_crit    = crit;
-    RESULTS.beams         = beam_list;
-    RESULTS.comparisons   = CONFIG.comparisons(:,1)';
-    RESULTS.mean_pass     = mean_pass;   % [nBeams x nComp]
-    RESULTS.std_pass      = std_pass;    % [nBeams x nComp]
-    RESULTS.n_segments    = nseg_used;
-    RESULTS.seg_pass      = seg_pass_by_beam;   % {1 x nBeams}, each [nSeg x nComp]
-    RESULTS.all_mean      = all_mean;    % [1 x nComp], pooled over every segment
-    RESULTS.all_std       = all_std;     % [1 x nComp]
-    RESULTS.all_n_segments = all_nseg;
-    RESULTS.log_file      = log_path;
-    RESULTS.total_runtime_s = total_runtime;
-    RESULTS.noise_floor   = noise_floor;   % [] when disabled; ens struct otherwise
-
-    save(out_path, '-struct', 'RESULTS', '-v7.3');   % out_path resolved above
-    fprintf('\nResults saved to: %s\n', out_path);
-elseif CONFIG.save_results && loaded_from_cache && noise_floor_is_new
-    % Results came from cache but the noise floor was (re)computed this run; add it
-    % to the existing cache so later runs reuse it without touching geometry.
-    save(out_path, 'noise_floor', '-append');
-    fprintf('\n[NOISE FLOOR] Appended to results cache: %s\n', out_path);
-end
-
-fprintf('\nTotal runtime: %.1f s (%.2f min) | %d beam(s), %d segment-evaluation(s).\n', ...
-    total_runtime, total_runtime/60, nproc, total_seg_evals);
+fprintf('\nTotal runtime: %.1f s (%.2f min) | %d beam(s), %d segment(s).\n', ...
+    total_runtime, total_runtime/60, nproc, all_nseg);
 fprintf('Console log written to: %s\n', log_path);
 diary off;
 
@@ -547,61 +344,6 @@ diary off;
 %% =========================================================================
 %  LOCAL FUNCTIONS
 %% =========================================================================
-
-function ensure_pool(desired_workers)
-%ENSURE_POOL Start a local CPU pool of desired_workers if none exists.
-%  Clamps the request to the cluster's NumWorkers limit; non-fatal if the
-%  Parallel Computing Toolbox is absent (loops then run serially).
-    if nargin < 1 || isempty(desired_workers), desired_workers = 64; end
-    if exist('parpool', 'file') ~= 2
-        fprintf('  [WARN] Parallel Computing Toolbox not found; loops run serially.\n');
-        return;
-    end
-    try
-        if isempty(gcp('nocreate'))
-            nw = desired_workers;
-            try
-                c  = parcluster('local');
-                nw = min(desired_workers, c.NumWorkers);
-                if nw < desired_workers
-                    fprintf('  [Pool] Requested %d workers; cluster caps at %d.\n', ...
-                        desired_workers, nw);
-                end
-            catch
-            end
-            parpool('local', nw);
-            fprintf('  [Pool] Started local pool with %d worker(s).\n', nw);
-        end
-    catch ME
-        fprintf('  [WARN] Could not start parallel pool (%s). Running serially.\n', ME.message);
-    end
-end
-
-function n = detect_num_cores(default_workers)
-%DETECT_NUM_CORES Physical CPU core count for sizing the worker pool.
-%  Tries the local cluster profile's NumWorkers first (the value parpool would
-%  use by default), then feature('numcores'); falls back to default_workers if
-%  neither is available or returns something nonsensical.
-    if nargin < 1 || isempty(default_workers), default_workers = 64; end
-    n = [];
-    try
-        c = parcluster('local');
-        n = c.NumWorkers;
-    catch
-        n = [];
-    end
-    if isempty(n) || ~isfinite(n) || n < 1
-        try
-            n = feature('numcores');   % undocumented but widely available
-        catch
-            n = [];
-        end
-    end
-    if isempty(n) || ~isfinite(n) || n < 1
-        n = default_workers;
-    end
-    n = double(round(n));
-end
 
 function name = add_name_suffix(name, suffix)
 %ADD_NAME_SUFFIX Insert suffix before the extension of a filename (keeps any dir).
@@ -611,6 +353,41 @@ function name = add_name_suffix(name, suffix)
     if isempty(d)
         name = [base, suffix, ext];   % keep it relative when no directory was given
     end
+end
+
+function [summary_path, hash] = find_summary_file(output_dir, config_hash)
+%FIND_SUMMARY_FILE Locate the Step-2.5 rollup segment_metrics_summary_<hash>.mat.
+%  With an explicit config_hash the matching file is required. Otherwise the
+%  directory is scanned; a single match is used and its hash returned, while zero
+%  or several matches raise (listing what was found) so the caller can disambiguate.
+    if ~isempty(config_hash)
+        hash = char(config_hash);
+        summary_path = fullfile(output_dir, ...
+            sprintf('segment_metrics_summary_%s.mat', hash));
+        if exist(summary_path, 'file') ~= 2
+            error('study_pass_rates_allsegments:NoSummary', ...
+                ['Step-2.5 summary not found:\n  %s\n' ...
+                 'Run step25_segment_metrics first (or clear CONFIG.config_hash to auto-discover).'], ...
+                summary_path);
+        end
+        return;
+    end
+
+    d = dir(fullfile(output_dir, 'segment_metrics_summary_*.mat'));
+    if isempty(d)
+        error('study_pass_rates_allsegments:NoSummary', ...
+            ['No segment_metrics_summary_*.mat in\n  %s\n' ...
+             'Run step25_segment_metrics first.'], output_dir);
+    end
+    if numel(d) > 1
+        hashes = regexprep({d.name}, '^segment_metrics_summary_(.+)\.mat$', '$1');
+        error('study_pass_rates_allsegments:AmbiguousSummary', ...
+            'Multiple Step-2.5 summaries in %s (hashes: %s). Set CONFIG.config_hash.', ...
+            output_dir, strjoin(hashes, ', '));
+    end
+    summary_path = fullfile(output_dir, d(1).name);
+    tok  = regexp(d(1).name, '^segment_metrics_summary_(.+)\.mat$', 'tokens', 'once');
+    hash = tok{1};
 end
 
 function metric = build_metric_descriptor(eval_method, crit)
@@ -636,391 +413,19 @@ function metric = build_metric_descriptor(eval_method, crit)
     end
 end
 
-function [ok, cached, why] = try_load_cache(out_path, CONFIG, crit)
-%TRY_LOAD_CACHE Load a saved results .mat and check it matches the current run.
-%  Returns ok=true and a struct with .beams/.mean_pass/.std_pass/.n_segments/
-%  .seg_pass (restricted to the requested beams, in order) when the cached run was
-%  produced with the same gamma criterion, comparison set, requested beams, config
-%  hash and normalization; otherwise ok=false and a short reason in `why`. Any
-%  load/format error is reported (non-fatal) rather than raised.
-    ok = false; cached = struct(); why = '';
-    try
-        cached = load(out_path);
-    catch ME
-        why = sprintf('load error: %s', ME.message);
-        return;
-    end
-
-    req = {'beams', 'mean_pass', 'std_pass', 'n_segments', 'seg_pass', ...
-           'gamma_crit', 'comparisons', 'config'};
-    miss = req(~isfield(cached, req));
-    if ~isempty(miss)
-        why = sprintf('missing field(s): %s', strjoin(miss, ', '));
-        return;
-    end
-
-    % Gamma criterion must match.
-    if ~isequal(cached.gamma_crit, crit)
-        why = sprintf('criterion %g%% ~= cached %g%%', crit, cached.gamma_crit);
-        return;
-    end
-
-    % Comparison set (names, in order) must match.
-    if ~isequal(cached.comparisons(:)', CONFIG.comparisons(:,1)')
-        why = 'comparison set differs';
-        return;
-    end
-
-    % Every requested beam must be present in the cache.
-    if ~all(ismember(CONFIG.beams(:)', cached.beams(:)'))
-        why = 'requested beams not all present in cache';
-        return;
-    end
-
-    % Key inputs that change the numbers must match the saved CONFIG.
-    cc = cached.config;
-    % Evaluation metric (older caches without the field are treated as gamma).
-    cached_method = 'gamma_index';
-    if isfield(cc, 'eval_method') && ~isempty(cc.eval_method)
-        cached_method = lower(char(cc.eval_method));
-    end
-    if ~strcmp(cached_method, CONFIG.eval_method)
-        why = sprintf('eval_method %s ~= cached %s', CONFIG.eval_method, cached_method);
-        return;
-    end
-    if isfield(cc, 'config_hash') && ~isequal(cc.config_hash, CONFIG.config_hash)
-        why = 'config_hash differs';
-        return;
-    end
-    if isfield(cc, 'normalize') && ~isequal(logical(cc.normalize), logical(CONFIG.normalize))
-        why = 'normalize flag differs';
-        return;
-    end
-    if isfield(cc, 'plan_type') && ~strcmpi(char(cc.plan_type), char(CONFIG.plan_type))
-        why = 'plan_type differs';
-        return;
-    end
-
-    % Restrict the cached aggregates to exactly the requested beams, in order.
-    [tf, loc] = ismember(CONFIG.beams(:)', cached.beams(:)');
-    loc = loc(tf);
-    cached.beams      = cached.beams(loc);
-    cached.mean_pass  = cached.mean_pass(loc, :);
-    cached.std_pass   = cached.std_pass(loc, :);
-    cached.n_segments = cached.n_segments(loc);
-    cached.seg_pass   = cached.seg_pass(loc);   % {1 x nBeams} per-segment matrices
-
-    ok = true;
-end
-
-function seg_data = group_beam_segments(fields, spacing, ct1_str, ct3_str, normalize, beam)
-%GROUP_BEAM_SEGMENTS Group a beam's loaded fields into per-segment volume sets.
-%  Returns a cell array; each element S has .recon_CT1/.recon_CT3/.rs_CT1/.rs_CT3
-%  (double), .spacing and .seg. Segments missing the CT_1/CT_3 pair or with
-%  mismatched grids are skipped (warning). When `normalize` is true each recon is
-%  scaled by the least-squares gain to its OWN-CT truth over that truth's 10% region.
-    seg_ids = arrayfun(@(k) seg_of_field(fields(k)), 1:numel(fields));
-    uniq    = unique(seg_ids(~isnan(seg_ids)));
-    uniq    = uniq(:).';   % ensure row so the loop iterates one segment at a time
-
-    seg_data = {};
-    for s = uniq
-        sub = fields(seg_ids == s);
-        iA  = find_field_by_ct(sub, ct1_str);
-        iB  = find_field_by_ct(sub, ct3_str);
-        if isempty(iA) || isempty(iB)
-            continue;   % missing CT_1/CT_3 pair for this segment -> skip entry
-        end
-        fA = sub(iA);
-        fB = sub(iB);
-
-        S = struct();
-        S.recon_CT1 = double(fA.recon_dose);
-        S.recon_CT3 = double(fB.recon_dose);
-        S.rs_CT1    = double(fA.rs_dose);
-        S.rs_CT3    = double(fB.rs_dose);
-        S.spacing   = spacing;
-        S.seg       = s;
-
-        % Skip entries whose recon/truth grids disagree (bad / missing data).
-        if ~isequal(size(S.recon_CT1), size(S.rs_CT1)) || ...
-           ~isequal(size(S.recon_CT3), size(S.rs_CT3)) || ...
-           ~isequal(size(S.rs_CT1),    size(S.rs_CT3))
-            warning('study_pass_rates_allsegments:GridMismatch', ...
-                'Beam #%d seg %d: grid mismatch; skipping segment.', beam, s);
-            continue;
-        end
-
-        % Least-squares relative normalization (recon -> own-CT truth).
-        if normalize
-            S.recon_CT1 = S.recon_CT1 * least_squares_gain(S.rs_CT1, S.recon_CT1);
-            S.recon_CT3 = S.recon_CT3 * least_squares_gain(S.rs_CT3, S.recon_CT3);
-        end
-
-        seg_data{end+1} = S; %#ok<AGROW>
-    end
-end
-
-function out = load_beam_set(CONFIG, beam)
-%LOAD_BEAM_SET Load every segment/CT of a beam via load_recon_dose_data (set).
-    args = {'Mode', 'set', 'Beam', beam, 'IncludeEthos', false, 'IncludeCBCT', false};
-    if isfield(CONFIG, 'plan_type') && ~isempty(CONFIG.plan_type) ...
-            && ~strcmpi(CONFIG.plan_type, 'any')
-        args = [args, {'PlanType', CONFIG.plan_type}];
-    end
-    if isfield(CONFIG, 'config_hash') && ~isempty(CONFIG.config_hash)
-        args = [args, {'Hash', CONFIG.config_hash}];
-    end
-    out = load_recon_dose_data(CONFIG.patient_id, CONFIG.session, CONFIG, args{:});
-end
-
-function sim_cfg = build_noise_sim_config(CONFIG)
-%BUILD_NOISE_SIM_CONFIG Simulation CONFIG handed to noise_ensemble_error_bars.
-%  CONFIG.noise_sim_config when a struct; otherwise get_default_config(). The
-%  machine/data fields are forced to this study's patient/session so the floor
-%  uses the same geometry and its cache key matches across runs.
-    if isstruct(CONFIG.noise_sim_config) && ~isempty(fieldnames(CONFIG.noise_sim_config))
-        sim_cfg = CONFIG.noise_sim_config;
-    else
-        sim_cfg = get_default_config();
-    end
-    sim_cfg.working_dir      = CONFIG.working_dir;
-    sim_cfg.patient_id       = CONFIG.patient_id;
-    sim_cfg.session          = CONFIG.session;
-    sim_cfg.treatment_site   = CONFIG.treatment_site;
-    sim_cfg.gruneisen_method = CONFIG.gruneisen_method;
-end
-
-function tf = noise_floor_matches(nf, CONFIG, crit)
-%NOISE_FLOOR_MATCHES True iff a cached noise-floor ensemble still applies: same
-%  gamma criterion and same simulation-config hash as the current settings would
-%  produce. Guards reuse of a stored floor after a sim-config / criterion change.
-    tf = false;
-    if isempty(nf) || ~isstruct(nf) || ~isfield(nf, 'criteria') || isempty(nf.criteria)
-        return;
-    end
-    c = nf.criteria;
-    if ~(isequal(c{1}, crit) && isequal(c{2}, crit))
-        return;
-    end
-    if isfield(nf, 'config_hash') && ~isempty(nf.config_hash)
-        try
-            if ~strcmp(nf.config_hash, resolve_noise_hash(CONFIG))
-                return;
-            end
-        catch
+function d = comp_col_names(names, want)
+%COMP_COL_NAMES Column index of comparison `want` within a cell vector of names.
+    d = NaN;
+    for r = 1:numel(names)
+        if strcmpi(names{r}, want)
+            d = r;
             return;
         end
-    end
-    tf = true;
-end
-
-function hash = resolve_noise_hash(CONFIG)
-%RESOLVE_NOISE_HASH Hash used to locate the cached noise-ensemble samples.
-%  CONFIG.noise_config_hash when set; otherwise the sim-config hash that
-%  noise_ensemble_error_bars would compute from this study's sim CONFIG. Returns
-%  '' only if neither is available.
-    hash = '';
-    if isfield(CONFIG, 'noise_config_hash') && ~isempty(CONFIG.noise_config_hash)
-        hash = char(CONFIG.noise_config_hash);
-        return;
-    end
-    try
-        hash = compute_sim_config_hash(build_noise_sim_config(CONFIG));
-    catch
-        hash = '';
-    end
-end
-
-function ens = compute_study_noise_floor(CONFIG, crit)
-%COMPUTE_STUDY_NOISE_FLOOR Obtain the noise-only null floor WITHOUT recomputing it.
-%  Looks for a cached noise-ensemble file (noise_ensemble_<patient>_<session>_
-%  <hash>.mat under AnalysisResults) located by CONFIG.noise_config_hash (or the
-%  sim-config hash when that is empty). If found, returns its stored mean/std pass
-%  rate. If the samples are NOT found, falls back to the constant
-%  CONFIG.noise_fallback_pass_rate (default 17%) with zero spread so all downstream
-%  calculations and plotting still have a noise floor. This never runs the (slow)
-%  k-Wave ensemble; generate the samples separately via noise_ensemble_error_bars.
-    hash       = resolve_noise_hash(CONFIG);
-    cache_dir  = fullfile(CONFIG.working_dir, 'AnalysisResults', ...
-        CONFIG.patient_id, CONFIG.session);
-    cache_file = fullfile(cache_dir, sprintf('noise_ensemble_%s_%s_%s.mat', ...
-        CONFIG.patient_id, CONFIG.session, hash));
-
-    % ---- Load the cached samples if present. ----
-    if ~isempty(hash) && isfile(cache_file)
-        try
-            S   = load(cache_file);
-            ens = S.ens;
-            ens.from_cache = true;
-            ens.is_fallback = false;
-            ens.cache_file = cache_file;
-            fprintf(['[NOISE FLOOR] Loaded cached samples: %s\n' ...
-                     '              Null gamma %.2f +/- %.2f %% over %d samples.\n'], ...
-                cache_file, ens.mean_pass_rate, ens.std_pass_rate, ens.num_samples);
-            return;
-        catch ME
-            warning('study_pass_rates_allsegments:NoiseCacheLoad', ...
-                'Noise cache %s could not be loaded (%s); using the fallback.', ...
-                cache_file, ME.message);
-        end
-    end
-
-    % ---- Samples not found: constant fallback pass rate. ----
-    fb = 17;
-    if isfield(CONFIG, 'noise_fallback_pass_rate') && ~isempty(CONFIG.noise_fallback_pass_rate)
-        fb = CONFIG.noise_fallback_pass_rate;
-    end
-    ens = struct();
-    ens.mean_pass_rate = fb;
-    ens.std_pass_rate  = 0;      % no spread known for an assumed value
-    ens.pass_rates     = fb;
-    ens.num_samples    = 0;
-    ens.criteria       = {crit, crit, sprintf('%g%%/%g mm', crit, crit)};
-    ens.config_hash    = hash;
-    ens.is_fallback    = true;
-    ens.from_cache     = false;
-    ens.cache_file     = cache_file;
-    fprintf(['[NOISE FLOOR] Cached noise samples not found (%s).\n' ...
-             '              Falling back to a constant %.1f%% pass rate.\n'], ...
-        cache_file, fb);
-end
-
-function s = seg_of_field(fld)
-%SEG_OF_FIELD Segment number of a loaded field (rtplan, else filename token).
-    s = NaN;
-    if isfield(fld, 'rtplan') && isfield(fld.rtplan, 'seg_num') ...
-            && ~isempty(fld.rtplan.seg_num) && isnumeric(fld.rtplan.seg_num) ...
-            && ~isnan(fld.rtplan.seg_num)
-        s = double(fld.rtplan.seg_num);
-        return;
-    end
-    if isfield(fld, 'source_mat_filename')
-        tok = regexp(char(fld.source_mat_filename), '_B\d+_(\d+)\.mat$', 'tokens', 'once');
-        if ~isempty(tok), s = str2double(tok{1}); end
-    end
-end
-
-function idx = find_field_by_ct(fields, want_ct)
-%FIND_FIELD_BY_CT Index of the first field whose CT label is want_ct.
-    idx = [];
-    for i = 1:numel(fields)
-        if strcmpi(field_ct_label(fields(i)), want_ct)
-            idx = i;
-            return;
-        end
-    end
-end
-
-function lbl = field_ct_label(fld)
-%FIELD_CT_LABEL CT label of a loaded field: rtplan.ct_label, else filename.
-    lbl = '';
-    if isfield(fld, 'rtplan') && isfield(fld.rtplan, 'ct_label') ...
-            && ~isempty(fld.rtplan.ct_label)
-        lbl = strrep(char(fld.rtplan.ct_label), '-', '_');
-    end
-    if isempty(lbl) && isfield(fld, 'source_mat_filename')
-        tok = regexp(char(fld.source_mat_filename), 'CT[_-]?(\d+)', 'tokens', 'once');
-        if ~isempty(tok), lbl = sprintf('CT_%s', tok{1}); end
-    end
-    if isempty(lbl), lbl = 'unknown'; end
-end
-
-function g = least_squares_gain(rs_truth, recon)
-%LEAST_SQUARES_GAIN Scalar gain aligning a recon to its RS truth (relative norm).
-%  g = sum(rs.*recon)/sum(recon.^2) over the truth's 10% low-dose region; the g
-%  minimizing ||rs - g*recon||^2 there. Falls back to 1 for empty/zero inputs.
-    rs_truth = double(rs_truth);
-    recon    = double(recon);
-    if max(rs_truth(:)) > 0
-        mask = rs_truth >= 0.10 * max(rs_truth(:));
-    else
-        mask = true(size(rs_truth));
-    end
-    r = recon(mask);
-    denom = sum(r .^ 2);
-    if denom > 0
-        g = sum(rs_truth(mask) .* r) / denom;
-    else
-        g = 1;
-    end
-end
-
-function v = get_dose_field(S, fieldname)
-%GET_DOSE_FIELD Fetch a named per-segment volume for a comparison spec.
-    switch fieldname
-        case 'rs_CT1',    v = S.rs_CT1;
-        case 'rs_CT3',    v = S.rs_CT3;
-        case 'recon_CT1', v = S.recon_CT1;
-        case 'recon_CT3', v = S.recon_CT3;
-        otherwise
-            error('study_pass_rates_allsegments:BadField', ...
-                'Unknown comparison volume "%s".', fieldname);
-    end
-end
-
-function p = seg_pass_rates(S, comparisons, crit, eval_method)
-%SEG_PASS_RATES Per-comparison metric score (%) for one segment.
-%  Reference = comparison ref volume; 10% reference cutoff eval mask. Depending on
-%  eval_method the score is either the global gamma pass rate (% of eval voxels
-%  with gamma<=1 at crit%/crit mm) or the mean local SSIM (%) over the same mask.
-%  Returns a 1 x nComp row (NaN where the metric failed).
-    if nargin < 4 || isempty(eval_method), eval_method = 'gamma_index'; end
-    np = size(comparisons, 1);
-    p  = nan(1, np);
-    for d = 1:np
-        ref = get_dose_field(S, comparisons{d, 2});
-        tgt = get_dose_field(S, comparisons{d, 3});
-        if max(ref(:)) > 0
-            mask = ref >= 0.10 * max(ref(:));
-        else
-            mask = tgt >= 0.10 * max(tgt(:));
-        end
-        if strcmp(eval_method, 'ssim')
-            p(d) = quiet_ssim_score(ref, tgt, mask);
-        else
-            p(d) = quiet_gamma_pass(ref, tgt, mask, crit, S.spacing);
-        end
-    end
-end
-
-function p = quiet_ssim_score(ref, tgt, mask)
-%QUIET_SSIM_SCORE Mean local SSIM (%) over the eval mask (target vs reference).
-%  Computes the full-volume local SSIM map (ssim's per-voxel output) with the
-%  dynamic range taken from the reference, then averages it over the 10% eval
-%  mask so the score is directly analogous to the gamma pass rate. Returns NaN on
-%  failure (e.g. an all-zero reference and target).
-    smap = quiet_ssim_map(ref, tgt);
-    if isempty(smap)
-        p = NaN;
-        return;
-    end
-    if any(mask(:))
-        p = 100 * mean(smap(mask), 'omitnan');
-    else
-        p = 100 * mean(smap(:), 'omitnan');
-    end
-end
-
-function p = quiet_gamma_pass(ref, tgt, mask, crit, spacing)
-%QUIET_GAMMA_PASS Global gamma pass rate (%), with CalcGamma output suppressed.
-%  evalc captures/discards all console output CalcGamma would otherwise print.
-%  Forces CPU computation ('cpu', 1) so many parfor workers do not contend over
-%  the GPU.
-    ref_struct = struct('start', [0, 0, 0], 'width', spacing, 'data', double(ref));
-    tgt_struct = struct('start', [0, 0, 0], 'width', spacing, 'data', double(tgt));
-    gmap = [];
-    try
-        evalc(['gmap = CalcGamma(ref_struct, tgt_struct, crit, crit, ', ...
-               '''local'', 0, ''limit'', crit*2, ''restrict'', 1, ''cpu'', 1);']);
-        p = 100 * mean(gmap(mask) <= 1);
-    catch
-        p = NaN;
     end
 end
 
 function d = comp_col(comparisons, name)
-%COMP_COL Column index (in comparisons / the pass matrices) for a comparison name.
+%COMP_COL Column index (in a {name,...} cell matrix) for a comparison name.
     d = NaN;
     for r = 1:size(comparisons, 1)
         if strcmpi(comparisons{r, 1}, name)
@@ -1029,6 +434,10 @@ function d = comp_col(comparisons, name)
         end
     end
 end
+
+%% =========================================================================
+%  CHANGE-DETECTION + FIDELITY PLOTS
+%% =========================================================================
 
 function plot_change_detection_tabs(x_pos, x_labels, mean_pass, std_pass, ...
         all_mean, all_std, seg_pass_by_beam, all_seg_pass, ...
@@ -1238,21 +647,93 @@ function [rd_m, rd_s, td_m, td_s] = diff_stats(M, d_r1, d_r3, d_tt)
     td_m = mean(truth_d, 'omitnan'); td_s = std(truth_d, 0, 'omitnan');
 end
 
+function plot_recon_fidelity_summary(x_pos, x_labels, m_11, s_11, m_33, s_33, ...
+        metric, patient_id, session)
+%PLOT_RECON_FIDELITY_SUMMARY Own-CT reconstruction fidelity per beam.
+%  Each recon is gamma-compared against the truth of its OWN CT - truth_CT1 vs
+%  recon_CT1 (green) and truth_CT3 vs recon_CT3 (red) - so a series sitting
+%  consistently higher means that CT's reconstruction is consistently better.
+%  Points within a series are joined by straight lines; the two series are NOT
+%  connected to each other. Same axis convention as the summary figure: the final
+%  slot is the pooled "All" entry, fenced off by a dashed vertical rule.
+    green = [0.15, 0.60, 0.20];
+    red   = [0.80, 0.15, 0.15];
+
+    x_pos = x_pos(:)';
+    m_11 = m_11(:)'; s_11 = s_11(:)';
+    m_33 = m_33(:)'; s_33 = s_33(:)';
+
+    figure('Name', 'Reconstruction Fidelity Summary (all segments)', 'Color', 'w', ...
+        'NumberTitle', 'off', ...
+        'Position', [140, 140, max(720, 55 * numel(x_pos) + 220), 480]);
+    hold on;
+
+    % A NaN gap before the final slot keeps the connecting line within the beam
+    % sequence instead of running it into the pooled "All" entry.
+    [xg, m11g, s11g] = gap_before_last(x_pos, m_11, s_11);
+    [~,  m33g, s33g] = gap_before_last(x_pos, m_33, s_33);
+
+    h_11 = errorbar(xg, m11g, s11g, '-o', 'Color', green, 'MarkerFaceColor', green, ...
+        'MarkerSize', 8, 'CapSize', 7, 'LineWidth', 1.2);
+    h_33 = errorbar(xg, m33g, s33g, '-o', 'Color', red, 'MarkerFaceColor', red, ...
+        'MarkerSize', 8, 'CapSize', 7, 'LineWidth', 1.2);
+
+    yline(90, 'k--', '90%', 'LineWidth', 1.0, 'FontSize', 8, ...
+        'LabelHorizontalAlignment', 'left');
+    apply_beam_axis(x_pos, x_labels);
+
+    hold off; grid on; box on;
+    ylim([0, 105]);
+    xlabel('Beam number');
+    ylabel(metric.axis_label);
+    title(sprintf(['Reconstruction Fidelity vs Own-CT Truth (mean \\pm std over ' ...
+        'segments)   |   %s / %s'], ...
+        strrep(patient_id, '_', '\_'), strrep(session, '_', '\_')), ...
+        'FontWeight', 'bold', 'FontSize', 12, 'Interpreter', 'tex');
+    legend([h_11, h_33], ...
+        {'Truth CT\_1 vs Recon CT\_1', 'Truth CT\_3 vs Recon CT\_3'}, ...
+        'Location', 'best', 'FontSize', 9);
+    drawnow;
+end
+
+function [xg, yg, eg] = gap_before_last(x, y, e)
+%GAP_BEFORE_LAST Insert a NaN sample before the last point to break the line.
+%  The NaN carries no marker and no error bar, so the last point still plots but
+%  is not joined to the preceding series.
+    if numel(x) < 2
+        xg = x; yg = y; eg = e;
+        return;
+    end
+    xg = [x(1:end-1), NaN, x(end)];
+    yg = [y(1:end-1), NaN, y(end)];
+    eg = [e(1:end-1), NaN, e(end)];
+end
+
+function apply_beam_axis(x_pos, x_labels)
+%APPLY_BEAM_AXIS Tick labels for the beam slots + a rule before the "All" slot.
+    if isempty(x_pos), return; end
+    xlim([min(x_pos) - 0.5, max(x_pos) + 0.5]);
+    xticks(x_pos);
+    xticklabels(x_labels);
+    if numel(x_pos) > 1
+        xline(x_pos(end) - 0.5, ':', 'Color', [0.4, 0.4, 0.4], 'LineWidth', 1.0);
+    end
+end
+
 %% =========================================================================
-%  RANDOM PER-SEGMENT PANEL VISUALIZATION (own cache)
+%  RANDOM PER-SEGMENT PANEL VISUALIZATION (own cache; re-expands folded maps)
 %% =========================================================================
 
 function show_random_segment_panels(CONFIG, crit, ct1_str, ct3_str, metric)
 %SHOW_RANDOM_SEGMENT_PANELS N random segments as tabs; one row of truth/recon/metric
-%  panels per requested comparison. The metric map is a gamma-index volume
-%  ('gamma_index') or a local-SSIM volume ('ssim'). Replots from
-%  CONFIG.random_cache_file when it matches (no metric recompute); otherwise
-%  (re)loads recon volumes from disk, recomputes the metric maps, caches the
+%  panels per requested comparison. The metric map is the Step-2.5 folded gamma-index
+%  ('gamma_index') or local-SSIM ('ssim') map re-expanded from the segment's CT_1
+%  recon file. Replots from CONFIG.random_cache_file when it matches; otherwise
+%  (re)loads recon volumes from disk, re-expands the folded maps, caches the
 %  selected slices, and plots.
     fprintf('\n----------- RANDOM SEGMENT PANELS -----------\n');
 
-    % Resolve the viz-cache path (own file, independent of the results cache).
-    % Cached beside the recon doses (CONFIG.output_dir), like the results cache.
+    % Resolve the viz-cache path (own file, beside the recon doses).
     cache_path = CONFIG.random_cache_file;
     if isempty(fileparts(cache_path))
         cache_path = fullfile(CONFIG.output_dir, cache_path);
@@ -1266,12 +747,12 @@ function show_random_segment_panels(CONFIG, crit, ct1_str, ct3_str, metric)
             fprintf('[CACHE] Reusing %d random panel(s) from: %s\n', ...
                 numel(picks), cache_path);
         else
-            fprintf('[CACHE] Random-viz cache not reusable (%s); recomputing.\n', why);
+            fprintf('[CACHE] Random-viz cache not reusable (%s); rebuilding.\n', why);
         end
     end
 
     if isempty(picks)
-        picks = build_random_picks(CONFIG, crit, ct1_str, ct3_str);
+        picks = build_random_picks(CONFIG, ct1_str, ct3_str);
         if isempty(picks)
             warning('study_pass_rates_allsegments:NoRandomPicks', ...
                 'No segments available for the random panel view; nothing to plot.');
@@ -1331,10 +812,11 @@ function [ok, picks, why] = try_load_random_cache(cache_path, CONFIG, crit)
     ok = true;
 end
 
-function picks = build_random_picks(CONFIG, crit, ct1_str, ct3_str)
-%BUILD_RANDOM_PICKS Randomly select CONFIG.n_random segments and compute their
-%  truth/recon/gamma display slices for each CONFIG.random_comparisons entry.
-%  Loads beams lazily (seeded shuffle) until enough segments are collected.
+function picks = build_random_picks(CONFIG, ct1_str, ct3_str)
+%BUILD_RANDOM_PICKS Randomly select CONFIG.n_random segments and build their
+%  truth/recon/metric display slices for each CONFIG.random_comparisons entry.
+%  Loads beams lazily (seeded shuffle) until enough segments are collected; the
+%  metric map for each panel is the Step-2.5 folded map, not a recomputation.
     picks = struct('beam', {}, 'seg', {}, 'spacing', {}, 'panels', {});
 
     specs = resolve_comparisons(CONFIG.comparisons, CONFIG.random_comparisons);
@@ -1368,7 +850,7 @@ function picks = build_random_picks(CONFIG, crit, ct1_str, ct3_str)
             if numel(picks) >= need, break; end
             S = seg_data{k};
             pk = struct('beam', b, 'seg', S.seg, 'spacing', spacing, ...
-                'panels', build_panels(S, specs, crit, CONFIG.eval_method));
+                'panels', build_panels(S, specs, CONFIG.eval_method, CONFIG.config_hash));
             picks(end+1) = pk; %#ok<AGROW>
         end
     end
@@ -1377,12 +859,13 @@ function picks = build_random_picks(CONFIG, crit, ct1_str, ct3_str)
         numel(picks), need);
 end
 
-function panels = build_panels(S, specs, crit, eval_method)
-%BUILD_PANELS One panel entry per comparison spec: truth/recon slices, metric-map
-%  slice (at the reference max-dose slice), score %, and labels. The metric map is
-%  a gamma-index volume ('gamma_index') or a local-SSIM volume ('ssim'); .gamma_img
-%  holds whichever map and .passpct the matching score (gamma pass % or mean SSIM %).
-    if nargin < 4 || isempty(eval_method), eval_method = 'gamma_index'; end
+function panels = build_panels(S, specs, eval_method, hash)
+%BUILD_PANELS One panel entry per comparison spec: truth/recon slices, the metric-map
+%  slice (at the reference max-dose slice), the stored score %, and labels. The
+%  metric map is re-expanded from the segment's CT_1 recon file (Step-2.5 folded
+%  gamma-index or local-SSIM values) rather than recomputed. .gamma_img holds
+%  whichever map and .passpct the matching stored score.
+    if nargin < 3 || isempty(eval_method), eval_method = 'gamma_index'; end
     panels = struct('name', {}, 'ref_label', {}, 'tgt_label', {}, ...
         'ref_img', {}, 'tgt_img', {}, 'gamma_img', {}, 'passpct', {}, ...
         'dose_max', {}, 'iz', {});
@@ -1390,27 +873,17 @@ function panels = build_panels(S, specs, crit, eval_method)
         ref = get_dose_field(S, specs{c, 2});
         tgt = get_dose_field(S, specs{c, 3});
 
-        if max(ref(:)) > 0
-            mask = ref >= 0.10 * max(ref(:));
-        else
-            mask = tgt >= 0.10 * max(tgt(:));
-        end
-        if strcmp(eval_method, 'ssim')
-            gmap = quiet_ssim_map(ref, tgt);
-            if isempty(gmap), gmap = nan(size(ref)); end
-            if any(mask(:))
-                passpct = 100 * mean(gmap(mask), 'omitnan');
-            else
-                passpct = NaN;
-            end
-        else
-            gmap = quiet_gamma_map(ref, tgt, crit, S.spacing);
-            if isempty(gmap), gmap = nan(size(ref)); end
-            if any(mask(:))
-                passpct = 100 * mean(gmap(mask) <= 1, 'omitnan');
-            else
-                passpct = NaN;
-            end
+        % Metric map + stored score from the Step-2.5 fold (no recompute). When the
+        % fold is absent/mismatched, show the images with a blank (NaN) metric map.
+        [gmap, passpct] = expand_folded_map(S.ct1_recon_file, specs{c, 1}, ...
+            eval_method, hash);
+        if isempty(gmap) || ~isequal(size(gmap), size(ref))
+            warning('study_pass_rates_allsegments:NoFoldedMetric', ...
+                ['Beam #%d seg %d: no Step-2.5 folded %s map for "%s"; ' ...
+                 'showing a blank metric panel (run/rerun step25_segment_metrics).'], ...
+                S.beam, S.seg, eval_method, specs{c, 1});
+            gmap    = nan(size(ref));
+            passpct = NaN;
         end
 
         % Display slice: axial slice (dim 3) of the reference's peak dose.
@@ -1427,6 +900,52 @@ function panels = build_panels(S, specs, crit, eval_method)
         P.dose_max  = max(ref(:));
         P.iz        = iz;
         panels(c) = P; %#ok<AGROW>
+    end
+end
+
+function [M, passpct] = expand_folded_map(ct1_file, comp_name, eval_method, hash)
+%EXPAND_FOLDED_MAP Re-expand a Step-2.5 folded metric map to a full volume.
+%  Reads the 'segment_metrics' variable folded into a segment's CT_1 recon .mat,
+%  finds the named comparison, and rebuilds the dense gamma-index / local-SSIM
+%  volume (NaN outside the stored 10% eval mask), returning the stored scalar
+%  score alongside it. Returns [] / NaN when the file, the variable, the matching
+%  config hash, or the named comparison is not present (caller falls back to a
+%  blank panel -- nothing is recomputed here).
+    M = []; passpct = NaN;
+    if isempty(ct1_file) || exist(ct1_file, 'file') ~= 2
+        return;
+    end
+    try
+        L = load(ct1_file, 'segment_metrics');
+    catch
+        return;
+    end
+    if ~isfield(L, 'segment_metrics'), return; end
+    sm = L.segment_metrics;
+
+    % Only use a fold produced for this config hash.
+    if ~isempty(hash) && isfield(sm, 'config_hash') && ~isempty(sm.config_hash) ...
+            && ~strcmpi(char(sm.config_hash), char(hash))
+        return;
+    end
+    if ~isfield(sm, 'comparison') || ~isfield(sm, 'vol_size'), return; end
+
+    c = [];
+    for k = 1:numel(sm.comparison)
+        if strcmpi(sm.comparison(k).name, comp_name)
+            c = sm.comparison(k);
+            break;
+        end
+    end
+    if isempty(c), return; end
+
+    M = nan(sm.vol_size);
+    if strcmp(eval_method, 'ssim')
+        if ~isempty(c.ssim_vals), M(c.mask_idx) = double(c.ssim_vals); end
+        passpct = c.ssim_mean;
+    else
+        if ~isempty(c.gamma_vals), M(c.mask_idx) = double(c.gamma_vals); end
+        passpct = c.gamma_pass_rate;
     end
 end
 
@@ -1448,39 +967,6 @@ function specs = resolve_comparisons(all_comps, names)
             continue;
         end
         specs(end+1, :) = all_comps(r, 1:5); %#ok<AGROW>
-    end
-end
-
-function gmap = quiet_gamma_map(ref, tgt, crit, spacing)
-%QUIET_GAMMA_MAP Full global gamma-index volume (CalcGamma output suppressed).
-%  Same CalcGamma call as quiet_gamma_pass but returns the map instead of a scalar.
-    ref_struct = struct('start', [0, 0, 0], 'width', spacing, 'data', double(ref));
-    tgt_struct = struct('start', [0, 0, 0], 'width', spacing, 'data', double(tgt));
-    gmap = [];
-    try
-        evalc(['gmap = CalcGamma(ref_struct, tgt_struct, crit, crit, ', ...
-               '''local'', 0, ''limit'', crit*2, ''restrict'', 1, ''cpu'', 1);']);
-    catch
-        gmap = [];
-    end
-end
-
-function smap = quiet_ssim_map(ref, tgt)
-%QUIET_SSIM_MAP Full local-SSIM volume (target vs reference), dynamic range from
-%  the reference. Returns [] when neither volume has any positive signal or ssim
-%  fails, so callers can fall back gracefully.
-    ref = double(ref);
-    tgt = double(tgt);
-    dr  = max(ref(:));
-    if ~(dr > 0), dr = max(tgt(:)); end
-    if ~(dr > 0)
-        smap = [];
-        return;
-    end
-    try
-        [~, smap] = ssim(tgt, ref, 'DynamicRange', dr);
-    catch
-        smap = [];
     end
 end
 
@@ -1574,75 +1060,144 @@ function cmap = gamma_colormap(n)
     end
 end
 
-function plot_recon_fidelity_summary(x_pos, x_labels, m_11, s_11, m_33, s_33, ...
-        metric, patient_id, session)
-%PLOT_RECON_FIDELITY_SUMMARY Own-CT reconstruction fidelity per beam.
-%  Each recon is gamma-compared against the truth of its OWN CT - truth_CT1 vs
-%  recon_CT1 (green) and truth_CT3 vs recon_CT3 (red) - so a series sitting
-%  consistently higher means that CT's reconstruction is consistently better.
-%  Points within a series are joined by straight lines; the two series are NOT
-%  connected to each other. Same axis convention as the summary figure: the final
-%  slot is the pooled "All" entry, fenced off by a dashed vertical rule.
-    green = [0.15, 0.60, 0.20];
-    red   = [0.80, 0.15, 0.15];
+%% =========================================================================
+%  SEGMENT LOADING / GROUPING (recon volumes for the random panels only)
+%% =========================================================================
 
-    x_pos = x_pos(:)';
-    m_11 = m_11(:)'; s_11 = s_11(:)';
-    m_33 = m_33(:)'; s_33 = s_33(:)';
-
-    figure('Name', 'Reconstruction Fidelity Summary (all segments)', 'Color', 'w', ...
-        'NumberTitle', 'off', ...
-        'Position', [140, 140, max(720, 55 * numel(x_pos) + 220), 480]);
-    hold on;
-
-    % A NaN gap before the final slot keeps the connecting line within the beam
-    % sequence instead of running it into the pooled "All" entry.
-    [xg, m11g, s11g] = gap_before_last(x_pos, m_11, s_11);
-    [~,  m33g, s33g] = gap_before_last(x_pos, m_33, s_33);
-
-    h_11 = errorbar(xg, m11g, s11g, '-o', 'Color', green, 'MarkerFaceColor', green, ...
-        'MarkerSize', 8, 'CapSize', 7, 'LineWidth', 1.2);
-    h_33 = errorbar(xg, m33g, s33g, '-o', 'Color', red, 'MarkerFaceColor', red, ...
-        'MarkerSize', 8, 'CapSize', 7, 'LineWidth', 1.2);
-
-    yline(90, 'k--', '90%', 'LineWidth', 1.0, 'FontSize', 8, ...
-        'LabelHorizontalAlignment', 'left');
-    apply_beam_axis(x_pos, x_labels);
-
-    hold off; grid on; box on;
-    ylim([0, 105]);
-    xlabel('Beam number');
-    ylabel(metric.axis_label);
-    title(sprintf(['Reconstruction Fidelity vs Own-CT Truth (mean \\pm std over ' ...
-        'segments)   |   %s / %s'], ...
-        strrep(patient_id, '_', '\_'), strrep(session, '_', '\_')), ...
-        'FontWeight', 'bold', 'FontSize', 12, 'Interpreter', 'tex');
-    legend([h_11, h_33], ...
-        {'Truth CT\_1 vs Recon CT\_1', 'Truth CT\_3 vs Recon CT\_3'}, ...
-        'Location', 'best', 'FontSize', 9);
-    drawnow;
+function out = load_beam_set(CONFIG, beam)
+%LOAD_BEAM_SET Load every segment/CT of a beam via load_recon_dose_data (set).
+    args = {'Mode', 'set', 'Beam', beam, 'IncludeEthos', false, 'IncludeCBCT', false};
+    if isfield(CONFIG, 'plan_type') && ~isempty(CONFIG.plan_type) ...
+            && ~strcmpi(CONFIG.plan_type, 'any')
+        args = [args, {'PlanType', CONFIG.plan_type}];
+    end
+    if isfield(CONFIG, 'config_hash') && ~isempty(CONFIG.config_hash)
+        args = [args, {'Hash', CONFIG.config_hash}];
+    end
+    out = load_recon_dose_data(CONFIG.patient_id, CONFIG.session, CONFIG, args{:});
 end
 
-function [xg, yg, eg] = gap_before_last(x, y, e)
-%GAP_BEFORE_LAST Insert a NaN sample before the last point to break the line.
-%  The NaN carries no marker and no error bar, so the last point still plots but
-%  is not joined to the preceding series.
-    if numel(x) < 2
-        xg = x; yg = y; eg = e;
+function seg_data = group_beam_segments(fields, spacing, ct1_str, ct3_str, normalize, beam)
+%GROUP_BEAM_SEGMENTS Group a beam's loaded fields into per-segment volume sets.
+%  Returns a cell array; each element S has .recon_CT1/.recon_CT3/.rs_CT1/.rs_CT3
+%  (double), .spacing, .seg, .beam and .ct1_recon_file (the file carrying the
+%  Step-2.5 folded metrics). Segments missing the CT_1/CT_3 pair, with mismatched
+%  grids, or without a CT_1 recon file path are skipped (warning). When `normalize`
+%  is true each recon is scaled by the least-squares gain to its OWN-CT truth over
+%  that truth's 10% region -- the same scaling Step 2.5 applied.
+    seg_ids = arrayfun(@(k) seg_of_field(fields(k)), 1:numel(fields));
+    uniq    = unique(seg_ids(~isnan(seg_ids)));
+    uniq    = uniq(:).';   % ensure row so the loop iterates one segment at a time
+
+    seg_data = {};
+    for s = uniq
+        sub = fields(seg_ids == s);
+        iA  = find_field_by_ct(sub, ct1_str);
+        iB  = find_field_by_ct(sub, ct3_str);
+        if isempty(iA) || isempty(iB)
+            continue;   % missing CT_1/CT_3 pair for this segment -> skip entry
+        end
+        fA = sub(iA);
+        fB = sub(iB);
+
+        S = struct();
+        S.recon_CT1      = double(fA.recon_dose);
+        S.recon_CT3      = double(fB.recon_dose);
+        S.rs_CT1         = double(fA.rs_dose);
+        S.rs_CT3         = double(fB.rs_dose);
+        S.spacing        = spacing;
+        S.seg            = s;
+        S.beam           = beam;
+        S.ct1_recon_file = fA.recon_file;   % holds the Step-2.5 folded metrics
+
+        % Skip entries whose recon/truth grids disagree (bad / missing data).
+        if ~isequal(size(S.recon_CT1), size(S.rs_CT1)) || ...
+           ~isequal(size(S.recon_CT3), size(S.rs_CT3)) || ...
+           ~isequal(size(S.rs_CT1),    size(S.rs_CT3))
+            warning('study_pass_rates_allsegments:GridMismatch', ...
+                'Beam #%d seg %d: grid mismatch; skipping segment.', beam, s);
+            continue;
+        end
+
+        % Least-squares relative normalization (recon -> own-CT truth).
+        if normalize
+            S.recon_CT1 = S.recon_CT1 * least_squares_gain(S.rs_CT1, S.recon_CT1);
+            S.recon_CT3 = S.recon_CT3 * least_squares_gain(S.rs_CT3, S.recon_CT3);
+        end
+
+        seg_data{end+1} = S; %#ok<AGROW>
+    end
+end
+
+function s = seg_of_field(fld)
+%SEG_OF_FIELD Segment number of a loaded field (rtplan, else filename token).
+    s = NaN;
+    if isfield(fld, 'rtplan') && isfield(fld.rtplan, 'seg_num') ...
+            && ~isempty(fld.rtplan.seg_num) && isnumeric(fld.rtplan.seg_num) ...
+            && ~isnan(fld.rtplan.seg_num)
+        s = double(fld.rtplan.seg_num);
         return;
     end
-    xg = [x(1:end-1), NaN, x(end)];
-    yg = [y(1:end-1), NaN, y(end)];
-    eg = [e(1:end-1), NaN, e(end)];
+    if isfield(fld, 'source_mat_filename')
+        tok = regexp(char(fld.source_mat_filename), '_B\d+_(\d+)\.mat$', 'tokens', 'once');
+        if ~isempty(tok), s = str2double(tok{1}); end
+    end
 end
 
-function apply_beam_axis(x_pos, x_labels)
-%APPLY_BEAM_AXIS Tick labels for the beam slots + a rule before the "All" slot.
-    if isempty(x_pos), return; end
-    xlim([min(x_pos) - 0.5, max(x_pos) + 0.5]);
-    xticks(x_pos);
-    xticklabels(x_labels);
-    if numel(x_pos) > 1
-        xline(x_pos(end) - 0.5, ':', 'Color', [0.4, 0.4, 0.4], 'LineWidth', 1.0);
+function idx = find_field_by_ct(fields, want_ct)
+%FIND_FIELD_BY_CT Index of the first field whose CT label is want_ct.
+    idx = [];
+    for i = 1:numel(fields)
+        if strcmpi(field_ct_label(fields(i)), want_ct)
+            idx = i;
+            return;
+        end
+    end
+end
+
+function lbl = field_ct_label(fld)
+%FIELD_CT_LABEL CT label of a loaded field: rtplan.ct_label, else filename.
+    lbl = '';
+    if isfield(fld, 'rtplan') && isfield(fld.rtplan, 'ct_label') ...
+            && ~isempty(fld.rtplan.ct_label)
+        lbl = strrep(char(fld.rtplan.ct_label), '-', '_');
+    end
+    if isempty(lbl) && isfield(fld, 'source_mat_filename')
+        tok = regexp(char(fld.source_mat_filename), 'CT[_-]?(\d+)', 'tokens', 'once');
+        if ~isempty(tok), lbl = sprintf('CT_%s', tok{1}); end
+    end
+    if isempty(lbl), lbl = 'unknown'; end
+end
+
+function g = least_squares_gain(rs_truth, recon)
+%LEAST_SQUARES_GAIN Scalar gain aligning a recon to its RS truth (relative norm).
+%  g = sum(rs.*recon)/sum(recon.^2) over the truth's 10% low-dose region; the g
+%  minimizing ||rs - g*recon||^2 there. Falls back to 1 for empty/zero inputs.
+    rs_truth = double(rs_truth);
+    recon    = double(recon);
+    if max(rs_truth(:)) > 0
+        mask = rs_truth >= 0.10 * max(rs_truth(:));
+    else
+        mask = true(size(rs_truth));
+    end
+    r = recon(mask);
+    denom = sum(r .^ 2);
+    if denom > 0
+        g = sum(rs_truth(mask) .* r) / denom;
+    else
+        g = 1;
+    end
+end
+
+function v = get_dose_field(S, fieldname)
+%GET_DOSE_FIELD Fetch a named per-segment volume for a comparison spec.
+    switch fieldname
+        case 'rs_CT1',    v = S.rs_CT1;
+        case 'rs_CT3',    v = S.rs_CT3;
+        case 'recon_CT1', v = S.recon_CT1;
+        case 'recon_CT3', v = S.recon_CT3;
+        otherwise
+            error('study_pass_rates_allsegments:BadField', ...
+                'Unknown comparison volume "%s".', fieldname);
     end
 end
