@@ -7,7 +7,13 @@
 %  k-Wave reconstruction and stores the four per-segment comparisons keyed to
 %  the simulation config hash. Here we only LOAD those precomputed results and
 %  draw the summary figures + optional random per-segment panels. Nothing is
-%  recomputed -- a segment with no Step-2.5 result on disk is skipped / blank.
+%  recomputed for plotting -- a segment with no Step-2.5 result is skipped/blank.
+%
+%  If Step 2.5 has NOT been run for this hash yet (no segment_metrics_summary_
+%  <hash>.mat on disk), this script runs step25_segment_metrics itself -- exactly
+%  as pipeline_simulate would -- so the summary and folded per-segment results are
+%  written to disk, then loads what it produced. (This is the one heavy path: it
+%  includes Step 2.5's noise-only ensemble when CONFIG.include_noise_floor is on.)
 %
 %  Where Step 2.5 stores its results (read here):
 %    - segment_metrics_summary_<hash>.mat  (beside the recon doses in
@@ -169,7 +175,22 @@ ct3_str = sprintf('CT_%d', ct_hi);
 % Everything the summary figures need is precomputed by step25_segment_metrics
 % and stored in segment_metrics_summary_<hash>.mat beside the recon doses.
 
-[summary_path, hash_used] = find_summary_file(CONFIG.output_dir, CONFIG.config_hash);
+[summary_path, hash_used] = locate_summary(CONFIG.output_dir, CONFIG.config_hash);
+if isempty(summary_path)
+    % Step 2.5 has not been run for this hash yet -- run it now (exactly as
+    % pipeline_simulate would) so the summary + folded per-segment results are
+    % written to disk, then load what it produced.
+    fprintf(['[STEP 2.5] No precomputed summary in\n  %s\n' ...
+             '           Running step25_segment_metrics now...\n'], CONFIG.output_dir);
+    run_step25_metrics(CONFIG);
+    [summary_path, hash_used] = locate_summary(CONFIG.output_dir, CONFIG.config_hash);
+    if isempty(summary_path)
+        error('study_pass_rates_allsegments:NoSummaryAfterStep25', ...
+            ['step25_segment_metrics ran but no segment_metrics_summary_*.mat appeared in\n' ...
+             '  %s\nCheck that Step 2 reconstructions exist for this hash.'], ...
+            CONFIG.output_dir);
+    end
+end
 CONFIG.config_hash = hash_used;   % pin the resolved hash for the random panels
 fprintf('[STEP 2.5] Loading precomputed metrics: %s\n', summary_path);
 SM = load(summary_path);
@@ -355,29 +376,26 @@ function name = add_name_suffix(name, suffix)
     end
 end
 
-function [summary_path, hash] = find_summary_file(output_dir, config_hash)
-%FIND_SUMMARY_FILE Locate the Step-2.5 rollup segment_metrics_summary_<hash>.mat.
-%  With an explicit config_hash the matching file is required. Otherwise the
-%  directory is scanned; a single match is used and its hash returned, while zero
-%  or several matches raise (listing what was found) so the caller can disambiguate.
+function [summary_path, hash] = locate_summary(output_dir, config_hash)
+%LOCATE_SUMMARY Find the Step-2.5 rollup segment_metrics_summary_<hash>.mat.
+%  Returns an empty path (NOT an error) when the summary is absent, so the caller
+%  can run Step 2.5 to create it. With an explicit config_hash only that file is
+%  looked for. Otherwise the directory is scanned: a single match is used and its
+%  hash returned; several matches with no requested hash is ambiguous and raises.
+    summary_path = '';
+    hash         = char(config_hash);
+
     if ~isempty(config_hash)
-        hash = char(config_hash);
-        summary_path = fullfile(output_dir, ...
-            sprintf('segment_metrics_summary_%s.mat', hash));
-        if exist(summary_path, 'file') ~= 2
-            error('study_pass_rates_allsegments:NoSummary', ...
-                ['Step-2.5 summary not found:\n  %s\n' ...
-                 'Run step25_segment_metrics first (or clear CONFIG.config_hash to auto-discover).'], ...
-                summary_path);
+        p = fullfile(output_dir, sprintf('segment_metrics_summary_%s.mat', hash));
+        if exist(p, 'file') == 2
+            summary_path = p;
         end
         return;
     end
 
     d = dir(fullfile(output_dir, 'segment_metrics_summary_*.mat'));
     if isempty(d)
-        error('study_pass_rates_allsegments:NoSummary', ...
-            ['No segment_metrics_summary_*.mat in\n  %s\n' ...
-             'Run step25_segment_metrics first.'], output_dir);
+        return;   % none yet -> caller runs Step 2.5
     end
     if numel(d) > 1
         hashes = regexprep({d.name}, '^segment_metrics_summary_(.+)\.mat$', '$1');
@@ -388,6 +406,39 @@ function [summary_path, hash] = find_summary_file(output_dir, config_hash)
     summary_path = fullfile(output_dir, d(1).name);
     tok  = regexp(d(1).name, '^segment_metrics_summary_(.+)\.mat$', 'tokens', 'once');
     hash = tok{1};
+end
+
+function run_step25_metrics(CONFIG)
+%RUN_STEP25_METRICS Generate the missing Step-2.5 results in place.
+%  Maps the study CONFIG onto step25_segment_metrics' expected fields and runs it
+%  exactly as pipeline_simulate would, so the same segment_metrics_summary_<hash>
+%  rollup AND the folded per-segment results are written to disk (this study only
+%  reads them afterwards). ALL beams on disk are processed (metrics_beams = []),
+%  so the saved summary is complete rather than limited to CONFIG.beams. The noise
+%  floor follows the study's CONFIG.include_noise_floor; every other Step-2.5
+%  parameter takes its own default.
+    if exist('step25_segment_metrics', 'file') ~= 2
+        error('study_pass_rates_allsegments:NoStep25', ...
+            'step25_segment_metrics.m not found on the path; cannot generate metrics.');
+    end
+
+    mc = struct();
+    mc.working_dir           = CONFIG.working_dir;
+    mc.treatment_site        = CONFIG.treatment_site;
+    mc.gruneisen_method      = CONFIG.gruneisen_method;
+    mc.gamma_dose_pct        = CONFIG.gamma_n;
+    mc.gamma_dist_mm         = CONFIG.gamma_n;
+    mc.metrics_plan_type     = CONFIG.plan_type;
+    mc.metrics_ct_pair       = CONFIG.ct_pair;
+    mc.metrics_normalize     = CONFIG.normalize;
+    mc.metrics_beams         = [];                         % full run, all beams on disk
+    mc.metrics_write_summary = true;
+    mc.metrics_noise_floor   = logical(CONFIG.include_noise_floor);
+    if ~isempty(CONFIG.config_hash)
+        mc.config_hash = CONFIG.config_hash;              % target a specific recon hash
+    end
+
+    step25_segment_metrics(CONFIG.patient_id, CONFIG.session, mc);
 end
 
 function metric = build_metric_descriptor(eval_method, crit)
