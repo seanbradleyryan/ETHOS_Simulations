@@ -63,7 +63,12 @@ function results = step25_segment_metrics(patient_id, session, config)
 %           .metrics_noise_minutes [30]   Ensemble time budget (min) handed to
 %                                  noise_ensemble_error_bars (TimeBudgetMin).
 %           .use_parallel          [true] parfor over a beam's segments (CPU).
-%           .num_parallel_workers  [8]    Pool size when none is running.
+%           .metrics_auto_workers  [true] size a NEW pool to the physical CPU
+%                                  core count (best for this CPU-bound work);
+%                                  set false to use num_parallel_workers exactly.
+%           .num_parallel_workers  [8]    pool size when auto-sizing is off or
+%                                  core detection fails (fallback). Ignored when
+%                                  a pool is already running (that pool is reused).
 %
 %   OUTPUTS:
 %       results - Summary struct (also saved to segment_metrics_summary_<hash>.mat
@@ -113,6 +118,7 @@ function results = step25_segment_metrics(patient_id, session, config)
     config = default_field(config, 'metrics_noise_floor',   true);
     config = default_field(config, 'metrics_noise_minutes', 30);
     config = default_field(config, 'use_parallel',          true);
+    config = default_field(config, 'metrics_auto_workers',  true);
     config = default_field(config, 'num_parallel_workers',  8);
 
     if exist('CalcGamma', 'file') ~= 2
@@ -162,7 +168,12 @@ function results = step25_segment_metrics(patient_id, session, config)
     % CPU pool for the per-segment gamma/SSIM. Reuse any running pool; the sim's
     % pool is fine (just fewer workers than physical cores).
     if config.use_parallel
-        ensure_cpu_pool(config.num_parallel_workers);
+        if config.metrics_auto_workers
+            nworkers = detect_num_cores(config.num_parallel_workers);
+        else
+            nworkers = config.num_parallel_workers;
+        end
+        ensure_cpu_pool(nworkers);
     end
 
     %% ======================== PER-BEAM PROCESSING ========================
@@ -758,20 +769,60 @@ function tf = has_folded_metrics(mat_file)
 end
 
 function ensure_cpu_pool(desired_workers)
-%ENSURE_CPU_POOL Reuse a running pool; otherwise start a local one. Non-fatal if
+%ENSURE_CPU_POOL Reuse a running pool; otherwise start a local one sized to
+%  desired_workers (clamped to the local cluster's NumWorkers cap). Non-fatal if
 %  the Parallel Computing Toolbox is absent (the caller's loop runs serially).
     if exist('parpool', 'file') ~= 2
         fprintf('  [WARN] Parallel Computing Toolbox not found; running serially.\n');
         return;
     end
     if ~isempty(gcp('nocreate'))
-        return;   % reuse the sim's pool as-is
+        return;   % reuse a running pool (e.g. the sim's) as-is
+    end
+    nw = desired_workers;
+    try
+        c  = parcluster('local');
+        nw = min(desired_workers, c.NumWorkers);
+        if nw < desired_workers
+            fprintf('  [Pool] Requested %d workers; cluster caps at %d.\n', ...
+                desired_workers, nw);
+        end
+    catch
     end
     try
-        parpool('local', desired_workers);
-        fprintf('  [Pool] Started local pool with %d worker(s).\n', desired_workers);
+        parpool('local', nw);
+        fprintf('  [Pool] Started local pool with %d worker(s).\n', nw);
     catch ME
         fprintf('  [WARN] Could not start parallel pool (%s). Running serially.\n', ...
             ME.message);
     end
+end
+
+function n = detect_num_cores(default_workers)
+%DETECT_NUM_CORES Physical CPU core count for sizing the worker pool.
+%  Prefers the local cluster profile's NumWorkers (what parpool uses by default,
+%  = physical cores under the default profile), then feature('numcores'); falls
+%  back to default_workers if neither is available or returns something odd.
+%  Physical (not logical/hyperthreaded) cores is the right target: the per-segment
+%  gamma/SSIM is CPU- and memory-bandwidth-bound, so hyperthreads add contention
+%  rather than throughput, and each MATLAB worker already runs single-threaded.
+    if nargin < 1 || isempty(default_workers), default_workers = 8; end
+    n = [];
+    try
+        c = parcluster('local');
+        n = c.NumWorkers;
+    catch
+        n = [];
+    end
+    if isempty(n) || ~isfinite(n) || n < 1
+        try
+            n = feature('numcores');   % undocumented but widely available
+        catch
+            n = [];
+        end
+    end
+    if isempty(n) || ~isfinite(n) || n < 1
+        n = default_workers;
+    end
+    n = double(round(n));
 end
