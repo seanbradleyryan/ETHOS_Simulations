@@ -30,6 +30,19 @@
 
 clear; clc; close all;
 
+% ==================== TIMING (start of run) ==============================
+% All timing bookkeeping lives in the TIMING struct and is kept separate from
+% the rest of the pipeline logic. The master stopwatch below measures the whole
+% script wall time (start to finish); the accumulators below collect every
+% single-field simulation time and the Step 2.5 time as the run proceeds.
+TIMING                       = struct();
+TIMING.script_start_wall     = datetime('now');
+TIMING.script_start_tic      = tic;          % master start-to-finish stopwatch
+TIMING.all_field_sim_times_sec = [];         % elapsed of every single-field sim
+TIMING.step25_time_sec       = 0;            % running total across sessions
+TIMING.assumed_sec_per_field = 16;           % 1 forward+time-reversal run (for ETA)
+% =========================================================================
+
 % Put the utils folder (get_default_config, calibrate_noise_amp, the engine
 % helpers, ...) on the path FIRST, before get_default_config is called. Derived
 % from this script's own location so it works regardless of the launch cwd.
@@ -357,7 +370,13 @@ for p_idx = 1:length(CONFIG.patients)
                     % report_field_progress prints it serialized on the client.
                     progress_queue = parallel.pool.DataQueue;
                     afterEach(progress_queue, @report_field_progress);
-                    report_field_progress(num_pending);   % reset the countdown
+                    % TIMING: seed the countdown AND the live-ETA assumptions
+                    % (assumed s/field and worker count) so report_field_progress
+                    % can print an estimated time-remaining with each field.
+                    report_field_progress(struct('kind','init', ...
+                        'total', num_pending, ...
+                        'assumed_sec', TIMING.assumed_sec_per_field, ...
+                        'workers', CONFIG.num_parallel_workers));
 
                     t_parfor       = tic;
                     parfor f = 1:num_pending
@@ -431,6 +450,8 @@ for p_idx = 1:length(CONFIG.patients)
                             mi, patient_id, session, field_elapsed(f));
                         log_msg(log_fid, 'Field %d complete [%s] (parallel, %.1f s)', ...
                             fi, CONFIG_HASH, field_elapsed(f));
+                        % TIMING: collect this field's sim time for the average.
+                        TIMING.all_field_sim_times_sec(end+1) = field_elapsed(f);
                     end
                     save_cache_manifest(cache_manifest, patient_id, session, CONFIG, CONFIG_HASH);
                     fprintf('         Parallel block done in %.1f s (%d field(s) computed here).\n', ...
@@ -495,6 +516,14 @@ for p_idx = 1:length(CONFIG.patients)
                         log_msg(log_fid, 'Field %d complete [%s] (%.1f s)', ...
                             fi, CONFIG_HASH, elapsed_f);
                         fprintf('             Done in %.1f s\n', elapsed_f);
+                        % --- TIMING: record this field + estimate time remaining ---
+                        % Just completed a field: collect its time and, assuming
+                        % ~assumed_sec_per_field per remaining single-field sim,
+                        % report how much of Step 2 is left (fields processed vs.
+                        % fields still pending). Serial -> 1 worker.
+                        TIMING.all_field_sim_times_sec(end+1) = elapsed_f;
+                        print_field_eta(f, num_pending, TIMING.assumed_sec_per_field, 1);
+                        % --- end TIMING ---
                     end
                 end
 
@@ -555,7 +584,14 @@ for p_idx = 1:length(CONFIG.patients)
             % the total reconstruction above; keyed on the same CONFIG_HASH.
             if CONFIG.run_step25
                 fprintf('\n[STEP 2.5] Running per-segment gamma + SSIM metrics...\n');
+                t_step25 = tic;   % TIMING: Step 2.5 stopwatch
                 metrics_summary = step25_segment_metrics(patient_id, session, CONFIG);
+                % --- TIMING: accumulate Step 2.5 time (running total over sessions) ---
+                step25_elapsed         = toc(t_step25);
+                TIMING.step25_time_sec = TIMING.step25_time_sec + step25_elapsed;
+                fprintf('           [TIMING] Step 2.5 took %.1f s (%.1f min)\n', ...
+                    step25_elapsed, step25_elapsed / 60);
+                % --- end TIMING ---
                 RESULTS.patients.(result_key).segment_metrics_summary = metrics_summary;
                 log_msg(log_fid, ['Step 2.5 complete: %d beam(s), %d segment(s) ' ...
                     'folded into CT_1 recon files [%s]'], ...
@@ -628,6 +664,38 @@ fprintf('\n=========================================================\n');
 fprintf('  Simulation Pipeline Complete\n');
 fprintf('=========================================================\n');
 
+% ==================== TIMING (end of run) ================================
+% Stop the master stopwatch and roll up the per-field / Step 2.5 numbers.
+TIMING.script_end_wall     = datetime('now');
+TIMING.total_wall_sec      = toc(TIMING.script_start_tic);   % start -> finish
+TIMING.num_field_sims      = numel(TIMING.all_field_sim_times_sec);
+TIMING.total_field_sim_sec = sum(TIMING.all_field_sim_times_sec);
+if TIMING.num_field_sims > 0
+    TIMING.avg_field_sim_sec = mean(TIMING.all_field_sim_times_sec);
+else
+    TIMING.avg_field_sim_sec = NaN;   % nothing computed this run (all cached)
+end
+
+fprintf('\n--- Timing Report ---\n');
+fprintf('  Total wall time (start -> finish): %.1f s (%.2f min)\n', ...
+    TIMING.total_wall_sec, TIMING.total_wall_sec / 60);
+fprintf('  Single-field simulations run this run: %d\n', TIMING.num_field_sims);
+fprintf('  Total single-field simulation time: %.1f s (%.2f min)\n', ...
+    TIMING.total_field_sim_sec, TIMING.total_field_sim_sec / 60);
+if TIMING.num_field_sims > 0
+    fprintf('  Average time per single-field simulation: %.1f s\n', ...
+        TIMING.avg_field_sim_sec);
+else
+    fprintf('  Average time per single-field simulation: N/A (no fields computed here)\n');
+end
+fprintf('  Step 2.5 time: %.1f s (%.2f min)\n', ...
+    TIMING.step25_time_sec, TIMING.step25_time_sec / 60);
+fprintf('---------------------\n');
+
+% Fold the timing into RESULTS so it is saved inside the main .mat too.
+RESULTS.timing = TIMING;
+% =========================================================================
+
 results_filename = sprintf('pipeline_results_%s.mat', datestr(now, 'yyyymmdd_HHMMSS'));
 results_path     = fullfile(CONFIG.working_dir, 'AnalysisResults', results_filename);
 if ~exist(fullfile(CONFIG.working_dir, 'AnalysisResults'), 'dir')
@@ -635,6 +703,11 @@ if ~exist(fullfile(CONFIG.working_dir, 'AnalysisResults'), 'dir')
 end
 save(results_path, 'RESULTS', '-v7.3');
 fprintf('  Results saved: %s\n', results_path);
+
+% ==================== TIMING (save standalone report) ====================
+% Also drop the timing on its own so it can be found without loading RESULTS.
+write_timing_report(TIMING, CONFIG);
+% =========================================================================
 
 generate_simulation_summary(RESULTS);
 fprintf('\n=========================================================\n\n');
@@ -1229,19 +1302,35 @@ function report_field_progress(msg)
     % actually being processed and keeps a live count of how many of the pending
     % fields are still outstanding.
     %
-    % A scalar numeric argument (re)initializes the outstanding counter to that
-    % many fields -- call it once on the client before the parfor begins.
-    persistent remaining
+    % Initialize with either a bare scalar (legacy: just the field count) or a
+    % struct with kind 'init' carrying the field count plus the TIMING
+    % assumptions (assumed s/field, worker count) used for the live ETA. Call
+    % it once on the client before the parfor begins.
+    persistent remaining assumed_sec workers
     if isnumeric(msg)
         remaining = msg;
+        if isempty(assumed_sec), assumed_sec = 16; end
+        if isempty(workers),     workers     = 1;  end
         return;
     end
-    if isempty(remaining), remaining = 0; end
+    if isfield(msg, 'kind') && strcmp(msg.kind, 'init')
+        remaining   = msg.total;
+        assumed_sec = msg.assumed_sec;
+        workers     = max(msg.workers, 1);
+        return;
+    end
+    if isempty(remaining),   remaining   = 0;  end
+    if isempty(assumed_sec), assumed_sec = 16; end
+    if isempty(workers),     workers     = 1;  end
     remaining = max(remaining - 1, 0);
     switch msg.kind
         case 'process'
-            fprintf('         Processing field %d (gantry %.1f deg)  --  %d remaining\n', ...
-                msg.field_idx, msg.gantry, remaining);
+            % TIMING: rough wall-clock ETA = remaining fields * assumed s/field,
+            % spread over the workers running in parallel.
+            eta_min = remaining * assumed_sec / workers / 60;
+            fprintf(['         Processing field %d (gantry %.1f deg)  --  %d remaining' ...
+                '  (est. %.1f min left @ %d s/field)\n'], ...
+                msg.field_idx, msg.gantry, remaining, eta_min, assumed_sec);
         case 'fail'
             fprintf('         Field %d load failed (%s); released claim  --  %d remaining\n', ...
                 msg.field_idx, msg.message, remaining);
@@ -1388,6 +1477,63 @@ function generate_simulation_summary(results)
             fprintf('  Error: %s\n', p.error.message);
         end
     end
+end
+
+
+%% =========================================================================
+%  TIMING HELPERS
+%% =========================================================================
+%  Small, self-contained helpers kept apart from the pipeline logic. They only
+%  print / write timing numbers and never touch the simulation state.
+
+function print_field_eta(n_done, n_total, assumed_sec_per_field, n_workers)
+    % Estimate how much of Step 2 is left when a single-field simulation just
+    % finished. Assumes every remaining field costs 'assumed_sec_per_field'
+    % seconds (one forward + time-reversal run); with n_workers in parallel the
+    % wall-clock estimate is that CPU estimate divided by the worker count.
+    if nargin < 4 || isempty(n_workers) || n_workers < 1
+        n_workers = 1;
+    end
+    n_left  = max(n_total - n_done, 0);
+    eta_sec = n_left * assumed_sec_per_field / n_workers;
+    fprintf(['             [TIMING] %d/%d fields done, %d left  --  ' ...
+        'est. %.1f min remaining (@ %d s/field, %d worker(s))\n'], ...
+        n_done, n_total, n_left, eta_sec / 60, assumed_sec_per_field, n_workers);
+end
+
+function write_timing_report(timing, config)
+    % Write the timing rollup to a plain-text file in AnalysisResults so it can
+    % be read without loading the RESULTS .mat. Best-effort: warns and returns
+    % on any file error rather than aborting the finished run.
+    out_dir = fullfile(config.working_dir, 'AnalysisResults');
+    if ~exist(out_dir, 'dir'), mkdir(out_dir); end
+    out_path = fullfile(out_dir, ...
+        sprintf('timing_report_%s.txt', datestr(now, 'yyyymmdd_HHMMSS')));
+
+    fid = fopen(out_path, 'w');
+    if fid < 0
+        warning('pipeline_simulate:timingReport', ...
+            'Could not write timing report: %s', out_path);
+        return;
+    end
+    fprintf(fid, 'ETHOS pipeline_simulate timing report\n');
+    fprintf(fid, '=====================================\n');
+    fprintf(fid, 'Run start : %s\n', datestr(timing.script_start_wall, 'yyyy-mm-dd HH:MM:SS'));
+    fprintf(fid, 'Run end   : %s\n', datestr(timing.script_end_wall,   'yyyy-mm-dd HH:MM:SS'));
+    fprintf(fid, 'Total wall time                 : %.1f s (%.2f min)\n', ...
+        timing.total_wall_sec, timing.total_wall_sec / 60);
+    fprintf(fid, 'Single-field sims run           : %d\n', timing.num_field_sims);
+    fprintf(fid, 'Total single-field sim time     : %.1f s (%.2f min)\n', ...
+        timing.total_field_sim_sec, timing.total_field_sim_sec / 60);
+    if timing.num_field_sims > 0
+        fprintf(fid, 'Average per single-field sim    : %.1f s\n', timing.avg_field_sim_sec);
+    else
+        fprintf(fid, 'Average per single-field sim    : N/A (no fields computed)\n');
+    end
+    fprintf(fid, 'Step 2.5 time                   : %.1f s (%.2f min)\n', ...
+        timing.step25_time_sec, timing.step25_time_sec / 60);
+    fclose(fid);
+    fprintf('  Timing report saved: %s\n', out_path);
 end
 
 

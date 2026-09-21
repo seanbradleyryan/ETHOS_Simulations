@@ -40,7 +40,7 @@
 %
 %  FIGURE 1 - change detection, a TABBED window (x = beam number):
 %    Tab "Pass rates"    - recon_CT1 (green), recon_CT3 (red) and truth_CT1-vs-
-%                          truth_CT3 (blue), std error bars, a per-beam connector
+%                          truth_CT3 (blue), standard-error bars, a per-beam connector
 %                          between the two recon means, and (gamma only, when
 %                          CONFIG.include_noise_floor) the noise-only null band.
 %    Tab "Differentials" - recon_CT1 - recon_CT3 (green >=0 / red <0), the true
@@ -114,6 +114,12 @@ CONFIG.normalize = true;
 
 % Draw the Step-2.5 noise-only null floor (gamma metric only) when present.
 CONFIG.include_noise_floor = true;
+
+% Per-segment pass-rate floor (%) for the one-sided "above the floor" test
+% (segment statistics, goal 2). PLACEHOLDER: the noise-only ensemble
+% (noise_ensemble_error_bars / the Step-2.5 noise_floor) should set this
+% rigorously per session; 17% is a stand-in until that value is wired in.
+CONFIG.noise_floor_pct = 17;
 
 % --- Output / logging ---
 % The console log is written beside the recon doses unless output_dir is set.
@@ -302,25 +308,107 @@ all_mean     = mean(all_seg_pass, 1, 'omitnan');
 all_std      = std(all_seg_pass, 0, 1, 'omitnan');
 all_nseg     = size(all_seg_pass, 1);
 
+%% ===================== PER-BEAM SNR (from recon noise_stats) ============
+%  The simulation already folded each field's electronic-noise SNR (pre-noise
+%  sensor peak / applied noise amplitude -- the SAME ratio pipeline_simulate /
+%  calibrate_noise_amp tune) into its recon .mat as noise_stats. Here we only
+%  read those scalars (no recon_dose load) and reduce them to a mean +/- std per
+%  beam over the beam's fields, plus a pooled "All". Drives the SNR tab below.
+snr_data = gather_beam_snr(CONFIG.output_dir, CONFIG.config_hash, ...
+    CONFIG.plan_type, beam_list);
+
+%% ===================== STANDARD ERROR FOR THE ERROR BARS ================
+%  Every error bar below (and the console +/- values) uses the STANDARD ERROR of
+%  the mean, std/sqrt(n), not the raw spread. n is the segment count per beam
+%  (nseg_used) / the field count per beam (snr_data.beam_n), or the pooled count
+%  for the trailing "All" slot. The differentials tab derives its own SE per beam
+%  inside diff_stats. The noise-only null band keeps its std -- it is a
+%  distribution (the scatter expected from noise), not an uncertainty on a mean.
+se_pass          = std_pass ./ sqrt(nseg_used(:));   % [nproc x nComp]
+all_se           = all_std  ./ sqrt(all_nseg);       % [1 x nComp]
+snr_data.beam_se = snr_data.beam_std ./ sqrt(snr_data.beam_n);
+snr_data.all_se  = snr_data.all_std  ./ sqrt(snr_data.all_n);
+
 %% ===================== CONSOLE SUMMARY (BY BEAM) =======================
 
 comp_names = SM.comparisons(:)';
 fprintf('\n==================== BEAM %s (mean over segments) ====================\n', ...
     upper(metric.title));
-fprintf('(%s, mean +/- std over segments)\n', metric.header_detail);
+fprintf('(%s, mean +/- standard error over segments)\n', metric.header_detail);
 for n = 1:nproc
     fprintf('\n----- [beam #%d]  (%d segments) -----\n', beam_list(n), nseg_used(n));
     for d = 1:nComp
         fprintf('  %-18s   %6.2f%% +/- %5.2f%%\n', ...
-            comp_names{d}, mean_pass(n, d), std_pass(n, d));
+            comp_names{d}, mean_pass(n, d), se_pass(n, d));
     end
 end
 
 fprintf('\n----- [ALL BEAMS]  (%d segments over %d beams) -----\n', all_nseg, nproc);
 for d = 1:nComp
-    fprintf('  %-18s   %6.2f%% +/- %5.2f%%\n', comp_names{d}, all_mean(d), all_std(d));
+    fprintf('  %-18s   %6.2f%% +/- %5.2f%%\n', comp_names{d}, all_mean(d), all_se(d));
 end
 fprintf('\n=============================================================\n');
+
+% Electronic-noise SNR per beam (mean +/- standard error over the beam's fields).
+fprintf('\n==================== BEAM SNR (mean over fields) ====================\n');
+fprintf('(noise_stats.snr = pre-noise sensor peak / applied noise amplitude)\n');
+for n = 1:nproc
+    fprintf('  beam #%-3d   SNR %6.2f +/- %5.2f   (%d field(s))\n', ...
+        beam_list(n), snr_data.beam_mean(n), snr_data.beam_se(n), snr_data.beam_n(n));
+end
+fprintf('  [ALL]       SNR %6.2f +/- %5.2f   (%d field(s))\n', ...
+    snr_data.all_mean, snr_data.all_se, snr_data.all_n);
+fprintf('=============================================================\n');
+
+%% ===================== SEGMENT-LEVEL STATISTICS ========================
+%  Three quantitative checks over the per-segment gamma pass rates (every segment
+%  is a fair-game test case for a bad reconstruction), reported per beam and pooled
+%  over all beams/segments:
+%    (1) PAIRED t-test recon_CT1 vs recon_CT3 (both scored against truth CT_1):
+%        percentage of segments where recon_CT1 passes higher, and the one-sided
+%        p-value (H1: mean(recon1 - recon3) > 0).
+%    (2) ONE-SIDED "above the floor" test: percentage of segments whose pass rate
+%        exceeds CONFIG.noise_floor_pct, with the standard error of that
+%        proportion, for recon_CT1 and recon_CT3 separately.
+%    (3) CORRELATION of the recon differential (recon1 - recon3) with the true
+%        change (truth1_vs_truth3) and with the CT_1 SNR: R^2 (Pearson) and
+%        Spearman rho.
+%  Pass rates come from the loaded summary (seg_pass_by_beam, already normalized
+%  and in ascending-segment order); the per-segment CT_1 SNR is read from the
+%  recon files and aligned to those rows by segment order.
+snr_seg_by_beam = gather_beam_ct1_snr(CONFIG.output_dir, CONFIG.config_hash, ...
+    CONFIG.plan_type, ct1_str, beam_list, nseg_used);
+
+floor_pct = CONFIG.noise_floor_pct;
+
+fprintf('\n==================== SEGMENT-LEVEL STATISTICS ====================\n');
+fprintf('A = recon_CT1 vs truth_CT1 | B = recon_CT3 vs truth_CT1 | diff = A - B\n');
+fprintf('Floor = %.1f%% pass rate (placeholder; see CONFIG.noise_floor_pct).\n', floor_pct);
+
+% Accumulate the pooled (all-segment) series for the correlation scatter (goal 3).
+pooled_diff = [];
+pooled_T    = [];
+pooled_snr  = [];
+
+for n = 1:nproc
+    A    = seg_pass_by_beam{n}(:, d_r1);
+    B    = seg_pass_by_beam{n}(:, d_r3);
+    Tvec = seg_pass_by_beam{n}(:, d_tt);
+    dvec = A - B;
+    snrvec = beam_snr_vec(snr_seg_by_beam, n, numel(dvec), beam_list(n));
+
+    fprintf('\n----- [beam #%d]  (%d segments) -----\n', beam_list(n), nseg_used(n));
+    print_segment_stats(A, B, Tvec, dvec, snrvec, floor_pct);
+
+    pooled_diff = [pooled_diff; dvec(:)];   %#ok<AGROW>
+    pooled_T    = [pooled_T;    Tvec(:)];   %#ok<AGROW>
+    pooled_snr  = [pooled_snr;  snrvec(:)]; %#ok<AGROW>
+end
+
+fprintf('\n----- [ALL BEAMS]  (%d segments) -----\n', size(all_seg_pass, 1));
+print_segment_stats(all_seg_pass(:, d_r1), all_seg_pass(:, d_r3), ...
+    pooled_T, pooled_diff, pooled_snr, floor_pct);
+fprintf('==================================================================\n');
 
 %% ===================== SUMMARY PLOTS ====================================
 %  x positions are 1..nproc for the beams plus one trailing slot for "All", so
@@ -334,15 +422,21 @@ x_labels = [arrayfun(@(b) sprintf('%d', b), beam_list, 'UniformOutput', false), 
 %                           with the noise floor drawn as a horizontal band.
 %   Tab 2 "Differentials" - per-beam recon1-recon3 (green if >0, else red) and
 %                           the true change 100-(truth1 vs truth3) (blue).
-plot_change_detection_tabs(x_pos, x_labels, mean_pass, std_pass, ...
-    all_mean, all_std, seg_pass_by_beam, all_seg_pass, ...
-    d_r1, d_r3, d_tt, noise_floor, metric, CONFIG.patient_id, CONFIG.session);
+%   Tab 3 "SNR"           - per-beam mean electronic-noise SNR (recon noise_stats).
+plot_change_detection_tabs(x_pos, x_labels, mean_pass, se_pass, ...
+    all_mean, all_se, seg_pass_by_beam, all_seg_pass, ...
+    d_r1, d_r3, d_tt, noise_floor, snr_data, metric, ...
+    CONFIG.patient_id, CONFIG.session);
 
 % Figure 2: reconstruction fidelity (each recon against its OWN-CT truth).
 plot_recon_fidelity_summary(x_pos, x_labels, ...
-    [mean_pass(:, d_r1); all_mean(d_r1)], [std_pass(:, d_r1); all_std(d_r1)], ...
-    [mean_pass(:, d_33); all_mean(d_33)], [std_pass(:, d_33); all_std(d_33)], ...
+    [mean_pass(:, d_r1); all_mean(d_r1)], [se_pass(:, d_r1); all_se(d_r1)], ...
+    [mean_pass(:, d_33); all_mean(d_33)], [se_pass(:, d_33); all_se(d_33)], ...
     metric, CONFIG.patient_id, CONFIG.session);
+
+% Figure 3: recon-differential correlations (goal 3), pooled over all segments.
+plot_recon_diff_correlations(pooled_diff, pooled_T, pooled_snr, ...
+    CONFIG.patient_id, CONFIG.session);
 
 %% ============= RANDOM PER-SEGMENT PANEL VISUALIZATION ==================
 % N random segments, each in its own tab: one row of truth | recon | metric per
@@ -490,15 +584,18 @@ end
 %  CHANGE-DETECTION + FIDELITY PLOTS
 %% =========================================================================
 
-function plot_change_detection_tabs(x_pos, x_labels, mean_pass, std_pass, ...
-        all_mean, all_std, seg_pass_by_beam, all_seg_pass, ...
-        d_r1, d_r3, d_tt, noise_floor, metric, patient_id, session)
-%PLOT_CHANGE_DETECTION_TABS One figure, two tabs on the shared beam x-axis:
+function plot_change_detection_tabs(x_pos, x_labels, mean_pass, se_pass, ...
+        all_mean, all_se, seg_pass_by_beam, all_seg_pass, ...
+        d_r1, d_r3, d_tt, noise_floor, snr_data, metric, patient_id, session)
+%PLOT_CHANGE_DETECTION_TABS One figure, three tabs on the shared beam x-axis:
 %    Tab 1 "Pass rates"    - the per-beam pass-rate summary (recon1/recon3/truth-
 %                            truth) with the noise-only null floor as a band.
 %    Tab 2 "Differentials" - the per-beam recon1-recon3 and 100-(truth1_vs_truth3)
 %                            differentials.
-%  The final x slot on both tabs is the pooled "All" entry.
+%    Tab 3 "SNR"           - the per-beam mean electronic-noise SNR (noise_stats
+%                            from the recon files), same beam axis.
+%  Error bars are the standard error of the mean; se_pass/all_se already carry it.
+%  The final x slot on every tab is the pooled "All" entry.
     fig = figure('Name', 'Change Detection (all segments)', 'Color', 'w', ...
         'NumberTitle', 'off', ...
         'Position', [100, 100, max(760, 55 * numel(x_pos) + 240), 500]);
@@ -507,9 +604,9 @@ function plot_change_detection_tabs(x_pos, x_labels, mean_pass, std_pass, ...
     tab1 = uitab(tg, 'Title', 'Pass rates');
     ax1  = axes('Parent', tab1); %#ok<LAXES>
     render_beam_pass_rate(ax1, x_pos, x_labels, ...
-        [mean_pass(:, d_r1); all_mean(d_r1)], [std_pass(:, d_r1); all_std(d_r1)], ...
-        [mean_pass(:, d_r3); all_mean(d_r3)], [std_pass(:, d_r3); all_std(d_r3)], ...
-        [mean_pass(:, d_tt); all_mean(d_tt)], [std_pass(:, d_tt); all_std(d_tt)], ...
+        [mean_pass(:, d_r1); all_mean(d_r1)], [se_pass(:, d_r1); all_se(d_r1)], ...
+        [mean_pass(:, d_r3); all_mean(d_r3)], [se_pass(:, d_r3); all_se(d_r3)], ...
+        [mean_pass(:, d_tt); all_mean(d_tt)], [se_pass(:, d_tt); all_se(d_tt)], ...
         noise_floor, metric, patient_id, session);
 
     tab2 = uitab(tg, 'Title', 'Differentials');
@@ -520,15 +617,59 @@ function plot_change_detection_tabs(x_pos, x_labels, mean_pass, std_pass, ...
     render_differentials(ax2, x_pos, x_labels, rd_m, rd_s, td_m, td_s, ...
         m_r1_all, noise_floor, metric, patient_id, session);
 
+    tab3 = uitab(tg, 'Title', 'SNR');
+    ax3  = axes('Parent', tab3); %#ok<LAXES>
+    render_beam_snr(ax3, x_pos, x_labels, ...
+        [snr_data.beam_mean(:); snr_data.all_mean], ...
+        [snr_data.beam_se(:);   snr_data.all_se], patient_id, session);
+
     drawnow;
+end
+
+function render_beam_snr(ax, x_pos, x_labels, m_snr, s_snr, patient_id, session)
+%RENDER_BEAM_SNR Per-beam mean electronic-noise SNR (+/- standard error over the
+%  beam's fields) into axes ax. The SNR is noise_stats.snr saved by the simulation:
+%  the pre-noise sensor signal peak over the applied noise amplitude -- the same
+%  ratio pipeline_simulate / calibrate_noise_amp tune. The trailing slot is the
+%  pooled "All" over every field. Falls back to a note when no SNR was found.
+    purple = [0.45, 0.25, 0.65];
+
+    x_pos = x_pos(:)';
+    m_snr = m_snr(:)'; s_snr = s_snr(:)';
+
+    axes(ax); hold(ax, 'on');
+
+    if ~any(isfinite(m_snr))
+        text(ax, 0.5, 0.5, {'No noise\_stats SNR found in the recon files.', ...
+            'Re-run the simulation with a noise model to populate it.'}, ...
+            'Units', 'normalized', 'HorizontalAlignment', 'center', ...
+            'Interpreter', 'tex', 'FontSize', 11, 'Color', [0.4, 0.4, 0.4]);
+        hold(ax, 'off'); box(ax, 'on');
+        title(ax, 'Beam SNR', 'FontWeight', 'bold');
+        return;
+    end
+
+    errorbar(ax, x_pos, m_snr, s_snr, 'o', 'Color', purple, ...
+        'MarkerFaceColor', purple, 'MarkerSize', 8, 'LineStyle', 'none', ...
+        'CapSize', 7, 'LineWidth', 1.2);
+
+    apply_beam_axis(x_pos, x_labels);
+    hold(ax, 'off'); grid(ax, 'on'); box(ax, 'on');
+    yl = ylim(ax); ylim(ax, [0, max(yl(2), 1)]);
+    xlabel(ax, 'Beam number');
+    ylabel(ax, 'Mean SNR (signal peak / noise amp)');
+    title(ax, sprintf(['Beam Electronic-Noise SNR (mean \\pm SE over fields)' ...
+        '   |   %s / %s'], strrep(patient_id, '_', '\_'), strrep(session, '_', '\_')), ...
+        'FontWeight', 'bold', 'FontSize', 12, 'Interpreter', 'tex');
 end
 
 function render_beam_pass_rate(ax, x_pos, x_labels, m_r1, s_r1, m_r3, s_r3, ...
         m_tt, s_tt, noise_floor, metric, patient_id, session)
-%RENDER_BEAM_PASS_RATE Per-beam mean metric (%) with std error bars, into axes ax.
+%RENDER_BEAM_PASS_RATE Per-beam mean metric (%) with standard-error bars, into axes ax.
 %  Three series (recon1 green, recon3 red, truth-truth blue), a per-beam connector
 %  between the two recon means (colour = greater one), and -- when noise_floor is
-%  supplied -- the noise-only null as a horizontal mean +/- std band behind them.
+%  supplied -- the noise-only null as a horizontal mean +/- std band behind them
+%  (the null keeps its std: it is a distribution, not an uncertainty on a mean).
     green = [0.15, 0.60, 0.20];
     red   = [0.80, 0.15, 0.15];
     blue  = [0.20, 0.40, 0.80];
@@ -582,7 +723,7 @@ function render_beam_pass_rate(ax, x_pos, x_labels, m_r1, s_r1, m_r3, s_r3, ...
     ylim(ax, [0, 105]);
     xlabel(ax, 'Beam number');
     ylabel(ax, metric.axis_label);
-    title(ax, sprintf('Beam %s Summary (mean \\pm std over segments)   |   %s / %s', ...
+    title(ax, sprintf('Beam %s Summary (mean \\pm SE over segments)   |   %s / %s', ...
         metric.title, strrep(patient_id, '_', '\_'), strrep(session, '_', '\_')), ...
         'FontWeight', 'bold', 'FontSize', 12, 'Interpreter', 'tex');
 
@@ -607,8 +748,8 @@ function render_differentials(ax, x_pos, x_labels, rd_m, rd_s, td_m, td_s, ...
 %RENDER_DIFFERENTIALS Per-beam pass-rate differentials into axes ax.
 %  Recon differential (recon1 - recon3): green where >= 0 (change detected the
 %  correct way), red where < 0. Truth differential 100 - (truth1 vs truth3), the
-%  true change magnitude referenced to truth CT_1, in blue. Both carry std error
-%  bars; the trailing slot is the pooled "All" entry. When noise_floor is supplied,
+%  true change magnitude referenced to truth CT_1, in blue. Both carry standard-
+%  error bars; the trailing slot is the pooled "All" entry. When noise_floor is supplied,
 %  a noise-reconstruction differential (m_r1 CT_1 pass rate minus the session noise
 %  pass rate) is drawn as one grey data point per slot.
     green = [0.15, 0.60, 0.20];
@@ -656,7 +797,7 @@ function render_differentials(ax, x_pos, x_labels, rd_m, rd_s, td_m, td_s, ...
     hold(ax, 'off'); grid(ax, 'on'); box(ax, 'on');
     xlabel(ax, 'Beam number');
     ylabel(ax, sprintf('%s differential (%%)', metric.title));
-    title(ax, sprintf(['Change-Detection Differentials (mean \\pm std over segments)' ...
+    title(ax, sprintf(['Change-Detection Differentials (mean \\pm SE over segments)' ...
         '   |   %s / %s'], strrep(patient_id, '_', '\_'), strrep(session, '_', '\_')), ...
         'FontWeight', 'bold', 'FontSize', 12, 'Interpreter', 'tex');
     leg_h = [h_pos, h_neg, h_td];
@@ -685,17 +826,21 @@ function [rd_m, rd_s, td_m, td_s] = beam_differentials(seg_pass_by_beam, ...
 end
 
 function [rd_m, rd_s, td_m, td_s] = diff_stats(M, d_r1, d_r3, d_tt)
-%DIFF_STATS Mean/std of the recon and truth differentials over a [nSeg x nComp] set.
-%  recon diff = (recon1 vs truth1) - (recon3 vs truth1); truth diff = 100 - (truth1
-%  vs truth3). Empty input yields NaNs.
+%DIFF_STATS Mean/standard-error of the recon and truth differentials over a
+%  [nSeg x nComp] set. recon diff = (recon1 vs truth1) - (recon3 vs truth1);
+%  truth diff = 100 - (truth1 vs truth3). The reported spread is the STANDARD
+%  ERROR of the mean (std/sqrt(n)) over the segments, n counted per differential
+%  after dropping NaNs. Empty input yields NaNs.
     if isempty(M)
         rd_m = NaN; rd_s = NaN; td_m = NaN; td_s = NaN;
         return;
     end
     recon_d = M(:, d_r1) - M(:, d_r3);   % paired, per segment
     truth_d = 100 - M(:, d_tt);
-    rd_m = mean(recon_d, 'omitnan'); rd_s = std(recon_d, 0, 'omitnan');
-    td_m = mean(truth_d, 'omitnan'); td_s = std(truth_d, 0, 'omitnan');
+    n_rd = max(sum(isfinite(recon_d)), 1);
+    n_td = max(sum(isfinite(truth_d)), 1);
+    rd_m = mean(recon_d, 'omitnan'); rd_s = std(recon_d, 0, 'omitnan') / sqrt(n_rd);
+    td_m = mean(truth_d, 'omitnan'); td_s = std(truth_d, 0, 'omitnan') / sqrt(n_td);
 end
 
 function plot_recon_fidelity_summary(x_pos, x_labels, m_11, s_11, m_33, s_33, ...
@@ -737,7 +882,7 @@ function plot_recon_fidelity_summary(x_pos, x_labels, m_11, s_11, m_33, s_33, ..
     ylim([0, 105]);
     xlabel('Beam number');
     ylabel(metric.axis_label);
-    title(sprintf(['Reconstruction Fidelity vs Own-CT Truth (mean \\pm std over ' ...
+    title(sprintf(['Reconstruction Fidelity vs Own-CT Truth (mean \\pm SE over ' ...
         'segments)   |   %s / %s'], ...
         strrep(patient_id, '_', '\_'), strrep(session, '_', '\_')), ...
         'FontWeight', 'bold', 'FontSize', 12, 'Interpreter', 'tex');
@@ -1251,4 +1396,343 @@ function v = get_dose_field(S, fieldname)
             error('study_pass_rates_allsegments:BadField', ...
                 'Unknown comparison volume "%s".', fieldname);
     end
+end
+
+
+%% =========================================================================
+%  PER-BEAM SNR (read straight from the recon files' noise_stats)
+%% =========================================================================
+
+function snr = gather_beam_snr(output_dir, hash, plan_type, beam_list)
+%GATHER_BEAM_SNR Per-beam electronic-noise SNR from the recon files' noise_stats.
+%  The simulation folded each field's SNR (pre-noise sensor peak / applied noise
+%  amplitude -- the SAME ratio pipeline_simulate / calibrate_noise_amp tune) into
+%  its <base>_recon_<hash>.mat as noise_stats.snr. This reduces those scalars to a
+%  mean +/- std per beam over the beam's fields (all segments, both CTs), plus a
+%  pooled "All" over every field. Only the small noise_stats variable is read --
+%  the heavy recon_dose array is never loaded. Beams with no readable, finite SNR
+%  come back NaN. Returned vectors are aligned to beam_list; the pooled all_* is
+%  over the same fields.
+    beam_list = beam_list(:)';
+    nB        = numel(beam_list);
+    vals_by_beam = cell(1, nB);
+    [vals_by_beam{:}] = deal([]);
+
+    listing = dir(fullfile(output_dir, sprintf('*_recon_%s.mat', hash)));
+    for k = 1:numel(listing)
+        name = listing(k).name;
+
+        btok = regexp(name, '_B(\d+)_\d+_recon_', 'tokens', 'once');
+        if isempty(btok), continue; end
+        slot = find(beam_list == str2double(btok{1}), 1);
+        if isempty(slot), continue; end
+
+        if ~strcmpi(plan_type, 'any')
+            ptok = regexp(name, '_(adapted|reference)_', 'tokens', 'once');
+            if isempty(ptok) || ~strcmpi(ptok{1}, plan_type), continue; end
+        end
+
+        s = read_noise_snr(fullfile(output_dir, name));
+        if isfinite(s)
+            vals_by_beam{slot}(end+1) = s; %#ok<AGROW>
+        end
+    end
+
+    snr = struct();
+    snr.beam_mean = nan(1, nB);
+    snr.beam_std  = nan(1, nB);
+    snr.beam_n    = zeros(1, nB);
+    for i = 1:nB
+        v = vals_by_beam{i};
+        snr.beam_n(i) = numel(v);
+        if ~isempty(v)
+            snr.beam_mean(i) = mean(v);
+            snr.beam_std(i)  = std(v);
+        end
+    end
+
+    all_v = [vals_by_beam{:}];
+    snr.all_n = numel(all_v);
+    if isempty(all_v)
+        snr.all_mean = NaN;
+        snr.all_std  = NaN;
+    else
+        snr.all_mean = mean(all_v);
+        snr.all_std  = std(all_v);
+    end
+end
+
+function s = read_noise_snr(recon_path)
+%READ_NOISE_SNR The noise_stats.snr scalar from a recon .mat (partial load).
+%  Returns NaN when the file, the noise_stats variable, or its .snr field is
+%  absent/unreadable, so an old recon without a noise model is simply skipped.
+    s = NaN;
+    try
+        L = load(recon_path, 'noise_stats');
+    catch
+        return;
+    end
+    if isfield(L, 'noise_stats') && isfield(L.noise_stats, 'snr') ...
+            && ~isempty(L.noise_stats.snr)
+        s = double(L.noise_stats.snr);
+    end
+end
+
+
+%% =========================================================================
+%  SEGMENT-LEVEL STATISTICS (goals 1-3; base-MATLAB only, no Stats Toolbox)
+%% =========================================================================
+
+function print_segment_stats(A, B, T, dvec, snrvec, floor_pct)
+%PRINT_SEGMENT_STATS Print the three per-set statistics for one beam (or the
+%  pooled all-segment set). A/B are the recon_CT1 / recon_CT3 pass rates vs truth
+%  CT_1; T is truth1_vs_truth3; dvec = A - B (the recon differential); snrvec is
+%  the aligned per-segment CT_1 SNR (may be NaN when unavailable).
+    % (1) Paired t-test A vs B (one-sided H1: mean(A - B) > 0).
+    [t_stat, p_val, pct_gt, n_pair] = paired_t(A, B);
+    fprintf(['  (1) Paired t: recon1 > recon3 in %5.1f%% of %d seg | ' ...
+             't = %7.3f, one-sided p = %.3g\n'], pct_gt, n_pair, t_stat, p_val);
+
+    % (2) One-sided floor test: proportion above the floor (+/- standard error).
+    [pA, seA, nA] = prop_above(A, floor_pct);
+    [pB, seB, nB] = prop_above(B, floor_pct);
+    fprintf(['  (2) Above %.0f%% floor: recon1 %5.1f%% +/- %4.1f%% (n=%d) | ' ...
+             'recon3 %5.1f%% +/- %4.1f%% (n=%d)\n'], ...
+             floor_pct, pA, seA, nA, pB, seB, nB);
+
+    % (3) Correlation of the differential vs the true change and vs the SNR.
+    rT = pearson_r(dvec, T);   rhoT = spearman_rho(dvec, T);
+    rS = pearson_r(dvec, snrvec); rhoS = spearman_rho(dvec, snrvec);
+    fprintf(['  (3) diff vs truth: R^2 = %.3f, rho = %+.3f | ' ...
+             'diff vs SNR: R^2 = %.3f, rho = %+.3f\n'], ...
+             rT^2, rhoT, rS^2, rhoS);
+end
+
+function [t_stat, p_val, pct_gt, n_pair] = paired_t(A, B)
+%PAIRED_T Paired (one-sample-on-differences) t-test of A vs B, one-sided H1:
+%  mean(A - B) > 0. Returns the t statistic, the one-sided (upper-tail) p-value,
+%  the percentage of finite pairs with A > B, and the number of finite pairs.
+%  NaN pairs are dropped.
+    A = A(:); B = B(:);
+    ok = isfinite(A) & isfinite(B);
+    d  = A(ok) - B(ok);
+    n_pair = numel(d);
+    t_stat = NaN; p_val = NaN; pct_gt = NaN;
+    if n_pair < 1, return; end
+    pct_gt = 100 * mean(d > 0);
+    if n_pair < 2, return; end
+    sd = std(d);
+    if sd > 0
+        t_stat = mean(d) / (sd / sqrt(n_pair));
+        p_val  = t_pvalue(t_stat, n_pair - 1, 'right');
+    elseif mean(d) > 0        % zero spread, all differences identical & positive
+        t_stat = Inf;  p_val = 0;
+    elseif mean(d) < 0
+        t_stat = -Inf; p_val = 1;
+    else                      % all differences exactly zero
+        t_stat = 0;    p_val = 0.5;
+    end
+end
+
+function [pct, se, n] = prop_above(x, floor_pct)
+%PROP_ABOVE Percentage of finite entries in x strictly above floor_pct, with the
+%  standard error of that proportion, 100*sqrt(p(1-p)/n). NaNs are dropped.
+    x = x(:); x = x(isfinite(x));
+    n = numel(x);
+    if n < 1, pct = NaN; se = NaN; return; end
+    p   = mean(x > floor_pct);
+    pct = 100 * p;
+    se  = 100 * sqrt(p * (1 - p) / n);
+end
+
+function r = pearson_r(x, y)
+%PEARSON_R Pearson correlation over the pairwise-finite entries of x and y.
+%  Returns NaN with fewer than two valid pairs or zero variance.
+    x = x(:); y = y(:);
+    ok = isfinite(x) & isfinite(y);
+    x = x(ok); y = y(ok);
+    if numel(x) < 2, r = NaN; return; end
+    x = x - mean(x); y = y - mean(y);
+    denom = sqrt(sum(x.^2) * sum(y.^2));
+    if denom > 0, r = sum(x .* y) / denom; else, r = NaN; end
+end
+
+function rho = spearman_rho(x, y)
+%SPEARMAN_RHO Spearman rank correlation: Pearson correlation of the tie-averaged
+%  ranks over the pairwise-finite entries.
+    x = x(:); y = y(:);
+    ok = isfinite(x) & isfinite(y);
+    x = x(ok); y = y(ok);
+    if numel(x) < 2, rho = NaN; return; end
+    rho = pearson_r(rank_avg(x), rank_avg(y));
+end
+
+function rk = rank_avg(v)
+%RANK_AVG Ranks of v with ties given their average rank (base-MATLAB tiedrank).
+    v = v(:);
+    n = numel(v);
+    [sv, ord] = sort(v);
+    rk = zeros(n, 1);
+    i = 1;
+    while i <= n
+        j = i;
+        while j < n && sv(j + 1) == sv(i)
+            j = j + 1;
+        end
+        rk(ord(i:j)) = (i + j) / 2;   % average rank for the tie block i..j
+        i = j + 1;
+    end
+end
+
+function p = t_pvalue(t, df, tail)
+%T_PVALUE p-value from a t statistic via the regularized incomplete beta function
+%  (base-MATLAB betainc; no Statistics Toolbox). 'both' = two-sided P(|T|>=|t|),
+%  'right' = upper tail P(T>=t), 'left' = lower tail P(T<=t).
+    if ~isfinite(t) || df < 1
+        p = NaN; return;
+    end
+    x  = df / (df + t^2);
+    p2 = betainc(x, df / 2, 0.5);   % two-sided P(|T| >= |t|)
+    switch lower(tail)
+        case 'right'
+            if t >= 0, p = p2 / 2; else, p = 1 - p2 / 2; end
+        case 'left'
+            if t <= 0, p = p2 / 2; else, p = 1 - p2 / 2; end
+        otherwise
+            p = p2;
+    end
+end
+
+function v = beam_snr_vec(snr_seg_by_beam, n, nseg, beam_num)
+%BEAM_SNR_VEC Aligned per-segment CT_1 SNR column for beam slot n, or a NaN column
+%  (with one warning) when the file scan could not align to the summary segments.
+    v = snr_seg_by_beam{n};
+    if numel(v) ~= nseg
+        warning('study_pass_rates_allsegments:SNRAlignSkip', ...
+            ['Beam #%d: per-segment SNR count (%d) does not match the summary ' ...
+             'segment count (%d); SNR correlation skipped for this beam.'], ...
+            beam_num, numel(v), nseg);
+        v = nan(nseg, 1);
+    else
+        v = v(:);
+    end
+end
+
+function snr_by_beam = gather_beam_ct1_snr(output_dir, hash, plan_type, ct1_str, ...
+        beam_list, nseg_used)
+%GATHER_BEAM_CT1_SNR Per-segment CT_1 recon SNR, aligned to the summary rows.
+%  For each beam it lists the reference-CT (ct1_str) recon files that carry a
+%  Step-2.5 fold ('segment_metrics') -- i.e. exactly the segments the summary
+%  rows come from -- sorts them by segment number ascending (the order
+%  build_summary stored them in), and reads noise_stats.snr from each (cheap:
+%  who('-file') + a partial load, never recon_dose). Returns {1 x nBeam}; a beam
+%  whose aligned count differs from nseg_used comes back [] so beam_snr_vec skips
+%  its correlation rather than risk a mis-paired series.
+    beam_list = beam_list(:)';
+    nB = numel(beam_list);
+    seg_by_beam = cell(1, nB);
+    snr_by_beam = cell(1, nB);
+    [seg_by_beam{:}] = deal([]);
+    [snr_by_beam{:}] = deal([]);
+
+    % ct1_str is e.g. 'CT_1'; match '_CT_1_' (tolerating a '-' separator).
+    ct_pat = ['_', regexprep(ct1_str, '_', '[_-]?'), '_'];
+
+    listing = dir(fullfile(output_dir, sprintf('*_recon_%s.mat', hash)));
+    for k = 1:numel(listing)
+        name = listing(k).name;
+        if isempty(regexp(name, ct_pat, 'once')), continue; end
+
+        btok = regexp(name, '_B(\d+)_(\d+)_recon_', 'tokens', 'once');
+        if isempty(btok), continue; end
+        slot = find(beam_list == str2double(btok{1}), 1);
+        if isempty(slot), continue; end
+
+        if ~strcmpi(plan_type, 'any')
+            ptok = regexp(name, '_(adapted|reference)_', 'tokens', 'once');
+            if isempty(ptok) || ~strcmpi(ptok{1}, plan_type), continue; end
+        end
+
+        fpath = fullfile(output_dir, name);
+        try
+            vars = who('-file', fpath);      % header read only, no data loaded
+        catch
+            continue;
+        end
+        if ~ismember('segment_metrics', vars), continue; end   % summary segments only
+
+        seg_by_beam{slot}(end+1) = str2double(btok{2});
+        snr_by_beam{slot}(end+1) = read_noise_snr(fpath);
+    end
+
+    % Sort each beam by segment number (matching the summary's row order); drop
+    % the beam's alignment when the counts disagree.
+    for i = 1:nB
+        [~, ord] = sort(seg_by_beam{i});
+        if numel(ord) == nseg_used(i)
+            snr_by_beam{i} = snr_by_beam{i}(ord);
+        else
+            snr_by_beam{i} = [];
+        end
+    end
+end
+
+
+%% =========================================================================
+%  RECON-DIFFERENTIAL CORRELATION PLOT (goal 3)
+%% =========================================================================
+
+function plot_recon_diff_correlations(dvec, T, snrvec, patient_id, session)
+%PLOT_RECON_DIFF_CORRELATIONS Two scatter panels (pooled over all segments):
+%  the recon differential (recon_CT1 - recon_CT3, %) against the true change
+%  (truth_CT1 vs truth_CT3 pass rate, %) and against the CT_1 SNR. Each panel
+%  draws the least-squares line and annotates R^2 (Pearson) and Spearman rho.
+    figure('Name', 'Recon differential correlations', 'Color', 'w', ...
+        'NumberTitle', 'off', 'Position', [160, 160, 980, 440]);
+    tl = tiledlayout(1, 2, 'Padding', 'compact', 'TileSpacing', 'compact');
+    title(tl, sprintf('Recon Differential Correlations   |   %s / %s', ...
+        strrep(patient_id, '_', '\_'), strrep(session, '_', '\_')), ...
+        'FontWeight', 'bold', 'Interpreter', 'tex');
+
+    scatter_with_fit(nexttile(tl), T, dvec, ...
+        'Truth CT\_1 vs Truth CT\_3 pass rate (%)', ...
+        'Recon differential  CT\_1 - CT\_3 (%)');
+
+    scatter_with_fit(nexttile(tl), snrvec, dvec, ...
+        'CT\_1 SNR', 'Recon differential  CT\_1 - CT\_3 (%)');
+
+    drawnow;
+end
+
+function scatter_with_fit(ax, x, y, xlab, ylab)
+%SCATTER_WITH_FIT Scatter of y vs x with a least-squares line and an
+%  R^2 / Spearman-rho title, over the pairwise-finite points.
+    x = x(:); y = y(:);
+    ok = isfinite(x) & isfinite(y);
+    x = x(ok); y = y(ok);
+
+    hold(ax, 'on');
+    if isempty(x)
+        text(ax, 0.5, 0.5, 'No paired data', 'Units', 'normalized', ...
+            'HorizontalAlignment', 'center', 'Color', [0.4, 0.4, 0.4]);
+        hold(ax, 'off'); box(ax, 'on');
+        xlabel(ax, xlab, 'Interpreter', 'tex');
+        ylabel(ax, ylab, 'Interpreter', 'tex');
+        return;
+    end
+
+    scatter(ax, x, y, 18, [0.20, 0.40, 0.80], 'filled', 'MarkerFaceAlpha', 0.5);
+    r   = pearson_r(x, y);
+    rho = spearman_rho(x, y);
+    if numel(x) >= 2 && isfinite(r) && (max(x) > min(x))
+        xl = [min(x), max(x)];
+        coef = polyfit(x, y, 1);
+        plot(ax, xl, polyval(coef, xl), '-', 'Color', [0.80, 0.15, 0.15], ...
+            'LineWidth', 1.5);
+    end
+    hold(ax, 'off'); grid(ax, 'on'); box(ax, 'on');
+    xlabel(ax, xlab, 'Interpreter', 'tex');
+    ylabel(ax, ylab, 'Interpreter', 'tex');
+    title(ax, sprintf('R^2 = %.3f   |   Spearman \\rho = %+.3f   (n = %d)', ...
+        r^2, rho, numel(x)), 'Interpreter', 'tex', 'FontWeight', 'normal');
 end
