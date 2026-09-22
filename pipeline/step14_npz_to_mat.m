@@ -69,22 +69,41 @@ end
 
 rs_dir = fullfile(config.working_dir, 'RayStationFiles', patient_id, session);
 
+% Native fallback for the NPZ inputs: the Step 0 sorted export under
+% EthosExports. NPZ are read from RayStationFiles first, EthosExports only
+% if RayStationFiles holds none. Converted .mat are always written back into
+% RayStationFiles so the rest of the pipeline finds them in one place.
+site = 'Pancreas';
+if isfield(config, 'treatment_site') && ~isempty(config.treatment_site)
+    site = config.treatment_site;
+end
+ethos_dir = fullfile(config.working_dir, 'EthosExports', patient_id, site, session, 'sct');
+input_dir = resolve_input_dir(rs_dir, ethos_dir, {'dose_*.npz'});
+
 fprintf('\n========================================\n');
 fprintf('  Step 1.4: Convert NPZ Field Doses to .mat\n');
 fprintf('  Patient: %s, Session: %s\n', patient_id, session);
 fprintf('========================================\n');
-fprintf('  Raystation directory: %s\n', rs_dir);
+fprintf('  NPZ input directory:  %s\n', input_dir);
+fprintf('  .mat output directory: %s\n', rs_dir);
 
-if ~isfolder(rs_dir)
+if ~isfolder(input_dir)
     error('step14_npz_to_mat:DirectoryNotFound', ...
-        'Raystation directory does not exist: %s', rs_dir);
+        'No NPZ input directory found (RayStationFiles or EthosExports): %s', input_dir);
 end
 
-npz_files = dir(fullfile(rs_dir, 'dose_*.npz'));
+npz_files = dir(fullfile(input_dir, 'dose_*.npz'));
 if isempty(npz_files)
     fprintf('  No dose_*.npz files found. Nothing to convert.\n');
     n_converted = 0;
     return;
+end
+
+% Ensure the RayStationFiles output location exists (it may not when the
+% NPZ inputs came from the EthosExports fallback).
+if ~isfolder(rs_dir)
+    mkdir(rs_dir);
+    fprintf('  Created output directory: %s\n', rs_dir);
 end
 
 fprintf('  Found %d NPZ file(s)\n', numel(npz_files));
@@ -95,7 +114,7 @@ n_converted = 0;
 n_skipped   = 0;
 for i = 1:numel(npz_files)
     npz_name = npz_files(i).name;
-    npz_path = fullfile(rs_dir, npz_name);
+    npz_path = fullfile(input_dir, npz_name);
     [~, stem, ~] = fileparts(npz_name);
     mat_name = [stem '.mat'];
     mat_path = fullfile(rs_dir, mat_name);

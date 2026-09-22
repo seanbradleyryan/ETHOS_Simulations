@@ -1509,29 +1509,20 @@ function print_segment_stats(A, B, T, dvec, snrvec, floor_pct)
 end
 
 function [t_stat, p_val, pct_gt, n_pair] = paired_t(A, B)
-%PAIRED_T Paired (one-sample-on-differences) t-test of A vs B, one-sided H1:
+%PAIRED_T Paired t-test of A vs B (Statistics Toolbox ttest), one-sided H1:
 %  mean(A - B) > 0. Returns the t statistic, the one-sided (upper-tail) p-value,
 %  the percentage of finite pairs with A > B, and the number of finite pairs.
 %  NaN pairs are dropped.
     A = A(:); B = B(:);
     ok = isfinite(A) & isfinite(B);
-    d  = A(ok) - B(ok);
-    n_pair = numel(d);
+    A = A(ok); B = B(ok);
+    n_pair = numel(A);
     t_stat = NaN; p_val = NaN; pct_gt = NaN;
     if n_pair < 1, return; end
-    pct_gt = 100 * mean(d > 0);
+    pct_gt = 100 * mean(A > B);
     if n_pair < 2, return; end
-    sd = std(d);
-    if sd > 0
-        t_stat = mean(d) / (sd / sqrt(n_pair));
-        p_val  = t_pvalue(t_stat, n_pair - 1, 'right');
-    elseif mean(d) > 0        % zero spread, all differences identical & positive
-        t_stat = Inf;  p_val = 0;
-    elseif mean(d) < 0
-        t_stat = -Inf; p_val = 1;
-    else                      % all differences exactly zero
-        t_stat = 0;    p_val = 0.5;
-    end
+    [~, p_val, ~, stats] = ttest(A, B, 'Tail', 'right');   % paired: H1 mean(A-B)>0
+    t_stat = stats.tstat;
 end
 
 function [pct, se, n] = prop_above(x, floor_pct)
@@ -1546,61 +1537,25 @@ function [pct, se, n] = prop_above(x, floor_pct)
 end
 
 function r = pearson_r(x, y)
-%PEARSON_R Pearson correlation over the pairwise-finite entries of x and y.
-%  Returns NaN with fewer than two valid pairs or zero variance.
-    x = x(:); y = y(:);
-    ok = isfinite(x) & isfinite(y);
-    x = x(ok); y = y(ok);
-    if numel(x) < 2, r = NaN; return; end
-    x = x - mean(x); y = y - mean(y);
-    denom = sqrt(sum(x.^2) * sum(y.^2));
-    if denom > 0, r = sum(x .* y) / denom; else, r = NaN; end
+%PEARSON_R Pearson correlation (Statistics Toolbox corr) over the pairwise-finite
+%  entries of x and y. NaN with fewer than two valid pairs.
+    r = safe_corr(x, y, 'Pearson');
 end
 
 function rho = spearman_rho(x, y)
-%SPEARMAN_RHO Spearman rank correlation: Pearson correlation of the tie-averaged
-%  ranks over the pairwise-finite entries.
+%SPEARMAN_RHO Spearman rank correlation (Statistics Toolbox corr) over the
+%  pairwise-finite entries of x and y. NaN with fewer than two valid pairs.
+    rho = safe_corr(x, y, 'Spearman');
+end
+
+function c = safe_corr(x, y, type)
+%SAFE_CORR corr() of the pairwise-finite entries; NaN when < 2 valid pairs (corr
+%  itself errors/ warns on too few points or NaNs).
     x = x(:); y = y(:);
     ok = isfinite(x) & isfinite(y);
     x = x(ok); y = y(ok);
-    if numel(x) < 2, rho = NaN; return; end
-    rho = pearson_r(rank_avg(x), rank_avg(y));
-end
-
-function rk = rank_avg(v)
-%RANK_AVG Ranks of v with ties given their average rank (base-MATLAB tiedrank).
-    v = v(:);
-    n = numel(v);
-    [sv, ord] = sort(v);
-    rk = zeros(n, 1);
-    i = 1;
-    while i <= n
-        j = i;
-        while j < n && sv(j + 1) == sv(i)
-            j = j + 1;
-        end
-        rk(ord(i:j)) = (i + j) / 2;   % average rank for the tie block i..j
-        i = j + 1;
-    end
-end
-
-function p = t_pvalue(t, df, tail)
-%T_PVALUE p-value from a t statistic via the regularized incomplete beta function
-%  (base-MATLAB betainc; no Statistics Toolbox). 'both' = two-sided P(|T|>=|t|),
-%  'right' = upper tail P(T>=t), 'left' = lower tail P(T<=t).
-    if ~isfinite(t) || df < 1
-        p = NaN; return;
-    end
-    x  = df / (df + t^2);
-    p2 = betainc(x, df / 2, 0.5);   % two-sided P(|T| >= |t|)
-    switch lower(tail)
-        case 'right'
-            if t >= 0, p = p2 / 2; else, p = 1 - p2 / 2; end
-        case 'left'
-            if t <= 0, p = p2 / 2; else, p = 1 - p2 / 2; end
-        otherwise
-            p = p2;
-    end
+    if numel(x) < 2, c = NaN; return; end
+    c = corr(x, y, 'Type', type);
 end
 
 function v = beam_snr_vec(snr_seg_by_beam, n, nseg, beam_num)
