@@ -67,9 +67,26 @@ if ~isempty(CONFIG.dose_file_override)
     [processed_dir, baseA, extA] = fileparts(dose_filepath_A);
     dose_basename_A = [baseA, extA];
 else
+    dose_basename_A = CONFIG.dose_filename;
+    % The dose filename embeds its own patient/session (e.g.
+    % dose_<patient>_<Session_N>_reference_CT_k_...). Parse them straight from
+    % the filename so the processed dir (and every file we then pull from it --
+    % the CT counterpart dose, both CBCTs) always matches the chosen dose,
+    % rather than trusting CONFIG.patient_id / CONFIG.session to have been
+    % edited in lockstep. This lets the wrapper run on any patient/session just
+    % by changing CONFIG.dose_filename.
+    ps_tok = regexp(dose_basename_A, '^dose_(\w+?)_(Session_\d+)_', 'tokens', 'once');
+    if isempty(ps_tok)
+        error('run_standalone_comparison:NoPatientSessionToken', ...
+            ['Dose filename "%s" does not match the expected ', ...
+             'dose_<patient>_<Session_N>_... pattern; cannot locate its directory.'], ...
+            dose_basename_A);
+    end
+    CONFIG.patient_id = ps_tok{1};
+    CONFIG.session    = ps_tok{2};
+
     processed_dir   = fullfile(CONFIG.working_dir, 'RayStationFiles', ...
         CONFIG.patient_id, CONFIG.session, 'processed');
-    dose_basename_A = CONFIG.dose_filename;
     dose_filepath_A = fullfile(processed_dir, dose_basename_A);
 end
 
