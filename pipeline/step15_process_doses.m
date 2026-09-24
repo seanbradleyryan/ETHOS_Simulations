@@ -86,7 +86,8 @@ function [field_doses, cbct_resampled, total_rs_dose, metadata] = step15_process
 %       e.g. dose_1885729_Session_4_adapted_B6_103.dcm
 %       beam_num = B[n], seg_num = [seg], field_num = beam_num (matches RTPLAN)
 %       plan_type = 'adapted' or 'reference'
-%   - RTPLAN files: RTPLAN*.dcm pattern
+%   - RTPLAN files: RTPLAN*.dcm pattern, read from the RayStation directory
+%     (RTPLAN_reference_adjusted_mlc.dcm, copied there by step06_explode_segments)
 %   - RTSTRUCT files: RTSTRUCT*.dcm pattern
 %   - Meterset matching: beam_num (n) from filename matches beam_number in RTPLAN
 %
@@ -176,29 +177,20 @@ fprintf('  Step 1.5: Process Field Doses and Resample CT\n');
 fprintf('  Patient: %s, Session: %s\n', patient_id, session);
 fprintf('========================================\n');
 
-% Raystation directory (contains RD.*.dcm field dose files)
+% Raystation directory (contains field dose files, CBCTs, RTSTRUCTs, and the
+% reference RTPLAN copied in by step06_explode_segments)
 rs_dir = fullfile(config.working_dir, 'RayStationFiles', patient_id, session);
-
-% SCT directory (contains CT images, RTPLAN, and RTSTRUCT)
-sct_dir = fullfile(config.working_dir, 'EthosExports', patient_id, ...
-    config.treatment_site, session, 'sct');
 
 % Processed output directory
 processed_dir = fullfile(rs_dir, 'processed');
 
 fprintf('  Raystation directory: %s\n', rs_dir);
-fprintf('  SCT directory: %s\n', sct_dir);
 
 %% ======================== VERIFY DIRECTORIES ========================
 
 if ~isfolder(rs_dir)
     error('step15_process_doses:DirectoryNotFound', ...
         'Raystation directory does not exist: %s', rs_dir);
-end
-
-if ~isfolder(sct_dir)
-    error('step15_process_doses:DirectoryNotFound', ...
-        'SCT directory does not exist: %s', sct_dir);
 end
 
 % Create processed directory
@@ -321,7 +313,7 @@ need_total_accum = ~(fields_ready && totals_ready);
 
 fprintf('\n[2/8] Loading RTPLAN for beam metadata...\n');
 
-beam_metadata = loadRtplanMetadata(sct_dir);
+beam_metadata = loadRtplanMetadata(rs_dir);
 
 if ~isempty(beam_metadata)
     fprintf('  Loaded metadata for %d beams from RTPLAN\n', length(beam_metadata));
@@ -1230,8 +1222,8 @@ function spacing = extractDoseSpacing(dose_info)
 end
 
 
-function beam_metadata = loadRtplanMetadata(sct_dir)
-%LOADRTPLANMETADATA Load beam metadata from RTPLAN file
+function beam_metadata = loadRtplanMetadata(plan_dir)
+%LOADRTPLANMETADATA Load beam metadata from the RTPLAN file in plan_dir
 %
 %   Extract gantry angles, metersets, isocenter positions, and jaw positions
 %   for each beam. Isocenter and jaw data are required by determine_sensor_mask
@@ -1249,23 +1241,23 @@ function beam_metadata = loadRtplanMetadata(sct_dir)
     beam_metadata = [];
     
     % Find RTPLAN file (RTPLAN*.dcm naming convention)
-    rp_files = dir(fullfile(sct_dir, 'RTPLAN*.dcm'));
-    
+    rp_files = dir(fullfile(plan_dir, 'RTPLAN*.dcm'));
+
     if isempty(rp_files)
         % Try alternative naming patterns
-        rp_files = dir(fullfile(sct_dir, 'RP*.dcm'));
+        rp_files = dir(fullfile(plan_dir, 'RP*.dcm'));
     end
-    
+
     if isempty(rp_files)
         return;
     end
-    
+
     % Prefer adjusted MLC plan if available
     adjusted_idx = find(contains({rp_files.name}, 'adjusted_mlc'), 1);
     if ~isempty(adjusted_idx)
-        rp_file = fullfile(sct_dir, rp_files(adjusted_idx).name);
+        rp_file = fullfile(plan_dir, rp_files(adjusted_idx).name);
     else
-        rp_file = fullfile(sct_dir, rp_files(1).name);
+        rp_file = fullfile(plan_dir, rp_files(1).name);
     end
     
     try

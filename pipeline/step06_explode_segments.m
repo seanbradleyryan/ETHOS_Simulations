@@ -103,6 +103,13 @@ copy_files_to_dir(sct_dir, 'RTDOSE_reference.dcm', output_dir, 'Reference dose')
 % Reference plan after MLC adjustment (before segment explosion)
 copy_files_to_dir(sct_dir, 'RTPLAN_reference_adjusted_mlc.dcm', output_dir, 'Reference plan (MLC adjusted)');
 
+% Same plan into RayStationFiles so step15 can read beam metadata without sct_dir
+rs_files_dir = fullfile(config.working_dir, 'RayStationFiles', patient_id, session);
+if ~exist(rs_files_dir, 'dir')
+    mkdir(rs_files_dir);
+end
+copy_files_to_dir(sct_dir, 'RTPLAN_reference_adjusted_mlc.dcm', rs_files_dir, 'Reference plan -> RayStationFiles');
+
 fprintf('\n');
 
 % -----------------------------------------------------------------------
