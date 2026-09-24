@@ -176,36 +176,24 @@ fprintf('  Step 1.5: Process Field Doses and Resample CT\n');
 fprintf('  Patient: %s, Session: %s\n', patient_id, session);
 fprintf('========================================\n');
 
-% Raystation directory (contains RD.*.dcm field dose files). This is also
-% where processed/ outputs are written, regardless of where inputs are read.
+% Raystation directory (contains RD.*.dcm field dose files)
 rs_dir = fullfile(config.working_dir, 'RayStationFiles', patient_id, session);
 
-% SCT directory (contains CT images, RTPLAN, and RTSTRUCT). Also serves as
-% the native fallback for the field dose / CBCT / RTSTRUCT inputs when
-% RayStationFiles holds none of them.
+% SCT directory (contains CT images, RTPLAN, and RTSTRUCT)
 sct_dir = fullfile(config.working_dir, 'EthosExports', patient_id, ...
     config.treatment_site, session, 'sct');
 
-% Resolve where the field dose files are read from: RayStationFiles first,
-% EthosExports (sct_dir) as fallback. discoverCbctSeries applies the same
-% RayStationFiles-first / EthosExports-fallback rule for the CBCT/RTSTRUCT.
-dose_input_dir = resolve_input_dir(rs_dir, sct_dir, ...
-    {'dose_*.mat', 'dose_*.dcm', 'Plan_Field*_Beam*_B*_S*.dcm', ...
-     'Beam*_Seg*_Field*.dcm', 'Beam*.dcm', 'RD.*.dcm', 'RD*.dcm'});
-
-% Processed output directory (always under RayStationFiles)
+% Processed output directory
 processed_dir = fullfile(rs_dir, 'processed');
 
-fprintf('  Field dose input directory: %s\n', dose_input_dir);
+fprintf('  Raystation directory: %s\n', rs_dir);
 fprintf('  SCT directory: %s\n', sct_dir);
-fprintf('  Processed output directory: %s\n', processed_dir);
 
 %% ======================== VERIFY DIRECTORIES ========================
 
-if ~isfolder(dose_input_dir)
+if ~isfolder(rs_dir)
     error('step15_process_doses:DirectoryNotFound', ...
-        'No field dose input directory found (RayStationFiles or EthosExports): %s', ...
-        dose_input_dir);
+        'Raystation directory does not exist: %s', rs_dir);
 end
 
 if ~isfolder(sct_dir)
@@ -232,14 +220,14 @@ fprintf('\n[1/8] Finding field dose files...\n');
 %
 % input_format selects the per-field loader branch later in this function.
 input_format       = '';
-rd_files_mat       = dir(fullfile(dose_input_dir, 'dose_*.mat'));
+rd_files_mat       = dir(fullfile(rs_dir, 'dose_*.mat'));
 
 if ~isempty(rd_files_mat)
     rd_files = rd_files_mat;
     input_format = 'mat';
     fprintf('  Using converted .mat input (dose_*.mat): %d file(s) found\n', numel(rd_files));
 else
-    rd_files_preferred = dir(fullfile(dose_input_dir, 'dose_*.dcm'));
+    rd_files_preferred = dir(fullfile(rs_dir, 'dose_*.dcm'));
 end
 
 if isempty(input_format) && ~isempty(rd_files_preferred)
@@ -249,20 +237,20 @@ if isempty(input_format) && ~isempty(rd_files_preferred)
 elseif isempty(input_format)
     input_format = 'dicom';
     % --- Legacy fallback patterns ---
-    rd_files = dir(fullfile(dose_input_dir, 'Plan_Field*_Beam*_B*_S*.dcm'));
+    rd_files = dir(fullfile(rs_dir, 'Plan_Field*_Beam*_B*_S*.dcm'));
 
     if isempty(rd_files)
-        rd_files = dir(fullfile(dose_input_dir, 'Beam*_Seg*_Field*.dcm'));
+        rd_files = dir(fullfile(rs_dir, 'Beam*_Seg*_Field*.dcm'));
     end
 
     if isempty(rd_files)
-        rd_files = dir(fullfile(dose_input_dir, 'Beam*.dcm'));
+        rd_files = dir(fullfile(rs_dir, 'Beam*.dcm'));
     end
 
     if isempty(rd_files)
-        rd_files = dir(fullfile(dose_input_dir, 'RD.*.dcm'));
+        rd_files = dir(fullfile(rs_dir, 'RD.*.dcm'));
         if isempty(rd_files)
-            rd_files = dir(fullfile(dose_input_dir, 'RD*.dcm'));
+            rd_files = dir(fullfile(rs_dir, 'RD*.dcm'));
         end
     end
 
@@ -280,7 +268,7 @@ if isempty(rd_files)
          '  3. Plan_Field*_Beam*_B*_S*.dcm\n' ...
          '  4. Beam*_Seg*_Field*.dcm\n' ...
          '  5. Beam*.dcm\n' ...
-         '  6. RD.*.dcm / RD*.dcm'], dose_input_dir);
+         '  6. RD.*.dcm / RD*.dcm'], rs_dir);
 end
 
 num_files = length(rd_files);
@@ -348,7 +336,7 @@ fprintf('\n[3/8] Establishing reference dose grid geometry...\n');
 % Load first dose file to get reference geometry. Both .mat and DICOM
 % inputs are pre-converted to the same (origin_mm, spacing_mm, dimensions)
 % triple before the per-field loop runs.
-ref_file = fullfile(dose_input_dir, rd_files(1).name);
+ref_file = fullfile(rs_dir, rd_files(1).name);
 switch input_format
     case 'mat'
         ref_loaded  = load(ref_file, 'raw_field_dose');
@@ -428,9 +416,9 @@ if cbct_ready
 
     clear cbct1_cache cbct3_cache CBCT1_cached CBCT3_cached;
 else
-    fprintf('\n[4/8] Discovering CBCTs and RTSTRUCTs (RayStationFiles first, EthosExports fallback)...\n');
+    fprintf('\n[4/8] Discovering CBCTs and RTSTRUCTs in RayStation directory...\n');
 
-    [cbct_ct1_meta, cbct_ct3_meta] = discoverCbctSeries(rs_dir, sct_dir);
+    [cbct_ct1_meta, cbct_ct3_meta] = discoverCbctSeries(rs_dir);
 
     fprintf('\n  Loading and resampling CBCT1 (CT_1, earlier) to dose grid...\n');
     [ct1_hu, ct1_origin, ct1_spacing, ct1_dims] = loadCbctImagesFromFiles(cbct_ct1_meta.files);
@@ -473,7 +461,7 @@ tissue_masks_file = fullfile(processed_dir, 'tissue_masks.mat');
 % rebuild the masks.
 if cbct_ready && ~masks_ready && (~isfield(cbct_ct1_meta, 'rtstruct') || isempty(cbct_ct1_meta.rtstruct))
     fprintf('  Cached CBCT cubes lack RTSTRUCT path — running discoverCbctSeries...\n');
-    [tmp_meta1, tmp_meta3] = discoverCbctSeries(rs_dir, sct_dir);
+    [tmp_meta1, tmp_meta3] = discoverCbctSeries(rs_dir);
     cbct_ct1_meta.rtstruct = tmp_meta1.rtstruct;
     cbct_ct3_meta.rtstruct = tmp_meta3.rtstruct;
     clear tmp_meta1 tmp_meta3;
@@ -634,7 +622,7 @@ for batch_idx = 1:num_batches
                 continue;
             end
 
-            dose_file = fullfile(dose_input_dir, rd_files(i).name);
+            dose_file = fullfile(rs_dir, rd_files(i).name);
             switch input_format
                 case 'mat'
                     % Load pre-converted .mat (from step14_npz_to_mat). Geometry
@@ -1780,12 +1768,10 @@ function [cbct_hu, origin, spacing, dims] = loadCbctImagesFromFiles(file_list)
 end
 
 
-function [cbct_ct1, cbct_ct3] = discoverCbctSeries(rs_dir, ethos_dir)
-%DISCOVERCBCTSERIES Find both CBCT image series + RTSTRUCTs, RS-first / Ethos-fallback
+function [cbct_ct1, cbct_ct3] = discoverCbctSeries(rs_dir)
+%DISCOVERCBCTSERIES Find both CBCT image series + RTSTRUCTs in a RayStation dir
 %
-%   [cbct_ct1, cbct_ct3] = discoverCbctSeries(rs_dir, ethos_dir)
-%
-%   Scans a directory with dicomCollection, picks out the two CT series (the
+%   Scans rs_dir with dicomCollection, picks out the two CT series (the
 %   CBCTs), pairs each with its RTSTRUCT by SeriesInstanceUID, sorts the
 %   pair by SeriesDate+SeriesTime, and returns:
 %       cbct_ct1 - earlier-acquired CBCT (treated as CT_1)
@@ -1796,31 +1782,6 @@ function [cbct_ct1, cbct_ct3] = discoverCbctSeries(rs_dir, ethos_dir)
 %       .series_uid - SeriesInstanceUID of the CT series
 %       .datetime   - numeric SeriesDate+SeriesTime
 %       .label      - 'CT_1' or 'CT_3'
-%
-%   rs_dir (RayStationFiles) is scanned first. If it yields no usable CBCT
-%   pair, the native EthosExports copy (ethos_dir) is tried. ethos_dir may be
-%   omitted or empty to scan rs_dir only.
-
-    if nargin < 2
-        ethos_dir = '';
-    end
-
-    try
-        [cbct_ct1, cbct_ct3] = discoverCbctSeriesInDir(rs_dir);
-        return;
-    catch ME_primary
-        if isempty(ethos_dir) || strcmp(ethos_dir, rs_dir) || ~isfolder(ethos_dir)
-            rethrow(ME_primary);
-        end
-        fprintf('    No usable CBCT pair in %s (%s)\n', rs_dir, ME_primary.message);
-        fprintf('    [FALLBACK] Scanning EthosExports for CBCTs: %s\n', ethos_dir);
-        [cbct_ct1, cbct_ct3] = discoverCbctSeriesInDir(ethos_dir);
-    end
-end
-
-
-function [cbct_ct1, cbct_ct3] = discoverCbctSeriesInDir(rs_dir)
-%DISCOVERCBCTSERIESINDIR Discover the CT_1/CT_3 CBCT pair in a single directory.
 
     cbct_ct1 = [];
     cbct_ct3 = [];

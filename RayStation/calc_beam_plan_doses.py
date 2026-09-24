@@ -269,6 +269,14 @@ try:
                 print(f"  WARNING: '{plan_name}' has no beam sets. Skipping.")
                 continue
 
+            # Skip the (expensive) dose computation if every CT for this
+            # plan has already been exported on a previous run.
+            pending_cts = [ct for ct in EXAMINATION_LABELS
+                           if f"{plan_name}|{ct}" not in completed_plans]
+            if not pending_cts:
+                print(f"\n  SKIPPING '{plan_name}' (all CTs already exported)")
+                continue
+
             beam_set    = plan.BeamSets[0]
             beam_set_id = beam_set.BeamSetIdentifier()
 

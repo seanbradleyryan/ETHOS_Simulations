@@ -106,30 +106,22 @@ for p_idx = 1:length(CONFIG.patients)
             %  Check RayStation files are present before doing anything
             %% ============================================================
             rs_dir = fullfile(CONFIG.working_dir, 'RayStationFiles', patient_id, session);
-            % Native fallback for the field dose / structure files: the Step 0
-            % sorted export under EthosExports. Scanning prefers RayStationFiles
-            % and only falls back here when RayStationFiles holds nothing.
-            ethos_dir = fullfile(CONFIG.working_dir, 'EthosExports', patient_id, ...
-                CONFIG.treatment_site, session, 'sct');
-            [rs_files_exist, num_dose_files, scan_dir] = check_raystation_files(rs_dir, ethos_dir);
+            [rs_files_exist, num_dose_files] = check_raystation_files(rs_dir);
 
             if ~rs_files_exist
-                fprintf('[STEP 1] WAITING: No field dose files found.\n');
-                fprintf('         Primary location:  %s\n', rs_dir);
-                fprintf('         Fallback location: %s\n', ethos_dir);
+                fprintf('[STEP 1] WAITING: No RayStation field dose files found.\n');
+                fprintf('         Expected location: %s\n', rs_dir);
                 fprintf('         Please complete the RayStation export, then re-run.\n');
                 RESULTS.patients.(result_key).status = 'awaiting_raystation';
                 continue;
             end
-            fprintf('[STEP 1] Found %d dose file(s) in %s\n', num_dose_files, scan_dir);
+            fprintf('[STEP 1] Found %d dose file(s) in %s\n', num_dose_files, rs_dir);
 
             %% ============================================================
             %  Report which processed outputs are already on disk
             %% ============================================================
-            % Outputs always live under RayStationFiles/.../processed, even when
-            % the inputs were read from the EthosExports fallback (scan_dir).
             processed_dir = fullfile(rs_dir, 'processed');
-            report_processed_status(processed_dir, scan_dir, CONFIG.skip_completed);
+            report_processed_status(processed_dir, rs_dir, CONFIG.skip_completed);
 
             %% ============================================================
             %  STEP 1.4: Convert RayStation NPZ Field Doses to .mat
@@ -195,21 +187,23 @@ generate_compress_summary(RESULTS);
 %  HELPER FUNCTIONS
 %% =========================================================================
 
-function [exists, num_files, scan_dir] = check_raystation_files(rs_dir, ethos_dir)
-    % Dose-file patterns in priority order (same order used by step15).
-    dose_patterns = {'dose_*.npz', 'dose_*.dcm', ...
-        'Plan_Field*_Beam*_B*_S*.dcm', 'RD.*.dcm', 'RD*.dcm'};
-
-    % RayStationFiles first, EthosExports fallback if it holds nothing.
-    scan_dir  = resolve_input_dir(rs_dir, ethos_dir, dose_patterns);
+function [exists, num_files] = check_raystation_files(rs_dir)
     exists    = false;
     num_files = 0;
-    if ~exist(scan_dir, 'dir'), return; end
-
-    rd_files = [];
-    for k = 1:numel(dose_patterns)
-        rd_files = dir(fullfile(scan_dir, dose_patterns{k}));
-        if ~isempty(rd_files), break; end
+    if ~exist(rs_dir, 'dir'), return; end
+    % Preferred input format on Linux: NPZ from calc_beam_plan_doses.py
+    rd_files = dir(fullfile(rs_dir, 'dose_*.npz'));
+    if isempty(rd_files)
+        rd_files = dir(fullfile(rs_dir, 'dose_*.dcm'));
+    end
+    if isempty(rd_files)
+        rd_files = dir(fullfile(rs_dir, 'Plan_Field*_Beam*_B*_S*.dcm'));
+    end
+    if isempty(rd_files)
+        rd_files = dir(fullfile(rs_dir, 'RD.*.dcm'));
+    end
+    if isempty(rd_files)
+        rd_files = dir(fullfile(rs_dir, 'RD*.dcm'));
     end
     num_files = numel(rd_files);
     exists    = (num_files > 0);
@@ -227,15 +221,13 @@ function result = init_patient_result(patient_id, session)
     result.start_time = datetime('now');
 end
 
-function report_processed_status(processed_dir, input_dir, skip_completed)
+function report_processed_status(processed_dir, rs_dir, skip_completed)
 %REPORT_PROCESSED_STATUS Print which Step 1.4/1.5 outputs are already on disk.
 %
 %   Purely informational — actual skipping is performed inside the daughter
 %   functions (step14_npz_to_mat / step15_process_doses), which honor
 %   config.skip_completed. This summary lets the user see what will be
-%   reused before processing begins. input_dir is the resolved scan location
-%   (RayStationFiles, or the EthosExports fallback) where the NPZ/.mat inputs
-%   live; processed outputs always live under RayStationFiles/.../processed.
+%   reused before processing begins.
 
     fprintf('\n[STATUS] Processed output check (skip_completed=%d)\n', skip_completed);
 
@@ -255,12 +247,12 @@ function report_processed_status(processed_dir, input_dir, skip_completed)
     field_outs = dir(fullfile(processed_dir, 'dose_*.mat'));
     n_field_out = numel(field_outs);
 
-    % NPZ vs converted .mat counts in the resolved input dir (Step 1.4 progress)
-    npz_files  = dir(fullfile(input_dir, 'dose_*.npz'));
-    mat_inputs = dir(fullfile(input_dir, 'dose_*.mat'));
+    % NPZ vs converted .mat counts in rs_dir (Step 1.4 progress)
+    npz_files  = dir(fullfile(rs_dir, 'dose_*.npz'));
+    mat_inputs = dir(fullfile(rs_dir, 'dose_*.mat'));
 
     fprintf('         Step 1.4 (NPZ -> .mat):  %d NPZ / %d .mat in %s\n', ...
-        numel(npz_files), numel(mat_inputs), input_dir);
+        numel(npz_files), numel(mat_inputs), rs_dir);
     fprintf('         CBCT1_resampled.mat:     %s\n', present(cbct1));
     fprintf('         CBCT3_resampled.mat:     %s\n', present(cbct3));
     fprintf('         tissue_masks.mat:        %s\n', present(masks));
