@@ -2111,7 +2111,8 @@ function [tissue_mask, roi_names, roi_masks, body_mask, couch_mask] = loadRtstru
     
     % Process each ROI in ROIContourSequence
     contour_seq_fields = fieldnames(rtstruct.ROIContourSequence);
-    
+    found_body_roi = false;  % true once an ROI name matches body_patterns
+
     for c_idx = 1:length(contour_seq_fields)
         try
             contour_item = rtstruct.ROIContourSequence.(contour_seq_fields{c_idx});
@@ -2137,7 +2138,10 @@ function [tissue_mask, roi_names, roi_masks, body_mask, couch_mask] = loadRtstru
             roi_name_lower = lower(roi_name);
             is_body = any(strcmpi(roi_name_lower, body_patterns)) || ...
                       any(contains(roi_name_lower, body_patterns));
-            
+            if is_body
+                found_body_roi = true;
+            end
+
             % Check if this is a couch region (case-insensitive)
             is_couch = any(strcmpi(roi_name_lower, couch_patterns)) || ...
                        any(contains(roi_name_lower, couch_patterns));
@@ -2236,7 +2240,24 @@ function [tissue_mask, roi_names, roi_masks, body_mask, couch_mask] = loadRtstru
     fprintf('    Tissue mask created with %d labeled ROIs\n', valid_count);
     fprintf('    Body mask (before gap fill): %d voxels\n', sum(body_mask(:)));
     fprintf('    Couch mask (before gap fill): %d voxels\n', sum(couch_mask(:)));
-    
+
+    % Warn if there is no usable body contour (dose masking relies on it)
+    if ~found_body_roi
+        if num_rois > 0
+            all_roi_names = strjoin({roi_info.name}, ', ');
+        else
+            all_roi_names = 'none';
+        end
+        warning('loadRtstructAndCreateMasksFromFile:NoBodyContour', ...
+            ['RTSTRUCT %s%s has no body contour (no ROI name matches: %s). ' ...
+             'ROIs found: %s'], rs_name, rs_ext, strjoin(body_patterns, ', '), ...
+            all_roi_names);
+    elseif ~any(body_mask(:))
+        warning('loadRtstructAndCreateMasksFromFile:EmptyBodyContour', ...
+            'RTSTRUCT %s%s has a body ROI, but none of its contours fall on the dose grid.', ...
+            rs_name, rs_ext);
+    end
+
     % ===== FIX GAPS IN BODY AND COUCH MASKS =====
     % RTSTRUCT contours may not align with dose grid slices, causing gaps.
     % Fill gaps by interpolating along z-direction.
