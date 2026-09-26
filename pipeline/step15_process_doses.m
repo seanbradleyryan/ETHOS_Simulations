@@ -23,6 +23,10 @@ function [field_doses, cbct_resampled, total_rs_dose, metadata] = step15_process
 %           .treatment_site     - Subfolder name (default: 'Pancreas')
 %           .apply_dose_masking - Boolean, zero dose outside body/in couch
 %                                 (default: true, set false for debugging)
+%           .log_interval       - Print per-field progress only every Nth
+%                                 field (default: 100)
+%           .fields_per_beam    - Expected dose files per RTPLAN beam; used to
+%                                 warn about missing files (default: 165)
 %
 %   OUTPUTS:
 %       field_doses     - Cell array of field dose structures (loaded from files)
@@ -153,6 +157,16 @@ if ~isfield(config, 'batch_size') || isempty(config.batch_size)
     config.batch_size = 1000;
 end
 
+% Per-field progress is only printed every log_interval-th field
+if ~isfield(config, 'log_interval') || isempty(config.log_interval)
+    config.log_interval = 100;
+end
+
+% Expected number of dose files per RTPLAN beam (for the missing-file check)
+if ~isfield(config, 'fields_per_beam') || isempty(config.fields_per_beam)
+    config.fields_per_beam = 165;
+end
+
 % Resume-friendly behavior: detect which outputs in processed/ already
 % exist and skip the corresponding work. Set false for a forced full re-run.
 if ~isfield(config, 'skip_completed')
@@ -267,12 +281,37 @@ num_files = length(rd_files);
 fprintf('  Found %d field dose file(s)\n', num_files);
 
 for i = 1:num_files
-    fprintf('    [%d] %s\n', i, rd_files(i).name);
+    if mod(i, config.log_interval) == 0
+        fprintf('    [%d] %s\n', i, rd_files(i).name);
+    end
+end
+
+%% ======================== LOAD RTPLAN FOR BEAM METADATA ========================
+
+fprintf('\n[2/8] Loading RTPLAN for beam metadata...\n');
+
+beam_metadata = loadRtplanMetadata(rs_dir);
+
+if ~isempty(beam_metadata)
+    fprintf('  Loaded metadata for %d beams from RTPLAN\n', length(beam_metadata));
+
+    % Check that every beam has its full set of dose files
+    expected_num_files = length(beam_metadata) * config.fields_per_beam;
+    fprintf('  Expected field dose files: %d beams x %d = %d (found %d)\n', ...
+        length(beam_metadata), config.fields_per_beam, expected_num_files, num_files);
+    if num_files < expected_num_files
+        warning('step15_process_doses:MissingFieldDoses', ...
+            '%d of %d expected field dose files are missing (found %d).', ...
+            expected_num_files - num_files, expected_num_files, num_files);
+    end
+else
+    fprintf('  [WARNING] No RTPLAN metadata available, using defaults\n');
+    fprintf('  [WARNING] Cannot check expected number of field dose files without RTPLAN\n');
 end
 
 %% ======================== DETECT EXISTING PROCESSED OUTPUTS ========================
 
-fprintf('\n[1.5/8] Detecting existing processed outputs (skip_completed=%d)...\n', ...
+fprintf('\n[2.5/8] Detecting existing processed outputs (skip_completed=%d)...\n', ...
     config.skip_completed);
 
 [skip_status, expected_field_outputs] = detectProcessedOutputs( ...
@@ -308,18 +347,6 @@ end
 % If every field output is on disk AND every totals file is on disk, we
 % can skip total accumulation entirely and load existing totals at the end.
 need_total_accum = ~(fields_ready && totals_ready);
-
-%% ======================== LOAD RTPLAN FOR BEAM METADATA ========================
-
-fprintf('\n[2/8] Loading RTPLAN for beam metadata...\n');
-
-beam_metadata = loadRtplanMetadata(rs_dir);
-
-if ~isempty(beam_metadata)
-    fprintf('  Loaded metadata for %d beams from RTPLAN\n', length(beam_metadata));
-else
-    fprintf('  [WARNING] No RTPLAN metadata available, using defaults\n');
-end
 
 %% ======================== ESTABLISH REFERENCE GRID ========================
 
@@ -562,7 +589,11 @@ for batch_idx = 1:num_batches
     batch_total_dose = zeros(ref_dims);
 
     for i = batch_start:batch_end
-        fprintf('  Processing field %d/%d: %s\n', i, num_files, rd_files(i).name);
+        % Only log every config.log_interval-th field (warnings always print)
+        show_progress = (mod(i, config.log_interval) == 0);
+        if show_progress
+            fprintf('  Processing field %d/%d: %s\n', i, num_files, rd_files(i).name);
+        end
 
         try
             % ----- Skip if the processed output for this field already exists.
@@ -608,8 +639,10 @@ for batch_idx = 1:num_batches
                     'couch_masked', cfd.couch_masked);
 
                 processed_count = processed_count + 1;
-                fprintf('    [Skip] %s already processed (max: %.4f Gy)\n', ...
-                    rd_files(i).name, cfd.max_dose_Gy);
+                if show_progress
+                    fprintf('    [Skip] %s already processed (max: %.4f Gy)\n', ...
+                        rd_files(i).name, cfd.max_dose_Gy);
+                end
                 clear cached cfd;
                 continue;
             end
@@ -635,7 +668,9 @@ for batch_idx = 1:num_batches
                     if isfield(dose_info, 'DoseGridScaling')
                         dose_scaling = dose_info.DoseGridScaling;
                         dose_data = dose_data * dose_scaling;
-                        fprintf('    Applied scaling: %e\n', dose_scaling);
+                        if show_progress
+                            fprintf('    Applied scaling: %e\n', dose_scaling);
+                        end
                     end
 
                     % Extract geometry and verify it matches reference
@@ -759,9 +794,11 @@ for batch_idx = 1:num_batches
             end
             save(field_filepath, 'field_dose', '-v7.3');
             save_count = save_count + 1;
-            fprintf('    [Save %d] %s (B%d S%d [%s], max: %.4f Gy, gantry: %.1f deg, MU: %.1f)\n', ...
-                save_count, field_filename, beam_num, seg_num, plan_type, ...
-                field_dose.max_dose_Gy, gantry_angle, meterset);
+            if show_progress
+                fprintf('    [Save %d] %s (B%d S%d [%s], max: %.4f Gy, gantry: %.1f deg, MU: %.1f)\n', ...
+                    save_count, field_filename, beam_num, seg_num, plan_type, ...
+                    field_dose.max_dose_Gy, gantry_angle, meterset);
+            end
 
             % Store reference in output cell array (without full dose data for memory)
             field_doses{i} = struct();
