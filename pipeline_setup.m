@@ -1,33 +1,26 @@
 %% =========================================================================
 %  PIPELINE_SETUP.m
-%  ETHOS Photoacoustic Pipeline  Pre-RayStation Steps
+%  ETHOS Pipeline  Pre-RayStation Steps
 %  =========================================================================
 %
 %  PURPOSE:
 %  Runs all steps that must be completed BEFORE exporting field doses from
-%  RayStation.  After this script completes, the user must:
-%    1. Import the per-beam exploded-segment RTPLAN files (from
-%       Raystation_Input/<PatientID>/<Session>/) into RayStation
-%    2. Recalculate dose for each exploded-segment beam
-%    3. Export field doses as Plan_Field*_Beam*_B*_S*.dcm files into
-%       RayStationFiles/<PatientID>/<Session>/
-%    4. Run pipeline_simulate.m
+%  RayStation. 
 %
 %  STEPS EXECUTED:
-%    Step 0    Sort DICOM files (SCT + RT + REG + up to 2 CBCT)
-%    Step 0.5  Fix Halcyon dual-layer MLC minimum gaps in RTPLAN
-%    Step 0.6  Explode each beam's segments into individual 2-CP beams
+%    Step 0    Sort DICOM files (SCT + RT + REG + up to 2 CBCT) and moves
+%    them into Raystation_input
+%    Step 0.5  Raystation is configured to reject plans without a minimum
+%    gap between mlc teeth. This fixes Halcyon dual-layer MLC minimum gaps in RTPLAN
+%    Step 0.6  Raystation does not have an object for the dose from a single segment which is needed for IRAI, but it does store the dose from a beam. 
+% This explodes each beam's segments into individual 2-CP beams.
 %               (one output RTPLAN file per original beam)
 %
 %  PREREQUISITES:
-%    - MATLAB R2022a or later
-%    - Image Processing Toolbox (dicominfo, dicomwrite, dicomuid)
 %    - Raw ETHOS DICOM exports in EthosExports/<PatientID>/Pancreas/<Session>/
 %
-%  PLATFORM: Windows machine (C:/Users/80030361/ETHOS_Simulations)
+%  PLATFORM: Windows machine (ideally F: drive for Moffitt users.) 
 %
-%  AUTHOR: ETHOS Pipeline Team
-%  DATE: March 2026
 %  =========================================================================
 
 clear; clc; close all;
@@ -41,8 +34,9 @@ CONFIG.sessions = {'Session_1','Session_2'};
 CONFIG.treatment_site  = 'Pancreas';
 
 % --- Directory Paths ---
-CONFIG.working_dir  = 'C:/Users/80030361/ETHOS_Simulations';
-CONFIG.matrad_path  = 'C:/Users/80030361/Documents/MATLAB/Addons/matRad';
+% working_dir = the git repo root (found by utils/get_repo_root).
+addpath(genpath(fullfile(fileparts(mfilename('fullpath')), 'utils')));
+CONFIG.working_dir  = get_repo_root();
 
 % --- MLC Gap Correction Parameters (Step 0.5) ---
 CONFIG.mlc_min_gap_mm       = 0.5*2;             % Minimum allowed leaf gap (mm)
@@ -64,7 +58,6 @@ fprintf('  Working directory: %s\n', CONFIG.working_dir);
 fprintf('=========================================================\n\n');
 
 % Add required paths
-addpath(genpath(CONFIG.matrad_path));
 addpath(genpath(fullfile(CONFIG.working_dir, 'PipelineScripts')));
 addpath(genpath(fullfile(CONFIG.working_dir, 'pipeline')));  % step* functions live here
 addpath(genpath(fullfile(CONFIG.working_dir, 'utils')));
