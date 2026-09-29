@@ -24,6 +24,8 @@ function output_paths = step06_explode_segments(patient_id, session, config)
 %  Each output file contains:
 %    - BeamSequence with N_seg beams (one per segment, BeamNumber 1..N_seg)
 %    - FractionGroupSequence with N_seg referenced beams and per-segment MUs
+%    - NumberOfFractionsPlanned = 1; every MU is divided by the original
+%      fraction count (e.g. 10 fractions, beam MU 400 -> 40 MU split over segments)
 %
 %  RayStation imports these plans; it exports one dose file per beam, which
 %  step15 loads via the preferred pattern:  Plan_Field*_Beam*_B*_S*.dcm
@@ -54,7 +56,7 @@ if nargin == 0
     patient_id = '1194203';
     session    = 'Session_1';
     config     = struct( ...
-        'working_dir',    '/mnt/weka/home/80030361/ETHOS_Simulations', ...
+        'working_dir',    get_repo_root(), ...
         'treatment_site', 'Pancreas');
 end
 
@@ -76,7 +78,7 @@ fprintf('SCT dir:    %s\n', sct_dir);
 fprintf('Output dir: %s\n\n', output_dir);
 
 % -----------------------------------------------------------------------
-% Copy supporting files from sct_dir and sim_ct_dir into output_dir
+% Copy supporting files from sct_dir into output_dir
 % -----------------------------------------------------------------------
 fprintf('--- Copying supporting files to RayStation input directory ---\n');
 
@@ -170,11 +172,22 @@ for pt = 1:numel(plan_types)
     frac_group      = rtplan.FractionGroupSequence.Item_1;
     ref_beam_fields = fieldnames(frac_group.ReferencedBeamSequence);
 
+    % Original fraction count: every beam's MU is divided by this so the
+    % exploded plan delivers a single fraction's worth of dose.
+    if ~isfield(frac_group, 'NumberOfFractionsPlanned') || ...
+            double(frac_group.NumberOfFractionsPlanned) < 1
+        error('step06:noFractions', ...
+            '[%s] FractionGroup has no valid NumberOfFractionsPlanned.', plan_type);
+    end
+    n_fractions = double(frac_group.NumberOfFractionsPlanned);
+    fprintf('Original fractions:  %d  (MU divided by %d, output plans use 1 fraction)\n', ...
+        n_fractions, n_fractions);
+
     for k = 1:numel(ref_beam_fields)
         rb        = frac_group.ReferencedBeamSequence.(ref_beam_fields{k});
         bnum      = int32(rb.ReferencedBeamNumber);
         bmu       = double(rb.BeamMeterset);
-        mu_map(bnum) = bmu;
+        mu_map(bnum) = bmu / n_fractions;
     end
     fprintf('MU map loaded for %d beams.\n\n', mu_map.Count);
 
@@ -389,6 +402,7 @@ for pt = 1:numel(plan_types)
         rtplan_out.BeamSequence = new_beam_seq;
         rtplan_out.FractionGroupSequence.Item_1.ReferencedBeamSequence = new_ref_beam_seq;
         rtplan_out.FractionGroupSequence.Item_1.NumberOfBeams = local_beam_idx;
+        rtplan_out.FractionGroupSequence.Item_1.NumberOfFractionsPlanned = 1;
 
         % Unique SOP Instance UID per file
         new_uid                               = dicomuid();
