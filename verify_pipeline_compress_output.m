@@ -37,14 +37,18 @@
 %  DoseSummationType = PLAN RTDOSE is divided by NumberOfFractionsPlanned.
 %
 %  INPUTS (set in the CONFIGURATION section):
-%    CONFIG.patients / .sessions / .treatment_site - what to verify
+%    CONFIG.patients / .sessions                    - what to verify
 %    CONFIG.num_random_pairs, .random_seed          - test 1 sampling
 %    CONFIG.gamma_*, .ethos_min_pass_pct            - gamma (tests 1 and 4)
 %    CONFIG.*_tol, .min_*                           - pass/fail thresholds
-%    CONFIG.ct_window_hu, .close_figures            - plotting
+%    CONFIG.ct_window_hu                            - plotting
 %
 %  OUTPUTS:
-%    Console report, and PNG figures in
+%    Console report. Two figure windows, one per plot category, with one tab
+%    per plot (tabs from every session go in the same window):
+%      "Test 1: dose on each CBCT"  - tab per session + beam/segment pair
+%      "Test 2: body contours"      - tab per patient/session
+%    Each tab is also saved as a PNG in
 %    AnalysisResults/<id>/<session>/compress_verification/
 %      pair_<plan>_B<beam>_S<seg>.png   (test 1)
 %      body_contours.png                (test 2)
@@ -75,7 +79,6 @@ clear; clc; close all;
 % --- Patient and Session Selection (copy the lists from pipeline_compress.m) ---
 CONFIG.patients       = {'1194203'};
 CONFIG.sessions       = {'Session_1'};
-CONFIG.treatment_site = 'Pancreas';
 
 % --- Directory Paths ---
 addpath(genpath(fullfile(fileparts(mfilename('fullpath')), 'utils')));
@@ -99,9 +102,7 @@ CONFIG.total_rel_tol      = 1e-6;   % test 8b: saved total vs summed field doses
 CONFIG.geometry_tol_mm    = 0.01;   % test 8b: CBCT origin/spacing vs metadata.mat
 
 % --- Plotting ---
-CONFIG.ct_window_hu  = [-500 500];
-% Keep figures open for a single session; close them (PNG still saved) for many
-CONFIG.close_figures = numel(CONFIG.patients) * numel(CONFIG.sessions) > 1;
+CONFIG.ct_window_hu = [-500 500];
 
 %% ========================= INITIALIZATION ================================
 
@@ -117,6 +118,10 @@ gammaCriteria = {CONFIG.gamma_dose_pct, CONFIG.gamma_dist_mm, ...
     sprintf('%g%%/%gmm', CONFIG.gamma_dose_pct, CONFIG.gamma_dist_mm)};
 allResults = struct('patient_id', {}, 'session', {}, 'tests', {});
 
+% One figure per plot category; every plot (all sessions) is a tab in it
+pairTabs = uitabgroup(figure('Name', 'Test 1: dose on each CBCT', 'Position', [50 50 1500 900]));
+bodyTabs = uitabgroup(figure('Name', 'Test 2: body contours', 'Position', [80 80 1500 900]));
+
 %% ========================= MAIN LOOP =====================================
 
 for pIdx = 1:numel(CONFIG.patients)
@@ -131,8 +136,8 @@ for pIdx = 1:numel(CONFIG.patients)
             %% ---------------- Paths and shared inputs ----------------
             rsDir        = fullfile(CONFIG.working_dir, 'RayStationFiles', patientID, session);
             processedDir = fullfile(rsDir, 'processed');
-            sctDir       = fullfile(CONFIG.working_dir, 'EthosExports', patientID, ...
-                CONFIG.treatment_site, session, 'sct');
+            % Step 0.6 copies the ETHOS truth dose + its plan here for the RayStation import
+            rsInputDir   = fullfile(CONFIG.working_dir, 'Raystation_Input', patientID, session);
             outDir       = fullfile(CONFIG.working_dir, 'AnalysisResults', patientID, session, ...
                 'compress_verification');
             if ~isfolder(outDir)
@@ -208,19 +213,17 @@ for pIdx = 1:numel(CONFIG.patients)
                         'Criteria', gammaCriteria, 'Cutoff', CONFIG.gamma_cutoff_fraction);
                     passRates(n) = g.pass_rates(1);
 
-                    fig = figure('Name', pairKeys{k}, 'Position', [50 50 1500 850]);
-                    plot_three_views(1, cbct1.cubeHU, cbct1.bodyMask, fd1.dose_Gy, ...
+                    panel = new_tab_panel(pairTabs, sprintf('%s %s', session, pairKeys{k}));
+                    plot_three_views(panel, 1, cbct1.cubeHU, cbct1.bodyMask, fd1.dose_Gy, ...
                         [row col slc], spacing, doseMax, CONFIG, 'CT_1 dose on CBCT1');
-                    plot_three_views(2, cbct3.cubeHU, cbct3.bodyMask, fd3.dose_Gy, ...
+                    plot_three_views(panel, 2, cbct3.cubeHU, cbct3.bodyMask, fd3.dose_Gy, ...
                         [row col slc], spacing, doseMax, CONFIG, 'CT_3 dose on CBCT3');
-                    sgtitle(fig, sprintf('%s %s %s | slices through CT_1 max | CT_1 vs CT_3 gamma %s: %.1f%% pass', ...
+                    sgtitle(panel, sprintf('%s %s %s | slices through CT_1 max | CT_1 vs CT_3 gamma %s: %.1f%% pass', ...
                         patientID, session, pairKeys{k}, gammaCriteria{3}, passRates(n)), ...
                         'Interpreter', 'none');
-                    exportgraphics(fig, fullfile(outDir, sprintf('pair_%s.png', pairKeys{k})), ...
+                    drawnow;
+                    exportgraphics(panel, fullfile(outDir, sprintf('pair_%s.png', pairKeys{k})), ...
                         'Resolution', 150);
-                    if CONFIG.close_figures
-                        close(fig);
-                    end
                     fprintf('    %s: gamma %s pass %.1f%%\n', pairKeys{k}, gammaCriteria{3}, passRates(n));
                 end
 
@@ -243,17 +246,15 @@ for pIdx = 1:numel(CONFIG.patients)
                 [row, col, slc] = ind2sub(size(cbct1.bodyMask), find(cbct1.bodyMask));
                 bodyCenter = round([mean(row) mean(col) mean(slc)]);
 
-                fig = figure('Name', 'Body contours', 'Position', [50 50 1500 850]);
-                plot_three_views(1, cbct1.cubeHU, cbct1.bodyMask, [], bodyCenter, spacing, 0, ...
+                panel = new_tab_panel(bodyTabs, sprintf('%s %s', patientID, session));
+                plot_three_views(panel, 1, cbct1.cubeHU, cbct1.bodyMask, [], bodyCenter, spacing, 0, ...
                     CONFIG, 'CBCT1 (CT_1)');
-                plot_three_views(2, cbct3.cubeHU, cbct3.bodyMask, [], bodyCenter, spacing, 0, ...
+                plot_three_views(panel, 2, cbct3.cubeHU, cbct3.bodyMask, [], bodyCenter, spacing, 0, ...
                     CONFIG, 'CBCT3 (CT_3)');
-                sgtitle(fig, sprintf('%s %s | body contour (green), slices through the CBCT1 body centroid', ...
+                sgtitle(panel, sprintf('%s %s | body contour (green), slices through the CBCT1 body centroid', ...
                     patientID, session), 'Interpreter', 'none');
-                exportgraphics(fig, fullfile(outDir, 'body_contours.png'), 'Resolution', 150);
-                if CONFIG.close_figures
-                    close(fig);
-                end
+                drawnow;
+                exportgraphics(panel, fullfile(outDir, 'body_contours.png'), 'Resolution', 150);
 
                 tests = add_result(tests, testName, 'INFO', sprintf( ...
                     'body voxels: CBCT1 %d, CBCT3 %d; figure body_contours.png', ...
@@ -325,14 +326,17 @@ for pIdx = 1:numel(CONFIG.patients)
                     rsCt1Total = load_total_dose(fullfile(processedDir, 'total_dose_CT_1.mat'));
 
                     % ETHOS truth for the same plan type, in Gy
-                    rtdoseFile = fullfile(sctDir, sprintf('RTDOSE_%s.dcm', planTypes{1}));
+                    rtdoseFile = fullfile(rsInputDir, sprintf('RTDOSE_%s.dcm', planTypes{1}));
                     info       = dicominfo(rtdoseFile);
                     ethosRaw   = double(squeeze(dicomread(rtdoseFile))) * info.DoseGridScaling;
 
-                    % RS doses are one fraction; a PLAN-summed RTDOSE covers every fraction
+                    % RS doses are one fraction; a PLAN-summed RTDOSE covers every fraction.
+                    % Use the MLC-adjusted plan: it keeps the original fraction count, while
+                    % the exploded RTPLAN_<id>_..._B*.dcm files in this folder are set to 1.
                     nFractions = 1;
                     if strcmpi(info.DoseSummationType, 'PLAN')
-                        rtplan     = dicominfo(fullfile(sctDir, sprintf('RTPLAN_%s.dcm', planTypes{1})));
+                        rtplan     = dicominfo(fullfile(rsInputDir, ...
+                            sprintf('RTPLAN_%s_adjusted_mlc.dcm', planTypes{1})));
                         nFractions = double(rtplan.FractionGroupSequence.Item_1.NumberOfFractionsPlanned);
                     end
                     ethosRaw = ethosRaw / nFractions;
@@ -610,8 +614,16 @@ function c = dose_centroid_mm(dose, origin, spacing)
     c = origin + ([xIdx yIdx zIdx] - 1) .* spacing;
 end
 
-function plot_three_views(row, hu, bodyMask, dose, center, spacing, doseMax, CONFIG, rowLabel)
-%PLOT_THREE_VIEWS Fill one row of a 2x3 figure: transverse, coronal, sagittal.
+function panel = new_tab_panel(tabGroup, tabTitle)
+%NEW_TAB_PANEL Add a tab to tabGroup, bring it to the front, and return a panel
+%   filling it (sgtitle and exportgraphics work on a panel).
+    tab = uitab(tabGroup, 'Title', tabTitle);
+    tabGroup.SelectedTab = tab;   % exportgraphics renders only the visible tab
+    panel = uipanel(tab, 'Position', [0 0 1 1], 'BorderType', 'none');
+end
+
+function plot_three_views(parent, row, hu, bodyMask, dose, center, spacing, doseMax, CONFIG, rowLabel)
+%PLOT_THREE_VIEWS Fill one row of a 2x3 grid in parent: transverse, coronal, sagittal.
 %
 %   Slices pass through center = [row col slice]. CBCT in grayscale, dose (skipped
 %   when empty) as a translucent color wash above the gamma cutoff on a fixed
@@ -623,7 +635,7 @@ function plot_three_views(row, hu, bodyMask, dose, center, spacing, doseMax, CON
     viewSpacing = [spacing(1) spacing(2); spacing(1) spacing(3); spacing(2) spacing(3)];
 
     for v = 1:3
-        ax = subplot(2, 3, (row - 1) * 3 + v);
+        ax = subplot(2, 3, (row - 1) * 3 + v, 'Parent', parent);
 
         ctSlice = get_slice(hu, v, center);
         ctGray  = min(max((ctSlice - CONFIG.ct_window_hu(1)) / diff(CONFIG.ct_window_hu), 0), 1);
