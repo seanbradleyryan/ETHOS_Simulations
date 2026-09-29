@@ -141,7 +141,7 @@ CONFIG.metrics_noise_minutes = 30;          % ensemble time budget (min)
 % otherwise the watcher is shrunk, or skipped (Step 2.5 then runs after Step 2
 % exactly as before).
 CONFIG.metrics_overlap_step2    = true;   % false => old behavior (Step 2, then 2.5)
-CONFIG.metrics_watcher_workers  = 23;     % CPU workers for the watcher's pool
+CONFIG.metrics_watcher_workers  = [];     % [] = auto: CPUs - GPU workers - 1 (see INITIALIZATION)
 CONFIG.metrics_watcher_poll_sec = 60;     % how often the watcher looks for finished beams
 
 % --- SSIM & Visualization Parameters ---
@@ -152,7 +152,7 @@ CONFIG.sensor_mode           = CONFIG.sensor_placement_method;  % passed to step
 
 % --- Parallel Processing ---
 CONFIG.use_parallel          = true;
-CONFIG.num_parallel_workers  = 8;
+CONFIG.num_parallel_workers  = [];     % Step 2 pool. [] = auto: one worker per GPU (see INITIALIZATION)
 
 % --- Multi-Instance Coordination ---
 % Multiple copies of this script (e.g. one per remote-desktop session, all
@@ -193,6 +193,40 @@ addpath(genpath(fullfile(CONFIG.working_dir, 'utils')));
 if ~exist('kWaveGrid', 'file')
     error('k-Wave toolbox not found. Please add k-Wave to the MATLAB path.');
 end
+
+% --- NEW: auto-detect CPUs and GPUs and size the worker pools from them ---
+% CPUs: this job's SLURM allocation when running under SLURM (the node may have
+% more cores than the job was given), otherwise the machine's physical cores.
+num_cpus = str2double(getenv('SLURM_CPUS_PER_TASK'));
+if isnan(num_cpus), num_cpus = str2double(getenv('SLURM_CPUS_ON_NODE')); end
+if isnan(num_cpus), num_cpus = feature('numcores'); end
+% GPUs: only the ones this job can see (the scheduler sets CUDA_VISIBLE_DEVICES).
+num_gpus = 0;
+if CONFIG.use_gpu
+    try, num_gpus = gpuDeviceCount; catch, num_gpus = 0; end
+end
+% Step 2 pool: one k-Wave worker per GPU. With no GPU, k-Wave runs on the CPUs,
+% so use every CPU the local cluster allows (then no CPUs are left for the
+% watcher, and Step 2.5 simply runs after Step 2).
+if isempty(CONFIG.num_parallel_workers)
+    if num_gpus > 0
+        CONFIG.num_parallel_workers = num_gpus;
+    else
+        local_cluster = parcluster();
+        CONFIG.num_parallel_workers = min(num_cpus, local_cluster.NumWorkers);
+    end
+end
+% Step 2.5 watcher pool: the CPUs left over after the Step 2 workers and the
+% watcher's own leader process (1).
+if isempty(CONFIG.metrics_watcher_workers)
+    CONFIG.metrics_watcher_workers = num_cpus - CONFIG.num_parallel_workers - 1;
+end
+fprintf('  Detected %d CPU(s), %d GPU(s) -> Step 2 workers: %d, Step 2.5 watcher workers: %d\n', ...
+    num_cpus, num_gpus, CONFIG.num_parallel_workers, max(CONFIG.metrics_watcher_workers, 0));
+if num_gpus == 0 && CONFIG.use_gpu
+    fprintf('  [WARN] No GPU visible; k-Wave will run on the CPU.\n');
+end
+% --- end NEW ---
 
 % Compute a stable hash of the sim-affecting CONFIG fields.  Every cached
 % artifact for this run is keyed on this hash, so flipping any sim-relevant
@@ -389,8 +423,8 @@ for p_idx = 1:length(CONFIG.patients)
                             n_watch);
                         log_msg(log_fid, 'Step 2.5 watcher started (%d CPU workers)', n_watch);
                     else
-                        fprintf(['         [WARN] Local cluster has %d workers; not enough for the ' ...
-                            'Step 2.5 watcher + %d GPU workers. Step 2.5 will run after Step 2.\n'], ...
+                        fprintf(['         [WARN] No CPUs left for the Step 2.5 watcher (local cluster ' ...
+                            'allows %d workers, Step 2 uses %d). Step 2.5 will run after Step 2.\n'], ...
                             local_cluster.NumWorkers, CONFIG.num_parallel_workers);
                     end
                 end
