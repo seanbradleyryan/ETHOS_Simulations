@@ -44,7 +44,7 @@ TIMING.script_start_wall     = datetime('now');
 TIMING.script_start_tic      = tic;          % master start-to-finish stopwatch
 TIMING.all_field_sim_times_sec = [];         % elapsed of every single-field sim
 TIMING.step25_time_sec       = 0;            % running total across sessions
-TIMING.assumed_sec_per_field = 16;           % 1 forward+time-reversal run (for ETA)
+TIMING.assumed_sec_per_field = 54;           % 1 forward+time-reversal run (for ETA)
 % =========================================================================
 
 % Put the utils folder (get_default_config, calibrate_noise_amp, the engine
@@ -70,7 +70,7 @@ CONFIG = get_default_config();
 
 % --- Patient and Session Selection ---
 CONFIG.patients        = {'1194203'};
-CONFIG.sessions        = {'Session_1'};
+CONFIG.sessions        = {'Session_1','Session_2'};
 CONFIG.treatment_site  = 'Pancreas';
 
 % working_dir is inherited from get_default_config (the git repo root).

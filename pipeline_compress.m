@@ -1,6 +1,6 @@
 %% =========================================================================
 %  PIPELINE_COMPRESS.m
-%  ETHOS Photoacoustic Pipeline — Dose Processing (Steps 1.4 / 1.5)
+%  ETHOS Photoacoustic Pipeline  Dose Processing (Steps 1.4 / 1.5)
 %  =========================================================================
 %
 %  PURPOSE:
@@ -8,13 +8,13 @@
 %  Converts NPZ field doses to .mat (Step 1.4) and processes them into
 %  per-field / total / SCT-resampled outputs (Step 1.5). The resulting
 %  .mat files in RayStationFiles/<id>/<session>/processed/ are the direct
-%  input to pipeline_simulate.m — no upload-packaging step is performed.
+%  input to pipeline_simulate.m  no upload-packaging step is performed.
 %
 %  Run this BEFORE pipeline_simulate.m.
 %
 %  STEPS EXECUTED:
-%    Step 1.4 — Convert RayStation NPZ field doses to .mat
-%    Step 1.5 — Process field doses and resample SCT to dose grid
+%    Step 1.4  Convert RayStation NPZ field doses to .mat
+%    Step 1.5  Process field doses and resample SCT to dose grid
 %
 %  PREREQUISITES:
 %    - MATLAB R2022a or later
@@ -35,7 +35,10 @@ clear; clc; close all;
 
 % --- Patient and Session Selection ---
 CONFIG.patients        = {'1194203'};
-CONFIG.sessions        = {'Session_1','Session_2','Session_3','Session_4','Session_5','Session_6','Session_7','Session_8','Session_9','Session_10'};
+%CONFIG.sessions        = {'Session_1','Session_2','Session_3','Session_4','Session_5','Session_6','Session_7','Session_8','Session_9','Session_10'};
+CONFIG.sessions        = {%'Session_1',
+    %'Session_4'
+    'Session_2'};
 CONFIG.treatment_site  = 'Pancreas';
 
 % --- Directory Paths ---
@@ -69,7 +72,7 @@ CONFIG.skip_completed   = true;
 %% ========================= INITIALIZATION ================================
 
 fprintf('=========================================================\n');
-fprintf('  ETHOS Pipeline — Step 1.4 / 1.5 Dose Processing\n');
+fprintf('  ETHOS Pipeline  Step 1.4 / 1.5 Dose Processing\n');
 fprintf('=========================================================\n');
 fprintf('  Started: %s\n', datetime('now'));
 fprintf('  Working directory: %s\n', CONFIG.working_dir);
@@ -224,7 +227,7 @@ end
 function report_processed_status(processed_dir, rs_dir, skip_completed)
 %REPORT_PROCESSED_STATUS Print which Step 1.4/1.5 outputs are already on disk.
 %
-%   Purely informational — actual skipping is performed inside the daughter
+%   Purely informational  actual skipping is performed inside the daughter
 %   functions (step14_npz_to_mat / step15_process_doses), which honor
 %   config.skip_completed. This summary lets the user see what will be
 %   reused before processing begins.
@@ -232,7 +235,7 @@ function report_processed_status(processed_dir, rs_dir, skip_completed)
     fprintf('\n[STATUS] Processed output check (skip_completed=%d)\n', skip_completed);
 
     if ~isfolder(processed_dir)
-        fprintf('         No processed/ directory yet — full run expected.\n');
+        fprintf('         No processed/ directory yet  full run expected.\n');
         return;
     end
 

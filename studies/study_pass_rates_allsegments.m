@@ -89,7 +89,7 @@ CONFIG.plan_type = 'reference';   % 'reference' | 'adapted' | 'any'
 CONFIG.ct_pair = [1, 3];
 
 % Recon config-hash. '' => auto-discover the single summary on disk.
-CONFIG.config_hash = 'a9a3e1e6';
+CONFIG.config_hash = '3fe4d7d8';
 
 % Needed by load_recon_dose_data (random panels) to resolve the method folder.
 CONFIG.gruneisen_method = 'threshold_2';

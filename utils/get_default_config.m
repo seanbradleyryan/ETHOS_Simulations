@@ -114,7 +114,7 @@ function CONFIG = get_default_config(varargin)
     %   'gaussian'    -> convolution_kernel is the Gaussian sigma (s)
     %   'rectangular' -> convolution_kernel is the full pulse width (s), closer
     %                    to a clinical linac's flat-top beam-on burst
-    CONFIG.pulse_shape         = 'gaussian';
+    CONFIG.pulse_shape         = 'rectangular';
     CONFIG.convolution_kernel  = 4e-6;   % Gaussian sigma / rectangular width (s)
     CONFIG.conv_noise_level    = 0.125;  % legacy noise amp as fraction of THIS field's peak
     CONFIG.conv_deconv_lambda  = 1e-4;   % Wiener regularization for deconvolution

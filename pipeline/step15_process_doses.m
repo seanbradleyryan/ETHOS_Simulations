@@ -13,12 +13,12 @@ function [field_doses, cbct_resampled, total_rs_dose, metadata] = step15_process
 %
 %   The earlier-acquired CBCT (by SeriesDate+SeriesTime) becomes CT_1, the
 %   later becomes CT_3. Field doses without a CT_1/CT_3 label in their
-%   filename are rejected — per-CBCT masking has no sensible default.
+%   filename are rejected  per-CBCT masking has no sensible default.
 %
 %   INPUTS:
 %       patient_id  - String, patient identifier (e.g., '1194203')
 %       session     - String, session name (e.g., 'Session_1')
-%       config      - Struct with configuration parameters:
+%       config      - Struct with configuration paraSmeters:
 %           .working_dir        - Base directory path
 %           .treatment_site     - Subfolder name (default: 'Pancreas')
 %           .apply_dose_masking - Boolean, zero dose outside body/in couch
@@ -43,7 +43,7 @@ function [field_doses, cbct_resampled, total_rs_dose, metadata] = step15_process
 %       cbct_resampled  - Struct with two fields, CT_1 and CT_3, each a
 %                         per-CBCT resampled struct with:
 %           .cubeHU              - 3D HU array
-%           .cubeDensity         - 3D density array (kg/mÂ³)
+%           .cubeDensity         - 3D density array (kg/m)
 %           .tissueMask          - 3D uint8 array with ROI labels (0 = unassigned)
 %           .roiNames            - Cell array of ROI names (index matches label)
 %           .bodyMask            - 3D logical array (true = inside body region)
@@ -83,7 +83,7 @@ function [field_doses, cbct_resampled, total_rs_dose, metadata] = step15_process
 %   KEY TECHNICAL NOTES:
 %   - Z-resolution MUST come from GridFrameOffsetVector, NOT PixelSpacing
 %   - Use squeeze() to remove singleton dimensions in dose arrays
-%   - Standard HU to density: Ï = 1000 + HU (approximate)
+%   - Standard HU to density:  = 1000 + HU (approximate)
 %   - Dose zeroed where: outside body OR inside couch (unless disabled)
 %   - Set config.apply_dose_masking = false to skip dose zeroing (debugging)
 %   - RayStation files: dose_[patientid]_[session]_[adapted|reference]_B[n]_[seg].dcm
@@ -179,7 +179,7 @@ if ~isfield(config, 'use_sparse_storage')
     config.use_sparse_storage = true;
 end
 if config.use_sparse_storage
-    fprintf('  [INFO] Sparse storage ENABLED — dose/mask arrays saved as sparse 2D\n');
+    fprintf('  [INFO] Sparse storage ENABLED  dose/mask arrays saved as sparse 2D\n');
     fprintf('         To reconstruct: reshape(full(var_sp), var_dims)\n');
 end
 
@@ -334,7 +334,7 @@ totals_ready  = config.skip_completed && skip_status.total_rs_done && ...
                 skip_status.metadata_done;
 
 if cbct_ready && masks_ready && fields_ready && totals_ready
-    fprintf('\n  All Step 1.5 outputs already exist — loading and returning early.\n');
+    fprintf('\n  All Step 1.5 outputs already exist  loading and returning early.\n');
     [field_doses, cbct_resampled, total_rs_dose, metadata] = ...
         loadExistingStep15Outputs(processed_dir, expected_field_outputs);
     fprintf('  Loaded %d field dose entries, total_rs_dose max=%.4f Gy\n', ...
@@ -402,7 +402,7 @@ metadata.beam_metadata = beam_metadata;  % Includes isocenter + jaw data for sen
 %% ======================== DISCOVER, LOAD, AND RESAMPLE CBCT1 / CBCT3 ========================
 
 if cbct_ready
-    fprintf('\n[4/8] CBCT*_resampled.mat already exist — loading cached resampled CBCTs.\n');
+    fprintf('\n[4/8] CBCT*_resampled.mat already exist  loading cached resampled CBCTs.\n');
 
     cbct1_cache = load(fullfile(processed_dir, 'CBCT1_resampled.mat'), 'CBCT1_resampled');
     cbct3_cache = load(fullfile(processed_dir, 'CBCT3_resampled.mat'), 'CBCT3_resampled');
@@ -478,7 +478,7 @@ tissue_masks_file = fullfile(processed_dir, 'tissue_masks.mat');
 % therefore don't have an .rtstruct path. Fill it in now if we are about to
 % rebuild the masks.
 if cbct_ready && ~masks_ready && (~isfield(cbct_ct1_meta, 'rtstruct') || isempty(cbct_ct1_meta.rtstruct))
-    fprintf('  Cached CBCT cubes lack RTSTRUCT path — running discoverCbctSeries...\n');
+    fprintf('  Cached CBCT cubes lack RTSTRUCT path  running discoverCbctSeries...\n');
     [tmp_meta1, tmp_meta3] = discoverCbctSeries(rs_dir);
     cbct_ct1_meta.rtstruct = tmp_meta1.rtstruct;
     cbct_ct3_meta.rtstruct = tmp_meta3.rtstruct;
@@ -486,7 +486,7 @@ if cbct_ready && ~masks_ready && (~isfield(cbct_ct1_meta, 'rtstruct') || isempty
 end
 
 if masks_ready
-    fprintf('\n[5/8] tissue_masks.mat already exists — loading cached masks.\n');
+    fprintf('\n[5/8] tissue_masks.mat already exists  loading cached masks.\n');
     [tissue_mask_ct1, roi_names_ct1, roi_masks_ct1, body_mask_ct1, couch_mask_ct1, ...
      tissue_mask_ct3, roi_names_ct3, roi_masks_ct3, body_mask_ct3, couch_mask_ct3] = ...
         loadCachedTissueMasks(tissue_masks_file, ref_dims);
@@ -713,7 +713,7 @@ for batch_idx = 1:num_batches
             end
 
             % Select per-CBCT invalid-dose mask. Reject anything that doesn't
-            % map to a supported CBCT — there is no sensible default now that
+            % map to a supported CBCT  there is no sensible default now that
             % masks are per-CT.
             switch ct_label
                 case 'CT_1'
@@ -771,7 +771,7 @@ for batch_idx = 1:num_batches
                 ct_dose_accum.(ct_key) = ct_dose_accum.(ct_key) + dose_data;
             end
 
-            % Save individual field dose file — name mirrors source.
+            % Save individual field dose file  name mirrors source.
             % Format (legacy DICOM):  dose_[id]_[session]_[plan_type]_B[beam]_[seg].mat
             % Format (NPZ-derived):   dose_[id]_[session]_[plan_type]_[ct_label]_B[beam]_[seg].mat
             if isempty(ct_label)
@@ -845,7 +845,7 @@ metadata.total_dose_max_Gy_before_masking = max(total_rs_dose(:));
 %% ======================== ZERO OUT DOSE OUTSIDE BODY AND IN COUCH ========================
 
 if ~need_total_accum
-    fprintf('\n[7/8] Total dose / metadata already on disk — loading for return.\n');
+    fprintf('\n[7/8] Total dose / metadata already on disk  loading for return.\n');
 
     td = load(fullfile(processed_dir, 'total_rs_dose.mat'));
     if isfield(td, 'total_rs_dose_sparse')
@@ -1012,7 +1012,7 @@ if ~cbct_ready
     save(cbct3_file, 'CBCT3_resampled', '-v7.3');
     fprintf('  Saved: CBCT3_resampled.mat\n');
 else
-    fprintf('  CBCT1/CBCT3 .mat already on disk — not re-saving.\n');
+    fprintf('  CBCT1/CBCT3 .mat already on disk  not re-saving.\n');
 end
 
 % Save metadata (only when totals were rebuilt; otherwise the on-disk
@@ -1022,7 +1022,7 @@ if need_total_accum
     save(metadata_file, 'metadata', '-v7.3');
     fprintf('  Saved: metadata.mat\n');
 else
-    fprintf('  metadata.mat already on disk — not re-saving.\n');
+    fprintf('  metadata.mat already on disk  not re-saving.\n');
 end
 
 %% ======================== SUMMARY ========================
@@ -1976,10 +1976,10 @@ end
 
 
 function density = huToDensity(hu)
-%HUTODENSITY Convert Hounsfield Units to density (kg/mÂ³)
+%HUTODENSITY Convert Hounsfield Units to density (kg/m)
 %
 %   Uses simplified linear conversion:
-%   - Below -1000 HU (air): density = 1 kg/mÂ³
+%   - Below -1000 HU (air): density = 1 kg/m
 %   - -1000 to 0 HU: linear interpolation from air (1) to water (1000)
 %   - 0 to 1000 HU: linear from water (1000) to bone (~2000)
 %   - Above 1000 HU: bone/metal region
@@ -1997,7 +1997,7 @@ function density = huToDensity(hu)
     density(lung_mask) = 400 + (hu(lung_mask) + 900) * (1000 - 400) / 400;
     
     % Soft tissue region (-500 to 100 HU)
-    % Approximate: density â‰ˆ 1000 + HU
+    % Approximate: density  1000 + HU
     soft_mask = (hu >= -500) & (hu < 100);
     density(soft_mask) = 1000 + hu(soft_mask);
     
@@ -2007,7 +2007,7 @@ function density = huToDensity(hu)
     density(bone_mask) = 1100 + (hu(bone_mask) - 100) * (1900 - 1100) / 900;
     
     % Clamp to reasonable range
-    density = max(density, 1);      % Minimum 1 kg/mÂ³
+    density = max(density, 1);      % Minimum 1 kg/m
     density = min(density, 7800);   % Maximum (metal)
 end
 
