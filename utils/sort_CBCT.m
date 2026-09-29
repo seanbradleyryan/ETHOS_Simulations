@@ -38,7 +38,7 @@ function cbct_paths = sort_CBCT(patient_id, session, config)
 %       CBCT2_<original_name>.dcm
 %
 %   EXAMPLE:
-%       config.working_dir    = 'C:/Users/80030361/ETHOS_Simulations';
+%       config.working_dir    = get_repo_root();
 %       config.treatment_site = 'Pancreas';
 %       cbct_paths = sort_CBCT('1194203', 'Session_1', config);
 %

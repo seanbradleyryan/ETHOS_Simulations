@@ -96,7 +96,7 @@ function [field_doses, cbct_resampled, total_rs_dose, metadata] = step15_process
 %   - Meterset matching: beam_num (n) from filename matches beam_number in RTPLAN
 %
 %   EXAMPLE:
-%       config.working_dir = '/mnt/weka/home/80030361/ETHOS_Simulations';
+%       config.working_dir = get_repo_root();
 %       config.treatment_site = 'Pancreas';
 %       config.apply_dose_masking = true;  % Set false to disable dose zeroing (debugging)
 %       [field_doses, sct, total_dose, meta] = step15_process_doses('1194203', 'Session_1', config);
@@ -104,7 +104,6 @@ function [field_doses, cbct_resampled, total_rs_dose, metadata] = step15_process
 %   DEPENDENCIES:
 %       - Image Processing Toolbox (dicominfo, dicomread, poly2mask)
 %
-%   AUTHOR: ETHOS Pipeline Team
 %   DATE: February 2026
 %   VERSION: 1.1 (Added RTSTRUCT tissue classification and couch masking)
 %

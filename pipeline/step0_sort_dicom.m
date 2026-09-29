@@ -1,7 +1,7 @@
-function [sct_dir, sim_ct_dir] = step0_sort_dicom(patient_id, session, config)
+function sct_dir = step0_sort_dicom(patient_id, session, config)
 %% STEP0_SORT_DICOM - Sort DICOM files for ETHOS pipeline
 %
-%   [sct_dir, sim_ct_dir] = step0_sort_dicom(patient_id, session, config)
+%   sct_dir = step0_sort_dicom(patient_id, session, config)
 %
 %   PURPOSE:
 %   Organize raw ETHOS DICOM export by identifying SCT (synthetic CT) series
@@ -21,46 +21,40 @@ function [sct_dir, sim_ct_dir] = step0_sort_dicom(patient_id, session, config)
 %       sct_dir     - String, path to directory containing sorted files:
 %                     - CT*.dcm files from SCT series
 %                     - RTSTRUCT_<CT>.dcm  (named by referenced CT:
-%                                           SCT, ICBCT, VCBCT, or sim;
+%                                           SCT, ICBCT, or VCBCT;
 %                                           enumerated _2, _3 if multiple)
 %                     - RTPLAN_reference.dcm  (reference RTPLAN)
 %                     - RTPLAN_adapted.dcm    (adapted RTPLAN)
 %                     - RTDOSE_reference.dcm  (RTDOSE for reference plan)
 %                     - RTDOSE_adapted.dcm    (RTDOSE for adapted plan)
-%       sim_ct_dir  - String, path to sim_ct directory (original planning CT).
-%                     Returns '' if no simulation CT is found.
 %
 %   ALGORITHM:
-%   1. Sort SCT series files as usual (three-tier priority)
+%   1. Sort SCT series files (three-tier priority)
 %   2. Scan all RTPLAN files; for each, read ReferenceRTPlanSequence.Item_1.RTPlanRelationship
 %      - Contains 'REFERENCE'   reference plan
 %      - Contains 'ADAPTED'     adapted plan
 %   3. For each classified plan:
 %      a. Trace ReferencedStructureSetSequence  find matching RTSTRUCT by SOPInstanceUID
 %      b. Determine which CT the RTSTRUCT references; label accordingly
-%         (SCT, ICBCT, VCBCT, sim; enumerated with _2, _3 if multiple)
+%         (SCT, ICBCT, VCBCT; enumerated with _2, _3 if multiple)
 %      c. Trace RTDOSE ReferencedRTPlanSequence  find RTDOSE referencing this plan
 %   4. Copy all files with standardized names into sct_dir
-%   5. Sort sim CT as usual
 %
 %   FILE NAMING CONVENTION:
 %       RTPLAN_reference.dcm   RTPLAN_adapted.dcm
-%       RTSTRUCT_<CT>.dcm      (CT label: SCT, ICBCT, VCBCT, sim)
+%       RTSTRUCT_<CT>.dcm      (CT label: SCT, ICBCT, VCBCT)
 %       RTDOSE_reference.dcm   RTDOSE_adapted.dcm
 %
 %   EXAMPLE:
-%       config.working_dir = '/mnt/weka/home/80030361/ETHOS_Simulations';
+%       config.working_dir = get_repo_root();
 %       config.treatment_site = 'Pancreas';
-%       [sct_dir, sim_ct_dir] = step0_sort_dicom('1194203', 'Session_1', config);
+%       sct_dir = step0_sort_dicom('1194203', 'Session_1', config);
 %
 %   DEPENDENCIES:
 %       - Image Processing Toolbox (dicomCollection, dicominfo)
 %
-%   AUTHOR: ETHOS Pipeline Team
 %   DATE: April 2026
 %   VERSION: 3.0 (REFERENCE/ADAPTED plan classification)
-%
-%   See also: dicomCollection, dicominfo, step05_fix_mlc_gaps
 
 %% ======================== INPUT VALIDATION ========================
 
@@ -101,8 +95,7 @@ end
 rawwd = fullfile(config.working_dir, 'EthosExports', patient_id, ...
     config.treatment_site, session);
 
-sct_dir    = fullfile(rawwd, 'sct');
-sim_ct_dir = '';
+sct_dir = fullfile(rawwd, 'sct');
 
 fprintf('  Processing: Patient %s, %s\n', patient_id, session);
 fprintf('  Raw directory: %s\n', rawwd);
@@ -113,8 +106,7 @@ if ~isfolder(rawwd)
     warning('step0_sort_dicom:DirectoryNotFound', ...
         'Raw directory not found for patient %s, %s: %s', ...
         patient_id, session, rawwd);
-    sct_dir    = '';
-    sim_ct_dir = '';
+    sct_dir = '';
     return;
 end
 
@@ -132,8 +124,7 @@ end
 if isempty(ctInfo) || height(ctInfo) == 0
     warning('step0_sort_dicom:EmptyCollection', ...
         'No DICOM files found in: %s', rawwd);
-    sct_dir    = '';
-    sim_ct_dir = '';
+    sct_dir = '';
     return;
 end
 
@@ -165,7 +156,7 @@ end
 %% ======================== SORT RT FILES ========================
 
 fprintf('  Classifying RTPLAN files (REFERENCE / ADAPTED)...\n');
-cbctUIDs = extractCbctSeriesUIDs(ctInfo);
+cbctUIDs = extractCbctSeriesUIDs(ctInfo); % Finds the two oldest CBCT objects by datetime
 sortRTFiles(ctInfo, rawwd, sct_dir, sctSeriesUID, cbctUIDs);
 
 %% ======================== SORT REG (IMAGE REGISTRATION) FILES ========================
@@ -188,19 +179,10 @@ end
 fprintf('  Sorting CBCT RTSTRUCT files...\n');
 sortCBCTStructFiles(ctInfo, sct_dir, cbctUIDs);
 
-%% ======================== SORT SIMULATION CT FILES ========================
-
-fprintf('  Searching for simulation CT series...\n');
-sim_ct_dir = fullfile(rawwd, 'sim_ct');
-% sim_ct_dir = sortSimCtFiles(ctInfo, rawwd, sim_ct_dir, sctSeriesUID);
-
 %% ======================== PATCH PATIENT NAMES ========================
 
 %fprintf('  Patching PatientName to append "research" in sorted files...\n');
 %appendResearchToPatientName(sct_dir);
-%if ~isempty(sim_ct_dir)
-%    appendResearchToPatientName(sim_ct_dir);
-%end
 
 %% ======================== VERIFY OUTPUT ========================
 
@@ -258,14 +240,6 @@ fprintf('    CBCT files           : %s (%d files)\n', tf2str(hasCBCT), nCBCTfile
 fprintf('    RTSTRUCT_ICBCT       : %s\n', tf2str(hasRTSTRUCT_ICBCT));
 fprintf('    RTSTRUCT_VCBCT       : %s\n', tf2str(hasRTSTRUCT_VCBCT));
 fprintf('  ---------------------------\n');
-
-if ~isempty(sim_ct_dir)
-    simCtFiles = dir(fullfile(sim_ct_dir, '*.dcm'));
-    fprintf('  Simulation CT: %d files in %s\n', length(simCtFiles), sim_ct_dir);
-else
-    warning('step0_sort_dicom:NoSimCT', ...
-        'No simulation CT series found for patient %s, %s', patient_id, session);
-end
 
 fprintf('  Step 0 complete for %s/%s\n', patient_id, session);
 
@@ -657,7 +631,7 @@ function [ctLabel, usedLabels] = labelRTSTRUCTByCT(structPath, sctSeriesUID, cbc
 %   [ctLabel, usedLabels] = labelRTSTRUCTByCT(structPath, sctSeriesUID, cbctUIDs, usedLabels)
 %
 %   Extracts the referenced CT SeriesInstanceUID from the RTSTRUCT and maps
-%   it to:  SCT, ICBCT (first CBCT by datetime), VCBCT (second CBCT), sim,
+%   it to:  SCT, ICBCT (first CBCT by datetime), VCBCT (second CBCT),
 %   or unknown.  When multiple RTSTRUCTs share a base label they are
 %   enumerated as <label>_2, <label>_3, etc.
 
@@ -864,131 +838,6 @@ function copyFileAs(srcPath, destPath, label)
     end
 end
 
-
-function sim_ct_dir = sortSimCtFiles(ctInfo, sourceDir, sim_ct_dir, sctSeriesUID) %#ok<INUSL>
-%SORTSIMCTFILES Find and copy the simulation CT to sim_ct folder.
-%
-%   Three-tier selection priority:
-%     1. CT series with empty SeriesDate / SeriesTime (highest priority)
-%     2. CT series whose description contains 'sim'
-%     3. Oldest timestamp among remaining CT series
-
-    sim_ct_dir = '';
-
-    if ~ismember('Modality', ctInfo.Properties.VariableNames) || ...
-       ~ismember('SeriesDescription', ctInfo.Properties.VariableNames)
-        warning('sortSimCtFiles:MissingColumns', ...
-            'Modality or SeriesDescription column not found in DICOM collection');
-        return;
-    end
-
-    isCT     = strcmpi(ctInfo.Modality, 'CT');
-    isSct    = strcmpi(ctInfo.SeriesDescription, 'sct');
-    eligible = isCT & ~isSct;
-
-    if ~any(eligible)
-        fprintf('    No non-SCT CT series found.\n');
-        return;
-    end
-
-    eligibleInfo = ctInfo(eligible, :);
-    fprintf('    Found %d non-SCT CT series\n', height(eligibleInfo));
-
-    hasSim = contains(lower(eligibleInfo.SeriesDescription), 'sim');
-    if any(hasSim)
-        candidateInfo = eligibleInfo(hasSim, :);
-        fprintf('    Found %d series with ''sim'' in description\n', height(candidateInfo));
-    else
-        candidateInfo = eligibleInfo;
-    end
-
-    numCandidates = height(candidateInfo);
-    dtValues      = zeros(numCandidates, 1);
-
-    for i = 1:numCandidates
-        fileCell = candidateInfo.Filenames{i};
-        if isempty(fileCell) || isempty(fileCell{1})
-            dtValues(i) = NaN;
-            continue;
-        end
-        try
-            meta    = dicominfo(fileCell{1});
-            dateStr = '';
-            timeStr = '';
-            if isfield(meta, 'SeriesDate'), dateStr = strtrim(meta.SeriesDate); end
-            if isfield(meta, 'SeriesTime'), timeStr = strtrim(meta.SeriesTime); end
-
-            if isempty(dateStr) && isempty(timeStr)
-                dtValues(i) = NaN;
-            else
-                dt = str2double([dateStr, timeStr]);
-                dtValues(i) = (isnan(dt) || dt == 0) * NaN + ...
-                              (~(isnan(dt) || dt == 0)) * dt;
-            end
-        catch
-            dtValues(i) = NaN;
-        end
-    end
-
-    nanIdx = find(isnan(dtValues));
-    if ~isempty(nanIdx)
-        bestIdx = nanIdx(1);
-        fprintf('    Selecting sim CT with empty/missing datetime (index %d)\n', bestIdx);
-    else
-        [~, bestIdx] = min(dtValues);
-        fprintf('    Selecting oldest sim CT by SeriesDate/Time\n');
-    end
-
-    selectedSeries = candidateInfo(bestIdx, :);
-    simFiles       = selectedSeries.Filenames{1};
-
-    if isempty(simFiles)
-        fprintf('    Selected sim CT series has no files.\n');
-        return;
-    end
-
-    try
-        meta = dicominfo(simFiles{1});
-        fprintf('    Sim CT: "%s"  Date: %s  Files: %d\n', ...
-            meta.SeriesDescription, meta.SeriesDate, length(simFiles));
-    catch
-        fprintf('    Sim CT: %d files (metadata unavailable)\n', length(simFiles));
-    end
-
-    destDir = fullfile(sourceDir, 'sim_ct');
-
-    if ~isfolder(destDir)
-        mkdir(destDir);
-        fprintf('    Created sim_ct directory: %s\n', destDir);
-    else
-        fprintf('    sim_ct directory exists: %s\n', destDir);
-    end
-
-    numMoved   = 0;
-    numSkipped = 0;
-
-    for k = 1:length(simFiles)
-        srcFile = simFiles{k};
-        [~, name, ext] = fileparts(srcFile);
-        destFile = fullfile(destDir, [name, ext]);
-
-        if ~exist(srcFile, 'file'), continue; end
-        if exist(destFile, 'file')
-            numSkipped = numSkipped + 1;
-        else
-            try
-                copyfile(srcFile, destFile);
-                numMoved = numMoved + 1;
-            catch ME
-                warning('sortSimCtFiles:CopyError', ...
-                    'Failed to copy %s: %s', name, ME.message);
-            end
-        end
-    end
-
-    fprintf('    Sim CT files: %d moved, %d already existed\n', numMoved, numSkipped);
-    sim_ct_dir = destDir;
-end
 
 
 function appendResearchToPatientName(dirPath)

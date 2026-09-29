@@ -57,7 +57,7 @@ function results = step3_analysis(patient_id, session, config)
 %       - Image Processing Toolbox (optional, for built-in ssim)
 %
 %   EXAMPLE:
-%       config.working_dir = '/mnt/weka/home/80030361/ETHOS_Simulations';
+%       config.working_dir = get_repo_root();
 %       config.treatment_site = 'Pancreas';
 %       config.gamma_dose_pct = 3.0;
 %       config.gamma_dist_mm = 3.0;

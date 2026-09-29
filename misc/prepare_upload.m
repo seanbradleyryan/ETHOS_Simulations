@@ -53,7 +53,7 @@ CONFIG.session         = 'Session_1';
 CONFIG.treatment_site  = 'Pancreas';
 
 % --- Paths ---
-CONFIG.working_dir     = '/mnt/weka/home/80030361/ETHOS_Simulations';
+CONFIG.working_dir     = get_repo_root();
 
 % --- Step 15 options (passed through if step15 needs to run) ---
 CONFIG.apply_dose_masking = true;

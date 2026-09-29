@@ -10,7 +10,7 @@ import os
 INPUT_ROOT = "F:/ETHOS_Simulations/Raystation_Input"
 
 # Session folders to import. One new case is created per folder, named after it.
-SESSIONS = ["Session_1", "Session_2"]
+SESSIONS = ["Session_1", "Session_2", "Session_3", "Session_4", "Session_5", "Session_6", "Session_7", "Session_8", "Session_9", "Session_10"]
 
 
 # ============================================================

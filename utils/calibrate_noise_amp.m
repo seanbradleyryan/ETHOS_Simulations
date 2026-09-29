@@ -47,7 +47,7 @@ function result = calibrate_noise_amp(patient_id, session, config)
 %
 %   EXAMPLE:
 %       CONFIG = get_default_config();
-%       CONFIG.working_dir = '/mnt/weka/home/80030361/ETHOS_Simulations';
+%       CONFIG.working_dir = get_repo_root();
 %       cal = calibrate_noise_amp('1194203', 'Session_1', CONFIG);
 %       CONFIG.noise_amp_Pa = cal.noise_amp_Pa;   % pipeline now uses fixed noise
 %

@@ -70,7 +70,7 @@ run_timer = tic;
 %% ========================= CONFIGURATION ================================
 
 % --- Machine / data selection ---
-CONFIG.working_dir      = '/mnt/weka/home/80030361/ETHOS_Simulations';
+CONFIG.working_dir      = get_repo_root();
 CONFIG.patient_id       = '1194203';
 CONFIG.session          = 'Session_1';
 CONFIG.treatment_site   = 'Pancreas';

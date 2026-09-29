@@ -1,14 +1,13 @@
+All scripts have been architeced and edited by Sean Ryan and generated using Claude. 
 
-The main scripts of the repository are 
 
-# Workflow
+# Instructions for replication
 
 ## Setup
 
-1. On your local machine and in your profile on remission remote desktop, clone the repository. 
+1. On your local machine and in your profile on remission remote desktop, clone the repository. The script is designed so that the repository operates from F:/ since this maximizes compatibility with various software and minimizes the amount that data needs to be moved between remote drives. 
 
 `git clone <>` 
-
 
 ## 1. Export from Ethos
 
@@ -80,4 +79,15 @@ I find the best way is to use git bash and scp the session directory to the pati
 
 ## 7. Process doses on remission. 
 
-1. 
+1. Navigate to ./ETHOS_Simulations in matlab. 
+2. Run pipeline_compress.m
+3. Verify there are no output red flags. You can run `verify_pipeline_compress_output.m` as a heuristic. Common ones include zero dose or zero body voxels beacuse it didn't load the RTSTRUCts properly. If there are errors, they will become apparent in the next step 
+
+This should be all that is necessary for this step. Matlab will do some post processing of RS dose files and turn them into .mat arrays in RayStationFiles/[patient]/[session]/processed and keep a log.
+
+## 8. Run kwave simulation
+
+1. Run pipeline_simulate.m
+
+A simulation costs about 40 gpu hours. I find that checking out 4 gpu's is a good balance between job time, accessibility, and not hogging resources. You can divide up these jobs however you see fit. 
+

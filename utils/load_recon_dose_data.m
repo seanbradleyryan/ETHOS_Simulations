@@ -77,7 +77,7 @@ function out = load_recon_dose_data(patient_id, session, config, varargin)
 %       4. When IncludeEthos, load RTDOSE truth and resample to the dose grid.
 %
 %   EXAMPLE:
-%       config.working_dir      = '/mnt/weka/home/80030361/ETHOS_Simulations';
+%       config.working_dir      = get_repo_root();
 %       config.treatment_site   = 'Pancreas';
 %       config.gruneisen_method = 'threshold_2';
 %       T = load_recon_dose_data('1194203','Session_1',config);

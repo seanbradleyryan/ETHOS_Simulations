@@ -55,7 +55,7 @@ function placement = place_sensor(patient_id, session, CONFIG)
 %       - Issues warning(), not error(), on non-fatal failures.
 %
 %   EXAMPLE:
-%       CONFIG.working_dir        = '/mnt/weka/home/80030361/ETHOS_Simulations';
+%       CONFIG.working_dir        = get_repo_root();
 %       CONFIG.sensor_size_cm     = [10, 10];
 %       CONFIG.sensor_standoff_mm = 5;
 %       CONFIG.tilt_angle_deg     = 15;

@@ -1,3 +1,35 @@
+"""
+calc_beam_plan_doses.py  -  RayStation per-segment dose calculation and export
+
+PURPOSE
+    Computes the dose from every segment of every exploded beam plan on both
+    CT 1 and CT 3, and saves each segment's dose grid as a compressed .npz
+    file for the MATLAB pipeline. Also exports
+    the CT 1 / CT 3 images and their RTSTRUCTs as DICOM once per session.
+
+EXECUTION (Raystation 2024 only).
+    Run inside RayStation (Scripting > Script creation > Run) with the
+    patient and case already open. It can be resumed: plan/CT pairs
+    already listed as DONE in the progress log are skipped on the next run.
+
+INPUTS
+    - Open patient/case with the exploded plans from Step 0.6 imported and
+      named "{Session_N} {reference} {origbeam}", e.g. "Session_1 reference B13".
+      Plans with other names are skipped.
+    - Examinations named "CT 1" and "CT 3" in the case (EXAMINATION_LABELS).
+    - Settings below: BASE_EXPORT_ROOT, DOSE_ALGORITHM, DOSE_VOXEL_SIZE (cm).
+
+OUTPUTS  (in BASE_EXPORT_ROOT/{patient_id}/{session}/)
+    - dose_{id}_{session}_{plan_type}_{CT_1|CT_3}_{origbeam}_{segment:02d}.npz
+        dose           float32 [nz, ny, nx]  RayStation per-beam dose values
+        voxel_size_cm  float32 [x, y, z]
+        corner_cm      float32 [x, y, z]     dose grid corner
+        nx, ny, nz     int32                 grid size
+      {segment} is the beam index inside the plan's beam set (one RS beam = one segment).
+    - CT 1 / CT 3 image and RTSTRUCT DICOM files (once per session).
+    - beam_plan_export_progress.log  (resume log: DONE,{plan}|{CT},{timestamp})
+"""
+
 from connect import *
 from collections import defaultdict
 from datetime import datetime

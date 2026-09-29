@@ -20,7 +20,7 @@ function config_block = hashtoconfig(hash, config)
 %                      canonical output). Errors if the hash is not found.
 %
 %   EXAMPLE:
-%       config.working_dir = '/mnt/weka/home/80030361/ETHOS_Simulations';
+%       config.working_dir = get_repo_root();
 %       cfg = hashtoconfig('a1b2c3d4', config);
 %
 %   DEPENDENCIES: none (reads config_registry.json written by pipeline_simulate)

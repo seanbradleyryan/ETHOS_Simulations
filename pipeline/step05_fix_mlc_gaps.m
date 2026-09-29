@@ -54,7 +54,7 @@ function [adjusted_paths, num_corrections] = step05_fix_mlc_gaps(patient_id, ses
 %   6. Write modified DICOM
 %
 %   EXAMPLE:
-%       config.working_dir = '/mnt/weka/home/80030361/ETHOS_Simulations';
+%       config.working_dir = get_repo_root();
 %       config.treatment_site = 'Pancreas';
 %       config.mlc_min_gap_mm = 0.5;
 %       config.mlc_expansion_mm = 0.4;
@@ -64,7 +64,6 @@ function [adjusted_paths, num_corrections] = step05_fix_mlc_gaps(patient_id, ses
 %
 %   DEPENDENCIES:
 %       - Image Processing Toolbox (dicominfo, dicomwrite)
-%       - dicomuid() for generating new UIDs
 %
 %   NOTES:
 %       - Halcyon has dual-layer MLC (MLCX1 and MLCX2)
@@ -73,11 +72,9 @@ function [adjusted_paths, num_corrections] = step05_fix_mlc_gaps(patient_id, ses
 %       - Only dynamic leaves (those that move during delivery) are corrected
 %       - If a plan file is missing, that plan type is skipped with a warning
 %
-%   AUTHOR: ETHOS Pipeline Team
 %   DATE: February 2026
 %   VERSION: 3.0 (Processes both reference and adapted plans)
 %
-%   See also: step0_sort_dicom, dicominfo, dicomwrite, dicomuid
 
 %% ======================== INPUT VALIDATION ========================
 

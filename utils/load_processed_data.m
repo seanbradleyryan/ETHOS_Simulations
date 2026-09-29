@@ -46,7 +46,7 @@ function [field_doses, sct_resampled, total_rs_dose, metadata] = load_processed_
 %       This function reconstructs all arrays to their original 3D dense form transparently.
 %
 %   EXAMPLE:
-%       config.working_dir = '/mnt/weka/home/80030361/ETHOS_Simulations';
+%       config.working_dir = get_repo_root();
 %       [field_doses, sct, total_dose, meta] = load_processed_data('1194203', 'Session_1', config);
 %
 %   DEPENDENCIES:
