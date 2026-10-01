@@ -48,10 +48,14 @@
 %    per plot (tabs from every session go in the same window):
 %      "Test 1: dose on each CBCT"  - tab per session + beam/segment pair
 %      "Test 2: body contours"      - tab per patient/session
+%      "Test 4: RS total vs ETHOS total" - tab per patient/session; summed RS
+%                                     CT_1 dose and ETHOS dose, both Gy/fraction,
+%                                     one shared color scale
 %    Each tab is also saved as a PNG in
 %    AnalysisResults/<id>/<session>/compress_verification/
 %      pair_<plan>_B<beam>_S<seg>.png   (test 1)
 %      body_contours.png                (test 2)
+%      rs_vs_ethos_total.png            (test 4)
 %
 %  ALGORITHM:
 %    1. Load metadata.mat and both CBCT*_resampled.mat; index the processed
@@ -120,7 +124,8 @@ allResults = struct('patient_id', {}, 'session', {}, 'tests', {});
 
 % One figure per plot category; every plot (all sessions) is a tab in it
 pairTabs = uitabgroup(figure('Name', 'Test 1: dose on each CBCT', 'Position', [50 50 1500 900]));
-bodyTabs = uitabgroup(figure('Name', 'Test 2: body contours', 'Position', [80 80 1500 900]));
+bodyTabs  = uitabgroup(figure('Name', 'Test 2: body contours', 'Position', [80 80 1500 900]));
+ethosTabs = uitabgroup(figure('Name', 'Test 4: RS total vs ETHOS total', 'Position', [110 110 1500 900]));
 
 %% ========================= MAIN LOOP =====================================
 
@@ -369,6 +374,23 @@ for pIdx = 1:numel(CONFIG.patients)
                          'RS %.3f Gy; RS - ETHOS dose centroid [%.1f %.1f %.1f] mm'], ...
                         gammaCriteria{3}, g.pass_rates(1), CONFIG.ethos_min_pass_pct, max(ethos(:)), ...
                         info.DoseSummationType, nFractions, max(rsCt1Total(:)), shiftMm));
+
+                    % Plot both totals in Gy per fraction on ONE shared color scale, through
+                    % the ETHOS max, so any scaling or position mismatch is visible
+                    doseMax = max(max(ethos(:)), max(rsCt1Total(:)));
+                    [~, iMax] = max(ethos(:));
+                    [row, col, slc] = ind2sub(size(ethos), iMax);
+                    panel = new_tab_panel(ethosTabs, sprintf('%s %s', patientID, session));
+                    plot_three_views(panel, 1, cbct1.cubeHU, cbct1.bodyMask, rsCt1Total, ...
+                        [row col slc], spacing, doseMax, CONFIG, 'RS total, all CT_1 segments (Gy/fx)');
+                    plot_three_views(panel, 2, cbct1.cubeHU, cbct1.bodyMask, ethos, ...
+                        [row col slc], spacing, doseMax, CONFIG, sprintf('ETHOS truth / %d fx (Gy/fx)', nFractions));
+                    sgtitle(panel, sprintf(['%s %s | on CBCT1, slices through ETHOS max | max RS %.3f Gy, ' ...
+                        'ETHOS %.3f Gy (ratio %.3f) | gamma %s: %.1f%% pass'], patientID, session, ...
+                        max(rsCt1Total(:)), max(ethos(:)), max(rsCt1Total(:)) / max(ethos(:)), ...
+                        gammaCriteria{3}, g.pass_rates(1)), 'Interpreter', 'none');
+                    drawnow;
+                    exportgraphics(panel, fullfile(outDir, 'rs_vs_ethos_total.png'), 'Resolution', 150);
                     clear ethos rsCt1Total;
                 end
             catch ME
