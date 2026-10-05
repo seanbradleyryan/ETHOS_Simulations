@@ -1,5 +1,6 @@
-All scripts have been architeced and edited by Sean Ryan and generated using Claude. 
+Code repository for simulation studies of IRAI's ability to detect changes in dose due to small anatomical changes in patients mid-treatment. 
 
+Parts of this codebase were developed with assistance from [Claude Code](https://claude.com/claude-code) (Anthropic).
 
 # Instructions for replication
 
@@ -7,7 +8,7 @@ All scripts have been architeced and edited by Sean Ryan and generated using Cla
 
 1. On your local machine and in your profile on remission remote desktop, clone the repository. The script is designed so that the repository operates from F:/ since this maximizes compatibility with various software and minimizes the amount that data needs to be moved between remote drives. 
 
-`git clone <>` 
+`git clone https://github.com/seanbradleyryan/ETHOS_Simulations.git` 
 
 ## 1. Export from Ethos
 
@@ -81,13 +82,13 @@ I find the best way is to use git bash and scp the session directory to the pati
 
 1. Navigate to ./ETHOS_Simulations in matlab. 
 2. Run pipeline_compress.m
-3. Verify there are no output red flags. You can run `verify_pipeline_compress_output.m` as a heuristic. Common ones include zero dose or zero body voxels beacuse it didn't load the RTSTRUCts properly. If there are errors, they will become apparent in the next step 
+3. Verify there are no output red flags. You can run `verify_pipeline_compress_output.m` as a heuristic. Common ones include zero dose or zero body voxels beacuse it didn't load the RTSTRUCts properly. Another problem is if all the dose is coming from the same gantry angle. If there are errors, they will become apparent in the next step.  Just take a quick look to make sure things look good since there are too many to independetly verify all. 
 
 This should be all that is necessary for this step. Matlab will do some post processing of RS dose files and turn them into .mat arrays in RayStationFiles/[patient]/[session]/processed and keep a log.
 
 ## 8. Run kwave simulation
 
 1. Run pipeline_simulate.m
+2. Verify that the script ran properly. Run verify_pipeline_simulate_output.m for some heuristics and initial statistics. 
 
-A simulation costs about 40 gpu hours. I find that checking out 4 gpu's is a good balance between job time, accessibility, and not hogging resources. You can divide up these jobs however you see fit. 
-
+A simulation costs about 40 hours / gpu. Fields are processed in parallel by each gpu so adding more decreases the processing time. Choose your preferred number depending on availibility. The script should also work if you want to launch multiple sessions to process the same patient i.e. 1 4 gpu job  = 4 1 gpu jobs, so you can use this to cheese the scheduler a little bit. 

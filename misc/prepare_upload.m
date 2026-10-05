@@ -34,7 +34,6 @@
 %    - Image Processing Toolbox (for step15 DICOM reading)
 %    - tar must be available on system PATH (Linux/Mac); on Windows uses zip
 %
-%  AUTHOR: ETHOS Pipeline
 %  DATE: April 2026
 %  =========================================================================
 

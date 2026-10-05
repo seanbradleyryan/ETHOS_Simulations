@@ -64,7 +64,6 @@ function results = step3_analysis(patient_id, session, config)
 %       config.analysis_plot_results = true;
 %       results = step3_analysis('1194203', 'Session_1', config);
 %
-%   AUTHOR: ETHOS Pipeline Team
 %   DATE: February 2026
 %   VERSION: 1.0
 %

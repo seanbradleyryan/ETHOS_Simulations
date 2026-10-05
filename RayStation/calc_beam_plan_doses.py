@@ -17,7 +17,20 @@ INPUTS
       named "{Session_N} {reference} {origbeam}", e.g. "Session_1 reference B13".
       Plans with other names are skipped.
     - Examinations named "CT 1" and "CT 3" in the case (EXAMINATION_LABELS).
+      The plans' planning examination is normally "CT 2", so dose on both
+      CT 1 and CT 3 comes from ComputeDoseOnAdditionalSets. If a plan is
+      planned on CT 1 or CT 3, that CT's dose is read from the beam set.
     - Settings below: BASE_EXPORT_ROOT, DOSE_ALGORITHM, DOSE_VOXEL_SIZE (cm).
+
+DOSE SELECTION
+    Additional-set doses are stored case-wide: one DoseEvaluation per beam
+    set under each examination. find_beam_doses() picks the evaluation whose
+    ForBeamSet is the plan just computed. (Before 2026-10-01 the script took
+    DoseEvaluations[0], so every plan exported the FIRST plan's doses, e.g.
+    all of Session_2 came out as beam 1 at gantry 181 deg. The same fix was
+    in commit 7283c6e on main but never reached the v6 branch.)
+    A plan/CT is skipped with a warning (not logged DONE) if no matching
+    evaluation exists or its beam-dose count differs from the beam count.
 
 OUTPUTS  (in BASE_EXPORT_ROOT/{patient_id}/{session}/)
     - dose_{id}_{session}_{plan_type}_{CT_1|CT_3}_{origbeam}_{segment:02d}.npz
@@ -184,6 +197,47 @@ def init_log(log_path, patient_id, session):
         f.write(f"# Beam plan dose export log - started {datetime.now()}\n")
         f.write(f"# Patient: {patient_id}  |  Session: {session}\n")
         f.write(f"# dose_{{id}}_{{session}}_{{plan_type}}_{{ct_label}}_{{origbeam}}_{{segment}}.npz\n")
+
+
+# ============================================================
+# Helper: per-beam doses of THIS beam set on one examination
+# ============================================================
+def find_beam_doses(case, beam_set, ct_label, primary_exam):
+    """
+    Return the per-beam (= per-segment) doses that `beam_set` produced on the
+    examination named `ct_label`, or None if there are none.
+
+    On the planning examination the dose lives on the beam set itself.
+    On any other examination, ComputeDoseOnAdditionalSets adds one
+    DoseEvaluation PER BEAM SET under the case-wide DoseOnExaminations, so
+    the evaluation must be matched to this beam set through ForBeamSet.
+    Taking DoseEvaluations[0] instead returns the first plan ever computed
+    on that exam for every plan (all beams exported as beam 1).
+    """
+    if ct_label == primary_exam:
+        return beam_set.FractionDose.BeamDoses
+
+    target_id = beam_set.BeamSetIdentifier()
+    matches = []
+    for fe in case.TreatmentDelivery.FractionEvaluations:
+        for doe in fe.DoseOnExaminations:
+            if doe.OnExamination.Name != ct_label:
+                continue
+            for dose_eval in doe.DoseEvaluations:
+                # Attribute spelling has varied across RayStation versions;
+                # evaluations without a beam set (e.g. summed doses) have neither.
+                fbs = getattr(dose_eval, 'ForBeamSet', None)
+                if fbs is None:
+                    fbs = getattr(dose_eval, 'ForBeamset', None)
+                if fbs is not None and fbs.BeamSetIdentifier() == target_id:
+                    matches.append(dose_eval)
+
+    if not matches:
+        return None
+    if len(matches) > 1:
+        print(f"    WARNING: {len(matches)} dose evaluations for '{target_id}' "
+              f"on '{ct_label}'; using the most recent.")
+    return matches[-1].BeamDoses
 
 
 
@@ -384,28 +438,18 @@ try:
                 # )
                 # ---
 
-                # Direct extraction: find FractionEvaluation whose DoseOnExamination
-                # matches ct_label, then pull per-beam doses directly.
+                # Direct extraction: the per-beam doses that THIS beam set
+                # produced on ct_label (see find_beam_doses).
                 print(f"    Extracting per-beam doses for '{ct_label}' ...")
-                fe_idx  = None
-                doe_idx = None
-                for fi, fe in enumerate(case.TreatmentDelivery.FractionEvaluations):
-                    for di, doe in enumerate(fe.DoseOnExaminations):
-                        if doe.OnExamination.Name == ct_label:
-                            fe_idx  = fi
-                            doe_idx = di
-                            break
-                    if fe_idx is not None:
-                        break
+                beam_doses = find_beam_doses(case, beam_set, ct_label, primary_exam)
 
-                if fe_idx is None:
-                    print(f"    WARNING: No FractionEvaluation found for '{ct_label}'. Skipping.")
+                if beam_doses is None:
+                    print(f"    WARNING: No dose for '{beam_set_id}' on '{ct_label}'. Skipping.")
                     continue
-
-                dose_on_exam = (case.TreatmentDelivery
-                                    .FractionEvaluations[fe_idx]
-                                    .DoseOnExaminations[doe_idx])
-                beam_doses = dose_on_exam.DoseEvaluations[0].BeamDoses
+                if len(beam_doses) != len(beam_set.Beams):
+                    print(f"    WARNING: {len(beam_doses)} beam doses but "
+                          f"{len(beam_set.Beams)} beams in '{beam_set_id}'. Skipping.")
+                    continue
 
                 safe_id      = re.sub(r'[\\/:*?"<>| ]', '_', patient_id)
                 safe_session = re.sub(r'[\\/:*?"<>| ]', '_', sess)

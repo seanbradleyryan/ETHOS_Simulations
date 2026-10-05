@@ -88,6 +88,12 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
 %                                                  sensor peak (sim_results
 %                                                  .sensor_signal_peak); skips
 %                                                  noise, deconv, and reconstruction.
+%           .sensor_stages_only         [false]  - Diagnostic fast-path (used by
+%                                                  verify_pipeline_simulate): record
+%                                                  the sensor-averaged |p(t)| after
+%                                                  each processing stage in
+%                                                  sim_results.sensor_stages and
+%                                                  return before reconstruction.
 %           .conv_deconv_lambda         [1e-4]   - Wiener deconvolution regularisation
 %           .noise_only                 [false]  - Null-signal control: run the
 %                                                  forward sim to fix the noise
@@ -170,6 +176,9 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
 %           .recon_method       - Which branch ran ('tr' | 'das' | 'ubp')
 %           .blind_recon        - Logical: true when forward and reconstruction
 %                                 media differed (blind geometry)
+%           .sensor_stages      - Only with CONFIG.sensor_stages_only: .names
+%                                 (stage labels), .mean_abs ([stage x Nt] mean
+%                                 |p| over all sensor points, Pa), .dt (s)
 %
 %   NOTES:
 %       - Stateless: safe for parfor execution. Diagnostic plotting must be
@@ -184,7 +193,6 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
 %         placement once for a whole plan and reuse it for every field. When it
 %         is absent or its grid does not match, the mask is computed inline.
 %
-%   AUTHOR: ETHOS Pipeline Team
 %   DATE: May 2026
 %   VERSION: 3.0 (DAS, determine_sensor_mask + grid expansion, scale correction,
 %                 dose normalisation, downscale_factor, attenuation toggle,
@@ -299,7 +307,7 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
     sim_results.num_pulses = num_pulses;
 
     %% ======================== FORCE-UNIFORM MEDIUM OVERRIDES ========================
-    %  Optional sensitivity-test toggles: override one or more medium properties
+    %  Debug sensitivity-test toggles: override one or more medium properties
     %  with uniform values. Applied to the passed-in medium in place.
 
     if force_uniform_density
@@ -324,7 +332,7 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
     end
 
     %% ======================== DOWNSCALE FACTOR ========================
-    %  Optional pre-sim downscale of the whole grid (dose, medium, body/couch
+    %  Debug pre-sim downscale of the whole grid (dose, medium, body/couch
     %  masks). Useful for rapid testing / large speedups (coarser dx also grows
     %  the CFL time step, so cost falls faster than voxel count alone). The
     %  reconstructed dose is resampled back to the native dimensions at the end
@@ -581,9 +589,12 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
                 fprintf('        Sensor: using precomputed plan sensor mask (%d active points)\n', ...
                     sum(sensor_mask_orig(:)));
             elseif lateral_sensor
+                warning("Precomputed sensor did not fit. Recalculating.")
                 [sensor_mask_orig, sensor_info_orig] = determine_sensor_mask_lateral( ...
                     sct_for_sensor, field_dose_for_sensor, beam_metadata, config);
             else
+                warning("Precomputed sensor did not fit. Recalculating.")
+
                 [sensor_mask_orig, sensor_info_orig] = determine_sensor_mask( ...
                     sct_for_sensor, field_dose_for_sensor, beam_metadata, config);
             end
@@ -1022,6 +1033,18 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
 
         fprintf('        Pulse model complete. Signal peak %.3e Pa, noise amp %.3e Pa, SNR %.2f\n', ...
             sensor_signal_peak, noise_amp, sim_results.snr);
+
+        % Diagnostic fast-path (verify_pipeline_simulate): keep the sensor signal
+        % after each stage above, then skip the reconstruction.
+        if safe_config(config, 'sensor_stages_only', false)
+            sim_results.sensor_stages = sensor_stage_traces( ...
+                {'raw (forward sim)', 'pulse convolved', 'sensor band-limit', ...
+                 'noise added', 'Wiener deconvolved'}, ...
+                {sensorData_cpu, sensorData_conv, sensorData_resp, ...
+                 sensorData_noisy, sensorData_deconv}, dt);
+            recon_dose = zeros(input_dims_for_crop);
+            return;
+        end
     else
         % No pulse model: apply only the sensor frequency response.
         sensorData = gaussianFilter(sensorData, FS, 0.35e6, 100, false);
@@ -1052,6 +1075,16 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
             end
             fprintf('        [NOISE ONLY] True signal nulled; reconstructing noise alone (amp %.3e Pa).\n', ...
                 noise_amp);
+        end
+
+        % Diagnostic fast-path (see the pulse branch above). sensorData_measured
+        % still holds the raw forward data here; it is overwritten just below.
+        if safe_config(config, 'sensor_stages_only', false)
+            sim_results.sensor_stages = sensor_stage_traces( ...
+                {'raw (forward sim)', 'sensor band-limit'}, ...
+                {sensorData_measured, sensorData}, dt);
+            recon_dose = zeros(input_dims_for_crop);
+            return;
         end
         sensorData_measured = sensorData;
         fprintf('        Pulse convolution disabled; frequency response applied.\n');
@@ -1504,6 +1537,17 @@ function amp = resolve_noise_amp(config, signal_peak, conv_noise_level)
         amp = double(config.noise_amp_Pa);
     else
         amp = conv_noise_level * signal_peak;
+    end
+end
+
+
+function stages = sensor_stage_traces(names, arrays, dt)
+%SENSOR_STAGE_TRACES Mean |p(t)| over all sensor points for each processing
+%  stage (arrays{k} is [num_sensor_points x Nt]). The absolute value is taken
+%  before averaging so bipolar signals from different sensors do not cancel.
+    stages = struct('names', {names}, 'mean_abs', [], 'dt', dt);
+    for k = 1:numel(arrays)
+        stages.mean_abs(k, :) = mean(abs(double(gather(arrays{k}))), 1);
     end
 end
 

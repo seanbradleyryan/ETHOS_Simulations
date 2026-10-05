@@ -87,7 +87,6 @@ function [sensor_mask, sensor_info] = determine_sensor_placement90(sct_resampled
 %   DEPENDENCIES:
 %       None (no toolbox required)
 %
-%   AUTHOR: ETHOS Pipeline Team
 %   DATE:   April 2026
 %   VERSION: 1.0
 %

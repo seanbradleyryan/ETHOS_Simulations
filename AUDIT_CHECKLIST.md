@@ -21,10 +21,10 @@ Items marked **(verify)** could not be confirmed without MATLAB / RayStation / d
 
 ### Could be affecting current results
 
-- [ ] **1.1 RayStation may export the wrong plan's dose (verify)** — `RayStation/calc_beam_plan_doses.py:390-406`
-  Takes the first dose record on "CT 1"/"CT 3" and reads `DoseEvaluations[0].BeamDoses` without checking it belongs to the current `beam_set`. If RayStation appends one evaluation per plan, every plan after the first exports the first plan's doses.
-  - *Check:* CT_3 NPZs from two different original beams actually differ and match RayStation's display.
-  - *Fix:* select the evaluation whose beam set matches the current plan.
+- [x] **1.1 RayStation exported the wrong plan's dose (CONFIRMED, fixed 2026-10-01)** — `RayStation/calc_beam_plan_doses.py`, `find_beam_doses`
+  Took the first dose record on "CT 1"/"CT 3" and read `DoseEvaluations[0].BeamDoses` without checking it belonged to the current `beam_set`. Seen in 1194203 Session_2: every beam's dose was beam 1's (gantry 181°). A fix (commit `7283c6e`) existed on `main` but never reached the v6 branch.
+  - *Fix:* `find_beam_doses` matches the evaluation by `ForBeamSet.BeamSetIdentifier()`; on the planning exam it reads `beam_set.FractionDose.BeamDoses`; skips (no DONE entry) if nothing matches or the beam-dose count ≠ beam count.
+  - *Still to do:* rerun any session exported with the old script (delete its progress log, NPZs, Step 1.4 `.mat`s and `processed/` doses first). The verify script still has no cross-beam check, so it would not catch this.
 
 - [ ] **1.2 CT_3 dose may be misaligned with CBCT3 (verify)** — `pipeline/step15_process_doses.m:659-669`
   If origin differs but dims match, only a warning; dose saved un-resampled and treated as on the reference grid. RS script uses `AllowGridExpansion=True` (`calc_beam_plan_doses.py:325`), which can change the grid.
