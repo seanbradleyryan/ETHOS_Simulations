@@ -7,9 +7,8 @@ function cbct_paths = sort_CBCT(patient_id, session, config)
 %   Identify all CT series in the raw ETHOS DICOM export whose
 %   SeriesDescription contains 'CBCT' and copy their files into the
 %   patient/session sct directory (alongside the SCT, RT, and image
-%   registration files sorted by step0_sort_dicom).  When more than two
-%   CBCT series are present, the two earliest by SeriesDate/SeriesTime
-%   are selected.
+%   registration files sorted by step0_sort_dicom).  Every CBCT series
+%   is copied.
 %
 %   INPUTS:
 %       patient_id  - String, patient identifier (e.g., '1194203')
@@ -27,15 +26,14 @@ function cbct_paths = sort_CBCT(patient_id, session, config)
 %      dicomCollection.
 %   2. Select rows where Modality is 'CT' and SeriesDescription contains
 %      'CBCT' (case-insensitive).
-%   3. If more than 2 CBCT series are found, sort by
-%      SeriesDate+SeriesTime and keep the two earliest.
-%   4. Copy each selected series' files into the sct directory using a
+%   3. Copy each series' files into the sct directory using a
 %      'CBCT<n>_' prefix on the original filename to avoid collisions
 %      with the SCT 'CT*.dcm' filenames.
 %
 %   FILE NAMING CONVENTION:
 %       CBCT1_<original_name>.dcm
 %       CBCT2_<original_name>.dcm
+%       ... (one prefix per CBCT series)
 %
 %   EXAMPLE:
 %       config.working_dir    = get_repo_root();
@@ -134,39 +132,6 @@ end
 cbctInfo = ctInfo(matches, :);
 nFound   = height(cbctInfo);
 fprintf('    Found %d CBCT series\n', nFound);
-
-%% ======================== ENFORCE MAX 2 (BY DATETIME) ========================
-
-if nFound > 2
-    fprintf('    More than 2 CBCT series found; selecting the two earliest by datetime.\n');
-
-    dtValues = NaN(nFound, 1);
-    for i = 1:nFound
-        fileCell = cbctInfo.Filenames{i};
-        if isempty(fileCell) || isempty(fileCell{1}), continue; end
-        try
-            meta    = dicominfo(fileCell{1});
-            dateStr = '';
-            timeStr = '';
-            if isfield(meta, 'SeriesDate'), dateStr = strtrim(meta.SeriesDate); end
-            if isfield(meta, 'SeriesTime'), timeStr = strtrim(meta.SeriesTime); end
-            if ~isempty(dateStr) || ~isempty(timeStr)
-                dt = str2double([dateStr, timeStr]);
-                if ~isnan(dt) && dt > 0
-                    dtValues(i) = dt;
-                end
-            end
-        catch
-            % leave as NaN
-        end
-    end
-
-    [~, sortIdx] = sort(dtValues);   % NaNs sort to the end
-    keepIdx      = sortIdx(1:2);
-    fprintf('    Keeping CBCT series indices [%d, %d] with datetimes [%s, %s]\n', ...
-        keepIdx(1), keepIdx(2), num2str(dtValues(keepIdx(1))), num2str(dtValues(keepIdx(2))));
-    cbctInfo = cbctInfo(keepIdx, :);
-end
 
 %% ======================== COPY FILES TO SCT DIR ========================
 

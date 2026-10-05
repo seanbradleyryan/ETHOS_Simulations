@@ -91,13 +91,15 @@ copy_files_to_dir(sct_dir, 'RTSTRUCT_SCT*.dcm', output_dir, 'RTSTRUCT (SCT)');
 % Image registration (REG) files
 copy_files_to_dir(sct_dir, 'REG_*.dcm', output_dir, 'Image registrations');
 
-% CBCT series (up to two, sorted by sort_CBCT)
+% CBCT series (all of them, sorted by sort_CBCT)
 copy_files_to_dir(sct_dir, 'CBCT*.dcm', output_dir, 'CBCT series');
 
-% RTSTRUCT files associated with each CBCT series
-% RTSTRUCT_ICBCT.dcm references the first CBCT (CBCT1_*); VCBCT references the second (CBCT2_*)
-copy_file_as(sct_dir, 'RTSTRUCT_ICBCT.dcm', output_dir, 'RTSTRUCT_CBCT1.dcm', 'RTSTRUCT (CBCT1)');
-copy_file_as(sct_dir, 'RTSTRUCT_VCBCT.dcm', output_dir, 'RTSTRUCT_CBCT2.dcm', 'RTSTRUCT (CBCT2)');
+% Every non-SCT RTSTRUCT (e.g. CBCT structure sets) goes in a subfolder
+extra_structs_dir = fullfile(output_dir, 'extra_structs');
+if ~exist(extra_structs_dir, 'dir')
+    mkdir(extra_structs_dir);
+end
+copy_files_to_dir(sct_dir, 'RTSTRUCT_extra_*.dcm', extra_structs_dir, 'Extra RTSTRUCTs');
 
 % Reference dose
 copy_files_to_dir(sct_dir, 'RTDOSE_reference.dcm', output_dir, 'Reference dose');
@@ -501,24 +503,6 @@ function copy_files_to_dir(src_dir, pattern, dst_dir, label)
     end
     fprintf('  %-20s %3d copied, %3d already present.\n', ...
         [label ':'], n_copied, n_skipped);
-end
-
-
-function copy_file_as(src_dir, src_name, dst_dir, dst_name, label)
-%COPY_FILE_AS Copy a single named file from src_dir to dst_dir under a new name.
-%   Issues a warning if the source is missing (e.g. no RTSTRUCT for that CBCT).
-    src = fullfile(src_dir, src_name);
-    dst = fullfile(dst_dir, dst_name);
-    if ~isfile(src)
-        warning('step06:noFile', 'No %s file (%s) found in:\n  %s', label, src_name, src_dir);
-        return;
-    end
-    if isfile(dst)
-        fprintf('  %-20s already present.\n', [label ':']);
-        return;
-    end
-    copyfile(src, dst);
-    fprintf('  %-20s 1 copied.\n', [label ':']);
 end
 
 

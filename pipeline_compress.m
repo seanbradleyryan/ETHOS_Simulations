@@ -66,6 +66,11 @@ CONFIG.run_step15       = true;   % Step 1.5: Process doses and resample CT
 % in 1.5). Set false to force a full re-run.
 CONFIG.skip_completed   = true;
 
+% --- Parallel per-field processing (Step 1.5) ---
+% parfor over CPU cores; false = serial. [] workers = all local cores.
+CONFIG.use_parallel     = true;
+CONFIG.num_cpu_workers  = [];
+
 %% ========================= INITIALIZATION ================================
 
 fprintf('=========================================================\n');

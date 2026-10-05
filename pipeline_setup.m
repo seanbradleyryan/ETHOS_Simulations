@@ -8,8 +8,9 @@
 %  RayStation. 
 %
 %  STEPS EXECUTED:
-%    Step 0    Sort DICOM files (SCT + RT + REG + up to 2 CBCT) and moves
-%    them into Raystation_input
+%    Step 0    Sort DICOM files (SCT + RT + REG + all CBCTs) and moves
+%    them into Raystation_input (non-SCT RTSTRUCTs go to
+%    Raystation_input/<pid>/<session>/extra_structs)
 %    Step 0.5  Raystation is configured to reject plans without a minimum
 %    gap between mlc teeth. This fixes Halcyon dual-layer MLC minimum gaps in RTPLAN
 %    Step 0.6  Raystation does not have an object for the dose from a single segment which is needed for IRAI, but it does store the dose from a beam. 
@@ -47,6 +48,7 @@ CONFIG.mlc_position_range   = [-140, 140];     % Valid Halcyon leaf position ran
 CONFIG.run_step0   = true;   % Step 0 : Sort DICOM files
 CONFIG.run_step05  = true;   % Step 0.5: Fix MLC gaps
 CONFIG.run_step06  = true;   % Step 0.6: Explode beam segments
+CONFIG.skip_completed = true; % Skip a patient/session if all setup outputs already exist
 
 %% ========================= INITIALIZATION ================================
 
@@ -80,6 +82,13 @@ for p_idx = 1:length(CONFIG.patients)
 
         result_key = make_result_key(patient_id, session);
         RESULTS.patients.(result_key) = init_patient_result(patient_id, session);
+
+        if CONFIG.skip_completed && setup_outputs_exist(patient_id, session, CONFIG)
+            RESULTS.patients.(result_key).status  = 'skipped';
+            RESULTS.patients.(result_key).sct_dir = get_sct_directory(patient_id, session, CONFIG);
+            fprintf('  All setup outputs already exist. Skipping.\n');
+            continue;
+        end
 
         try
 
@@ -192,6 +201,33 @@ fprintf('\n=========================================================\n\n');
 function sct_dir = get_sct_directory(patient_id, session, config)
     sct_dir = fullfile(config.working_dir, 'EthosExports', patient_id, ...
         config.treatment_site, session, 'sct');
+end
+
+function done = setup_outputs_exist(patient_id, session, config)
+% True when Steps 0 / 0.5 / 0.6 outputs are all on disk:
+%   Step 0  : sCT slices in sct/
+%   Step 0.5: RTPLAN_reference_adjusted_mlc.dcm in sct/
+%   Step 0.6: plan copy in RayStationFiles/, and one exploded RTPLAN per
+%             beam of the adjusted plan in Raystation_Input/
+    done = false;
+    sct_dir      = get_sct_directory(patient_id, session, config);
+    adjusted     = fullfile(sct_dir, 'RTPLAN_reference_adjusted_mlc.dcm');
+    rs_input_dir = fullfile(config.working_dir, 'Raystation_Input', patient_id, session);
+    rs_files_dir = fullfile(config.working_dir, 'RayStationFiles', patient_id, session);
+
+    if isempty(dir(fullfile(sct_dir, 'CT*.dcm'))) || ~isfile(adjusted)
+        return;
+    end
+    if ~isfile(fullfile(rs_files_dir, 'RTPLAN_reference_adjusted_mlc.dcm'))
+        return;
+    end
+
+    % Compare exploded file count to the beam count of the adjusted plan
+    exploded = dir(fullfile(rs_input_dir, ...
+        sprintf('RTPLAN_%s_%s_reference_B*.dcm', patient_id, session)));
+    rtplan = dicominfo(adjusted, 'UseDictionaryVR', true);
+    numBeams = numel(fieldnames(rtplan.BeamSequence));
+    done = numel(exploded) >= numBeams;
 end
 
 function adjusted_path = find_adjusted_rtplan(sct_dir)

@@ -62,7 +62,7 @@ Items marked **(verify)** could not be confirmed without MATLAB / RayStation / d
   One RTPLAN used for reference and adapted; each segment gets original beam's full MU, while real segment MU = Δweight × beam MU (`step06_explode_segments.m:268`). Pulse count inflated ~100×. Cancels in current legacy noise mode; breaks fixed `noise_amp_Pa` mode; saved `noise_stats.snr` non-physical.
   - *Fix:* compute segment MU from CumulativeMetersetWeight of the correct plan type.
 
-- [ ] **1.11 ETHOS truth resampled by array size only** — `utils/load_recon_dose_data.m:603-646`, `pipeline/step3_analysis.m:411-437`
+- [x] **1.11 ETHOS truth resampled by array size only** — `utils/load_recon_dose_data.m:603-646`, `pipeline/step3_analysis.m:411-437` — fixed: `load_recon_dose_data` now resamples by patient position (`resample_ethos_by_position`); step3 uses it and no longer resamples itself.
   `imresize3` to target dims ignoring origin/spacing; takes first RTDOSE*.dcm in folder. ETHOS-vs-RS comparisons invalid (`IncludeEthos` defaults true).
 
 - [ ] **1.12 Noise floor uses a different engine and medium** — `utils/noise_ensemble_error_bars.m`
