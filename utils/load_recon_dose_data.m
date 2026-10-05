@@ -614,16 +614,60 @@ function ethos = load_ethos_truth_resampled(patient_id, session, config, metadat
     end
     fprintf('  [ethos] Loaded truth dose: %s\n', rd_files(1).name);
 
-    if isfield(metadata, 'dimensions') && ~isempty(metadata.dimensions)
+    have_geom = isfield(metadata, 'origin') && ~isempty(metadata.origin) ...
+        && isfield(metadata, 'spacing') && ~isempty(metadata.spacing) ...
+        && isfield(metadata, 'dimensions') && ~isempty(metadata.dimensions);
+    if have_geom
+        ethos = resample_ethos_by_position(raw, info, metadata);
+    elseif isfield(metadata, 'dimensions') && ~isempty(metadata.dimensions)
+        warning('load_recon_dose_data:EthosSizeResample', ...
+            ['Dose-grid metadata has no origin/spacing; ETHOS truth resampled by ' ...
+             'array size only (positions NOT aligned).']);
         ethos = resample_to_grid(raw, metadata.dimensions(:)');
     else
         ethos = raw;
     end
 end
 
+function ethos = resample_ethos_by_position(raw, info, metadata)
+    % Trilinear resample of the ETHOS RTDOSE onto the dose grid in patient
+    % coordinates (mm). Assumes axis-aligned HFS orientation for both grids.
+    % RTDOSE arrays are (row, col, slice) = (Y, X, Z); ImagePositionPatient is
+    % the first voxel centre; PixelSpacing = [row spacing (dy), col spacing (dx)];
+    % slice positions come from GridFrameOffsetVector. Voxels outside the
+    % ETHOS grid are 0.
+    nRow = size(raw, 1);  nCol = size(raw, 2);  nSlc = size(raw, 3);
+    ipp  = double(info.ImagePositionPatient(:));
+    ps   = double(info.PixelSpacing(:));
+    xs = ipp(1) + (0:nCol - 1) * ps(2);
+    ys = ipp(2) + (0:nRow - 1) * ps(1);
+    if isfield(info, 'GridFrameOffsetVector') && numel(info.GridFrameOffsetVector) == nSlc
+        zs = ipp(3) + double(info.GridFrameOffsetVector(:))';
+    else
+        zs = ipp(3) + (0:nSlc - 1) * double(info.SliceThickness);
+    end
+    if nSlc > 1 && zs(end) < zs(1)          % interp3 needs ascending z
+        zs  = fliplr(zs);
+        raw = flip(raw, 3);
+    end
+
+    o = double(metadata.origin(:));
+    s = double(metadata.spacing(:));
+    d = double(metadata.dimensions(:))';     % [rows, cols, slices]
+    xt = o(1) + (0:d(2) - 1) * s(1);
+    yt = o(2) + (0:d(1) - 1) * s(2);
+    zt = o(3) + (0:d(3) - 1) * s(3);
+
+    % Grid vectors in array-dimension order (dim1 = Y, dim2 = X, dim3 = Z).
+    F = griddedInterpolant({ys, xs, zs}, raw, 'linear', 'none');
+    ethos = F({yt, xt, zt});
+    ethos(isnan(ethos) | ethos < 0) = 0;
+    fprintf('  [ethos] Resampled by patient position onto [%d x %d x %d]\n', d);
+end
+
 function out_dose = resample_to_grid(dose, target_size)
-    % Size-based trilinear resample, mirroring step3_analysis/resample_dose_to_grid
-    % so recon, RS and ETHOS doses share one grid for gamma/SSIM.
+    % Size-based trilinear resample. Fallback only, used when the dose-grid
+    % metadata has no origin/spacing (positions are NOT aligned).
     src = size(dose);
     if numel(src) < 3
         src(end + 1:3) = 1;

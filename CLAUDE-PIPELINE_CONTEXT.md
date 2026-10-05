@@ -13,7 +13,7 @@
 | 1.5 | `step15_process_doses.m` | `[fields, sct, total, meta] = step15_process_doses(...)` | Resample CT to dose grid, process per-field doses (**Windows work laptop** via `pipeline_compress.m`) |
 | 2 | `run_single_field_simulation.m` | `[recon, results] = run_single_field_simulation(...)` | k-Wave forward + time-reversal for one field |
 | 2.5 | `step25_segment_metrics.m` | `results = step25_segment_metrics(patient_id, session, config)` | Per-beam/segment gamma + local SSIM (4 study comparisons); folds raw masked results into each segment's **CT_1** recon file |
-| 3 | `step3_analysis.m` | `results = step3_analysis(patient_id, session, config)` | Gamma analysis (3%/3mm), SSIM, visualization |
+| 3 | `step3_analysis.m` | `results = step3_analysis(patient_id, session, config)` | Total-dose gamma + local SSIM, and the full per-segment study (tables, statistics, figures) from the Step 2.5 summary; everything saved to `AnalysisResults/` |
 
 ## Orchestrator Scripts
 
@@ -39,7 +39,8 @@
 | `CalcGamma.m` | Gamma index calculation (external dependency) |
 | `load_processed_data.m` | Loads previously processed dose/CT data |
 | `load_recon_dose_data.m` | Loads computed recon doses (single/set/total) + RS, ETHOS truth, CBCT, RTPLAN stats — no re-sim. See CLAUDE.md "Analysis Utilities" |
-| `compute_local_ssim.m` | Local (per-voxel) SSIM map + masked mean (study-style, over the 10% region). NOT `step3`'s global `compute_dose_ssim` |
+| `compute_local_ssim.m` | Local (per-voxel) SSIM map + masked mean over the 10% region. The only SSIM in the pipeline (Steps 2.5 and 3) |
+| `studies/study_pass_rates_allsegments.m` | Superseded by Step 3 (all its analyses now run there); kept for reference |
 
 ## Full Workflow (Common Operations)
 
@@ -113,8 +114,8 @@ run standalone like `step3_analysis`.
   `results.noise_floor` (`.mean_pass_rate`, `.std_pass_rate`, `.num_samples`, …). `metrics_noise_minutes`
   (30) is the ensemble `TimeBudgetMin`. The reference geometry/summed truth come from
   `load_recon_dose_data(Mode='total')`. Since Step 2.5 draws no figures, the floor is only *saved*; a
-  plotting script would draw `noise_floor.mean_pass_rate` as the horizontal null line on the pass-rate-by-
-  beam plot and, on the differentials, the point (`truth1_vs_recon1` pass) − (noise mean). The first
+  Step 3 draws `noise_floor.mean_pass_rate` as the horizontal null band on the pass-rate-by-beam plot
+  and, on the differentials, the point (`truth1_vs_recon1` pass) − (noise mean). The first
   (uncached) ~30 min compute is guarded by a `<noise_ensemble_cache>.lock` so only one instance pays it;
   siblings skip and pick up the cache on a later run.
 - **Overlap with Step 2 (`CONFIG.metrics_overlap_step2`, default on):** so one allocation of GPUs + CPUs
@@ -131,6 +132,44 @@ run standalone like `step3_analysis`.
   writes the summary. Needs `parcluster().NumWorkers >= 1 + metrics_watcher_workers + num_parallel_workers`;
   otherwise the watcher is shrunk or skipped. `field_index` is already sorted by [beam, segment], so beams
   finish progressively during Step 2.
+
+## Step 3 — Analysis (totals + per-segment study)
+
+`step3_analysis.m` runs after Step 2.5 (`CONFIG.run_step3`, default off in `pipeline_simulate`) or
+standalone. It absorbed every analysis from `study_pass_rates_allsegments.m`.
+
+- **Part A, total doses** (loaded via `load_recon_dose_data(Mode='total')`, hash pinned by
+  `config.config_hash`):
+  - `ethos_vs_rs`: ETHOS RTDOSE truth vs RS **per-CT** total `total_dose_<analysis_ethos_ct_label>.mat`
+    (default `CT_1`). Not `total_rs_dose`, which sums both CTs' fields (≈2 plans).
+  - `rs_vs_recon`: `total_rs_dose` vs `total_recon` (both sums of every field). The recon is LS-scaled
+    when `metrics_normalize`.
+  - Gamma and local SSIM use the same settings as Step 2.5: global `CalcGamma`, `limit = 2*dist_mm`,
+    reference-only 10% mask, `compute_local_ssim`. `CalcGamma` widths are passed in array order
+    `[dy dx dz]`.
+  - ETHOS is resampled by **patient position** (RTDOSE IPP/PixelSpacing/GridFrameOffsetVector → dose-grid
+    origin/spacing), not by array size.
+  - Figures use orthogonal views (transverse/coronal/sagittal) at the reference max-dose voxel, with the
+    CT_1 body contour and the real sensor footprint from `sensor_mask_<hash>.mat` (skipped when that mask
+    is not on the dose grid).
+- **Part B, per-segment study:** reads `segment_metrics_summary_<hash>.mat` and runs Step 2.5 first if it
+  is missing. For **both** metrics (gamma pass %, local SSIM %) it produces:
+  - per-beam mean ± SE tables, plus a pooled "All" row
+  - pass-rate, differential and own-CT fidelity plots, with the noise-only band drawn for gamma only
+  - segment statistics: paired one-sided t-test recon1 vs recon3; % above the floor
+    (`analysis_noise_floor_pct`, default = Step 2.5 noise-floor mean; gamma only); Pearson R² and
+    Spearman ρ of (recon1 − recon3) vs truth1_vs_truth3 and vs CT_1 SNR. All base MATLAB (`betainc`,
+    `corrcoef`), no Statistics Toolbox.
+
+  It also produces per-beam `noise_stats.snr` and `analysis_n_random` random segment panels
+  (truth | recon | folded gamma map | folded SSIM map). No metric is recomputed here.
+- **Outputs** go to `AnalysisResults/<pid>/<session>/<method>/<hash>/`:
+  - `step3_results.mat`
+  - `beam_summary.csv`
+  - `segment_statistics.csv`
+  - `step3_console_log.txt`: diary, written to the session folder while running and moved here at the end
+  - `figures/*.png`
+- Step 3 never loads all field doses at once. The random panels load one beam at a time.
 
 ## Gotchas
 

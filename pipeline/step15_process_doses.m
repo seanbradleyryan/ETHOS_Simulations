@@ -27,6 +27,11 @@ function [field_doses, cbct_resampled, total_rs_dose, metadata] = step15_process
 %                                 field (default: 100)
 %           .fields_per_beam    - Expected dose files per RTPLAN beam; used to
 %                                 warn about missing files (default: 165)
+%           .use_parallel       - parfor the per-field loop over CPU cores
+%                                 (default: true). Worker log lines print
+%                                 out of order.
+%           .num_cpu_workers    - Pool size; [] = local cluster NumWorkers
+%                                 (default: []). Lower it if RAM is tight.
 %
 %   OUTPUTS:
 %       field_doses     - Cell array of field dose structures (loaded from files)
@@ -75,8 +80,9 @@ function [field_doses, cbct_resampled, total_rs_dose, metadata] = step15_process
 %      pair by SeriesInstanceUID, sort by datetime -> CT_1 / CT_3
 %   6. Resample each CBCT to the dose grid; build per-CBCT body/couch/tissue
 %      masks from the matching RTSTRUCT; precompute per-CBCT invalid masks
-%   7. Process each dose file: scale -> validate -> zero invalid regions
-%      (per the field's ct_label) -> save
+%   7. Process each dose file (parfor over CPU cores, see processOneField):
+%      scale -> validate -> zero invalid regions (per the field's ct_label)
+%      -> save; totals summed as parfor reductions
 %   8. Zero combined total_rs_dose using union-body / intersection-couch;
 %      zero each per-CT total with its own mask; save all outputs
 %
@@ -104,6 +110,7 @@ function [field_doses, cbct_resampled, total_rs_dose, metadata] = step15_process
 %
 %   DEPENDENCIES:
 %       - Image Processing Toolbox (dicominfo, dicomread, poly2mask)
+%       - Parallel Computing Toolbox (optional; per-field loop runs serially without it)
 %
 %   DATE: February 2026
 %   VERSION: 1.1 (Added RTSTRUCT tissue classification and couch masking)
@@ -152,9 +159,14 @@ if ~config.apply_dose_masking
     fprintf('  [INFO] Dose masking DISABLED (debugging mode)\n');
 end
 
-% Set default batch size for field dose processing (memory management)
-if ~isfield(config, 'batch_size') || isempty(config.batch_size)
-    config.batch_size = 1000;
+% Parallel per-field processing (parfor over CPU cores). Runs serially when
+% false or when the Parallel Computing Toolbox is unavailable.
+if ~isfield(config, 'use_parallel') || isempty(config.use_parallel)
+    config.use_parallel = true;
+end
+% Pool size; [] = local cluster's NumWorkers (physical cores by default)
+if ~isfield(config, 'num_cpu_workers')
+    config.num_cpu_workers = [];
 end
 
 % Per-field progress is only printed every log_interval-th field
@@ -385,7 +397,7 @@ fprintf('    Origin (mm): [%.3f, %.3f, %.3f]\n', ref_origin(1), ref_origin(2), r
 % Initialize total dose accumulator
 total_rs_dose = zeros(ref_dims);
 
-% Per-CT-label accumulators; keys added dynamically from filenames (e.g. 'CT_1', 'CT_3')
+% Per-CT-label totals; CT_1 / CT_3 fields filled after the per-field parfor
 ct_dose_accum = struct();
 
 % Initialize metadata structure
@@ -568,33 +580,64 @@ end
 
 %% ======================== PROCESS EACH FIELD DOSE ========================
 
-fprintf('\n[6/8] Processing field doses (masking before export, batch_size=%d)...\n', config.batch_size);
+fprintf('\n[6/8] Processing field doses (masking before export)...\n');
 
-% Track which files were processed successfully
-field_doses    = cell(num_files, 1);
+% Pool size for the per-field parfor. numWorkers = 0 makes parfor run
+% serially in this MATLAB session (also the fallback without the toolbox).
+numWorkers = 0;
+if config.use_parallel && exist('parpool', 'file') == 2
+    try
+        pool = gcp('nocreate');
+        if isempty(pool)
+            cluster    = parcluster('local');
+            numWorkers = cluster.NumWorkers;
+            if ~isempty(config.num_cpu_workers)
+                numWorkers = min(config.num_cpu_workers, numWorkers);
+            end
+            pool = parpool('local', numWorkers);
+        end
+        numWorkers = pool.NumWorkers;   % reuse a running pool as-is
+    catch ME
+        fprintf('  [WARN] Could not start parallel pool (%s). Running serially.\n', ME.message);
+        numWorkers = 0;
+    end
+end
+fprintf('  Total files: %d | Workers: %d (0 = serial)\n', num_files, numWorkers);
+
+% parfor reduction variables: each worker keeps its own sum and MATLAB adds
+% them together at the end. CT totals are plain arrays (not a struct with
+% dynamic fields) because parfor cannot reduce into struct fields.
+field_doses     = cell(num_files, 1);
+total_ct1       = zeros(ref_dims);
+total_ct3       = zeros(ref_dims);
+n_ct1           = 0;
+n_ct3           = 0;
 processed_count = 0;
 save_count      = 0;
 
-num_batches = ceil(num_files / config.batch_size);
-fprintf('  Total files: %d | Batches: %d\n', num_files, num_batches);
+parfor (i = 1:num_files, numWorkers)
+    [summary, dose, ctLabel, didSave] = processOneField(i, num_files, ...
+        rd_files(i).name, expected_field_outputs{i}, rs_dir, processed_dir, ...
+        patient_id, session, input_format, ref_origin, ref_spacing, ref_dims, ...
+        invalid_dose_mask_ct1, invalid_dose_mask_ct3, beam_metadata, config, ...
+        need_total_accum);
 
-for batch_idx = 1:num_batches
-    batch_start = (batch_idx - 1) * config.batch_size + 1;
-    batch_end   = min(batch_idx * config.batch_size, num_files);
-
-    fprintf('\n  --- Batch %d/%d (files %d-%d) ---\n', ...
-        batch_idx, num_batches, batch_start, batch_end);
-
-    % Accumulate dose contribution for this batch only, then fold into total
-    batch_total_dose = zeros(ref_dims);
-
-    for i = batch_start:batch_end
-        % Only log every config.log_interval-th field (warnings always print)
-        show_progress = (mod(i, config.log_interval) == 0);
-        if show_progress
-            fprintf('  Processing field %d/%d: %s\n', i, num_files, rd_files(i).name);
+    field_doses{i} = summary;
+    if ~isempty(dose)
+        total_rs_dose = total_rs_dose + dose;
+        if strcmp(ctLabel, 'CT_1')
+            total_ct1 = total_ct1 + dose;
+            n_ct1 = n_ct1 + 1;
+        elseif strcmp(ctLabel, 'CT_3')
+            total_ct3 = total_ct3 + dose;
+            n_ct3 = n_ct3 + 1;
         end
+    end
+    processed_count = processed_count + ~isempty(summary);
+    save_count      = save_count + didSave;
+end
 
+% <<<<<<< HEAD
         try
             % ----- Skip if the processed output for this field already exists.
             % If totals also need to be rebuilt we still load the cached dose
@@ -835,6 +878,16 @@ for batch_idx = 1:num_batches
     fprintf('  [Batch %d/%d] Done. Running total max: %.4f Gy. Memory cleared.\n', ...
         batch_idx, num_batches, max(total_rs_dose(:)));
 end  % batch loop
+% =======
+% % Rebuild the per-CT accumulator struct used by the masking/saving code below
+% if n_ct1 > 0
+%     ct_dose_accum.CT_1 = total_ct1;
+% end
+% if n_ct3 > 0
+%     ct_dose_accum.CT_3 = total_ct3;
+% end
+% clear total_ct1 total_ct3;
+% >>>>>>> f5723c25eb99ee6af50d366ca193a188f71825ed
 
 fprintf('  Successfully processed %d/%d field doses\n', processed_count, num_files);
 fprintf('  Total dose max: %.4f Gy\n', max(total_rs_dose(:)));
@@ -2311,4 +2364,235 @@ function mask_filled = fillMaskZGaps(mask)
     
     % Reshape back to 3D
     mask_filled = reshape(mask_2d_filled', nRows, nCols, nSlices);
+end
+
+
+function [summary, dose, ct_label, didSave] = processOneField(i, num_files, ...
+    rd_name, cached_out, rs_dir, processed_dir, patient_id, session, input_format, ...
+    ref_origin, ref_spacing, ref_dims, invalid_dose_mask_ct1, invalid_dose_mask_ct3, ...
+    beam_metadata, config, need_total_accum)
+%PROCESSONEFIELD Process one field dose file (body of the Step 1.5 parfor).
+%
+%   Loads a raw field dose (or the cached processed output), masks it with
+%   its CBCT's invalid-dose mask, saves the per-field .mat, and returns:
+%     summary  - lightweight struct for field_doses{i} ([] on failure)
+%     dose     - dense masked dose for the running totals ([] when not needed)
+%     ct_label - 'CT_1' / 'CT_3' ('' if unknown)
+%     didSave  - true if a new per-field .mat was written
+%   Lives in its own function because parfor bodies cannot call save/clear.
+
+    summary  = [];
+    dose     = [];
+    ct_label = '';
+    didSave  = false;
+
+    % Only log every config.log_interval-th field (warnings always print)
+    show_progress = (mod(i, config.log_interval) == 0);
+    if show_progress
+        fprintf('  Processing field %d/%d: %s\n', i, num_files, rd_name);
+    end
+
+    try
+        % ----- Skip if the processed output for this field already exists.
+        % If totals also need to be rebuilt we still load the cached dose
+        % and return it for the running totals; otherwise we only return
+        % the lightweight summary entry.
+        if config.skip_completed && ~isempty(cached_out) && isfile(cached_out)
+            cached = load(cached_out, 'field_dose');
+            cfd    = cached.field_dose;
+
+            if need_total_accum
+                if isfield(cfd, 'is_sparse') && cfd.is_sparse
+                    dose = reshape(full(cfd.dose_Gy), cfd.dose_dims);
+                else
+                    dose = cfd.dose_Gy;
+                end
+                if isfield(cfd, 'ct_label')
+                    ct_label = cfd.ct_label;
+                end
+            end
+
+            summary = struct( ...
+                'filepath',     cached_out, ...
+                'beam_num',     cfd.beam_num, ...
+                'seg_num',      cfd.seg_num, ...
+                'field_num',    cfd.field_num, ...
+                'plan_type',    cfd.plan_type, ...
+                'gantry_angle', cfd.gantry_angle, ...
+                'meterset',     cfd.meterset, ...
+                'max_dose_Gy',  cfd.max_dose_Gy, ...
+                'source_file',  cfd.source_file, ...
+                'isocenter',    cfd.isocenter, ...
+                'jaw_x',        cfd.jaw_x, ...
+                'jaw_y',        cfd.jaw_y, ...
+                'body_masked',  cfd.body_masked, ...
+                'couch_masked', cfd.couch_masked);
+
+            if show_progress
+                fprintf('    [Skip] %s already processed (max: %.4f Gy)\n', ...
+                    rd_name, cfd.max_dose_Gy);
+            end
+            return;
+        end
+
+        dose_file = fullfile(rs_dir, rd_name);
+        switch input_format
+            case 'mat'
+                % Load pre-converted .mat (from step14_npz_to_mat). Geometry
+                % is already in mm and the dose array is already double in
+                % MATLAB (row=Y, col=X, slice=Z) order.
+                loaded       = load(dose_file, 'raw_field_dose');
+                rf           = loaded.raw_field_dose;
+                dose_data    = rf.dose_Gy;
+                dose_origin  = rf.origin(:);
+                dose_spacing = rf.spacing(:);
+                dose_dims    = size(dose_data);
+            otherwise  % 'dicom'
+                % Load DICOM dose file
+                dose_info = dicominfo(dose_file);
+                dose_data = double(squeeze(dicomread(dose_file)));
+
+                % Apply dose grid scaling
+                if isfield(dose_info, 'DoseGridScaling')
+                    dose_scaling = dose_info.DoseGridScaling;
+                    dose_data = dose_data * dose_scaling;
+                    if show_progress
+                        fprintf('    Applied scaling: %e\n', dose_scaling);
+                    end
+                end
+
+                % Extract geometry and verify it matches reference
+                dose_origin  = dose_info.ImagePositionPatient(:);
+                dose_spacing = extractDoseSpacing(dose_info);
+                dose_dims    = size(dose_data);
+        end
+
+        % Validate geometry matches reference
+        [geom_match, geom_msg] = validateGeometry(dose_origin, dose_spacing, dose_dims, ...
+            ref_origin, ref_spacing, ref_dims);
+
+        if ~geom_match
+            warning('step15_process_doses:GeometryMismatch', ...
+                'Field %d geometry mismatch: %s', i, geom_msg);
+            % Attempt to resample if dimensions don't match
+            if ~isequal(dose_dims, ref_dims)
+                fprintf('    Resampling to reference grid...\n');
+                dose_data = resampleDoseToGrid(dose_data, dose_origin, dose_spacing, ...
+                    ref_origin, ref_spacing, ref_dims);
+                dose_dims = ref_dims;
+            end
+        end
+
+        % Extract beam info from filename
+        % e.g. dose_1885729_Session_4_adapted_B6_103.dcm
+        %   -> beam_num=6, seg_num=103, field_num=6, plan_type='adapted'
+        % field_num (= beam_num) is used to match to RTPLAN beam metadata
+        [beam_num, seg_num, field_num, plan_type] = extractBeamInfo(rd_name, i);
+
+        % Extract CT label (e.g. 'CT_1' / 'CT_3'). Required: every field
+        % dose must carry a CT label so we can pick the matching CBCT
+        % geometry + mask for simulation and masking.
+        ct_tokens = regexp(rd_name, ...
+            '_(?:adapted|reference)_(CT_\d+)_B\d+_\d+\.(?:dcm|mat)$', ...
+            'tokens', 'once', 'ignorecase');
+        if ~isempty(ct_tokens)
+            ct_label = ct_tokens{1};
+        end
+
+        % Select per-CBCT invalid-dose mask. Reject anything that doesn't
+        % map to a supported CBCT  there is no sensible default now that
+        % masks are per-CT.
+        switch ct_label
+            case 'CT_1'
+                invalid_for_field = invalid_dose_mask_ct1;
+            case 'CT_3'
+                invalid_for_field = invalid_dose_mask_ct3;
+            otherwise
+                error('step15_process_doses:UnsupportedCtLabel', ...
+                    'Field %s has ct_label="%s"; only CT_1 and CT_3 are supported.', ...
+                    rd_name, ct_label);
+        end
+
+        % Get beam metadata by matching field_num to beam_number in RTPLAN
+        [gantry_angle, meterset] = getBeamMetadata(beam_metadata, field_num);
+
+        % Propagate isocenter and jaw data from beam_metadata
+        [iso, jx, jy] = getBeamGeometry(beam_metadata, field_num);
+
+        % Zero out invalid regions (outside body or in couch) BEFORE saving
+        if config.apply_dose_masking
+            dose_data(invalid_for_field) = 0;
+        end
+
+        % Create field dose structure with masking already applied
+        field_dose = struct();
+        field_dose.dose_Gy = dose_data;
+        field_dose.origin = dose_origin;
+        field_dose.spacing = dose_spacing;
+        field_dose.dimensions = dose_dims;
+        field_dose.beam_num = beam_num;         % Beam number from filename (B[n])
+        field_dose.seg_num = seg_num;           % Segment number from filename
+        field_dose.field_num = field_num;       % Field number (= beam_num, matches RTPLAN)
+        field_dose.plan_type = plan_type;       % 'adapted' or 'reference'
+        field_dose.ct_label  = ct_label;        % 'CT_1' or 'CT_3'
+        field_dose.gantry_angle = gantry_angle;
+        field_dose.meterset = meterset;
+        field_dose.source_file = rd_name;
+        field_dose.max_dose_Gy = max(dose_data(:));
+        field_dose.mean_dose_Gy = mean(dose_data(dose_data > 0));
+        field_dose.isocenter = iso;
+        field_dose.jaw_x = jx;
+        field_dose.jaw_y = jy;
+        field_dose.body_masked = config.apply_dose_masking;
+        field_dose.couch_masked = config.apply_dose_masking;
+
+        % Save individual field dose file  name mirrors source.
+        % Format: dose_[id]_[session]_[plan_type]_[ct_label]_B[beam]_[seg].mat
+        field_filename = sprintf('dose_%s_%s_%s_%s_B%d_%d.mat', ...
+            patient_id, session, plan_type, ct_label, beam_num, seg_num);
+        field_filepath = fullfile(processed_dir, field_filename);
+
+        % Convert 3D dose to sparse 2D [nRows*nCols, nSlices] before saving.
+        % Field doses are mostly zero outside the treated volume after masking.
+        % Reconstruct: reshape(full(field_dose.dose_Gy), field_dose.dose_dims)
+        if config.use_sparse_storage
+            field_dose.dose_dims = size(field_dose.dose_Gy);
+            field_dose.dose_Gy   = sparse(reshape(field_dose.dose_Gy, [], field_dose.dose_dims(end)));
+            field_dose.is_sparse = true;
+        end
+        save(field_filepath, 'field_dose', '-v7.3');
+        didSave = true;
+        if show_progress
+            fprintf('    [Save] %s (B%d S%d [%s], max: %.4f Gy, gantry: %.1f deg, MU: %.1f)\n', ...
+                field_filename, beam_num, seg_num, plan_type, ...
+                field_dose.max_dose_Gy, gantry_angle, meterset);
+        end
+
+        % Dense masked dose goes back to the caller for the running totals
+        dose = dose_data;
+
+        % Lightweight summary for field_doses{i} (no dose array, for memory)
+        summary = struct();
+        summary.filepath = field_filepath;
+        summary.beam_num = beam_num;
+        summary.seg_num = seg_num;
+        summary.field_num = field_num;
+        summary.plan_type = plan_type;
+        summary.gantry_angle = gantry_angle;
+        summary.meterset = meterset;
+        summary.max_dose_Gy = field_dose.max_dose_Gy;
+        summary.source_file = rd_name;
+        summary.isocenter = iso;
+        summary.jaw_x = jx;
+        summary.jaw_y = jy;
+        summary.body_masked = config.apply_dose_masking;
+        summary.couch_masked = config.apply_dose_masking;
+
+    catch ME
+        warning('step15_process_doses:FieldProcessingError', ...
+            'Failed to process field %d (%s): %s', i, rd_name, ME.message);
+        summary  = [];
+        dose     = [];
+        didSave  = false;
+    end
 end

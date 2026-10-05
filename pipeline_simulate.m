@@ -127,11 +127,14 @@ CONFIG.metrics_overlap_step2    = true;   % false => old behavior (Step 2, then 
 CONFIG.metrics_watcher_workers  = [];     % [] = auto: CPUs - GPU workers - 1 (see INITIALIZATION)
 CONFIG.metrics_watcher_poll_sec = 60;     % how often the watcher looks for finished beams
 
-% --- SSIM & Visualization Parameters ---
-CONFIG.analysis_compute_ssim = true;   % Compute SSIM alongside gamma
-CONFIG.analysis_plot_results = true;   % Generate PNG figures
-CONFIG.analysis_plot_slices  = 'auto'; % Slice indices or 'auto' (25/50/75th %ile)
-CONFIG.sensor_mode           = CONFIG.sensor_placement_method;  % passed to step3
+% --- Step 3 Analysis (totals + per-segment study; figures/stats/log saved to
+%     AnalysisResults/<patient>/<session>/<method>/<hash>/) ---
+CONFIG.analysis_plot_results    = true;    % Save PNG figures
+CONFIG.analysis_ethos_ct_label  = 'CT_1';  % RS per-CT total compared with the ETHOS RTDOSE
+CONFIG.analysis_beams           = [];      % [] => every beam in the Step 2.5 summary
+CONFIG.analysis_noise_floor_pct = [];      % [] => Step 2.5 noise-only floor mean
+CONFIG.analysis_n_random        = 5;       % random segment panels
+CONFIG.analysis_random_seed     = 42;
 
 % --- Parallel Processing ---
 CONFIG.use_parallel          = true;
@@ -708,34 +711,22 @@ for p_idx = 1:length(CONFIG.patients)
             %  STEP 3: Gamma Analysis, SSIM & Visualization
             %% ============================================================
             if CONFIG.run_step3
-                total_recon = double(gather(total_recon));
-                fprintf('\n[STEP 3] Running analysis (gamma + SSIM)...\n');
-
-                step3_results = step3_analysis(patient_id, session, CONFIG);
+                fprintf('\n[STEP 3] Running analysis (totals + per-segment study)...\n');
+                step3_config             = CONFIG;
+                step3_config.config_hash = CONFIG_HASH;
+                step3_results = step3_analysis(patient_id, session, step3_config);
 
                 RESULTS.patients.(result_key).gamma_ethos_vs_rs_pass_pct = ...
                     step3_results.ethos_vs_rs.gamma.pass_rate;
                 RESULTS.patients.(result_key).gamma_rs_vs_recon_pass_pct = ...
                     step3_results.rs_vs_recon.gamma.pass_rate;
-
-                if CONFIG.analysis_compute_ssim && ~isempty(step3_results.ethos_vs_rs.ssim)
-                    RESULTS.patients.(result_key).ssim_ethos_vs_rs = ...
-                        step3_results.ethos_vs_rs.ssim.ssim_3d;
-                    RESULTS.patients.(result_key).ssim_rs_vs_recon = ...
-                        step3_results.rs_vs_recon.ssim.ssim_3d;
-                end
-
-                fprintf('[STEP 3] Complete.\n');
-                fprintf('         ETHOS vs RS  gamma pass: %.1f%%\n', ...
-                    step3_results.ethos_vs_rs.gamma.pass_rate);
-                fprintf('         RS vs Recon  gamma pass: %.1f%%\n', ...
-                    step3_results.rs_vs_recon.gamma.pass_rate);
-                if CONFIG.analysis_compute_ssim && ~isempty(step3_results.ethos_vs_rs.ssim)
-                    fprintf('         ETHOS vs RS  SSIM:       %.4f\n', ...
-                        step3_results.ethos_vs_rs.ssim.ssim_3d);
-                    fprintf('         RS vs Recon  SSIM:       %.4f\n', ...
-                        step3_results.rs_vs_recon.ssim.ssim_3d);
-                end
+                RESULTS.patients.(result_key).ssim_ethos_vs_rs_pct = ...
+                    step3_results.ethos_vs_rs.ssim.mean_pct;
+                RESULTS.patients.(result_key).ssim_rs_vs_recon_pct = ...
+                    step3_results.rs_vs_recon.ssim.mean_pct;
+                RESULTS.patients.(result_key).step3_output_dir = ...
+                    step3_results.metadata.output_dir;
+                fprintf('[STEP 3] Complete. Output: %s\n', step3_results.metadata.output_dir);
             end
 
             RESULTS.patients.(result_key).status = 'complete';
@@ -1630,11 +1621,11 @@ function generate_simulation_summary(results)
             if isfield(p, 'gamma_rs_vs_recon_pass_pct')
                 fprintf('  Gamma RS vs Recon:  %.1f%%\n', p.gamma_rs_vs_recon_pass_pct);
             end
-            if isfield(p, 'ssim_ethos_vs_rs')
-                fprintf('  SSIM  ETHOS vs RS:  %.4f\n', p.ssim_ethos_vs_rs);
+            if isfield(p, 'ssim_ethos_vs_rs_pct')
+                fprintf('  Local SSIM ETHOS vs RS:  %.1f%%\n', p.ssim_ethos_vs_rs_pct);
             end
-            if isfield(p, 'ssim_rs_vs_recon')
-                fprintf('  SSIM  RS vs Recon:  %.4f\n', p.ssim_rs_vs_recon);
+            if isfield(p, 'ssim_rs_vs_recon_pct')
+                fprintf('  Local SSIM RS vs Recon:  %.1f%%\n', p.ssim_rs_vs_recon_pct);
             end
         elseif strcmp(p.status, 'error')
             fprintf('  Error: %s\n', p.error.message);

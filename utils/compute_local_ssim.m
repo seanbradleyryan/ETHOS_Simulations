@@ -10,9 +10,8 @@ function [ssim_map, mean_over_mask] = compute_local_ssim(reference, target, mask
 %   per-voxel SSIM map is averaged over the same 10%-of-reference region the
 %   gamma pass rate is computed on, so the two scores are directly comparable.
 %
-%   This matches the local-SSIM metric used by study_pass_rates_allsegments
-%   (eval_method = 'ssim'); it is NOT the global / per-slice SSIM in
-%   step3_analysis (compute_dose_ssim). Both are legitimate but different.
+%   This is the SSIM used everywhere in the pipeline: Step 2.5 per-segment
+%   metrics and Step 3 total-dose comparisons.
 %
 %   INPUTS:
 %       reference - 3D (or 2D) reference dose array. Sets the SSIM dynamic

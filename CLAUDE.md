@@ -157,8 +157,22 @@ recon outputs from `SimulationResults/[PatientID]/[Session]/[method]/` (`<base>_
 
 `[ssim_map, mean_over_mask] = compute_local_ssim(reference, target, mask)`. The study-style *local* SSIM:
 the per-voxel `ssim` map (dynamic range from the reference), averaged over the eval mask so it reads like a
-gamma pass rate. Returns `[]`/`NaN` when neither volume has signal. **Not** the same as `step3_analysis`'s
-global/per-slice `compute_dose_ssim` — keep them distinct.
+gamma pass rate. Returns `[]`/`NaN` when neither volume has signal. The only SSIM in the pipeline (Step 2.5
+segments and Step 3 totals).
+
+### `step3_analysis.m` — totals + per-segment study (Step 3)
+
+`results = step3_analysis(patient_id, session, config)`. It replaces `study_pass_rates_allsegments.m`.
+
+- **Part A:** gamma and local SSIM for two total-dose comparisons:
+  - ETHOS truth vs the RS per-CT total (`analysis_ethos_ct_label`)
+  - RS total vs recon total
+- **Part B:** the study analyses from the Step 2.5 summary, run for gamma and for SSIM: per-beam tables,
+  the stats tests, plots, SNR and random segment panels.
+- **Outputs:** figures, `.mat`, CSVs and the console log, all in
+  `AnalysisResults/<pid>/<session>/<method>/<hash>/`.
+
+See `CLAUDE-PIPELINE_CONTEXT.md` ("Step 3").
 
 ### `step25_segment_metrics.m` — per-segment gamma + SSIM (Step 2.5)
 
