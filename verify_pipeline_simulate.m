@@ -15,15 +15,19 @@ function results = verify_pipeline_simulate(patient_id, session, config, config_
 %     1  Completion: beam/segment pairs in the RTPLAN x {CT_1, CT_3} = processed
 %        doses = recon files for this config hash, and the saved total recon
 %        equals the sum of the per-field recons.
-%     2  Sensor placement on CBCT1 and CBCT3: axial/coronal/sagittal slices
-%        through the sensor center.                                    [figure]
+%     2  Sensor placement on CBCT1 and CBCT3: axial and coronal slices through
+%        the sensor center, plus a sagittal CT radiograph (mean HU left-right)
+%        with the axial and coronal cut planes drawn as lines.         [figure]
 %     3  (added) The sensor is clear of the body and couch on BOTH CBCTs. The
 %        plan sensor is placed once on CBCT1 and reused for every CT_3 field, so
 %        an anatomy change can put it inside the CT_3 patient.
 %     4  Random beam/segment pairs: RS truth, recon and gamma map with pass rate,
-%        on CT_1 and CT_3.                                            [figures]
+%        on CT_1 and CT_3. Gamma maps, pass rates and recon gains are read from
+%        Step 2.5 (segment_metrics in the CT_1 recon file); only a pair Step 2.5
+%        has not scored is recomputed.                      [window, tab per pair]
 %     5  Totals per CT: ETHOS truth, RS total and recon total, with gamma maps,
-%        pass rates and gamma histograms.                             [figures]
+%        pass rates and gamma histograms. Step 2.5 scores segments only, so the
+%        total gammas are computed here.                      [window, tab per CT]
 %     6  Sensor signal after each processing stage (raw, pulse convolved,
 %        band-limited, noise added, deconvolved), averaged over all sensor
 %        points, on a log axis. The pipeline does not save these signals, so
@@ -58,7 +62,8 @@ function results = verify_pipeline_simulate(patient_id, session, config, config_
 %       results - struct: .patient_id, .session, .config_hash, .out_dir and
 %                 .tests (struct array with .name, .status, .detail)
 %       PNG figures in SimulationResults/<id>/<session>/<method>/simulation_debug/
-%       named <plot>_<hash>.png. They are also shown when MATLAB has a desktop.
+%       named <plot>_<hash>.png (one PNG per tab). They are also shown when
+%       MATLAB has a desktop; plots of the same kind share one window as tabs.
 %
 %   ALGORITHM:
 %       1. Resolve the config hash; index the processed doses; load both CBCTs.
@@ -385,6 +390,9 @@ function results = verify_pipeline_simulate(patient_id, session, config, config_
             [rows, cols, slices] = ind2sub(size(sensor), find(sensor));
             center = round([mean(rows), mean(cols), mean(slices)]);
 
+            % Columns: axial slice, coronal slice, sagittal radiograph (view 4)
+            sensorViews     = [1 2 4];
+            sensorViewNames = {'axial', 'coronal', 'sagittal radiograph'};
             fig    = new_figure('Sensor placement', showFigures);
             inBody = zeros(1, 2);
             for c = 1:2
@@ -393,19 +401,31 @@ function results = verify_pipeline_simulate(patient_id, session, config, config_
                 couch = embed_in_grid(cbcts{c}.couchMask, size(sensor), offset, false);
                 inBody(c) = nnz(sensor & (body | couch));
                 for v = 1:3
+                    viewNum = sensorViews(v);
                     ax = subplot(2, 3, (c - 1) * 3 + v, 'Parent', fig);
-                    show_ct(ax, hu, v, center, spacing, ctWindowHu);
-                    add_overlay(ax, double(sensor), sensor, v, center, [0 1], [1 0 0]);
-                    add_contour(ax, body, v, center, 'g');
-                    add_contour(ax, planDose10, v, center, 'c');
-                    title(ax, sprintf('%s %s', cbctNames{c}, viewNames{v}));
+                    show_ct(ax, hu, viewNum, center, spacing, ctWindowHu);
+                    add_overlay(ax, double(sensor), sensor, viewNum, center, [0 1], [1 0 0]);
+                    if viewNum ~= 4   % a body outline means nothing on a projection
+                        add_contour(ax, body, viewNum, center, 'g');
+                    end
+                    add_contour(ax, planDose10, viewNum, center, 'c');
+                    if viewNum == 4
+                        % Where the axial and coronal slices cut the radiograph.
+                        % Sagittal: horizontal = row (A-P), vertical = slice (I-S).
+                        yline(ax, center(3), 'y-', 'axial', 'LineWidth', 1.5);
+                        xline(ax, center(1), 'm-', 'coronal', 'LineWidth', 1.5);
+                    end
+                    title(ax, sprintf('%s %s', cbctNames{c}, sensorViewNames{v}));
                 end
             end
             sgtitle(fig, sprintf(['%s %s | sensor (red), body (green), plan dose >= %g%% (cyan) | ' ...
                 'slices through sensor center [row %d, col %d, slice %d] | sensor in body: ' ...
                 'CBCT1 %d, CBCT3 %d voxels'], patient_id, session, 100 * cutoffFraction, ...
                 center, inBody), 'Interpreter', 'none');
-            save_figure(fig, outDir, ['sensor_placement_' config_hash], showFigures);
+            save_figure(fig, outDir, ['sensor_placement_' config_hash]);
+            if ~showFigures
+                close(fig);
+            end
 
             tests = add_result(tests, testName2, 'INFO', sprintf( ...
                 ['%d sensor voxels, center %s mm, tilt %.1f deg, placement_valid = %d, ' ...
@@ -431,23 +451,54 @@ function results = verify_pipeline_simulate(patient_id, session, config, config_
         complete = find(pairCt1 > 0 & pairCt3 > 0);
         complete = complete(reconOk(pairCt1(complete)) & reconOk(pairCt3(complete)));
         picks    = complete(randperm(numel(complete), min(numPairs, numel(complete))));
-        passRates = nan(numel(picks), 2);   % columns: CT_1, CT_3
+        passRates  = nan(numel(picks), 2);     % columns: CT_1, CT_3
+        fromStep25 = false(numel(picks), 1);   % true = gamma read from Step 2.5, not recomputed
+        % Step 2.5 comparisons of RS truth vs recon on the same CT (CT_1, CT_3)
+        step25Names = {'truth1_vs_recon1', 'truth3_vs_recon3'};
+        if ~isempty(picks)
+            fig      = new_figure('Random beam/segment pairs', showFigures);
+            tabGroup = uitabgroup(fig);
+        end
         for n = 1:numel(picks)
             k = picks(n);
             pairFields = [pairCt1(k), pairCt3(k)];
-            fig = new_figure(['Pair ' pairKeys{k}], showFigures);
+            % Step 2.5 folds its result into the CT_1 recon file as segment_metrics
+            warning('off', 'MATLAB:load:variableNotFound');
+            folded = load(reconPath{pairFields(1)}, 'segment_metrics');
+            warning('on', 'MATLAB:load:variableNotFound');
+            fromStep25(n) = isfield(folded, 'segment_metrics');
+            panel = new_tab_panel(tabGroup, pairKeys{k});
             for c = 1:2
                 fd     = load_field_dose_file(fieldIndex(pairFields(c)).file);
                 truth  = double(fd.dose_Gy);
                 loaded = load(reconPath{pairFields(c)}, 'recon_dose');
-                gain   = 1;
-                if normalizeRecon
-                    gain = least_squares_gain(truth, loaded.recon_dose);   % same scaling as Step 2.5
+                recon  = double(loaded.recon_dose);
+                if fromStep25(n)
+                    % Re-expand the stored masked gamma values into a volume
+                    sm       = folded.segment_metrics;
+                    comp     = sm.comparison(strcmp({sm.comparison.name}, step25Names{c}));
+                    gains    = [sm.recon_ct1_gain, sm.recon_ct3_gain];
+                    gain     = gains(c);
+                    evalMask = false(sm.vol_size);
+                    evalMask(comp.mask_idx) = true;
+                    gammaMap = zeros(sm.vol_size);
+                    gammaMap(comp.mask_idx) = comp.gamma_vals;
+                    passRates(n, c) = comp.gamma_pass_rate;
+                    source = 'Step 2.5';
+                else
+                    % Not scored by Step 2.5: recompute with the same settings
+                    gain = 1;
+                    if normalizeRecon
+                        gain = least_squares_gain(truth, recon);
+                    end
+                    g = compute_gamma(truth, gain * recon, gammaWidth, 'Criteria', gammaCriteria, ...
+                        'Cutoff', cutoffFraction);
+                    gammaMap = g.maps{1};
+                    evalMask = g.eval_mask;
+                    passRates(n, c) = g.pass_rates(1);
+                    source = 'recomputed';
                 end
-                recon = gain * double(loaded.recon_dose);
-                g = compute_gamma(truth, recon, gammaWidth, 'Criteria', gammaCriteria, ...
-                    'Cutoff', cutoffFraction);
-                passRates(n, c) = g.pass_rates(1);
+                recon = gain * recon;
 
                 % Both rows: axial slice through the CT_1 truth max, CT_1 color scale
                 if c == 1
@@ -457,29 +508,33 @@ function results = verify_pipeline_simulate(patient_id, session, config, config_
                     doseMax = max(truth(:));
                 end
                 hu = cbcts{c}.cubeHU;
-                ax = subplot(2, 3, (c - 1) * 3 + 1, 'Parent', fig);
+                ax = subplot(2, 3, (c - 1) * 3 + 1, 'Parent', panel);
                 show_ct(ax, hu, 1, center, spacing, ctWindowHu);
                 add_overlay(ax, truth, truth >= cutoffFraction * doseMax, 1, center, [0 doseMax], jet(256));
                 colorbar(ax);
                 title(ax, sprintf('%s RS truth (Gy)', ctLabels{c}), 'Interpreter', 'none');
 
-                ax = subplot(2, 3, (c - 1) * 3 + 2, 'Parent', fig);
+                ax = subplot(2, 3, (c - 1) * 3 + 2, 'Parent', panel);
                 show_ct(ax, hu, 1, center, spacing, ctWindowHu);
                 add_overlay(ax, recon, recon >= cutoffFraction * doseMax, 1, center, [0 doseMax], jet(256));
                 colorbar(ax);
                 title(ax, sprintf('%s recon x %.3g (Gy)', ctLabels{c}, gain), 'Interpreter', 'none');
 
-                ax = subplot(2, 3, (c - 1) * 3 + 3, 'Parent', fig);
+                ax = subplot(2, 3, (c - 1) * 3 + 3, 'Parent', panel);
                 show_ct(ax, hu, 1, center, spacing, ctWindowHu);
-                add_overlay(ax, g.maps{1}, g.eval_mask, 1, center, [0 2], gammaCmap);
+                add_overlay(ax, gammaMap, evalMask, 1, center, [0 2], gammaCmap);
                 colorbar(ax);
-                title(ax, sprintf('%s gamma %s: %.1f%% pass', ctLabels{c}, gammaCriteria{3}, ...
-                    passRates(n, c)), 'Interpreter', 'none');
+                title(ax, sprintf('%s gamma %s: %.1f%% pass (%s)', ctLabels{c}, gammaCriteria{3}, ...
+                    passRates(n, c), source), 'Interpreter', 'none');
             end
-            sgtitle(fig, sprintf('%s %s | %s | axial slice %d (CT_1 truth max) | recon x least-squares gain: %d', ...
-                patient_id, session, pairKeys{k}, center(3), normalizeRecon), 'Interpreter', 'none');
-            save_figure(fig, outDir, sprintf('pair_%s_%s', pairKeys{k}, config_hash), showFigures);
-            fprintf('    %s: gamma pass CT_1 %.1f%%, CT_3 %.1f%%\n', pairKeys{k}, passRates(n, 1), passRates(n, 2));
+            sgtitle(panel, sprintf('%s %s | %s | axial slice %d (CT_1 truth max) | recon x least-squares gain', ...
+                patient_id, session, pairKeys{k}, center(3)), 'Interpreter', 'none');
+            save_figure(panel, outDir, sprintf('pair_%s_%s', pairKeys{k}, config_hash));
+            fprintf('    %s: gamma pass CT_1 %.1f%%, CT_3 %.1f%% (%s)\n', pairKeys{k}, ...
+                passRates(n, 1), passRates(n, 2), source);
+        end
+        if ~isempty(picks) && ~showFigures
+            close(fig);
         end
 
         if isempty(picks)
@@ -487,8 +542,9 @@ function results = verify_pipeline_simulate(patient_id, session, config, config_
                 'no beam/segment has a valid CT_1 AND CT_3 recon');
         else
             tests = add_result(tests, testName, 'INFO', sprintf( ...
-                '%d pairs, gamma pass: CT_1 mean %.1f%% (min %.1f%%), CT_3 mean %.1f%% (min %.1f%%); figures pair_*.png', ...
-                numel(picks), mean(passRates(:, 1)), min(passRates(:, 1)), ...
+                ['%d pairs (%d from Step 2.5, %d recomputed), gamma pass: CT_1 mean %.1f%% (min %.1f%%), ' ...
+                 'CT_3 mean %.1f%% (min %.1f%%); figures pair_*.png'], numel(picks), nnz(fromStep25), ...
+                nnz(~fromStep25), mean(passRates(:, 1)), min(passRates(:, 1)), ...
                 mean(passRates(:, 2)), min(passRates(:, 2))));
         end
     catch ME
@@ -534,6 +590,8 @@ function results = verify_pipeline_simulate(patient_id, session, config, config_
             compRef    = [1 2 1];   % gamma comparisons: reference volume ...
             compTgt    = [2 3 3];   % ... vs target volume (indices into shortNames)
             passRates  = nan(2, 3);
+            fig        = new_figure('Totals: ETHOS vs RS vs recon', showFigures);
+            tabGroup   = uitabgroup(fig);
             for c = 1:2
                 % Zero ETHOS outside this CBCT's body / inside the couch, as Step 1.5 did to the RS doses
                 ethos = ethosOnGrid;
@@ -559,9 +617,9 @@ function results = verify_pipeline_simulate(patient_id, session, config, config_
                 center  = [row, col, slc];
                 doseMax = max([max(volumes{1}(:)), max(volumes{2}(:)), max(volumes{3}(:))]);
                 hu      = cbcts{c}.cubeHU;
-                fig     = new_figure(['Totals ' ctLabels{c}], showFigures);
+                panel   = new_tab_panel(tabGroup, [ctLabels{c} ' totals']);
                 for m = 1:3   % row 1: the three doses
-                    ax = subplot(3, 3, m, 'Parent', fig);
+                    ax = subplot(3, 3, m, 'Parent', panel);
                     show_ct(ax, hu, 1, center, spacing, ctWindowHu);
                     add_overlay(ax, volumes{m}, volumes{m} >= cutoffFraction * doseMax, 1, center, ...
                         [0 doseMax], jet(256));
@@ -569,14 +627,14 @@ function results = verify_pipeline_simulate(patient_id, session, config, config_
                     title(ax, [volNames{m} ' (Gy)'], 'Interpreter', 'none');
                 end
                 for m = 1:3   % row 2: gamma maps over each reference's cutoff region
-                    ax = subplot(3, 3, 3 + m, 'Parent', fig);
+                    ax = subplot(3, 3, 3 + m, 'Parent', panel);
                     show_ct(ax, hu, 1, center, spacing, ctWindowHu);
                     add_overlay(ax, gammas{m}.maps{1}, gammas{m}.eval_mask, 1, center, [0 2], gammaCmap);
                     colorbar(ax);
                     title(ax, sprintf('gamma %s vs %s: %.1f%% pass', shortNames{compRef(m)}, ...
                         shortNames{compTgt(m)}, passRates(c, m)));
                 end
-                ax = subplot(3, 3, 7:9, 'Parent', fig);   % row 3: gamma histograms
+                ax = subplot(3, 3, 7:9, 'Parent', panel);   % row 3: gamma histograms
                 hold(ax, 'on');
                 for m = 1:3
                     gammaVals = min(gammas{m}.maps{1}(gammas{m}.eval_mask > 0), 3);
@@ -590,10 +648,13 @@ function results = verify_pipeline_simulate(patient_id, session, config, config_
                 xlabel(ax, 'gamma index (clipped at 3); <= 1 passes');
                 ylabel(ax, 'fraction of evaluated voxels');
                 nCt = nnz(strcmp(ctLabel, ctLabels{c}));
-                sgtitle(fig, sprintf('%s %s | %s totals (%d of %d recons valid) | axial slice %d (ETHOS max)', ...
+                sgtitle(panel, sprintf('%s %s | %s totals (%d of %d recons valid) | axial slice %d (ETHOS max)', ...
                     patient_id, session, ctLabels{c}, nnz(reconOk & strcmp(ctLabel, ctLabels{c})), ...
                     nCt, center(3)), 'Interpreter', 'none');
-                save_figure(fig, outDir, sprintf('totals_%s_%s', ctLabels{c}, config_hash), showFigures);
+                save_figure(panel, outDir, sprintf('totals_%s_%s', ctLabels{c}, config_hash));
+            end
+            if ~showFigures
+                close(fig);
             end
             tests = add_result(tests, testName, 'INFO', sprintf( ...
                 ['gamma pass, ETHOS-RS / RS-recon / ETHOS-recon: CT_1 %.1f / %.1f / %.1f%%, ' ...
@@ -652,7 +713,10 @@ function results = verify_pipeline_simulate(patient_id, session, config, config_
                 end
                 title(ax, sprintf('%s %s | %s%s', patient_id, session, ...
                     fieldIndex(stageField).source_mat_filename, snrText), 'Interpreter', 'none');
-                save_figure(fig, outDir, ['sensor_stages_' config_hash], showFigures);
+                save_figure(fig, outDir, ['sensor_stages_' config_hash]);
+                if ~showFigures
+                    close(fig);
+                end
 
                 peakText = '';
                 for s = 1:numel(stages.names)
@@ -695,7 +759,10 @@ function results = verify_pipeline_simulate(patient_id, session, config, config_
         end
         sgtitle(fig, sprintf('%s %s | slices through the CBCT1 body centroid | mean |HU3 - HU1| in body = %.1f HU', ...
             patient_id, session, meanAbsDiff), 'Interpreter', 'none');
-        save_figure(fig, outDir, ['cbct_difference_' config_hash], showFigures);
+        save_figure(fig, outDir, ['cbct_difference_' config_hash]);
+        if ~showFigures
+            close(fig);
+        end
 
         tests = add_result(tests, testName, pass_fail(~sameUid && meanAbsDiff > minCbctHuDiff), sprintf( ...
             'same SeriesInstanceUID = %d; mean |HU_CBCT3 - HU_CBCT1| inside body = %.1f HU; figure cbct_difference_%s.png', ...
@@ -748,7 +815,10 @@ function results = verify_pipeline_simulate(patient_id, session, config, config_
         title(ax, 'SNR each field saw (noise\_stats saved with the recon)');
         sgtitle(fig, sprintf('%s %s | %d recons, %d zero/invalid', patient_id, session, ...
             nnz(hasRecon), nnz(badRecon)), 'Interpreter', 'none');
-        save_figure(fig, outDir, ['field_scale_snr_' config_hash], showFigures);
+        save_figure(fig, outDir, ['field_scale_snr_' config_hash]);
+        if ~showFigures
+            close(fig);
+        end
 
         tests = add_result(tests, testName, pass_fail(~any(badRecon)), sprintf( ...
             ['%d of %d recons zero / NaN / wrong size / unreadable; recon/truth ratio median %.3g, ' ...
@@ -847,26 +917,38 @@ function fig = new_figure(name, showFigures)
     fig = figure('Name', name, 'Color', 'w', 'Visible', visible, 'Position', [50 50 1500 900]);
 end
 
-function save_figure(fig, outDir, fileStem, showFigures)
-%SAVE_FIGURE Save fig as <outDir>/<fileStem>.png; close it when it is not shown.
+function panel = new_tab_panel(tabGroup, tabTitle)
+%NEW_TAB_PANEL Add a tab to tabGroup, bring it to the front, and return a panel
+%   filling it (subplot, sgtitle and exportgraphics all work on a panel).
+    tab = uitab(tabGroup, 'Title', tabTitle);
+    tabGroup.SelectedTab = tab;   % exportgraphics renders only the visible tab
+    panel = uipanel(tab, 'Position', [0 0 1 1], 'BorderType', 'none', 'BackgroundColor', 'w');
+end
+
+function save_figure(target, outDir, fileStem)
+%SAVE_FIGURE Save a figure (or one tab's panel) as <outDir>/<fileStem>.png.
     drawnow;
-    exportgraphics(fig, fullfile(outDir, [fileStem '.png']), 'Resolution', 150);
-    if ~showFigures
-        close(fig);
-    end
+    exportgraphics(target, fullfile(outDir, [fileStem '.png']), 'Resolution', 150);
 end
 
 function show_ct(ax, hu, viewNum, center, spacing, ctWindow)
 %SHOW_CT Grayscale CT slice through center = [row col slice] in true proportions.
 %   viewNum 1 = axial (anterior at top, patient right on the left), 2 = coronal,
-%   3 = sagittal (superior at top; sagittal has anterior on the left).
+%   3 = sagittal (superior at top; sagittal has anterior on the left),
+%   4 = sagittal radiograph: mean HU along the left-right axis, auto-windowed.
 %   Leaves hold on so overlays and contours can be drawn on top.
-    ctSlice = get_slice(hu, viewNum, center);
-    ctGray  = min(max((ctSlice - ctWindow(1)) / diff(ctWindow), 0), 1);
+    if viewNum == 4
+        ctSlice  = squeeze(mean(double(hu), 2))';
+        ctWindow = [min(ctSlice(:)), max(ctSlice(:))];
+    else
+        ctSlice = get_slice(hu, viewNum, center);
+    end
+    ctGray = min(max((ctSlice - ctWindow(1)) / diff(ctWindow), 0), 1);
     image(ax, repmat(ctGray, 1, 1, 3));   % truecolor, so the colormap only colors overlays
     hold(ax, 'on');
     % Voxel size (mm) along each view's [horizontal, vertical] screen axis
-    viewSpacing = [spacing(1) spacing(2); spacing(1) spacing(3); spacing(2) spacing(3)];
+    viewSpacing = [spacing(1) spacing(2); spacing(1) spacing(3); spacing(2) spacing(3); ...
+                   spacing(2) spacing(3)];
     daspect(ax, [viewSpacing(viewNum, 2) viewSpacing(viewNum, 1) 1]);
     if viewNum > 1
         set(ax, 'YDir', 'normal');   % higher slice index (superior) at the top
@@ -896,7 +978,8 @@ end
 function s = get_slice(vol, viewNum, center)
 %GET_SLICE 2D slice of a (rows = y, cols = x, slices = z) volume through center.
 %   1 = axial (y down, x across), 2 = coronal (z up, x across),
-%   3 = sagittal (z up, y across).
+%   3 = sagittal (z up, y across), 4 = sagittal projection: max along x, so an
+%   overlay (sensor, dose mask) shows wherever it is left-right.
     switch viewNum
         case 1
             s = vol(:, :, center(3));
@@ -904,6 +987,8 @@ function s = get_slice(vol, viewNum, center)
             s = squeeze(vol(center(1), :, :))';
         case 3
             s = squeeze(vol(:, center(2), :))';
+        case 4
+            s = squeeze(max(vol, [], 2))';
     end
     s = double(s);
 end
