@@ -42,7 +42,6 @@ function [sensor_data_avg, sensor_data_expanded] = apply_element_averaging(senso
 %       % Use sensor_data_exp for time reversal
 %       source_tr.p = fliplr(sensor_data_exp);
 %
-%   AUTHOR: ETHOS Pipeline Team
 %   DATE: February 2026
 %   VERSION: 1.0
 %

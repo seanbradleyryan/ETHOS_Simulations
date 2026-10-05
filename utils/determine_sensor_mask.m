@@ -159,7 +159,6 @@ function [sensor_mask, sensor_info] = determine_sensor_mask(sct_resampled, field
 %   DEPENDENCIES:
 %       - Image Processing Toolbox (bwconncomp, regionprops)
 %
-%   AUTHOR: ETHOS Pipeline Team
 %   DATE: May 2026
 %   VERSION: 2.0 (tilted)
 %

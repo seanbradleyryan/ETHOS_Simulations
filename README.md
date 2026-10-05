@@ -1,7 +1,6 @@
-Code repository for simulation studies of IRAI's ability to detect changes in dose due to small anatomical changes in patients mid-treatment.
+Code repository for simulation studies of IRAI's ability to detect changes in dose due to small anatomical changes in patients mid-treatment. 
 
-All scripts have been architected and edited by Sean Ryan and generated using Claude. 
-
+Parts of this codebase were developed with assistance from [Claude Code](https://claude.com/claude-code) (Anthropic).
 
 # Instructions for replication
 
@@ -90,6 +89,6 @@ This should be all that is necessary for this step. Matlab will do some post pro
 ## 8. Run kwave simulation
 
 1. Run pipeline_simulate.m
-2. Verify that the script ran properly. Run verify_pipeline_simulate_output.m for some heuristics. 
+2. Verify that the script ran properly. Run verify_pipeline_simulate_output.m for some heuristics and initial statistics. 
 
-A simulation costs about 40 hours / gpu. Fields are processed in parallel by each gpu. Choose your preferred number depending on availibility. 
+A simulation costs about 40 hours / gpu. Fields are processed in parallel by each gpu so adding more decreases the processing time. Choose your preferred number depending on availibility. The script should also work if you want to launch multiple sessions to process the same patient i.e. 1 4 gpu job  = 4 1 gpu jobs, so you can use this to cheese the scheduler a little bit. 

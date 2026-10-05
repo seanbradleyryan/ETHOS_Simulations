@@ -52,7 +52,6 @@ function [field_doses, sct_resampled, total_rs_dose, metadata] = load_processed_
 %   DEPENDENCIES:
 %       - Processed data from step15_process_doses
 %
-%   AUTHOR: ETHOS Pipeline Team
 %   DATE: February 2026
 %   VERSION: 1.1 (Transparent sparse reconstruction)
 %

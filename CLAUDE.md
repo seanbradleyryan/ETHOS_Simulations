@@ -200,6 +200,12 @@ Write code that a physics BS who has taken one matlab course could read and modi
 - Any script over 200 lines need a one line justification before writing it. 
 - After writing, re-read and delete anything not required by the stated task. Report what you removed.
 
+## Behavior
+
+- If my request is ambiguous, ask one clarifying question before doing anything. 
+- Do not apologize, just fix it and tell me what changed. 
+- When reporting information to me, be extremely concise and sacrifice grammar for the sake of concision. 
+
 ## Prerequisites
 
 - MATLAB R2022a+

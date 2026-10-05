@@ -45,7 +45,6 @@ function cbct_paths = sort_CBCT(patient_id, session, config)
 %   DEPENDENCIES:
 %       - Image Processing Toolbox (dicomCollection, dicominfo)
 %
-%   AUTHOR: ETHOS Pipeline Team
 %   DATE: April 2026
 %
 %   See also: step0_sort_dicom, step06_explode_segments, dicomCollection

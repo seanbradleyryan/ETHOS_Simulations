@@ -41,7 +41,6 @@ function medium = create_acoustic_medium(sct_resampled, config)
 %       config.tissue_tables = define_tissue_tables();
 %       medium = create_acoustic_medium(sct_resampled, config);
 %
-%   AUTHOR: ETHOS Pipeline Team
 %   DATE: February 2026
 %   VERSION: 1.0
 %

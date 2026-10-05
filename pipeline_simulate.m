@@ -1,6 +1,6 @@
 %% =========================================================================
 %  PIPELINE_SIMULATE.m
-%  ETHOS Photoacoustic Pipeline  Simulation and Analysis Steps
+%  ETHOS Pipeline  Simulation and Analysis Steps
 %  =========================================================================
 %
 %  PURPOSE:
@@ -14,6 +14,8 @@
 %  STEPS EXECUTED:
 %    Step 2    k-Wave photoacoustic simulation (forward + time-reversal)
 %    Step 3    Gamma analysis, SSIM, and visualization
+%    Verify    verify_pipeline_simulate: output checks + debug plots per
+%              finished session (CONFIG.run_verify), run last
 %
 %    NEW: with CONFIG.metrics_overlap_step2, Step 2.5 (per-segment gamma +
 %    SSIM) runs on CPU workers (step25_metrics_watcher) DURING Step 2,
@@ -28,7 +30,6 @@
 %    - pipeline_compress.m must have been run on the Windows work laptop
 %      (processes field doses via Step 1.5 and uploads to cluster)
 %
-%  AUTHOR: ETHOS Pipeline Team
 %  DATE: March 2026
 %  =========================================================================
 
@@ -75,18 +76,6 @@ CONFIG.treatment_site  = 'Pancreas';
 
 % working_dir is inherited from get_default_config (the git repo root).
 
-% --- Acoustic Simulation Parameters that differ from the defaults ---
-% This pipeline runs 5 time-reversal iterations (get_default_config default: 1).
-% CONFIG.num_time_reversal_iter   = 5;
-
-% Preserve prior pipeline behavior. Previously these fields were left unset, so
-% run_single_field_simulation used its own internal defaults: correction_factor
-% = 1.9 and normalize = false. get_default_config's canonical values (20 and
-% true) would change the saved recon scale, and normalize=true would max-scale
-% each per-field recon to 1 -- which this pipeline then SUMS into total_recon,
-% breaking the physical dose sum. Pin both to keep the reconstruction identical.
-%CONFIG.correction_factor = 1.9;
-%CONFIG.normalize         = false;
 
 % --- Blind-Geometry Reconstruction (CT_3 / adapted fields) ---
 % When true, every CT_3 (adapted) beam/segment field is FORWARD-propagated on
@@ -101,12 +90,6 @@ CONFIG.treatment_site  = 'Pancreas';
 CONFIG.blind_recon_ct3           = true;
 % CT label of the reference geometry we reconstruct on (default 'CT_1').
 CONFIG.blind_recon_reference_label = 'CT_1';
-
-% --- Sensor Placement (indices differ from the defaults: 20 vs 2/4) ---
-% sensor_placement_method inherited ('determine_sensor_mask'). The indices below
-% are used only by the 'full_plane_*' methods.
-%CONFIG.sensor_x_index = 20;   % Used by 'full_plane_anterior'
-%CONFIG.sensor_y_index = 20;   % Used by 'full_plane_lateral'
 
 % --- Gamma Analysis Parameters ---
 CONFIG.gamma_dose_pct        = 3.0;    % Dose difference threshold (%)
@@ -165,14 +148,15 @@ CONFIG.num_parallel_workers  = [];     % Step 2 pool. [] = auto: one worker per 
 % NOTE: there is no heartbeat -- the 'in_progress' status is stamped once
 % when a field starts and only rewritten as 'complete' at the end, so this
 % age is measured from when the dose STARTED, not from last progress. Keep
-% it above the worst-case single-dose runtime (~30 min) so a slow but live
+% it above the worst-case single-dose runtime (~5 min) so a slow but live
 % sibling field is never overtaken and recomputed in duplicate.
-CONFIG.stale_claim_minutes   = 30;
+CONFIG.stale_claim_minutes   = 5;
 
 % --- Pipeline Control Flags ---
 CONFIG.run_step2   = true;    % Step 2   : k-Wave simulation
 CONFIG.run_step25  = true;    % Step 2.5 : per-segment gamma + SSIM (folded in)
 CONFIG.run_step3   = false;    % Step 3   : Gamma analysis
+CONFIG.run_verify  = true;     % verify_pipeline_simulate: checks + plots in <method>/simulation_debug/
 
 %% ========================= INITIALIZATION ================================
 
@@ -320,7 +304,7 @@ for p_idx = 1:length(CONFIG.patients)
 
             % Load the per-dose CBCT geometries (CT_1 / CT_3). Each field's
             % simulation uses the CBCT the dose was actually computed on
-            % (field_dose.ct_label) -- the SCT is not used anywhere.
+            % (field_dose.ct_label) 
             cbct_by_label = load_cbct_resampled(patient_id, session, CONFIG);
 
             % Extract beam metadata for sensor placement
@@ -333,7 +317,7 @@ for p_idx = 1:length(CONFIG.patients)
             end
 
             %% ============================================================
-            %  STEP 2: k-Wave Photoacoustic Simulation
+            %  STEP 2: k-Wave Simulation
             %% ============================================================
             if CONFIG.run_step2
                 fprintf('\n[STEP 2] Running k-Wave simulations...\n');
@@ -839,6 +823,27 @@ write_timing_report(TIMING, CONFIG);
 
 generate_simulation_summary(RESULTS);
 fprintf('\n=========================================================\n\n');
+
+%% ========================= VERIFICATION ==================================
+% Check every finished session's outputs and save debug plots to
+% SimulationResults/<id>/<session>/<method>/simulation_debug/. Runs after
+% RESULTS is saved, so a crash here can never lose the simulation results.
+if CONFIG.run_verify
+    for p_idx = 1:length(CONFIG.patients)
+        for s_idx = 1:length(CONFIG.sessions)
+            patient_id = CONFIG.patients{p_idx};
+            session    = CONFIG.sessions{s_idx};
+            if ~strcmp(RESULTS.patients.(make_result_key(patient_id, session)).status, 'complete')
+                continue;
+            end
+            try
+                verify_pipeline_simulate(patient_id, session, CONFIG, CONFIG_HASH);
+            catch ME
+                fprintf('[VERIFY] %s / %s: verification crashed: %s\n', patient_id, session, ME.message);
+            end
+        end
+    end
+end
 
 
 %% =========================================================================
