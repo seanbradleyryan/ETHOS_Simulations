@@ -82,7 +82,7 @@ clear; clc; close all;
 
 % --- Patient and Session Selection (copy the lists from pipeline_compress.m) ---
 CONFIG.patients       = {'1194203'};
-CONFIG.sessions       = {'Session_1'};
+CONFIG.sessions       = {'Session_1','Session_2'};
 
 % --- Directory Paths ---
 addpath(genpath(fullfile(fileparts(mfilename('fullpath')), 'utils')));

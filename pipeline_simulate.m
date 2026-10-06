@@ -71,7 +71,7 @@ CONFIG = get_default_config();
 
 % --- Patient and Session Selection ---
 CONFIG.patients        = {'1194203'};
-CONFIG.sessions        = {'Session_1','Session_2'};
+CONFIG.sessions        = {'Session_2'};
 CONFIG.treatment_site  = 'Pancreas';
 
 % working_dir is inherited from get_default_config (the git repo root).

@@ -35,14 +35,11 @@ clear; clc; close all;
 
 % --- Patient and Session Selection ---
 CONFIG.patients        = {'1194203'};
-%CONFIG.sessions        = {'Session_1','Session_2','Session_3','Session_4','Session_5','Session_6','Session_7','Session_8','Session_9','Session_10'};
-CONFIG.sessions        = {%'Session_1',
-    %'Session_4'
-    'Session_2'};
+CONFIG.sessions        = {'Session_2','Session_3','Session_4','Session_5','Session_6','Session_7','Session_8','Session_9','Session_10'};
 CONFIG.treatment_site  = 'Pancreas';
 
 % --- Directory Paths ---
-% working_dir = the git repo root (found by utils/get_repo_root). Works on any
+% working_dir = the git repo root (found by ut ils/get_repo_root). Works on any
 % host (Linux cluster, Windows laptop) as long as the RayStationFiles /
 % EthosExports trees live inside the repo checkout.
 addpath(genpath(fullfile(fileparts(mfilename('fullpath')), 'utils')));
