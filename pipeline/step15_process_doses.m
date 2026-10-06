@@ -2386,7 +2386,7 @@ function [summary, dose, ct_label, didSave] = processOneField(i, num_files, ...
     ct_label = '';
     didSave  = false;
 
-    % Only log every config.log_interval-th field (warnings always print)
+    % Only log every config.log_interval-th field (failure warnings always print)
     show_progress = (mod(i, config.log_interval) == 0);
     if show_progress
         fprintf('  Processing field %d/%d: %s\n', i, num_files, rd_name);
@@ -2472,11 +2472,15 @@ function [summary, dose, ct_label, didSave] = processOneField(i, num_files, ...
             ref_origin, ref_spacing, ref_dims);
 
         if ~geom_match
-            warning('step15_process_doses:GeometryMismatch', ...
-                'Field %d geometry mismatch: %s', i, geom_msg);
+            if show_progress
+                warning('step15_process_doses:GeometryMismatch', ...
+                    'Field %d geometry mismatch: %s', i, geom_msg);
+            end
             % Attempt to resample if dimensions don't match
             if ~isequal(dose_dims, ref_dims)
-                fprintf('    Resampling to reference grid...\n');
+                if show_progress
+                    fprintf('    Resampling to reference grid...\n');
+                end
                 dose_data = resampleDoseToGrid(dose_data, dose_origin, dose_spacing, ...
                     ref_origin, ref_spacing, ref_dims);
                 dose_dims = ref_dims;
