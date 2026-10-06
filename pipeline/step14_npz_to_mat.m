@@ -16,6 +16,8 @@ function n_converted = step14_npz_to_mat(patient_id, session, config)
 %       session    - char/string, session name (e.g. 'Session_1')
 %       config     - struct with at least:
 %           .working_dir  - base pipeline directory (char)
+%           .log_interval - print per-file progress only every Nth NPZ
+%                           (default: 100)
 %
 %   OUTPUT:
 %       n_converted - number of NPZ files successfully converted
@@ -65,6 +67,11 @@ if ~isfield(config, 'skip_completed')
     config.skip_completed = true;
 end
 
+% Per-file progress is only printed every log_interval-th NPZ
+if ~isfield(config, 'log_interval') || isempty(config.log_interval)
+    config.log_interval = 100;
+end
+
 %% ======================== LOCATE NPZ FILES ========================
 
 rs_dir = fullfile(config.working_dir, 'RayStationFiles', patient_id, session);
@@ -100,14 +107,21 @@ for i = 1:numel(npz_files)
     mat_name = [stem '.mat'];
     mat_path = fullfile(rs_dir, mat_name);
 
+    % Only log every config.log_interval-th file (failures always print)
+    show_progress = (mod(i, config.log_interval) == 0);
+
     if config.skip_completed && isfile(mat_path)
-        fprintf('  [%d/%d] %s -> %s already exists, skipping.\n', ...
-            i, numel(npz_files), npz_name, mat_name);
+        if show_progress
+            fprintf('  [%d/%d] %s -> %s already exists, skipping.\n', ...
+                i, numel(npz_files), npz_name, mat_name);
+        end
         n_skipped = n_skipped + 1;
         continue;
     end
 
-    fprintf('  [%d/%d] %s\n', i, numel(npz_files), npz_name);
+    if show_progress
+        fprintf('  [%d/%d] %s\n', i, numel(npz_files), npz_name);
+    end
 
     tmp_dir = '';
     try
@@ -145,9 +159,11 @@ for i = 1:numel(npz_files)
 
         save(mat_path, 'raw_field_dose', '-v7.3');
 
-        fprintf('    -> %s  (size=[%d %d %d], spacing=[%.3f %.3f %.3f] mm)\n', ...
-            mat_name, dims(1), dims(2), dims(3), ...
-            spacing_mm(1), spacing_mm(2), spacing_mm(3));
+        if show_progress
+            fprintf('    -> %s  (size=[%d %d %d], spacing=[%.3f %.3f %.3f] mm)\n', ...
+                mat_name, dims(1), dims(2), dims(3), ...
+                spacing_mm(1), spacing_mm(2), spacing_mm(3));
+        end
 
         n_converted = n_converted + 1;
     catch ME

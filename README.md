@@ -10,15 +10,19 @@ Parts of this codebase were developed with assistance from [Claude Code](https:/
 
 `git clone https://github.com/seanbradleyryan/ETHOS_Simulations.git` 
 
+2. Repeat on remission.
+
+The git directory will be referred to by ./ for these instructions (for example ./EthosExports would be F:/ETHOS_Simulations/EthosExports). It is important for the directory structure to be followed so that everything works properly. 
+
 ## 1. Export from Ethos
 
 1. Navigate to Ethos treatment manager
 2. Navigate to the patient
 3. Right click the square indicating the treatment session
-4. Click the three dots > Export session data. Export to ETHOS_Simulations/EthosExports
+4. Click the three dots > Export session data. Export to ./EthosExports
 5. Do not let the program time out until the export is complete. This shouldn't be a problem on campus wifi but remote is much slower. 
 
-Parallelization: You can open multiple instances of Ethos and export at once. I think the bottleneck is the Ethos interface and not the user download speed, so having multiple instances seems to be faster than just one. 
+Parallelization: You can open multiple instances of Ethos and export at once. I think the bottleneck is the Ethos interface and not the user download speed, so having multiple instances seems to be faster than just one. Sometimes it crashes though so I just do them one at a time. 
 
 ## 2. Process Ethos data 
 
@@ -30,8 +34,7 @@ Parallelization: You can open multiple instances of Ethos and export at once. I 
 a. The directory ETHOS_Simulations/Raystation_input/[id]/[session] should now contain a bunch of CT files, 10-20 RTPLAN files, 2 RTSTRUCT files, and registrations. 
 b. The directory ETHOS_Simulations/RayStationFiles/[id]/[session] should now contain an RTPlan file. 
 
-Parallelization: I recommend doing this in batches of patients of sessions. 
-
+I recommend doing this step in batches. 
 
 ## 3. Upload to RS 
 
@@ -52,7 +55,7 @@ Parallelization: I recommend doing this in batches of patients of sessions.
 
 A lot of errors will probably appear. This should not affect the dose calculation. If there are problems with the dose calculation just make it on the tracking form and I will try to fix it. If you want to debug you can try deleting all case data, reimporting, and saving the import error.
 
-Parallelization: RayStation will let you upload data for multiple patients at once, but not multiple cases for an existing patient. However, you can open many instances of RayStation and have a lot uploading at once. 
+RayStation will let you upload data for multiple patients at once, but not multiple cases for an existing patient. However, you can open many instances of RayStation and have a lot uploading at once. 
 
 
 ## 4. Edit RS parameters for dose calculation
@@ -67,16 +70,16 @@ The goal is now to try to do a dose calculation with any plan. Errors will pop u
 ## 5. Dose calculation
 
 1. Navigate to the sidebar: scripting > Script creation. 
-2. Search for ./calc_beam_plan_doses.py. Run the script. 
+2. Search for ./Raystation/calc_beam_plan_doses.py. Run the script. 
 3. Upon script completion, loosely verify the output. The directory ./RayStationFiles/[id]/[session] should now contain a bunch of CT files, 165 (0 to 164) RTDOSE files for each beam, 2 RTSTRUCT files. 
 
 TO see execution details, navigate to the execution details tab. The script should now run. If execution stops, the error message will be at the very top of the error log and you may need to scroll up to find it. If it is not trivial to resolve, flag it and let me know. 
 
-Parallelization: Same as the last step. Most of the time is spent on the file export working with the RayStation interface. Usually doing parallel dose calculations you would worry about using up clinic resources, but since most of the script time is just the file export and there are only 17 dose calculations over about 2 hours per run of the script, you are safe to open multiple instances and run in parallel. 
+Dose can be calculated for multiple patients at once in different RS instances, but not for multiple sessions on an existing patient. Most of the time is spent on the file export working with the RayStation interface. Usually doing parallel dose calculations you would worry about using up clinic resources, but since most of the script time is just the file export and there are only 17 dose calculations over about 2 hours per run of the script, you are safe to open multiple instances and run in parallel. 
 
-## 6. Upload all RayStationFiles files to Remission
+## 6. Upload all Raystation files to the repository directory Remission ./RayStationFiles/[id]/[session]
 
-I find the best way is to use git bash and scp the session directory to the patient directory on Remission. YOu can also upload via OOD but this is sensitive to interruption when dealing with a lot of files. There may be other better solutions. 
+I find mobaxterm is best for this since it resumable to some extent if it gets interrupted. 
 
 ## 7. Process doses on remission. 
 
@@ -91,4 +94,4 @@ This should be all that is necessary for this step. Matlab will do some post pro
 1. Run pipeline_simulate.m
 2. Verify that the script ran properly. Run verify_pipeline_simulate_output.m for some heuristics and initial statistics. 
 
-A simulation costs about 40 hours / gpu. Fields are processed in parallel by each gpu so adding more decreases the processing time. Choose your preferred number depending on availibility. The script should also work if you want to launch multiple sessions to process the same patient i.e. 1 4 gpu job  = 4 1 gpu jobs, so you can use this to cheese the scheduler a little bit. 
+A simulation costs about 40 hours / gpu. Fields are processed in parallel by each gpu so adding more decreases the processing time. Choose your preferred number depending on availibility. The script should also work if you want to launch multiple sessions to process the same patient i.e. one 4 gpu job  = four 1 gpu jobs, so you can use this to cheese the scheduler a little bit. 

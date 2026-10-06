@@ -71,6 +71,11 @@ CONFIG.skip_completed   = true;
 CONFIG.use_parallel     = true;
 CONFIG.num_cpu_workers  = [];
 
+% --- Console Logging ---
+% Per-dose log lines (NPZ unpack/convert, skip checks, field processing)
+% print only for every log_interval-th dose. Failures always print.
+CONFIG.log_interval     = 100;
+
 %% ========================= INITIALIZATION ================================
 
 fprintf('=========================================================\n');
