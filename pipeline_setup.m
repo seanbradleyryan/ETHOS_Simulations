@@ -9,7 +9,8 @@
 %
 %  STEPS EXECUTED:
 %    Step 0    Sort DICOM files (SCT + RT + REG + all CBCTs) and moves
-%    them into Raystation_input (non-SCT RTSTRUCTs go to
+%    them into Raystation_input via Step 0.6; only the first and last CBCT
+%    by datetime are copied there (non-SCT RTSTRUCTs go to
 %    Raystation_input/<pid>/<session>/extra_structs)
 %    Step 0.5  Raystation is configured to reject plans without a minimum
 %    gap between mlc teeth. This fixes Halcyon dual-layer MLC minimum gaps in RTPLAN

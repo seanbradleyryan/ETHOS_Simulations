@@ -91,8 +91,12 @@ copy_files_to_dir(sct_dir, 'RTSTRUCT_SCT*.dcm', output_dir, 'RTSTRUCT (SCT)');
 % Image registration (REG) files
 copy_files_to_dir(sct_dir, 'REG_*.dcm', output_dir, 'Image registrations');
 
-% CBCT series (all of them, sorted by sort_CBCT)
-copy_files_to_dir(sct_dir, 'CBCT*.dcm', output_dir, 'CBCT series');
+% CBCT series: only the first and last by datetime (all are in sct_dir via sort_CBCT)
+cbctPrefixes = first_last_cbct_prefixes(sct_dir);
+for k = 1:numel(cbctPrefixes)
+    copy_files_to_dir(sct_dir, [cbctPrefixes{k} '*.dcm'], output_dir, ...
+        ['CBCT ' cbctPrefixes{k}(1:end-1)]);
+end
 
 % Every non-SCT RTSTRUCT (e.g. CBCT structure sets) goes in a subfolder
 extra_structs_dir = fullfile(output_dir, 'extra_structs');
@@ -503,6 +507,55 @@ function copy_files_to_dir(src_dir, pattern, dst_dir, label)
     end
     fprintf('  %-20s %3d copied, %3d already present.\n', ...
         [label ':'], n_copied, n_skipped);
+end
+
+
+function prefixes = first_last_cbct_prefixes(sct_dir)
+%FIRST_LAST_CBCT_PREFIXES 'CBCT<n>_' prefixes of the earliest and latest CBCT
+%   series in sct_dir. Datetime from SeriesDate/Time, falling back to
+%   Acquisition then Content Date/Time. One prefix if only one series exists.
+    prefixes = {};
+    files = dir(fullfile(sct_dir, 'CBCT*.dcm'));
+    if isempty(files)
+        warning('step06:noFiles', 'No CBCT series files (CBCT*.dcm) found in:\n  %s', sct_dir);
+        return;
+    end
+
+    % Unique series prefixes, e.g. {'CBCT1_', 'CBCT2_', ...}
+    names = {files.name};
+    allPrefixes = unique(regexp(names, '^CBCT\d+_', 'match', 'once'));
+    allPrefixes = allPrefixes(~cellfun(@isempty, allPrefixes));
+
+    dateTimeTags = {'SeriesDate', 'SeriesTime'; ...
+                    'AcquisitionDate', 'AcquisitionTime'; ...
+                    'ContentDate', 'ContentTime'};
+    seriesTimes = NaT(numel(allPrefixes), 1);
+    for k = 1:numel(allPrefixes)
+        seriesFiles = dir(fullfile(sct_dir, [allPrefixes{k} '*.dcm']));
+        meta = dicominfo(fullfile(sct_dir, seriesFiles(1).name));
+        for j = 1:size(dateTimeTags, 1)
+            dateTag = dateTimeTags{j, 1};
+            timeTag = dateTimeTags{j, 2};
+            if isfield(meta, dateTag) && isfield(meta, timeTag) && ...
+                    ~isempty(meta.(dateTag)) && ~isempty(meta.(timeTag))
+                timeStr = pad(strtrim(meta.(timeTag)), 6, 'right', '0');  % HHmmss[.ffffff]
+                seriesTimes(k) = datetime([strtrim(meta.(dateTag)) timeStr(1:6)], ...
+                    'InputFormat', 'yyyyMMddHHmmss');
+                break;
+            end
+        end
+        if isnat(seriesTimes(k))
+            error('step06:NoCBCTDatetime', ...
+                'No date/time tags found for CBCT series %s in:\n  %s', allPrefixes{k}, sct_dir);
+        end
+    end
+
+    [~, iFirst] = min(seriesTimes);
+    [~, iLast]  = max(seriesTimes);
+    prefixes = unique(allPrefixes([iFirst, iLast]), 'stable');
+    fprintf('  CBCT series found: %d. Copying first (%s, %s) and last (%s, %s).\n', ...
+        numel(allPrefixes), allPrefixes{iFirst}(1:end-1), char(seriesTimes(iFirst)), ...
+        allPrefixes{iLast}(1:end-1), char(seriesTimes(iLast)));
 end
 
 
