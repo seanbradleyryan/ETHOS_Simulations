@@ -17,10 +17,6 @@
 %    Verify    verify_pipeline_simulate: output checks + debug plots per
 %              finished session (CONFIG.run_verify), run last
 %
-%    NEW: with CONFIG.metrics_overlap_step2, Step 2.5 (per-segment gamma +
-%    SSIM) runs on CPU workers (step25_metrics_watcher) DURING Step 2,
-%    scoring each beam as soon as its recon files are on disk.
-%
 %  PREREQUISITES:
 %    - MATLAB R2022a or later
 %    - k-Wave Toolbox (http://www.k-wave.org)
@@ -115,18 +111,6 @@ CONFIG.metrics_write_summary = true;        % write segment_metrics_summary_<has
 CONFIG.metrics_noise_floor   = true;        % compute the noise-only null once/session
 CONFIG.metrics_noise_minutes = 30;          % ensemble time budget (min)
 
-% --- NEW: Overlap Step 2.5 (CPU) with Step 2 (GPU) ---
-% When true, a background batch job (step25_metrics_watcher) with its own pool
-% of CPU workers scores each beam as soon as Step 2 has written all of that
-% beam's recon files, so the CPUs work while the GPUs simulate instead of
-% waiting for Step 2 to end. Needs parcluster().NumWorkers >= 1 +
-% metrics_watcher_workers + num_parallel_workers (e.g. 1 + 23 + 8 = 32);
-% otherwise the watcher is shrunk, or skipped (Step 2.5 then runs after Step 2
-% exactly as before).
-CONFIG.metrics_overlap_step2    = true;   % false => old behavior (Step 2, then 2.5)
-CONFIG.metrics_watcher_workers  = [];     % [] = auto: CPUs - GPU workers - 1 (see INITIALIZATION)
-CONFIG.metrics_watcher_poll_sec = 60;     % how often the watcher looks for finished beams
-
 % --- Step 3 Analysis (totals + per-segment study; figures/stats/log saved to
 %     AnalysisResults/<patient>/<session>/<method>/<hash>/) ---
 CONFIG.analysis_plot_results    = true;    % Save PNG figures
@@ -138,7 +122,7 @@ CONFIG.analysis_random_seed     = 42;
 
 % --- Parallel Processing ---
 CONFIG.use_parallel          = true;
-CONFIG.num_parallel_workers  = [];     % Step 2 pool. [] = auto: one worker per GPU (see INITIALIZATION)
+CONFIG.num_parallel_workers  = 8;
 
 % --- Multi-Instance Coordination ---
 % Multiple copies of this script (e.g. one per remote-desktop session, all
@@ -180,40 +164,6 @@ addpath(genpath(fullfile(CONFIG.working_dir, 'utils')));
 if ~exist('kWaveGrid', 'file')
     error('k-Wave toolbox not found. Please add k-Wave to the MATLAB path.');
 end
-
-% --- NEW: auto-detect CPUs and GPUs and size the worker pools from them ---
-% CPUs: this job's SLURM allocation when running under SLURM (the node may have
-% more cores than the job was given), otherwise the machine's physical cores.
-num_cpus = str2double(getenv('SLURM_CPUS_PER_TASK'));
-if isnan(num_cpus), num_cpus = str2double(getenv('SLURM_CPUS_ON_NODE')); end
-if isnan(num_cpus), num_cpus = feature('numcores'); end
-% GPUs: only the ones this job can see (the scheduler sets CUDA_VISIBLE_DEVICES).
-num_gpus = 0;
-if CONFIG.use_gpu
-    try, num_gpus = gpuDeviceCount; catch, num_gpus = 0; end
-end
-% Step 2 pool: one k-Wave worker per GPU. With no GPU, k-Wave runs on the CPUs,
-% so use every CPU the local cluster allows (then no CPUs are left for the
-% watcher, and Step 2.5 simply runs after Step 2).
-if isempty(CONFIG.num_parallel_workers)
-    if num_gpus > 0
-        CONFIG.num_parallel_workers = num_gpus;
-    else
-        local_cluster = parcluster();
-        CONFIG.num_parallel_workers = min(num_cpus, local_cluster.NumWorkers);
-    end
-end
-% Step 2.5 watcher pool: the CPUs left over after the Step 2 workers and the
-% watcher's own leader process (1).
-if isempty(CONFIG.metrics_watcher_workers)
-    CONFIG.metrics_watcher_workers = num_cpus - CONFIG.num_parallel_workers - 1;
-end
-fprintf('  Detected %d CPU(s), %d GPU(s) -> Step 2 workers: %d, Step 2.5 watcher workers: %d\n', ...
-    num_cpus, num_gpus, CONFIG.num_parallel_workers, max(CONFIG.metrics_watcher_workers, 0));
-if num_gpus == 0 && CONFIG.use_gpu
-    fprintf('  [WARN] No GPU visible; k-Wave will run on the CPU.\n');
-end
-% --- end NEW ---
 
 % Compute a stable hash of the sim-affecting CONFIG fields.  Every cached
 % artifact for this run is keyed on this hash, so flipping any sim-relevant
@@ -270,11 +220,6 @@ for p_idx = 1:length(CONFIG.patients)
             CONFIG_HASH, CONFIG_CANONICAL);
         log_msg(log_fid, 'Run started  patient %s, session %s, config %s', ...
             patient_id, session, CONFIG_HASH);
-
-        % NEW (overlap mode): handle to the Step 2.5 watcher batch job and the
-        % flag file that tells it Step 2 is over. Empty when no watcher runs.
-        metrics_job       = [];
-        watcher_stop_file = '';
 
         try
 
@@ -382,40 +327,6 @@ for p_idx = 1:length(CONFIG.patients)
                 status_dir = get_status_directory(patient_id, session, CONFIG);
                 if ~exist(status_dir, 'dir'), mkdir(status_dir); end
                 stale_minutes = CONFIG.stale_claim_minutes;
-
-                % --- NEW: start the Step 2.5 watcher (overlap CPU with GPU) ---
-                % A background batch job with its own CPU worker pool runs
-                % step25_segment_metrics on each beam as soon as the GPU loop
-                % below has written all of that beam's recon files. The two sides
-                % only share files on disk. See step25_metrics_watcher.m.
-                if CONFIG.run_step25 && CONFIG.use_parallel && ...
-                        CONFIG.metrics_overlap_step2 && num_pending > 0
-                    % The watcher (1 leader + n_watch pool workers) and the GPU
-                    % pool share one local cluster. If they do not both fit in
-                    % NumWorkers, the GPU pool would wait forever for workers, so
-                    % shrink the watcher to fit (or skip it).
-                    local_cluster = parcluster();
-                    n_watch = min(CONFIG.metrics_watcher_workers, ...
-                        local_cluster.NumWorkers - 1 - CONFIG.num_parallel_workers);
-                    if n_watch >= 1
-                        % Stop-flag name includes this process ID so sibling
-                        % pipeline_simulate instances never stop each other's watcher.
-                        watcher_stop_file = fullfile( ...
-                            get_simulation_directory(patient_id, session, CONFIG), ...
-                            sprintf('metrics_watcher_stop_%s_%d.flag', CONFIG_HASH, feature('getpid')));
-                        if isfile(watcher_stop_file), delete(watcher_stop_file); end
-                        metrics_job = batch(local_cluster, @step25_metrics_watcher, 0, ...
-                            {patient_id, session, CONFIG, watcher_stop_file}, 'Pool', n_watch);
-                        fprintf('         Step 2.5 watcher started: %d CPU worker(s) score beams as they finish.\n', ...
-                            n_watch);
-                        log_msg(log_fid, 'Step 2.5 watcher started (%d CPU workers)', n_watch);
-                    else
-                        fprintf(['         [WARN] No CPUs left for the Step 2.5 watcher (local cluster ' ...
-                            'allows %d workers, Step 2 uses %d). Step 2.5 will run after Step 2.\n'], ...
-                            local_cluster.NumWorkers, CONFIG.num_parallel_workers);
-                    end
-                end
-                % --- end NEW ---
 
                 if CONFIG.use_parallel && num_pending > 1
                     fprintf('         Using parallel processing (parfor)...\n');
@@ -609,15 +520,6 @@ for p_idx = 1:length(CONFIG.patients)
                 for fi = valid_field_indices(:).'
                     rp = expected_recon_path(field_index(fi), patient_id, session, CONFIG, CONFIG_HASH);
                     if isfile(rp)
-                        % NEW (overlap mode): if the Step 2.5 watcher is writing
-                        % metrics into this recon file right now (its lock folder
-                        % exists), wait for it. Capped at 10 min so a stale lock
-                        % left by a crashed run cannot hang the pipeline.
-                        t_lock = tic;
-                        while ~isempty(metrics_job) && isfolder([rp '.metrics_lock']) ...
-                                && toc(t_lock) < 600
-                            pause(1);
-                        end
                         cd_ = load(rp, 'recon_dose');
                         total_recon = total_recon + cd_.recon_dose;
                     else
@@ -638,9 +540,6 @@ for p_idx = 1:length(CONFIG.patients)
                         'instances %s -- total not assembled'], ...
                         numel(missing_idxs), mat2str(missing_idxs));
                     RESULTS.patients.(result_key).status = 'awaiting_siblings';
-                    % NEW: let the watcher score the beams that ARE complete, then stop it.
-                    finish_metrics_watcher(metrics_job, watcher_stop_file);
-                    metrics_job = [];
                     close_simulation_log(log_fid);
                     continue;
                 end
@@ -671,29 +570,7 @@ for p_idx = 1:length(CONFIG.patients)
             if CONFIG.run_step25
                 fprintf('\n[STEP 2.5] Running per-segment gamma + SSIM metrics...\n');
                 t_step25 = tic;   % TIMING: Step 2.5 stopwatch
-
-                % --- NEW: finish the overlapped Step 2.5 watcher first ---
-                step25_config = CONFIG;
-                if ~isempty(metrics_job)
-                    % The noise floor is GPU work. Run it here, on this client's
-                    % GPU, while the watcher scores the last beams on the CPUs.
-                    % It is cached, so the full call below just reads it back.
-                    if CONFIG.metrics_noise_floor
-                        fprintf('           Noise floor on the GPU while the watcher finishes...\n');
-                        nf_config = CONFIG;
-                        nf_config.metrics_noise_floor_only = true;
-                        step25_segment_metrics(patient_id, session, nf_config);
-                    end
-                    finish_metrics_watcher(metrics_job, watcher_stop_file);
-                    metrics_job = [];
-                    % The watcher already scored the beams; do not redo them in
-                    % the call below even if metrics_overwrite is set. Anything
-                    % the watcher missed is still computed there.
-                    step25_config.metrics_overwrite = false;
-                end
-                % --- end NEW ---
-
-                metrics_summary = step25_segment_metrics(patient_id, session, step25_config);
+                metrics_summary = step25_segment_metrics(patient_id, session, CONFIG);
                 % --- TIMING: accumulate Step 2.5 time (running total over sessions) ---
                 step25_elapsed         = toc(t_step25);
                 TIMING.step25_time_sec = TIMING.step25_time_sec + step25_elapsed;
@@ -742,13 +619,6 @@ for p_idx = 1:length(CONFIG.patients)
             log_msg(log_fid, 'ERROR: %s', ME.message);
             for k = 1:length(ME.stack)
                 log_msg(log_fid, '  at %s (line %d)', ME.stack(k).name, ME.stack(k).line);
-            end
-            % NEW: stop the Step 2.5 watcher gracefully (stop flag, not cancel,
-            % so it is never killed half-way through saving into a recon file).
-            try
-                finish_metrics_watcher(metrics_job, watcher_stop_file);
-            catch watcherME
-                fprintf('[WARN] Could not stop the Step 2.5 watcher cleanly: %s\n', watcherME.message);
             end
             close_simulation_log(log_fid);
             RESULTS.patients.(result_key).status        = 'error';
@@ -1010,36 +880,6 @@ function [recon_dose, sim_results] = run_blind_field_quietly(field_dose, cbct_re
     config.blind_recon = true;
     [~, recon_dose, sim_results] = evalc(['run_single_field_simulation(field_dose, ' ...
         'cbct_resampled, medium_fwd, beam_metadata, config, precomputed_sensor, medium_recon)']);
-end
-
-function finish_metrics_watcher(metrics_job, stop_file)
-    % NEW (overlap mode): tell step25_metrics_watcher that Step 2 is over by
-    % creating its stop-flag file, wait for its final pass, print its console
-    % output here, and clean up. Does nothing when no watcher is running.
-    if isempty(metrics_job), return; end
-
-    fid = fopen(stop_file, 'w');
-    if fid < 0
-        % Without the flag the watcher would never stop, so cancel it instead.
-        fprintf('[WARN] Could not create %s; cancelling the Step 2.5 watcher.\n', stop_file);
-        cancel(metrics_job);
-        delete(metrics_job);
-        return;
-    end
-    fclose(fid);
-
-    fprintf('\n[STEP 2.5] Waiting for the watcher to finish its last beams...\n');
-    wait(metrics_job);
-    fprintf('--------- Step 2.5 watcher output ---------\n');
-    diary(metrics_job);
-    fprintf('-------------------------------------------\n');
-    if ~isempty(metrics_job.Tasks(1).Error)
-        fprintf(['[WARN] Step 2.5 watcher failed: %s\n' ...
-                 '       The final Step 2.5 call will compute any missing segments.\n'], ...
-            metrics_job.Tasks(1).Error.message);
-    end
-    delete(metrics_job);
-    if isfile(stop_file), delete(stop_file); end
 end
 
 function save_field_reconstruction(recon_dose, sim_results, field_dose, patient_id, session, config, hash8)

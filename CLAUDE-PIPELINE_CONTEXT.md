@@ -118,20 +118,6 @@ run standalone like `step3_analysis`.
   and, on the differentials, the point (`truth1_vs_recon1` pass) − (noise mean). The first
   (uncached) ~30 min compute is guarded by a `<noise_ensemble_cache>.lock` so only one instance pays it;
   siblings skip and pick up the cache on a later run.
-- **Overlap with Step 2 (`CONFIG.metrics_overlap_step2`, default on):** so one allocation of GPUs + CPUs
-  is never half idle, `pipeline_simulate` starts `step25_metrics_watcher.m` as a `batch` job with its own
-  CPU pool (`metrics_watcher_workers`) before the Step 2 GPU `parfor`. Pool sizes are auto-detected when
-  left `[]`: `num_parallel_workers` = `gpuDeviceCount` (one k-Wave worker per GPU; all CPUs if no GPU) and
-  `metrics_watcher_workers` = CPUs − GPU workers − 1, with CPUs from `SLURM_CPUS_PER_TASK` /
-  `SLURM_CPUS_ON_NODE`, else `feature('numcores')`. Every `metrics_watcher_poll_sec`
-  it runs `step25_segment_metrics` (noise floor + summary off) on beams whose recon files are ALL on disk
-  (beam = smallest unit, because `load_recon_dose_data` Mode `set` errors on a missing recon). After Step 2,
-  the client runs the GPU noise floor (`metrics_noise_floor_only = true`) while the watcher finishes, creates
-  the watcher's stop flag (`metrics_watcher_stop_<hash>_<pid>.flag` in the sim dir), waits for it, then runs
-  the normal Step 2.5 call, which reads the folded scalars back, computes anything the watcher missed, and
-  writes the summary. Needs `parcluster().NumWorkers >= 1 + metrics_watcher_workers + num_parallel_workers`;
-  otherwise the watcher is shrunk or skipped. `field_index` is already sorted by [beam, segment], so beams
-  finish progressively during Step 2.
 
 ## Step 3 — Analysis (totals + per-segment study)
 

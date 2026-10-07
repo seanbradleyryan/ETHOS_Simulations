@@ -62,11 +62,6 @@ function results = step25_segment_metrics(patient_id, session, config)
 %                                  (once per session; cached by the sim hash).
 %           .metrics_noise_minutes [30]   Ensemble time budget (min) handed to
 %                                  noise_ensemble_error_bars (TimeBudgetMin).
-%           .metrics_noise_floor_only [false] NEW: compute ONLY the noise floor
-%                                  (fills its cache) and return results with just
-%                                  .noise_floor. pipeline_simulate uses this to run
-%                                  the GPU noise floor while step25_metrics_watcher
-%                                  finishes the last beams on the CPUs.
 %           .use_parallel          [true] parfor over a beam's segments (CPU).
 %           .metrics_auto_workers  [true] size a NEW pool to the physical CPU
 %                                  core count (best for this CPU-bound work);
@@ -122,7 +117,6 @@ function results = step25_segment_metrics(patient_id, session, config)
     config = default_field(config, 'metrics_write_summary', true);
     config = default_field(config, 'metrics_noise_floor',   true);
     config = default_field(config, 'metrics_noise_minutes', 30);
-    config = default_field(config, 'metrics_noise_floor_only', false);   % NEW
     config = default_field(config, 'use_parallel',          true);
     config = default_field(config, 'metrics_auto_workers',  true);
     config = default_field(config, 'num_parallel_workers',  8);
@@ -140,18 +134,6 @@ function results = step25_segment_metrics(patient_id, session, config)
     ct_hi      = max(config.metrics_ct_pair);
     ct1_str    = sprintf('CT_%d', ct_lo);
     ct3_str    = sprintf('CT_%d', ct_hi);
-
-    % --- NEW: noise-floor-only mode (used by pipeline_simulate's overlap mode) ---
-    % Skip the per-beam gamma/SSIM and the summary; just compute the noise floor
-    % so its cache is filled. The later full call then loads it from the cache.
-    if config.metrics_noise_floor_only
-        hash8   = compute_sim_config_hash(config);
-        results = struct();
-        results.noise_floor = compute_session_noise_floor(patient_id, session, ...
-            config, dose_pct, dist_mm, hash8);
-        return;
-    end
-    % --- end NEW ---
 
     % Fixed comparison set (name, reference volume, target volume). The
     % reference builds the 10% eval mask and is CalcGamma's reference.
