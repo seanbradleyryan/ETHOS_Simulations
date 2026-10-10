@@ -45,11 +45,20 @@ for session in SESSIONS:
         print(f"  WARNING: nothing to import for patient {patient_id}, skipping")
         continue
 
-    # Import everything into a new case named after the session folder
+    # CaseName=None makes RayStation create a new case (CaseName is the
+    # target of an existing case). Rename the new case afterwards.
     patient.Save()
+    cases_before = [c.CaseName for c in patient.Cases]
     warnings = patient.ImportDataFromPath(
-        Path=folder, SeriesOrInstances=series, CaseName=session)
+        Path=folder, SeriesOrInstances=series, CaseName=None)
     print(f"  Imported. Warnings: {warnings}")
+
+    new_cases = [c for c in patient.Cases if c.CaseName not in cases_before]
+    if len(new_cases) != 1:
+        print(f"  WARNING: expected 1 new case, found {len(new_cases)}; not renaming")
+    else:
+        print(f"  Renaming new case '{new_cases[0].CaseName}' -> '{session}'")
+        new_cases[0].CaseName = session
 
     patient.Save()
     existing_cases.append(session)
