@@ -27,6 +27,12 @@ function output_paths = step06_explode_segments(patient_id, session, config)
 %    - NumberOfFractionsPlanned = 1; every MU is divided by the original
 %      fraction count (e.g. 10 fractions, beam MU 400 -> 40 MU split over segments)
 %
+%  APERTURE CHECK:
+%    RayStation rejects a beam whose MLC is fully closed at a control point.
+%    A segment-beam is removed (with a warning) if, at either of its two CPs,
+%    any MLC layer has every leaf pair gap < config.mlc_min_gap_mm. Removed
+%    segments leave gaps in the S numbering; BeamNumber stays 1..N_kept.
+%
 %  RayStation imports these plans; it exports one dose file per beam, which
 %  step15 loads via the preferred pattern:  Plan_Field*_Beam*_B*_S*.dcm
 %
@@ -36,6 +42,8 @@ function output_paths = step06_explode_segments(patient_id, session, config)
 %    config      - struct with fields:
 %                    .working_dir      (char)  root workspace directory
 %                    .treatment_site   (char)  e.g. 'Pancreas'
+%                    .mlc_min_gap_mm   (double, optional) leaf pairs with a smaller
+%                                      gap count as closed (default 0.5, same as step05)
 %
 %  OUTPUT:
 %    output_paths - struct with fields:
@@ -58,6 +66,10 @@ if nargin == 0
     config     = struct( ...
         'working_dir',    get_repo_root(), ...
         'treatment_site', 'Pancreas');
+end
+
+if ~isfield(config, 'mlc_min_gap_mm') || isempty(config.mlc_min_gap_mm)
+    config.mlc_min_gap_mm = 0.5;
 end
 
 fprintf('=== Step 0.6: Segment Explosion  1 Plan per Beam (Reference + Adapted) ===\n');
@@ -255,23 +267,22 @@ for pt = 1:numel(plan_types)
         % Accumulators for this beam's output plan
         %   new_beam_seq:     BeamSequence of the output RTPLAN
         %   new_ref_beam_seq: FractionGroup.ReferencedBeamSequence
-        %   local_beam_idx:   running beam counter within this plan (1..N_seg)
+        %   local_beam_idx:   running beam counter within this plan (1..N_kept)
+        %   n_closed:         segments removed for a fully closed MLC
         % -----------------------------------------------------------
         new_beam_seq     = struct();
         new_ref_beam_seq = struct();
         local_beam_idx   = 0;
+        n_closed         = 0;
 
         % -----------------------------------------------------------
         % Segment loop  each segment becomes one beam in the output plan
         % -----------------------------------------------------------
         for s = 1:N_seg
 
-            local_beam_idx = local_beam_idx + 1;
-
             % Deep-copy original beam
             new_beam                       = orig_beam;
-            new_beam.BeamNumber            = local_beam_idx;   % sequential within this plan
-            new_beam.BeamName              = sprintf('B%d_S%03d', original_beam_number, s - 1);
+            new_beam.BeamName             = sprintf('B%d_S%03d', original_beam_number, s - 1);
             new_beam.NumberOfControlPoints = 2;
 
             % Bounding control points
@@ -357,6 +368,19 @@ for pt = 1:numel(plan_types)
             new_beam.ControlPointSequence         = new_cp_seq;
             new_beam.FinalCumulativeMetersetWeight = 1;
 
+            % --- Aperture check: drop segment if MLC is fully closed at either CP ---
+            if ~cp_has_aperture(cp_entry_new, config.mlc_min_gap_mm) || ...
+                    ~cp_has_aperture(cp_exit_new, config.mlc_min_gap_mm)
+                warning('step06:closedMLC', ...
+                    '[%s] B%d S%03d: MLC fully closed at a control point, segment removed (MU=%.4f).', ...
+                    plan_type, original_beam_number, s - 1, seg_mu);
+                n_closed = n_closed + 1;
+                continue;
+            end
+
+            local_beam_idx      = local_beam_idx + 1;
+            new_beam.BeamNumber = local_beam_idx;   % sequential within this plan
+
             % -----------------------------------------------------------
             % Accumulate this segment-beam into the plan's BeamSequence
             % and FractionGroup.ReferencedBeamSequence
@@ -376,7 +400,15 @@ for pt = 1:numel(plan_types)
 
         end  % segment loop
 
-        fprintf('    -> %d segment-beams assembled for B%d\n', local_beam_idx, original_beam_number);
+        fprintf('    -> %d segment-beams assembled for B%d (%d removed, closed MLC)\n', ...
+            local_beam_idx, original_beam_number, n_closed);
+
+        if local_beam_idx == 0
+            warning('step06:allClosed', ...
+                '[%s] B%d: every segment has a fully closed MLC, no plan written.', ...
+                plan_type, original_beam_number);
+            continue;
+        end
 
         % ---------------------------------------------------------------
         % MU validation for this beam
@@ -556,6 +588,30 @@ function prefixes = first_last_cbct_prefixes(sct_dir)
     fprintf('  CBCT series found: %d. Copying first (%s, %s) and last (%s, %s).\n', ...
         numel(allPrefixes), allPrefixes{iFirst}(1:end-1), char(seriesTimes(iFirst)), ...
         allPrefixes{iLast}(1:end-1), char(seriesTimes(iLast)));
+end
+
+
+function has_aperture = cp_has_aperture(cp, min_gap_mm)
+%CP_HAS_APERTURE False if any MLC layer at this control point has every leaf
+%   pair gap (bank B - bank A) below min_gap_mm. The Halcyon aperture is the
+%   overlap of both layers, so one fully closed layer blocks the whole field.
+    has_aperture = true;
+    bldps = cp.BeamLimitingDevicePositionSequence;
+    items = fieldnames(bldps);
+    for k = 1:numel(items)
+        device = bldps.(items{k});
+        if ~isfield(device, 'RTBeamLimitingDeviceType') || ...
+                ~contains(device.RTBeamLimitingDeviceType, 'MLC', 'IgnoreCase', true)
+            continue;
+        end
+        positions = double(device.LeafJawPositions(:));
+        n_pairs   = numel(positions) / 2;
+        gaps      = positions(n_pairs+1:end) - positions(1:n_pairs);
+        if all(gaps < min_gap_mm)
+            has_aperture = false;
+            return;
+        end
+    end
 end
 
 
