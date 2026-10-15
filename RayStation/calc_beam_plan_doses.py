@@ -22,6 +22,15 @@ INPUTS
       planned on CT 1 or CT 3, that CT's dose is read from the beam set.
     - Settings below: BASE_EXPORT_ROOT, DOSE_ALGORITHM, DOSE_VOXEL_SIZE (cm).
 
+CASE PREPARATION  (prepare_case, before any dose calculation; was README step 4)
+    1. Every examination's imaging system is set to "Generic CT".
+    2. Duplicate ROIs "<name> (N)" are deleted when "<name>" also exists.
+    3. Material overrides Water/Air/Aluminum, with or without a "(N)"
+       suffix, are replaced by the template materials in MATERIAL_REPLACEMENTS.
+    4. The external ROI is recreated on every examination at
+       EXTERNAL_THRESHOLD_HU (RayStation has no auto-threshold option).
+    The patient is saved afterwards.
+
 DOSE SELECTION
     Additional-set doses are stored case-wide: one DoseEvaluation per beam
     set under each examination. find_beam_doses() picks the evaluation whose
@@ -70,6 +79,20 @@ PLAN_NAME_RE = re.compile(
     r'^(Session_\d+)\s+(adapted|reference)\s+(.+)$',
     re.IGNORECASE
 )
+
+# Case preparation (see prepare_case)
+IMAGING_SYSTEM_NAME   = "Generic CT"
+EXTERNAL_THRESHOLD_HU = -250   # RayStation's default external threshold
+
+# Material override name (lowercase, "(N)" suffix removed) -> template material
+MATERIAL_REPLACEMENTS = {
+    'water':    'Water',
+    'air':      'Air',
+    'aluminum': 'Aluminum [Al]',
+}
+
+# " (1)", " (2)", ... that RayStation appends to duplicate ROI / material names
+DUPLICATE_SUFFIX_RE = re.compile(r'\s*\(\d+\)$')
 
 
 # ============================================================
@@ -240,6 +263,71 @@ def find_beam_doses(case, beam_set, ct_label, primary_exam):
     return matches[-1].BeamDoses
 
 
+# ============================================================
+# Helper: fix the ETHOS-import problems that block dose calculation
+# ============================================================
+def prepare_case(patient, case):
+    """
+    Steps 1-4 of CASE PREPARATION in the header, then save.
+    Runs on every examination in the case, not only EXAMINATION_LABELS,
+    because the planning examination (CT 2) needs them too.
+    """
+    print("\nPreparing case for dose calculation ...")
+    patient_model = case.PatientModel
+    exam_names    = [e.Name for e in case.Examinations]
+
+    # 1. Imaging system
+    for exam in case.Examinations:
+        exam.EquipmentInfo.SetImagingSystemReference(ImagingSystemName=IMAGING_SYSTEM_NAME)
+    print(f"  Imaging system '{IMAGING_SYSTEM_NAME}' set on {exam_names}")
+
+    # 2. Duplicate ROIs. A failed delete is only a warning: step 3 still
+    #    fixes that ROI's material.
+    roi_names = [roi.Name for roi in patient_model.RegionsOfInterest]
+    for roi_name in roi_names:
+        base_name = DUPLICATE_SUFFIX_RE.sub('', roi_name)
+        if base_name == roi_name:
+            continue
+        if base_name not in roi_names:
+            print(f"  WARNING: '{roi_name}' has no original '{base_name}'. Not deleted.")
+            continue
+        try:
+            patient_model.RegionsOfInterest[roi_name].DeleteRoi()
+            print(f"  Deleted duplicate ROI '{roi_name}'")
+        except Exception as exc:
+            print(f"  WARNING: could not delete ROI '{roi_name}': {exc}")
+
+    # 3. Material overrides
+    patient_db = get_current("PatientDB")
+    for roi in patient_model.RegionsOfInterest:
+        if roi.RoiMaterial is None:
+            continue
+        old_material = roi.RoiMaterial.OfMaterial.Name
+        new_material = MATERIAL_REPLACEMENTS.get(DUPLICATE_SUFFIX_RE.sub('', old_material).lower())
+        if new_material is None:
+            print(f"  ROI '{roi.Name}': material '{old_material}' left unchanged")
+            continue
+        roi.SetRoiMaterial(Material=patient_db.TemplateMaterials[new_material].Material)
+        print(f"  ROI '{roi.Name}': material '{old_material}' -> '{new_material}'")
+
+    # 4. External ROI (reuse the existing one, e.g. "Body", or create "Body")
+    externals = [roi for roi in patient_model.RegionsOfInterest if roi.Type == 'External']
+    if externals:
+        external = externals[0]
+    else:
+        patient_model.CreateRoi(Name='Body', Color='Green', Type='External',
+                                TissueName=None, RbeCellTypeName=None, RoiMaterial=None)
+        external = patient_model.RegionsOfInterest['Body']
+    external.CreateExternalGeometries(
+        ReferenceExamination=case.Examinations[exam_names[0]],
+        AdditionalExaminationNames=exam_names[1:],
+        ReferenceThresholdLevel=EXTERNAL_THRESHOLD_HU,
+    )
+    print(f"  External ROI '{external.Name}' created on {exam_names} "
+          f"(threshold {EXTERNAL_THRESHOLD_HU} HU)")
+
+    patient.Save()
+    print("  Case prepared and patient saved.")
 
 
 # ============================================================
@@ -292,6 +380,8 @@ try:
             bs      = plan.BeamSets[0] if plan.BeamSets else None
             n_beams = len(bs.Beams) if bs else 0
             print(f"    {plan_type:<10s}  origbeam={origbeam:<10s}  plan='{plan.Name}'  beams={n_beams}")
+
+    prepare_case(patient, case)
 
     # ============================================================
     # OUTER LOOP – sessions

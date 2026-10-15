@@ -11,7 +11,8 @@
 %    3. Field doses have been exported as Plan_Field*_Beam*_B*_S*.dcm into
 %       RayStationFiles/<PatientID>/<Session>/
 %
-%  STEPS EXECUTED:
+%  STEPS EXECUTED (Step 2.05 = step205_run_full_field_simulation: each CT's
+%  total RS dose simulated as one field, between Steps 2 and 2.5):
 %    Step 2    k-Wave photoacoustic simulation (forward + time-reversal)
 %    Step 3    Gamma analysis, SSIM, and visualization
 %    Verify    verify_pipeline_simulate: output checks + debug plots per
@@ -141,6 +142,7 @@ CONFIG.stale_claim_minutes   = 5;
 
 % --- Pipeline Control Flags ---
 CONFIG.run_step2   = true;    % Step 2   : k-Wave simulation
+CONFIG.run_step205 = true;    % Step 2.05: total RS dose per CT simulated as one field
 CONFIG.run_step25  = true;    % Step 2.5 : per-segment gamma + SSIM (folded in)
 CONFIG.run_step3   = false;    % Step 3   : Gamma analysis
 CONFIG.run_verify  = true;     % verify_pipeline_simulate: checks + plots in <method>/simulation_debug/
@@ -558,6 +560,29 @@ for p_idx = 1:length(CONFIG.patients)
             else
                 fprintf('\n[STEP 2] Loading previously computed reconstruction...\n');
                 [total_recon, ~] = load_total_reconstruction(patient_id, session, CONFIG, CONFIG_HASH);
+            end
+
+            %% ============================================================
+            %  STEP 2.05: Full-Field Simulation (total RS dose as one field)
+            %% ============================================================
+            % Simulates each CT's TOTAL RayStation dose in one k-Wave run (CT_1
+            % full access, CT_3 blind on CT_1) with the plan sensor mask Step 2
+            % saved, then runs the four Step 2.5 comparisons on the totals.
+            % Skips itself when its outputs for CONFIG_HASH are already on disk.
+            % ANALYSIS TODO: compare the step205 output (full_field_dose_CT_*_<hash>.mat)
+            % with the output of all the per-field simulations (their sum,
+            % total_recon_dose_<hash>.mat): one whole-plan simulation vs the sum
+            % of the field simulations.
+            if CONFIG.run_step205
+                fprintf('\n[STEP 2.05] Running full-field (total RS dose) simulation...\n');
+                fprintf(['           NOTE: in the analysis, compare this output with the ' ...
+                         'output of all the field simulations (total_recon_dose_%s.mat).\n'], ...
+                    CONFIG_HASH);
+                step205_config             = CONFIG;
+                step205_config.config_hash = CONFIG_HASH;
+                step205_results = step205_run_full_field_simulation(patient_id, session, step205_config);
+                RESULTS.patients.(result_key).step205 = step205_results;
+                log_msg(log_fid, 'Step 2.05 %s [%s]', step205_results.status, CONFIG_HASH);
             end
 
             %% ============================================================

@@ -12,6 +12,7 @@
 | 1 | *Manual* | — | Import exploded RTPLANs into RayStation, recalculate and export field doses |
 | 1.5 | `step15_process_doses.m` | `[fields, sct, total, meta] = step15_process_doses(...)` | Resample CT to dose grid, process per-field doses (**Windows work laptop** via `pipeline_compress.m`) |
 | 2 | `run_single_field_simulation.m` | `[recon, results] = run_single_field_simulation(...)` | k-Wave forward + time-reversal for one field |
+| 2.05 | `step205_run_full_field_simulation.m` | `results = step205_run_full_field_simulation(patient_id, session, config)` | Each CT's total RS dose (`total_dose_CT_1/3.mat`) simulated as ONE field (CT_1 full access, CT_3 blind on CT_1) with the Step 2 sensor mask; four Step 2.5 gamma + SSIM comparisons on the totals. Saves `full_field_dose_CT_*_<hash>.mat` beside the recons. To be compared with the summed per-field recon in analysis |
 | 2.5 | `step25_segment_metrics.m` | `results = step25_segment_metrics(patient_id, session, config)` | Per-beam/segment gamma + local SSIM (4 study comparisons); folds raw masked results into each segment's **CT_1** recon file |
 | 3 | `step3_analysis.m` | `results = step3_analysis(patient_id, session, config)` | Total-dose gamma + local SSIM, and the full per-segment study (tables, statistics, figures) from the Step 2.5 summary; everything saved to `AnalysisResults/` |
 
