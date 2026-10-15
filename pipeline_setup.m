@@ -31,14 +31,14 @@ clear; clc; close all;
 
 % --- Patient and Session Selection ---
 CONFIG.patients        = {'1194203'};
-CONFIG.sessions = {'Session_1','Session_2'}; 
-%CONFIG.sessions        = {'Session_1','Session_2','Session_3','Session_4','Session_5','Session_6','Session_7','Session_8','Session_9','Session_10'};
+CONFIG.sessions        = {'Session_1','Session_2','Session_3','Session_4','Session_5','Session_6','Session_7','Session_8','Session_9','Session_10'};
 CONFIG.treatment_site  = 'Pancreas';
 
 % --- Directory Paths ---
-% working_dir = the git repo root (found by utils/get_repo_root).
-addpath(genpath(fullfile(fileparts(mfilename('fullpath')), 'utils')));
-CONFIG.working_dir  = get_repo_root();
+% working_dir = the folder this script lives in (falls back to the current
+% folder when run as a selection, where mfilename is empty).
+CONFIG.working_dir = fileparts(mfilename('fullpath'));
+if isempty(CONFIG.working_dir), CONFIG.working_dir = pwd; end
 
 % --- MLC Gap Correction Parameters (Step 0.5) ---
 CONFIG.mlc_min_gap_mm       = 0.5*2;             % Minimum allowed leaf gap (mm)

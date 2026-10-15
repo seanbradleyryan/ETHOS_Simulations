@@ -23,8 +23,8 @@
 %    - RayStation field dose NPZ files placed under
 %      <working_dir>/RayStationFiles/[PatientID]/[Session]/
 %
-%  PLATFORM: Linux cluster. working_dir is the git repo root
-%            (get_repo_root).
+%  PLATFORM: Linux cluster. working_dir is the folder containing this
+%            script.
 %
 %  DATE: April 2026
 %  =========================================================================
@@ -39,11 +39,11 @@ CONFIG.sessions        = {'Session_2','Session_3','Session_4','Session_5','Sessi
 CONFIG.treatment_site  = 'Pancreas';
 
 % --- Directory Paths ---
-% working_dir = the git repo root (found by ut ils/get_repo_root). Works on any
-% host (Linux cluster, Windows laptop) as long as the RayStationFiles /
-% EthosExports trees live inside the repo checkout.
-addpath(genpath(fullfile(fileparts(mfilename('fullpath')), 'utils')));
-CONFIG.working_dir  = get_repo_root();
+% working_dir = the folder this script lives in (falls back to the current
+% folder when run as a selection, where mfilename is empty). The
+% RayStationFiles / EthosExports trees must live inside this folder.
+CONFIG.working_dir = fileparts(mfilename('fullpath'));
+if isempty(CONFIG.working_dir), CONFIG.working_dir = pwd; end
 
 % --- Dose Masking (Step 1.5) ---
 % Set false to disable zeroing outside body / in couch (for debugging only)
