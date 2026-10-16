@@ -42,7 +42,7 @@ TIMING.script_start_wall     = datetime('now');
 TIMING.script_start_tic      = tic;          % master start-to-finish stopwatch
 TIMING.all_field_sim_times_sec = [];         % elapsed of every single-field sim
 TIMING.step25_time_sec       = 0;            % running total across sessions
-TIMING.assumed_sec_per_field = 54;           % 1 forward+time-reversal run (for ETA)
+TIMING.avg_field_sim_sec     = NaN;          % running mean of all_field_sim_times_sec (for ETA)
 % =========================================================================
 
 % Put the utils folder (get_default_config, calibrate_noise_amp, the engine
@@ -357,13 +357,16 @@ for p_idx = 1:length(CONFIG.patients)
                     % report_field_progress prints it serialized on the client.
                     progress_queue = parallel.pool.DataQueue;
                     afterEach(progress_queue, @report_field_progress);
-                    % TIMING: seed the countdown AND the live-ETA assumptions
-                    % (assumed s/field and worker count) so report_field_progress
-                    % can print an estimated time-remaining with each field.
+                    % TIMING: seed the countdown, the worker count, and the field
+                    % times recorded so far. report_field_progress keeps the
+                    % running average up to date as fields finish ('done'
+                    % messages) and prints an estimated time-remaining with each
+                    % field. (The callback cannot write TIMING itself; TIMING's
+                    % average is refreshed from field_elapsed after the parfor.)
                     report_field_progress(struct('kind','init', ...
                         'total', num_pending, ...
-                        'assumed_sec', TIMING.assumed_sec_per_field, ...
-                        'workers', CONFIG.num_parallel_workers));
+                        'workers', CONFIG.num_parallel_workers, ...
+                        'field_times', TIMING.all_field_sim_times_sec));
 
                     t_parfor       = tic;
                     parfor f = 1:num_pending
@@ -424,6 +427,9 @@ for p_idx = 1:length(CONFIG.patients)
                         write_field_status(status_path, 'complete', fi, fd.gantry_angle, CONFIG_HASH);
                         field_computed(f) = true;
                         field_elapsed(f)  = toc(t_field);
+                        % TIMING: report this field's time to the running average.
+                        send(progress_queue, struct('kind','done','field_idx',fi, ...
+                            'gantry',fd.gantry_angle,'message','','elapsed_sec',field_elapsed(f)));
                     end
                     elapsed_parfor = toc(t_parfor);
                     for f = 1:num_pending
@@ -440,6 +446,7 @@ for p_idx = 1:length(CONFIG.patients)
                         % TIMING: collect this field's sim time for the average.
                         TIMING.all_field_sim_times_sec(end+1) = field_elapsed(f);
                     end
+                    TIMING.avg_field_sim_sec = mean(TIMING.all_field_sim_times_sec);   % NaN if empty
                     save_cache_manifest(cache_manifest, patient_id, session, CONFIG, CONFIG_HASH);
                     fprintf('         Parallel block done in %.1f s (%d field(s) computed here).\n', ...
                         elapsed_parfor, nnz(field_computed));
@@ -504,12 +511,13 @@ for p_idx = 1:length(CONFIG.patients)
                             fi, CONFIG_HASH, elapsed_f);
                         fprintf('             Done in %.1f s\n', elapsed_f);
                         % --- TIMING: record this field + estimate time remaining ---
-                        % Just completed a field: collect its time and, assuming
-                        % ~assumed_sec_per_field per remaining single-field sim,
-                        % report how much of Step 2 is left (fields processed vs.
-                        % fields still pending). Serial -> 1 worker.
+                        % Just completed a field: collect its time, update the
+                        % running average, and use that average per remaining
+                        % single-field sim to report how much of Step 2 is left
+                        % (fields processed vs. fields still pending). Serial -> 1 worker.
                         TIMING.all_field_sim_times_sec(end+1) = elapsed_f;
-                        print_field_eta(f, num_pending, TIMING.assumed_sec_per_field, 1);
+                        TIMING.avg_field_sim_sec = mean(TIMING.all_field_sim_times_sec);
+                        print_field_eta(f, num_pending, TIMING.avg_field_sim_sec, 1);
                         % --- end TIMING ---
                     end
                 end
@@ -668,11 +676,7 @@ TIMING.script_end_wall     = datetime('now');
 TIMING.total_wall_sec      = toc(TIMING.script_start_tic);   % start -> finish
 TIMING.num_field_sims      = numel(TIMING.all_field_sim_times_sec);
 TIMING.total_field_sim_sec = sum(TIMING.all_field_sim_times_sec);
-if TIMING.num_field_sims > 0
-    TIMING.avg_field_sim_sec = mean(TIMING.all_field_sim_times_sec);
-else
-    TIMING.avg_field_sim_sec = NaN;   % nothing computed this run (all cached)
-end
+% TIMING.avg_field_sim_sec is already the running mean (NaN if all cached).
 
 fprintf('\n--- Timing Report ---\n');
 fprintf('  Total wall time (start -> finish): %.1f s (%.2f min)\n', ...
@@ -1362,39 +1366,42 @@ end
 function report_field_progress(msg)
     % afterEach callback (runs serialized on the CLIENT) that turns the parfor
     % block's per-worker chatter into a single clean line per field. Each parfor
-    % iteration sends exactly one DataQueue message; this prints only for fields
-    % actually being processed and keeps a live count of how many of the pending
-    % fields are still outstanding.
+    % iteration sends one 'process' / 'skip' / 'fail' message when it starts;
+    % this prints only for fields actually being processed and keeps a live
+    % count of how many of the pending fields are still outstanding. Each
+    % computed field also sends a 'done' message with its elapsed time, which
+    % is added to the running average used for the live ETA.
     %
-    % Initialize with either a bare scalar (legacy: just the field count) or a
-    % struct with kind 'init' carrying the field count plus the TIMING
-    % assumptions (assumed s/field, worker count) used for the live ETA. Call
-    % it once on the client before the parfor begins.
-    persistent remaining assumed_sec workers
-    if isnumeric(msg)
-        remaining = msg;
-        if isempty(assumed_sec), assumed_sec = 16; end
-        if isempty(workers),     workers     = 1;  end
-        return;
-    end
-    if isfield(msg, 'kind') && strcmp(msg.kind, 'init')
+    % Call it once on the client before the parfor begins with a struct of kind
+    % 'init' carrying the field count, the worker count, and the field times
+    % already recorded in TIMING.all_field_sim_times_sec.
+    persistent remaining workers field_times
+    if strcmp(msg.kind, 'init')
         remaining   = msg.total;
-        assumed_sec = msg.assumed_sec;
         workers     = max(msg.workers, 1);
+        field_times = msg.field_times;
         return;
     end
-    if isempty(remaining),   remaining   = 0;  end
-    if isempty(assumed_sec), assumed_sec = 16; end
-    if isempty(workers),     workers     = 1;  end
+    if strcmp(msg.kind, 'done')
+        field_times(end+1) = msg.elapsed_sec;
+        return;
+    end
     remaining = max(remaining - 1, 0);
     switch msg.kind
         case 'process'
-            % TIMING: rough wall-clock ETA = remaining fields * assumed s/field,
-            % spread over the workers running in parallel.
-            eta_min = remaining * assumed_sec / workers / 60;
-            fprintf(['         Processing field %d (gantry %.1f deg)  --  %d remaining' ...
-                '  (est. %.1f min left @ %d s/field)\n'], ...
-                msg.field_idx, msg.gantry, remaining, eta_min, assumed_sec);
+            % TIMING: wall-clock ETA = remaining fields * running average
+            % s/field, spread over the workers running in parallel.
+            avg_sec = mean(field_times);   % NaN until the first field finishes
+            if isnan(avg_sec)
+                fprintf(['         Processing field %d (gantry %.1f deg)  --  %d remaining' ...
+                    '  (est. time left: n/a until first field finishes)\n'], ...
+                    msg.field_idx, msg.gantry, remaining);
+            else
+                eta_min = remaining * avg_sec / workers / 60;
+                fprintf(['         Processing field %d (gantry %.1f deg)  --  %d remaining' ...
+                    '  (est. %.1f min left @ %.1f s/field avg)\n'], ...
+                    msg.field_idx, msg.gantry, remaining, eta_min, avg_sec);
+            end
         case 'fail'
             fprintf('         Field %d load failed (%s); released claim  --  %d remaining\n', ...
                 msg.field_idx, msg.message, remaining);
@@ -1550,19 +1557,20 @@ end
 %  Small, self-contained helpers kept apart from the pipeline logic. They only
 %  print / write timing numbers and never touch the simulation state.
 
-function print_field_eta(n_done, n_total, assumed_sec_per_field, n_workers)
+function print_field_eta(n_done, n_total, avg_sec_per_field, n_workers)
     % Estimate how much of Step 2 is left when a single-field simulation just
-    % finished. Assumes every remaining field costs 'assumed_sec_per_field'
-    % seconds (one forward + time-reversal run); with n_workers in parallel the
-    % wall-clock estimate is that CPU estimate divided by the worker count.
+    % finished. Assumes every remaining field costs 'avg_sec_per_field' seconds
+    % (TIMING.avg_field_sim_sec: the running mean of every field timed so far);
+    % with n_workers in parallel the wall-clock estimate is that total divided
+    % by the worker count.
     if nargin < 4 || isempty(n_workers) || n_workers < 1
         n_workers = 1;
     end
     n_left  = max(n_total - n_done, 0);
-    eta_sec = n_left * assumed_sec_per_field / n_workers;
+    eta_sec = n_left * avg_sec_per_field / n_workers;
     fprintf(['             [TIMING] %d/%d fields done, %d left  --  ' ...
-        'est. %.1f min remaining (@ %d s/field, %d worker(s))\n'], ...
-        n_done, n_total, n_left, eta_sec / 60, assumed_sec_per_field, n_workers);
+        'est. %.1f min remaining (@ %.1f s/field avg, %d worker(s))\n'], ...
+        n_done, n_total, n_left, eta_sec / 60, avg_sec_per_field, n_workers);
 end
 
 function write_timing_report(timing, config)
