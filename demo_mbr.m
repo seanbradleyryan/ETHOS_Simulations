@@ -38,7 +38,8 @@
 %    1      raw sensor signals (forward k-Wave + pulse + transducer + noise)
 %    base   time reversal, as run_single_field_simulation does it
 %    2      predictor          A  : image   -> signals
-%    3      reverse predictor  A' : signals -> image ("blame map")
+%    3      reverse predictor  A' : signals -> image ("blame map"), either a
+%           backwards k-Wave run ('tr') or delay-and-sum ('das')
 %    4      check A and A' are exact opposites (adjoint test)
 %    5      safe step size (power iteration)
 %    6      TV prior and its weight
@@ -50,7 +51,9 @@
 %  RUNTIME
 %    Every predictor or reverse-predictor call is one full k-Wave run. With
 %    the defaults this demo does ~90 runs (setting mbr_tune_tv adds ~190).
-%    A GPU is needed in practice.
+%    A GPU is needed in practice. With mbr_adjoint = 'das' about half of
+%    those become CPU delay-and-sum passes instead; das_reconstruct loops
+%    over every element, so this is not necessarily faster.
 %
 %  DEPENDENCIES
 %    k-Wave (kspaceFirstOrder3D, kWaveGrid, smooth, gaussianFilter), Image
@@ -58,7 +61,7 @@
 %    get_default_config, create_acoustic_medium,
 %    determine_sensor_mask_lateral, find_optimal_kwave_size,
 %    build_pulse_kernel, load_field_dose_file, least_squares_gain,
-%    compute_gamma, plot_sensor_dose_planes.
+%    compute_gamma, plot_sensor_dose_planes, das_reconstruct (for 'das').
 %    Data: RayStationFiles/1194203/Session_1/processed/ (Step 1.5 output).
 %
 %  See also: run_single_field_simulation, noise_ensemble_error_bars,
@@ -88,6 +91,7 @@ CONFIG.gamma_dist_mm         = 3;
 CONFIG.gamma_dose_cutoff_pct = 10;
 
 % MBR knobs, each explained in the step that uses it
+CONFIG.mbr_adjoint         = 'tr';    % Step 3:  reverse predictor, 'tr' (k-Wave backwards) | 'das' (delay-and-sum)
 CONFIG.mbr_num_iter        = 10;      % Step 9:  loop iterations, identical for both arms
 CONFIG.mbr_adjoint_pairs   = 3;       % Step 4:  random image/signal pairs
 CONFIG.mbr_power_iter      = 10;      % Step 5:  power iterations
@@ -108,6 +112,9 @@ CONFIG.total_dose_file = fullfile(processedDir, 'total_dose_CT_1.mat');
 % Gamma runs at the very end; fail now rather than after an hour of k-Wave.
 if exist('CalcGamma', 'file') ~= 2
     error('demo_mbr:MissingDependency', 'CalcGamma must be on the MATLAB path.');
+end
+if ~any(strcmp(CONFIG.mbr_adjoint, {'tr', 'das'}))
+    error('demo_mbr:BadAdjoint', 'CONFIG.mbr_adjoint must be ''tr'' or ''das'' (got ''%s'').', CONFIG.mbr_adjoint);
 end
 
 %% ========================= 1. PICK A DOSE AND LOAD DATA =================
@@ -263,6 +270,22 @@ M.H             = fft(build_pulse_kernel(CONFIG.pulse_shape, CONFIG.convolution_
 M.FS            = 1 / dt;
 M.adjoint_scale = 1;   % calibrated in Step 4
 
+% Delay-and-sum reverse predictor (used when CONFIG.mbr_adjoint = 'das').
+% Pipeline DAS (das_reconstruct) with four settings changed so it can stand
+% in for the reverse wave run:
+%   envelope / clip_negative off : both are non-linear; a blame map must keep
+%       its sign (push DOWN where the guess predicts too much signal)
+%   use_aperture off : the predictor's sensor points hear every direction, so
+%       the back-projection must reach every direction too
+%   interp linear    : smoother blame than taking the nearest time sample
+% Element averaging stays on: back-project from the 32x32 element centres
+% instead of every sensor voxel (far fewer channels).
+M.adjoint     = CONFIG.mbr_adjoint;
+M.sensor_info = sensorInfo;
+M.dx          = dxM;
+M.das_opts    = struct('use_elements', true, 'envelope', false, 'clip_negative', false, ...
+                       'use_aperture', false, 'depth_weight', true, 'interp', 'linear');
+
 % Pressure -> dose conversion data (Step 10): CT1 Gruneisen x density.
 G = struct('offset', offset, 'dims', doseDims);
 G.gamma_rho = medium1.gruneisen .* medium1.density;
@@ -357,12 +380,18 @@ end
 %
 %  reverse_predict (A'): a set of signals -> a "blame map". For a signal
 %    mismatch it says which voxels are responsible, and by how much. It runs
-%    each predictor stage backwards in reverse order. The k-Wave part looks
-%    like TR but differs in two ways:
+%    each predictor stage backwards in reverse order. Mathematically A' is
+%    the adjoint (transpose) of A; Step 4 checks this. The wave part has two
+%    options (CONFIG.mbr_adjoint):
+%    'tr'  a k-Wave run that looks like TR but differs in two ways:
 %      * the flipped signals are ADDED at the sensor points (TR overwrites
 %        the pressure there)
 %      * absorption is not flipped: sound still loses energy going backwards
-%    Mathematically A' is the adjoint (transpose) of A. Step 4 checks this.
+%    'das' delay-and-sum: each voxel collects every element's signal at the
+%        travel time from that voxel to the element. Straight rays, one
+%        average sound speed, no absorption, no anatomy: an APPROXIMATE
+%        opposite of the predictor (a "mismatched" pair). The loop can still
+%        converge, but to a slightly different image than with 'tr'.
 
 %% ========================= STEP 4: ARE THEY TRUE OPPOSITES? =============
 %  For a random image x and random signals r, an exact pair satisfies
@@ -373,6 +402,10 @@ end
 %  by a CONSTANT factor, which we fold into A'. If the factor changes from one
 %  random pair to the next, A' is not A's opposite (wrong time alignment, a
 %  missing stage, ...) and the loop below cannot be trusted.
+%  With 'das' a warning is EXPECTED: DAS is only an approximate opposite, and
+%  the spread printed here measures how approximate. What matters then is
+%  that the ratio keeps the same sign (a wrong sign would push the image
+%  uphill) and that the Step 11 mismatch curve still falls.
 
 ratios = zeros(CONFIG.mbr_adjoint_pairs, 1);
 for k = 1:CONFIG.mbr_adjoint_pairs
@@ -392,6 +425,10 @@ if spread > 0.05
     warning('demo_mbr:AdjointMismatch', ...
         'Adjoint ratio varies by %.1f%% between random pairs: A'' is not A''s opposite.', 100 * spread);
 end
+if any(sign(ratios) ~= sign(M.adjoint_scale))
+    warning('demo_mbr:AdjointSign', ...
+        'Adjoint ratio changes sign between pairs: the reverse predictor does not reliably point downhill.');
+end
 clear xRand rRand
 
 %% ========================= STEP 5: SAFE STEP SIZE =======================
@@ -401,7 +438,9 @@ clear xRand rRand
 %  number L. Find it by power iteration: push a random image through A then
 %  A' over and over, rescaling to length 1 each time. Whatever the image
 %  starts as, it turns into the most-amplified pattern, and the growth per
-%  round trip settles to L. Safe steps are below about 1/L.
+%  round trip settles to L. Safe steps are below about 1/L. (With 'das' the
+%  round trip is not perfectly symmetric, so L may wobble rather than settle;
+%  the last value is used.)
 
 x = randn(kDims) .* support;
 x = x / norm(x(:));
@@ -649,7 +688,9 @@ sgtitle(sprintf('Gamma %s, transverse slice through the truth maximum', crit{3})
 %  converges to exactly that image, because every update is a
 %  reverse-predictor output and those only contain seen content. A few
 %  iterations capture only the strongly-seen part, so the unseen fraction
-%  printed below is an upper bound.
+%  printed below is an upper bound. This relies on the reverse predictor
+%  being the true opposite of A, so with mbr_adjoint = 'das' the split is
+%  only approximate.
 
 if CONFIG.mbr_null_split_iter > 0
     diffP  = arm(1).p_mbr - arm(2).p_mbr;   % R1 - R3 (pressure, k-Wave grid)
@@ -717,19 +758,33 @@ function img = reverse_predict(signals, M)
 %   3'. transducer filter: symmetric in frequency, so it is its own mirror
 %   2'. pulse smear: correlate with the pulse (conj(M.H)) instead of
 %       convolving
-%   1'. k-Wave backwards: inject the time-flipped signals at the sensor points
-%       as ADDED sources (TR would overwrite the pressure there), propagate
-%       with normal absorption, record the pressure everywhere at the end
+%   1'. wave propagation backwards, by M.adjoint:
+%       'tr'  k-Wave: inject the time-flipped signals at the sensor points as
+%             ADDED sources (TR would overwrite the pressure there), propagate
+%             with normal absorption, record the pressure everywhere at the end
+%       'das' delay-and-sum on straight rays (das_reconstruct); no k-Wave run
 %  M.adjoint_scale is the constant found in Step 4.
     filtered  = gaussianFilter(signals, M.FS, 0.35e6, 100, false);
     unsmeared = real(ifft(fft(filtered, [], 2) .* conj(M.H), [], 2));
-    source.p_mask   = M.sensor.mask;
-    source.p        = fliplr(unsmeared);
-    source.p_mode   = 'additive';
-    recorder.mask   = ones(size(M.sensor.mask));
-    recorder.record = {'p_final'};
-    out = kspaceFirstOrder3D(M.kgrid, M.kmedium, source, recorder, M.inputArgs{:});
-    img = M.adjoint_scale * reshape(double(gather(out.p_final)), size(M.sensor.mask));
+    gridSize  = size(M.sensor.mask);
+    if strcmp(M.adjoint, 'das')
+        % A sensor records the TIME DERIVATIVE of the pressure averaged over a
+        % sphere around it, so the matching back-projection sums -d/dt of the
+        % signals. Plain DAS of these band-limited signals would be 90 degrees
+        % out of phase with the true blame.
+        [dSdt, ~] = gradient(unsmeared, 1 / M.FS);
+        img = das_reconstruct(-dSdt, M.sensor, M.sensor_info, M.kmedium, ...
+            gridSize(1), gridSize(2), gridSize(3), M.dx(1), M.dx(2), M.dx(3), 1 / M.FS, M.das_opts);
+    else
+        source.p_mask   = M.sensor.mask;
+        source.p        = fliplr(unsmeared);
+        source.p_mode   = 'additive';
+        recorder.mask   = ones(gridSize);
+        recorder.record = {'p_final'};
+        out = kspaceFirstOrder3D(M.kgrid, M.kmedium, source, recorder, M.inputArgs{:});
+        img = reshape(double(gather(out.p_final)), gridSize);
+    end
+    img = M.adjoint_scale * img;
 end
 
 

@@ -737,15 +737,17 @@ end
 %% =========================================================================
 
 function tables = define_tissue_tables()
-    % THRESHOLD_1: Detailed 9-tissue segmentation
+    % THRESHOLD_1: HU anchor points, linearly interpolated in between
+    % (see utils/define_tissue_tables.m for the full description).
     tables.threshold_1 = struct();
-    tables.threshold_1.hu_boundaries = [-1000, -900, -500, -200, -50, 13, 50, 80, 300, 3000, Inf];
-    tables.threshold_1.tissue_names  = {'Air','Lung','Fat','Water','Blood','Muscle','SoftTissue','Bone','Metal'};
-    tables.threshold_1.density       = [1.2,  400,  920,  1000, 1060, 1050, 1040, 1900, 7800];
-    tables.threshold_1.sound_speed   = [343,  600,  1450, 1480, 1575, 1580, 1540, 3200, 5900];
-    tables.threshold_1.alpha_coeff   = [0,    0.5,  0.48, 0.0022, 0.2, 0.5, 0.5,  10,   0];
-    tables.threshold_1.alpha_power   = [1.0,  1.5,  1.5,  2.0,  1.3,  1.0, 1.1,  1.0,  1.0];
-    tables.threshold_1.gruneisen     = [0,    0.5,  0.7,  0.11, 0.15, 0.2, 1.0,  0,    0];
+    tables.threshold_1.hu_points    = [-1000, -700,  -600,  -120,  -90,   0,      13,    35,    50,     55,     100,         300,         700,    3000,   3001];
+    tables.threshold_1.point_names  = {'Air', 'Lung','Lung','Fat', 'Fat', 'Water','Blood','Blood','Muscle','Muscle','SoftTissue','SoftTissue','Bone', 'Bone', 'Metal'};
+    tables.threshold_1.density      = [1.2,   400,   400,   911,   911,   993,    1060,  1060,  1090,   1090,   1090,        1090,        1850,   1850,   4500];
+    tables.threshold_1.sound_speed  = [343,   644,   644,   1440,  1440,  1524,   1584,  1584,  1588,   1588,   1610,        1610,        2800,   2800,   6070];
+    tables.threshold_1.alpha_coeff  = [0,     NaN,   NaN,   0.6,   0.6,   0.002,  0.2,   0.2,   1.1,    1.1,    0.4,         0.4,         8,      8,      0];
+    tables.threshold_1.gruneisen    = [0.38,  0.2,   0.2,   0.8,   0.8,   0.20,   0.23,  0.23,  0.21,   0.21,   0.21,        0.21,        0.79,   0.79,   1.2];
+    tables.threshold_1.alpha_power  = 1.1;
+    tables.threshold_1.outside_body_hu = 0;
 
     % THRESHOLD_2: Simplified 4-tissue model
     tables.threshold_2 = struct();

@@ -66,10 +66,16 @@ function reconPressure = das_reconstruct(sensorData, sensor, sensor_info, medium
 %                    .aperture_cos (0.997)  cone threshold (cos of half-angle)
 %                    .depth_weight (true)   depth/r^2 vs plain 1/r^2 weighting
 %                    .interp       ('nearest')  'nearest' (floor) | 'linear'
+%                    .clip_negative (true)  max(.,0) on the output; false
+%                                           keeps the signed result (with
+%                                           envelope = false the operator is
+%                                           then linear, e.g. for use as an
+%                                           approximate adjoint in demo_mbr)
 %
 %  OUTPUT
-%    reconPressure - [Nx x Ny x Nz] double, max(.,0)-clipped. The caller
-%                    applies any correction_factor scaling.
+%    reconPressure - [Nx x Ny x Nz] double, max(.,0)-clipped unless
+%                    opts.clip_negative = false. The caller applies any
+%                    correction_factor scaling.
 %
 %  See also: apply_element_averaging, determine_sensor_mask,
 %            run_standalone_simulation, run_single_field_simulation
@@ -82,6 +88,7 @@ function reconPressure = das_reconstruct(sensorData, sensor, sensor_info, medium
     opts = set_default(opts, 'aperture_cos', 0.997);
     opts = set_default(opts, 'depth_weight', true);
     opts = set_default(opts, 'interp',       'nearest');
+    opts = set_default(opts, 'clip_negative', true);
 
     % ---- 1. Channel signals (element-averaged) + positions (metres) -----
     sensor_lin = find(sensor.mask);
@@ -224,7 +231,10 @@ function reconPressure = das_reconstruct(sensorData, sensor, sensor_info, medium
     end
 
     % ---- 7. Finalise ----------------------------------------------------
-    reconPressure = max(double(real(reconPressure)), 0);
+    reconPressure = double(real(reconPressure));
+    if opts.clip_negative
+        reconPressure = max(reconPressure, 0);
+    end
 end
 
 

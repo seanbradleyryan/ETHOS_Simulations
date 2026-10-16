@@ -5,18 +5,20 @@ function medium = create_acoustic_medium(sct_resampled, config)
 %
 %   Segments the CT volume into tissue types based on HU thresholds and
 %   assigns density, speed of sound, attenuation, and Gruneisen coefficient
-%   for each voxel. Supports three methods: uniform, threshold_1 (9-tissue),
-%   and threshold_2 (4-tissue simplified).
+%   for each voxel. Supports three methods: uniform, threshold_1 (9-tissue
+%   HU anchors, linearly interpolated between anchors), and threshold_2
+%   (4-tissue simplified bins).
 %
 %   INPUTS:
 %       sct_resampled - Struct from step15_process_doses:
 %           .cubeHU       - 3D array of Hounsfield Units
 %           .spacing      - [dx, dy, dz] in mm
 %           .dimensions   - [nx, ny, nz]
-%           .bodyMask     - 3D logical (optional). Required for the threshold_2
-%                           air row: air acoustics are assigned ONLY to low-HU
-%                           voxels inside the body. Outside the body, low-HU
-%                           voxels stay water for sensor coupling.
+%           .bodyMask     - 3D logical (optional). Needed so the region
+%                           outside the body stays water for sensor coupling:
+%                           threshold_1 looks up every outside-body voxel as
+%                           water; the threshold_2 air row is applied ONLY to
+%                           low-HU voxels inside the body.
 %       config - Configuration struct:
 %           .gruneisen_method  - 'uniform' | 'threshold_1' | 'threshold_2'
 %           .tissue_tables     - Tissue property lookup tables (from
@@ -31,7 +33,8 @@ function medium = create_acoustic_medium(sct_resampled, config)
 %           .density       - 3D density array (kg/m^3)
 %           .sound_speed   - 3D speed of sound array (m/s)
 %           .alpha_coeff   - 3D attenuation coefficient array (dB/MHz^y/cm)
-%           .alpha_power   - Scalar power law exponent (mean across tissues)
+%           .alpha_power   - Scalar power law exponent (table value for
+%                            threshold_1; mean across tissues for threshold_2)
 %           .gruneisen     - 3D Gruneisen parameter array (dimensionless)
 %           .grid_size     - [nx, ny, nz] dimensions
 %           .method        - String indicating method used
@@ -94,9 +97,35 @@ function medium = create_acoustic_medium(sct_resampled, config)
             fprintf('      Uniform medium: rho=%.0f kg/m^3, c=%.0f m/s, Gamma=%.2f\n', ...
                 tables.density, tables.sound_speed, tables.gruneisen);
 
-        case {'threshold_1', 'threshold_2'}
+        case 'threshold_1'
+            %% --- HU anchor table, linear interpolation between anchors ---
+            tables   = config.tissue_tables.threshold_1;
+            huLookup = double(ctCube);
+
+            % Water override: voxels outside the body contour are looked up
+            % as water, so the sensor-coupling region is a water bath.
+            if isfield(sct_resampled, 'bodyMask') && ~isempty(sct_resampled.bodyMask) ...
+                    && isequal(size(sct_resampled.bodyMask), gridSize)
+                outsideBody = ~logical(sct_resampled.bodyMask);
+                huLookup(outsideBody) = tables.outside_body_hu;
+                fprintf('      Outside body -> water (HU %g): %d voxels (%.1f%%)\n', ...
+                    tables.outside_body_hu, sum(outsideBody(:)), 100 * mean(outsideBody(:)));
+            else
+                fprintf('      [Water override] No matching bodyMask; outside-body voxels keep their CT HU.\n');
+            end
+
+            % HU outside the anchor range takes the end-anchor values
+            huLookup = min(max(huLookup, tables.hu_points(1)), tables.hu_points(end));
+
+            density      = interp_anchors(tables.hu_points, tables.density,     huLookup);
+            soundSpeed   = interp_anchors(tables.hu_points, tables.sound_speed, huLookup);
+            alphaCoeff   = interp_anchors(tables.hu_points, tables.alpha_coeff, huLookup);
+            gruneisenArr = interp_anchors(tables.hu_points, tables.gruneisen,   huLookup);
+            alphaPower   = tables.alpha_power;
+
+        case 'threshold_2'
             %% --- Threshold-based tissue segmentation ---
-            tables = config.tissue_tables.(config.gruneisen_method);
+            tables = config.tissue_tables.threshold_2;
 
             hu_bounds  = tables.hu_boundaries;
             numTissues = length(tables.tissue_names);
@@ -210,4 +239,13 @@ function medium = create_acoustic_medium(sct_resampled, config)
         min(soundSpeed(:)), max(soundSpeed(:)));
     fprintf('      Alpha power:       %.2f\n', alphaPower);
     fprintf('    Acoustic medium created.\n');
+end
+
+
+function values = interp_anchors(huPoints, anchorValues, hu)
+%INTERP_ANCHORS Linearly interpolate one tissue property over the HU anchors.
+%   Anchors with NaN (no sourced value) are skipped, so that HU range is
+%   interpolated from the neighbouring anchors.
+    known  = ~isnan(anchorValues);
+    values = interp1(huPoints(known), anchorValues(known), hu, 'linear');
 end
