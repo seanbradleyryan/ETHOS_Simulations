@@ -35,8 +35,9 @@ HU thresholds in a driver.
 | Method | Description |
 |--------|-------------|
 | `'uniform'` | Single properties everywhere: Γ=1.0, c=1540 m/s, ρ=1000 kg/m³ |
-| `'threshold_1'` | 9 tissue types by HU: air, lung, fat, water, blood, muscle, soft tissue, bone, metal |
+| `'threshold_1'` | 9 tissue HU anchors (air, lung, fat, water, blood, muscle, soft tissue, bone, metal), linearly interpolated between anchors; water outside body |
 | `'threshold_2'` | 4 tissue types by HU: water, fat, soft tissue, bone — **most commonly used** |
+| `'continuous_1'` | Yu et al. 2019 (Med Phys 46:3649) Table I: piecewise-linear HU→ρ→c/αV/Cp/α0, Γ = αV·c²/Cp; water (threshold_2 values) outside body |
 
 ## Sensor Design
 

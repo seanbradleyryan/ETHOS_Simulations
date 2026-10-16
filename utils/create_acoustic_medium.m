@@ -5,9 +5,11 @@ function medium = create_acoustic_medium(sct_resampled, config)
 %
 %   Segments the CT volume into tissue types based on HU thresholds and
 %   assigns density, speed of sound, attenuation, and Gruneisen coefficient
-%   for each voxel. Supports three methods: uniform, threshold_1 (9-tissue
-%   HU anchors, linearly interpolated between anchors), and threshold_2
-%   (4-tissue simplified bins).
+%   for each voxel. Supports four methods: uniform, threshold_1 (9-tissue
+%   HU anchors, linearly interpolated between anchors), threshold_2
+%   (4-tissue simplified bins), and continuous_1 (Yu et al. 2019 Table I:
+%   piecewise-linear HU -> density -> sound speed, attenuation, and
+%   Gamma = alpha_V c^2 / Cp).
 %
 %   INPUTS:
 %       sct_resampled - Struct from step15_process_doses:
@@ -17,10 +19,13 @@ function medium = create_acoustic_medium(sct_resampled, config)
 %           .bodyMask     - 3D logical (optional). Needed so the region
 %                           outside the body stays water for sensor coupling:
 %                           threshold_1 looks up every outside-body voxel as
-%                           water; the threshold_2 air row is applied ONLY to
-%                           low-HU voxels inside the body.
+%                           water; continuous_1 sets every outside-body voxel
+%                           to its .outside_body water values; the
+%                           threshold_2 air row is applied ONLY to low-HU
+%                           voxels inside the body.
 %       config - Configuration struct:
-%           .gruneisen_method  - 'uniform' | 'threshold_1' | 'threshold_2'
+%           .gruneisen_method  - 'uniform' | 'threshold_1' | 'threshold_2' |
+%                                'continuous_1'
 %           .tissue_tables     - Tissue property lookup tables (from
 %                                define_tissue_tables() in master pipeline).
 %                                A threshold table may carry an '.air' row and
@@ -34,7 +39,8 @@ function medium = create_acoustic_medium(sct_resampled, config)
 %           .sound_speed   - 3D speed of sound array (m/s)
 %           .alpha_coeff   - 3D attenuation coefficient array (dB/MHz^y/cm)
 %           .alpha_power   - Scalar power law exponent (table value for
-%                            threshold_1; mean across tissues for threshold_2)
+%                            threshold_1 / continuous_1; mean across tissues
+%                            for threshold_2)
 %           .gruneisen     - 3D Gruneisen parameter array (dimensionless)
 %           .grid_size     - [nx, ny, nz] dimensions
 %           .method        - String indicating method used
@@ -210,9 +216,42 @@ function medium = create_acoustic_medium(sct_resampled, config)
                 alphaPower = 1.1;  % safe default
             end
 
+        case 'continuous_1'
+            %% --- Yu et al. 2019 Table I: HU -> density -> c, alpha_V, Cp, alpha_0 ---
+            tables = config.tissue_tables.continuous_1;
+
+            % HU below min_hu would give negative density
+            hu  = max(double(ctCube), tables.min_hu);
+            rho = piecewise_linear(hu, tables.hu_to_rho);                  % g/cm^3
+
+            soundSpeed = piecewise_linear(rho, tables.rho_to_c);           % m/s
+            alphaV     = piecewise_linear(rho, tables.rho_to_alphaV);      % 1/K
+            heatCap    = piecewise_linear(rho, tables.rho_to_Cp);          % J/(kg K)
+            % Yu's air line dips slightly below 0 near HU -1000
+            alphaCoeff = max(piecewise_linear(rho, tables.rho_to_alpha0), 0);  % dB/(MHz^y cm)
+
+            gruneisenArr = alphaV .* soundSpeed.^2 ./ heatCap;           % Gamma = alpha_V c^2 / Cp
+            density      = 1000 * rho;                                   % kg/m^3
+            alphaPower   = tables.alpha_power;
+
+            % Water override: voxels outside the body contour become a
+            % water bath for sensor coupling.
+            if isfield(sct_resampled, 'bodyMask') && ~isempty(sct_resampled.bodyMask) ...
+                    && isequal(size(sct_resampled.bodyMask), gridSize)
+                outsideBody = ~logical(sct_resampled.bodyMask);
+                density(outsideBody)      = tables.outside_body.density;
+                soundSpeed(outsideBody)   = tables.outside_body.sound_speed;
+                alphaCoeff(outsideBody)   = tables.outside_body.alpha_coeff;
+                gruneisenArr(outsideBody) = tables.outside_body.gruneisen;
+                fprintf('      Outside body -> water: %d voxels (%.1f%%)\n', ...
+                    sum(outsideBody(:)), 100 * mean(outsideBody(:)));
+            else
+                fprintf('      [Water override] No matching bodyMask; outside-body voxels keep their CT values.\n');
+            end
+
         otherwise
             error('create_acoustic_medium:UnknownMethod', ...
-                'Unknown gruneisen_method: ''%s''.\nValid options: ''uniform'', ''threshold_1'', ''threshold_2''.', ...
+                'Unknown gruneisen_method: ''%s''.\nValid options: ''uniform'', ''threshold_1'', ''threshold_2'', ''continuous_1''.', ...
                 config.gruneisen_method);
     end
 
@@ -248,4 +287,16 @@ function values = interp_anchors(huPoints, anchorValues, hu)
 %   interpolated from the neighbouring anchors.
     known  = ~isnan(anchorValues);
     values = interp1(huPoints(known), anchorValues(known), hu, 'linear');
+end
+
+
+function y = piecewise_linear(x, segments)
+%PIECEWISE_LINEAR Evaluate a curve made of straight-line pieces.
+%   Each row of segments is [from, to, slope, intercept]; that row gives
+%   y = slope * x + intercept for from <= x < to.
+    y = zeros(size(x));
+    for s = 1:size(segments, 1)
+        inRange    = (x >= segments(s, 1)) & (x < segments(s, 2));
+        y(inRange) = segments(s, 3) * x(inRange) + segments(s, 4);
+    end
 end
