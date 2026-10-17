@@ -63,7 +63,8 @@
 %    build_pulse_kernel, least_squares_gain, compute_gamma,
 %    plot_sensor_dose_planes, das_reconstruct (for 'das').
 %    Data: RayStationFiles/1194203/Session_1/processed/ (Step 1.5 output:
-%    total_dose_CT_1/3.mat, CBCT1/3_resampled.mat, dose_*.mat for the MU).
+%    total_dose_CT_1/3.mat, CBCT1/3_resampled.mat, metadata.mat, and the
+%    dose_*.mat file names for the MU).
 %
 %  See also: run_single_field_simulation, step205_run_full_field_simulation,
 %            noise_ensemble_error_bars, compute_gamma
@@ -125,6 +126,11 @@ end
 %  delivered over every pulse of that CT's segments, so the pulse count
 %  comes from the summed meterset of those segments.
 
+md = load(fullfile(processedDir, 'metadata.mat'), 'metadata');
+beamMetadata = md.metadata.beam_metadata;   % all beams: the sensor must avoid every entrance path
+beamNumbers  = [beamMetadata.beam_number];
+beamMU       = [beamMetadata.meterset];
+
 arm = struct('name',     {'R1', 'R3'}, ...
              'ct_label', {'CT_1', 'CT_3'}, ...
              'cbct_var', {'CBCT1_resampled', 'CBCT3_resampled'});
@@ -150,28 +156,32 @@ for a = 1:2
     end
     arm(a).dose_truth = double(totalDose) .* double(arm(a).sct.bodyMask);   % dose only exists in the body
 
-    % Summed meterset of this CT's segments (one segment file in memory at a time)
+    % Summed meterset of this CT's segments. Step 1.5 gives every segment its
+    % beam's RTPLAN meterset, so the beam number in each file name is looked
+    % up in metadata.mat: no segment dose file is opened.
     segFiles = dir(fullfile(processedDir, ['dose_*_', arm(a).ct_label, '_B*.mat']));
     if isempty(segFiles)
         error('demo_mbr:NoSegments', 'No %s segment doses in %s', arm(a).ct_label, processedDir);
     end
     arm(a).meterset = 0;
     for i = 1:numel(segFiles)
-        F = load(fullfile(processedDir, segFiles(i).name), 'field_dose');
-        arm(a).meterset = arm(a).meterset + F.field_dose.meterset;
+        beamNum = str2double(regexp(segFiles(i).name, '_B(\d+)_\d+\.mat$', 'tokens', 'once'));
+        match   = find(beamNumbers == beamNum, 1);
+        if isempty(match)
+            error('demo_mbr:NoBeamMU', 'Beam of %s not found in metadata.beam_metadata.', segFiles(i).name);
+        end
+        arm(a).meterset = arm(a).meterset + beamMU(match);
     end
     fprintf('[DEMO] %s truth: %s total, max %.3f Gy, %.1f MU over %d segments\n', ...
         arm(a).name, arm(a).ct_label, max(arm(a).dose_truth(:)), arm(a).meterset, numel(segFiles));
 end
-clear T S F totalDose
+clear T S totalDose
 
 doseDims  = size(arm(1).dose_truth);
 spacingMm = arm(1).sct.spacing(:)';
 if ~isequal(size(arm(2).dose_truth), doseDims)
     error('demo_mbr:GridMismatch', 'CT_1 and CT_3 doses are on different grids.');
 end
-md = load(fullfile(processedDir, 'metadata.mat'), 'metadata');
-beamMetadata = md.metadata.beam_metadata;   % all beams: the sensor must avoid every entrance path
 
 fprintf('[DEMO] Grid [%d %d %d], spacing [%.2f %.2f %.2f] mm\n', doseDims, spacingMm);
 
