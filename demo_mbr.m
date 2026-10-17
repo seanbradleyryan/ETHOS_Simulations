@@ -63,8 +63,7 @@
 %    build_pulse_kernel, least_squares_gain, compute_gamma,
 %    plot_sensor_dose_planes, das_reconstruct (for 'das').
 %    Data: RayStationFiles/1194203/Session_1/processed/ (Step 1.5 output:
-%    total_dose_CT_1/3.mat, CBCT1/3_resampled.mat, metadata.mat, and the
-%    dose_*.mat file names for the MU).
+%    total_dose_CT_1/3.mat, CBCT1/3_resampled.mat).
 %
 %  See also: run_single_field_simulation, step205_run_full_field_simulation,
 %            noise_ensemble_error_bars, compute_gamma
@@ -122,14 +121,7 @@ end
 %  dose, the sum of every segment dose RayStation calculated on that CT
 %  (Step 1.5 writes total_dose_CT_1.mat and total_dose_CT_3.mat). The CT_1
 %  total is the R1 truth and the CT_3 total is the R3 truth. As in
-%  step205_run_full_field_simulation, the plan is treated as ONE field
-%  delivered over every pulse of that CT's segments, so the pulse count
-%  comes from the summed meterset of those segments.
-
-md = load(fullfile(processedDir, 'metadata.mat'), 'metadata');
-beamMetadata = md.metadata.beam_metadata;   % all beams: the sensor must avoid every entrance path
-beamNumbers  = [beamMetadata.beam_number];
-beamMU       = [beamMetadata.meterset];
+%  step205_run_full_field_simulation, the plan is treated as ONE field.
 
 arm = struct('name',     {'R1', 'R3'}, ...
              'ct_label', {'CT_1', 'CT_3'}, ...
@@ -155,25 +147,7 @@ for a = 1:2
         arm(a).sct.couchMask = false(size(arm(a).sct.bodyMask));
     end
     arm(a).dose_truth = double(totalDose) .* double(arm(a).sct.bodyMask);   % dose only exists in the body
-
-    % Summed meterset of this CT's segments. Step 1.5 gives every segment its
-    % beam's RTPLAN meterset, so the beam number in each file name is looked
-    % up in metadata.mat: no segment dose file is opened.
-    segFiles = dir(fullfile(processedDir, ['dose_*_', arm(a).ct_label, '_B*.mat']));
-    if isempty(segFiles)
-        error('demo_mbr:NoSegments', 'No %s segment doses in %s', arm(a).ct_label, processedDir);
-    end
-    arm(a).meterset = 0;
-    for i = 1:numel(segFiles)
-        beamNum = str2double(regexp(segFiles(i).name, '_B(\d+)_\d+\.mat$', 'tokens', 'once'));
-        match   = find(beamNumbers == beamNum, 1);
-        if isempty(match)
-            error('demo_mbr:NoBeamMU', 'Beam of %s not found in metadata.beam_metadata.', segFiles(i).name);
-        end
-        arm(a).meterset = arm(a).meterset + beamMU(match);
-    end
-    fprintf('[DEMO] %s truth: %s total, max %.3f Gy, %.1f MU over %d segments\n', ...
-        arm(a).name, arm(a).ct_label, max(arm(a).dose_truth(:)), arm(a).meterset, numel(segFiles));
+    fprintf('[DEMO] %s truth: %s total, max %.3f Gy\n', arm(a).name, arm(a).ct_label, max(arm(a).dose_truth(:)));
 end
 clear T S totalDose
 
@@ -196,10 +170,14 @@ fprintf('[DEMO] Grid [%d %d %d], spacing [%.2f %.2f %.2f] mm\n', doseDims, spaci
 %      p0 = (dose per linac pulse) x Gruneisen x density
 %  then smoothed slightly (k-Wave's smooth) to avoid grid-scale ringing, as
 %  the pipeline does.
+%  The pulse count uses the nominal CONFIG.meterset. It cancels out: p0 is
+%  divided by it here and the dose multiplied back by it in Step 10, and the
+%  default noise is a fraction of the peak signal. It only sets the SNR when
+%  CONFIG.noise_amp_Pa is a fixed value.
 
 for a = 1:2
     arm(a).medium     = build_medium_with_bath(arm(a).sct, CONFIG);
-    arm(a).num_pulses = ceil(arm(a).meterset / CONFIG.dose_per_pulse_cGy);
+    arm(a).num_pulses = ceil(CONFIG.meterset / CONFIG.dose_per_pulse_cGy);
     p0 = arm(a).dose_truth / arm(a).num_pulses .* arm(a).medium.gruneisen .* arm(a).medium.density;
     arm(a).p0_true = smooth(p0);
 end
@@ -220,7 +198,7 @@ end
 sctForSensor.spacing = spacingMm;
 doseForSensor = struct('dose_Gy', arm(1).dose_truth, ...   % no gantry angle: the whole plan
     'origin', sctForSensor.origin, 'spacing', spacingMm, 'dimensions', doseDims);
-[sensorMask, sensorInfo] = determine_sensor_mask_lateral(sctForSensor, doseForSensor, beamMetadata, CONFIG);
+[sensorMask, sensorInfo] = determine_sensor_mask_lateral(sctForSensor, doseForSensor, [], CONFIG);   % [] = no beam metadata (only logged)
 gp = sensorInfo.grid_pad;
 
 offset  = [gp.y_pre, gp.x_pre, gp.z_pre];   % where the dose grid starts inside the k-Wave grid
