@@ -121,6 +121,14 @@ CONFIG.analysis_noise_floor_pct = [];      % [] => Step 2.5 noise-only floor mea
 CONFIG.analysis_n_random        = 5;       % random segment panels
 CONFIG.analysis_random_seed     = 42;
 
+% --- Engine figures OFF ---
+% get_default_config sets plot_results = true (for the standalone driver), which
+% makes run_single_field_simulation draw 4 figures per field (sensor planes, live
+% TR, dose panels, convergence) that are never closed. That costs tens of seconds
+% per field, piles up figures over a run, and must be off under parfor.
+% run_standalone_field forces it off the same way. Not part of the config hash.
+CONFIG.plot_results          = false;
+
 % --- Parallel Processing ---
 CONFIG.use_parallel          = true;
 CONFIG.num_parallel_workers  = 8;
@@ -365,6 +373,18 @@ for p_idx = 1:length(CONFIG.patients)
                         if ~isempty(pool), delete(pool); end
                         parpool(CONFIG.num_parallel_workers);
                     end
+                    % Pin each worker to a GPU round-robin (worker 1 -> GPU 1,
+                    % worker 2 -> GPU 2, worker 3 -> GPU 1, ...) and print the
+                    % mapping, so every GPU is used and it is visible which GPU
+                    % each worker runs on. run_single_field_simulation's own
+                    % gpuDevice call keeps this selection.
+                    if CONFIG.use_gpu && gpuDeviceCount > 0
+                        num_gpus = gpuDeviceCount;
+                        spmd
+                            gpu = gpuDevice(mod(labindex - 1, num_gpus) + 1);
+                            fprintf('Worker %d -> GPU %d (%s)\n', labindex, gpu.Index, gpu.Name);
+                        end
+                    end
                     % Pre-slice the lightweight per-field metadata so parfor
                     % ships one small struct per iteration. The heavy dose_Gy is
                     % NOT held here -- each worker loads its own dose from disk
@@ -477,6 +497,12 @@ for p_idx = 1:length(CONFIG.patients)
                     save_cache_manifest(cache_manifest, patient_id, session, CONFIG, CONFIG_HASH);
                     fprintf('         Parallel block done in %.1f s (%d field(s) computed here).\n', ...
                         elapsed_parfor, nnz(field_computed));
+                    % Per-field time rises as workers share a GPU; the number to
+                    % compare against serial is wall time / fields computed.
+                    if any(field_computed)
+                        fprintf('         Effective %.1f s/field wall-clock (each field took %.1f s on its worker).\n', ...
+                            elapsed_parfor / nnz(field_computed), mean(field_elapsed(field_computed)));
+                    end
                 else
                     fprintf('         Using serial processing...\n');
                     log_msg(log_fid, 'Serial mode: %d fields pending', num_pending);
@@ -1403,7 +1429,7 @@ function report_field_progress(msg)
             else
                 eta_min = remaining * avg_sec / workers / 60;
                 fprintf(['         Processing field %d (gantry %.1f deg)  --  %d remaining' ...
-                    '  (est. %.1f min left @ %.1f s/field avg)\n'], ...
+                    '  (est. %.1f min left @ %.1f s/field per worker)\n'], ...
                     msg.field_idx, msg.gantry, remaining, eta_min, avg_sec);
             end
         case 'fail'
