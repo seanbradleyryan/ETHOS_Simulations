@@ -465,7 +465,7 @@ for p_idx = 1:length(CONFIG.patients)
                         % simulation. Selection of the field's own CBCT/medium
                         % happens inside the dispatcher.
                         [rd, sd] = run_field_dispatch(fd, cbct_by_label, medium_by_label, ...
-                            beam_metadata, CONFIG, precomputed_sensor);
+                            beam_metadata, CONFIG, precomputed_sensor, true);
                         rd = gather(rd);
                         save_field_reconstruction(rd, sd, fd, patient_id, session, CONFIG, CONFIG_HASH);
                         save_simulated_dose(rd, fd, patient_id, session, CONFIG, CONFIG_HASH);
@@ -549,14 +549,18 @@ for p_idx = 1:length(CONFIG.patients)
                         t_field = tic;
                         % CT_3 fields -> blind-geometry second-field simulation;
                         % CT_1 fields -> standard single-field simulation.
+                        % quiet = false: serial shows the engine + k-Wave output.
                         [recon_dose, sim_results] = run_field_dispatch(fd, cbct_by_label, ...
-                            medium_by_label, beam_metadata, CONFIG, precomputed_sensor);
+                            medium_by_label, beam_metadata, CONFIG, precomputed_sensor, false);
+                        sim_elapsed_f = toc(t_field);
                         save_field_reconstruction(recon_dose, sim_results, fd, patient_id, session, CONFIG, CONFIG_HASH);
                         save_simulated_dose(recon_dose, fd, patient_id, session, CONFIG, CONFIG_HASH);
 
                         % Overwrite IN PROGRESS with COMPLETE.
                         write_field_status(status_path, 'complete', fi, fd.gantry_angle, CONFIG_HASH);
                         elapsed_f = toc(t_field);
+                        fprintf('             Simulation %.1f s, saves + status %.1f s\n', ...
+                            sim_elapsed_f, elapsed_f - sim_elapsed_f);
                         cache_manifest = update_manifest_field(cache_manifest, fi, ...
                             fd, patient_id, session, elapsed_f);
                         save_cache_manifest(cache_manifest, patient_id, session, CONFIG, CONFIG_HASH);
@@ -908,26 +912,8 @@ function [cbct, medium] = select_cbct_for_field(field_dose, cbct_by_label, mediu
     medium = medium_by_label.(lbl);
 end
 
-function [recon_dose, sim_results] = run_field_quietly(field_dose, cbct_resampled, medium, ...
-        beam_metadata, config, precomputed_sensor)
-    % Run one field's k-Wave simulation but swallow ALL of its console output
-    % (the k-Wave forward/time-reversal banners plus run_single_field_simulation's
-    % own per-field diagnostics). evalc captures everything the call prints and
-    % discards it, keeping pipeline_simulate's console limited to the high-level
-    % per-field progress line. This suppression is local to THIS script: other
-    % callers invoke run_single_field_simulation directly and keep their logging.
-    %
-    % Wrapping the evalc here (rather than at the parfor call site) keeps every
-    % argument a normal function input, so parfor's variable classification still
-    % ships beam_metadata / precomputed_sensor to the workers -- a bare evalc
-    % string in the loop body would hide those uses and break the broadcast.
-    % sim_results carries the per-field noise stats (sensor_signal_peak / snr).
-    [~, recon_dose, sim_results] = evalc(['run_single_field_simulation(field_dose, ' ...
-        'cbct_resampled, medium, beam_metadata, config, precomputed_sensor)']);
-end
-
 function [recon_dose, sim_results] = run_field_dispatch(field_dose, cbct_by_label, medium_by_label, ...
-        beam_metadata, config, precomputed_sensor)
+        beam_metadata, config, precomputed_sensor, quiet)
     % Route a single field to the correct reconstruction mode of the merged
     % run_single_field_simulation:
     %   - CT_3 (adapted) fields  -> BLIND geometry (CONFIG.blind_recon = true):
@@ -940,6 +926,12 @@ function [recon_dose, sim_results] = run_field_dispatch(field_dose, cbct_by_labe
     % passed through; the reference medium is pulled from medium_by_label. Kept
     % as a normal function (not an inline branch at the parfor call site) so
     % parfor still classifies cbct_by_label / medium_by_label as broadcast vars.
+    %
+    % quiet = true (parfor): evalc captures and discards everything the engine
+    % and k-Wave print, keeping the console to one progress line per field.
+    % quiet = false (serial): the engine and k-Wave print normally, so the
+    % per-stage timings (grid size, dt/Nt, forward / time-reversal seconds) are
+    % visible.
     [cbct_fd, medium_fwd] = select_cbct_for_field(field_dose, cbct_by_label, medium_by_label);
 
     ref_label = blind_recon_reference_label(config);
@@ -950,14 +942,22 @@ function [recon_dose, sim_results] = run_field_dispatch(field_dose, cbct_by_labe
         fld_label = strrep(field_dose.ct_label, '-', '_');
     end
 
+    % Blind: CONFIG.blind_recon makes run_single_field_simulation forward on
+    % medium_fwd (CT_3) and time-reverse on medium_recon (CT_1). Full access:
+    % medium_recon stays [] and both passes run on medium_fwd.
+    medium_recon = [];
     if blind_on && ~isempty(fld_label) && ~strcmp(fld_label, ref_label) ...
             && isfield(medium_by_label, ref_label)
-        medium_recon = medium_by_label.(ref_label);
-        [recon_dose, sim_results] = run_blind_field_quietly(field_dose, cbct_fd, medium_fwd, ...
-            medium_recon, beam_metadata, config, precomputed_sensor);
+        medium_recon       = medium_by_label.(ref_label);
+        config.blind_recon = true;
+    end
+
+    if quiet
+        [~, recon_dose, sim_results] = evalc(['run_single_field_simulation(field_dose, ' ...
+            'cbct_fd, medium_fwd, beam_metadata, config, precomputed_sensor, medium_recon)']);
     else
-        [recon_dose, sim_results] = run_field_quietly(field_dose, cbct_fd, medium_fwd, ...
-            beam_metadata, config, precomputed_sensor);
+        [recon_dose, sim_results] = run_single_field_simulation(field_dose, ...
+            cbct_fd, medium_fwd, beam_metadata, config, precomputed_sensor, medium_recon);
     end
 end
 
@@ -969,21 +969,6 @@ function lbl = blind_recon_reference_label(config)
     else
         lbl = 'CT_1';
     end
-end
-
-function [recon_dose, sim_results] = run_blind_field_quietly(field_dose, cbct_resampled, medium_fwd, ...
-        medium_recon, beam_metadata, config, precomputed_sensor)
-    % Blind-geometry per-field simulation with the same console suppression as
-    % run_field_quietly. medium_fwd is the TRUE (CT_3) forward medium; the
-    % reconstruction runs on medium_recon (reference CT_1). CONFIG.blind_recon is
-    % set here so the merged run_single_field_simulation takes its blind branch
-    % (forward on medium_fwd, time reversal on the trailing medium_recon arg).
-    % Every argument stays a normal function input so parfor ships beam_metadata /
-    % precomputed_sensor / medium_recon to the workers (a bare evalc string would
-    % hide those uses).
-    config.blind_recon = true;
-    [~, recon_dose, sim_results] = evalc(['run_single_field_simulation(field_dose, ' ...
-        'cbct_resampled, medium_fwd, beam_metadata, config, precomputed_sensor, medium_recon)']);
 end
 
 function save_field_reconstruction(recon_dose, sim_results, field_dose, patient_id, session, config, hash8)
