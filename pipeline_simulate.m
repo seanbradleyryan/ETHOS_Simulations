@@ -12,7 +12,7 @@
 %       RayStationFiles/<PatientID>/<Session>/
 %
 %  STEPS EXECUTED (Step 2.05 = step205_run_full_field_simulation: each CT's
-%  total RS dose simulated as one field, between Steps 2 and 2.5):
+%  total RS dose simulated as one field, run FIRST, before Step 2's per-field sims):
 %    Step 2    k-Wave photoacoustic simulation (forward + time-reversal)
 %    Step 3    Gamma analysis, SSIM, and visualization
 %    Verify    verify_pipeline_simulate: output checks + debug plots per
@@ -266,6 +266,44 @@ for p_idx = 1:length(CONFIG.patients)
                 fprintf('           [WARNING] No beam metadata  legacy sensor placement.\n');
             end
 
+            % Compute the sensor mask ONCE for the whole plan and reuse it
+            % for every field, instead of recomputing determine_sensor_mask
+            % inside each run_single_field_simulation call. The mask is
+            % saved to disk (SimulationResults/<method>/sensor_mask_<hash>.mat)
+            % so the exact sensor geometry can be recovered for analysis.
+            % Returns [] for non-determine_sensor_mask methods (or when no
+            % summed plan dose is available), in which case each field falls
+            % back to its inline placement. Done before Step 2.05, which
+            % loads this saved mask.
+            if CONFIG.run_step2 || CONFIG.run_step205
+                precomputed_sensor = compute_plan_sensor_mask(patient_id, session, ...
+                    cbct_by_label, dose_metadata, beam_metadata, CONFIG, CONFIG_HASH);
+            end
+
+            %% ============================================================
+            %  STEP 2.05: Full-Field Simulation (total RS dose as one field)
+            %% ============================================================
+            % Runs FIRST, before the per-field simulations of Step 2.
+            % Simulates each CT's TOTAL RayStation dose in one k-Wave run (CT_1
+            % full access, CT_3 blind on CT_1) with the plan sensor mask saved
+            % above, then runs the four Step 2.5 comparisons on the totals.
+            % Skips itself when its outputs for CONFIG_HASH are already on disk.
+            % ANALYSIS TODO: compare the step205 output (full_field_dose_CT_*_<hash>.mat)
+            % with the output of all the per-field simulations (their sum,
+            % total_recon_dose_<hash>.mat): one whole-plan simulation vs the sum
+            % of the field simulations.
+            if CONFIG.run_step205
+                fprintf('\n[STEP 2.05] Running full-field (total RS dose) simulation...\n');
+                fprintf(['           NOTE: in the analysis, compare this output with the ' ...
+                         'output of all the field simulations (total_recon_dose_%s.mat).\n'], ...
+                    CONFIG_HASH);
+                step205_config             = CONFIG;
+                step205_config.config_hash = CONFIG_HASH;
+                step205_results = step205_run_full_field_simulation(patient_id, session, step205_config);
+                RESULTS.patients.(result_key).step205 = step205_results;
+                log_msg(log_fid, 'Step 2.05 %s [%s]', step205_results.status, CONFIG_HASH);
+            end
+
             %% ============================================================
             %  STEP 2: k-Wave Simulation
             %% ============================================================
@@ -282,17 +320,6 @@ for p_idx = 1:length(CONFIG.patients)
                     fprintf('         Building acoustic medium for %s...\n', lbl);
                     medium_by_label.(lbl) = create_acoustic_medium(cbct_by_label.(lbl), CONFIG);
                 end
-
-                % Compute the sensor mask ONCE for the whole plan and reuse it
-                % for every field, instead of recomputing determine_sensor_mask
-                % inside each run_single_field_simulation call. The mask is
-                % saved to disk (SimulationResults/<method>/sensor_mask_<hash>.mat)
-                % so the exact sensor geometry can be recovered for analysis.
-                % Returns [] for non-determine_sensor_mask methods (or when no
-                % summed plan dose is available), in which case each field falls
-                % back to its inline placement.
-                precomputed_sensor = compute_plan_sensor_mask(patient_id, session, ...
-                    cbct_by_label, dose_metadata, beam_metadata, CONFIG, CONFIG_HASH);
 
                 valid_field_indices = 1:numel(field_index);
                 num_fields          = length(valid_field_indices);
@@ -568,29 +595,6 @@ for p_idx = 1:length(CONFIG.patients)
             else
                 fprintf('\n[STEP 2] Loading previously computed reconstruction...\n');
                 [total_recon, ~] = load_total_reconstruction(patient_id, session, CONFIG, CONFIG_HASH);
-            end
-
-            %% ============================================================
-            %  STEP 2.05: Full-Field Simulation (total RS dose as one field)
-            %% ============================================================
-            % Simulates each CT's TOTAL RayStation dose in one k-Wave run (CT_1
-            % full access, CT_3 blind on CT_1) with the plan sensor mask Step 2
-            % saved, then runs the four Step 2.5 comparisons on the totals.
-            % Skips itself when its outputs for CONFIG_HASH are already on disk.
-            % ANALYSIS TODO: compare the step205 output (full_field_dose_CT_*_<hash>.mat)
-            % with the output of all the per-field simulations (their sum,
-            % total_recon_dose_<hash>.mat): one whole-plan simulation vs the sum
-            % of the field simulations.
-            if CONFIG.run_step205
-                fprintf('\n[STEP 2.05] Running full-field (total RS dose) simulation...\n');
-                fprintf(['           NOTE: in the analysis, compare this output with the ' ...
-                         'output of all the field simulations (total_recon_dose_%s.mat).\n'], ...
-                    CONFIG_HASH);
-                step205_config             = CONFIG;
-                step205_config.config_hash = CONFIG_HASH;
-                step205_results = step205_run_full_field_simulation(patient_id, session, step205_config);
-                RESULTS.patients.(result_key).step205 = step205_results;
-                log_msg(log_fid, 'Step 2.05 %s [%s]', step205_results.status, CONFIG_HASH);
             end
 
             %% ============================================================

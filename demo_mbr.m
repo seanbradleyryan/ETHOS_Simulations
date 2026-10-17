@@ -5,11 +5,11 @@
 %  =========================================================================
 %
 %  PURPOSE
-%    Teach how model-based reconstruction works on one real field dose from
-%    patient 1194203 / Session_1, and check (gamma analysis) that it lands
-%    closer to the true dose than the time-reversal (TR) reconstruction the
-%    pipeline uses today. Run it section by section (Ctrl+Enter) and read the
-%    comments as you go.
+%    Teach how model-based reconstruction works on the real total plan dose
+%    (every beam segment summed, one total per CT) of patient 1194203 /
+%    Session_1, and check (gamma analysis) that it lands closer to the true
+%    dose than the time-reversal (TR) reconstruction the pipeline uses today.
+%    Run it section by section (Ctrl+Enter) and read the comments as you go.
 %
 %  THE IDEA IN ONE PARAGRAPH
 %    TR plays the recorded signals backwards into a model of the patient and
@@ -28,10 +28,10 @@
 %    The minimizer used here is FISTA (gradient steps with momentum).
 %
 %  TWO ARMS (both reconstructed on CT1, the only anatomy a live system has)
-%    R1: truth dose on CT1, signals generated on CT1 anatomy. The model used
+%    R1: CT1 total dose, signals generated on CT1 anatomy. The model used
 %        to reconstruct is exactly the model that made the data (an "inverse
 %        crime"), so this is the best case.
-%    R3: truth dose on CT3, signals generated on CT3 anatomy, reconstructed
+%    R3: CT3 total dose, signals generated on CT3 anatomy, reconstructed
 %        on CT1. The model is wrong by the anatomy change: the realistic case.
 %
 %  STEPS (numbering follows the method write-up)
@@ -60,12 +60,13 @@
 %    Processing Toolbox (padarray), CalcGamma, and in utils/:
 %    get_default_config, create_acoustic_medium,
 %    determine_sensor_mask_lateral, find_optimal_kwave_size,
-%    build_pulse_kernel, load_field_dose_file, least_squares_gain,
-%    compute_gamma, plot_sensor_dose_planes, das_reconstruct (for 'das').
-%    Data: RayStationFiles/1194203/Session_1/processed/ (Step 1.5 output).
+%    build_pulse_kernel, least_squares_gain, compute_gamma,
+%    plot_sensor_dose_planes, das_reconstruct (for 'das').
+%    Data: RayStationFiles/1194203/Session_1/processed/ (Step 1.5 output:
+%    total_dose_CT_1/3.mat, CBCT1/3_resampled.mat, dose_*.mat for the MU).
 %
-%  See also: run_single_field_simulation, noise_ensemble_error_bars,
-%            compute_gamma
+%  See also: run_single_field_simulation, step205_run_full_field_simulation,
+%            noise_ensemble_error_bars, compute_gamma
 
 clear; clc; close all;
 
@@ -82,8 +83,6 @@ addpath(genpath(fullfile(scriptDir, 'utils')));
 CONFIG = get_default_config();
 CONFIG.patient_id    = '1194203';
 CONFIG.session       = 'Session_1';
-CONFIG.dose_filename = '';   % '' = random CT_1 segment dose that also exists on CT_3,
-                             % or a name like 'dose_1194203_Session_1_reference_CT_1_B15_112.mat'
 
 % Gamma criteria (same values as pipeline_simulate.m)
 CONFIG.gamma_dose_pct        = 3;
@@ -117,50 +116,54 @@ if ~any(strcmp(CONFIG.mbr_adjoint, {'tr', 'das'}))
     error('demo_mbr:BadAdjoint', 'CONFIG.mbr_adjoint must be ''tr'' or ''das'' (got ''%s'').', CONFIG.mbr_adjoint);
 end
 
-%% ========================= 1. PICK A DOSE AND LOAD DATA =================
-%  A dose file is one beam segment's dose, calculated by RayStation on one
-%  CT. We need the SAME segment on both CTs: the CT_1 version is the R1
-%  truth and the CT_3 version is the R3 truth.
+%% ========================= 1. LOAD THE TOTAL DOSES AND ANATOMY ==========
+%  The example is the whole plan, not one beam segment: each CT's total
+%  dose, the sum of every segment dose RayStation calculated on that CT
+%  (Step 1.5 writes total_dose_CT_1.mat and total_dose_CT_3.mat). The CT_1
+%  total is the R1 truth and the CT_3 total is the R3 truth. As in
+%  step205_run_full_field_simulation, the plan is treated as ONE field
+%  delivered over every pulse of that CT's segments, so the pulse count
+%  comes from the summed meterset of those segments.
 
-if isempty(CONFIG.dose_filename)
-    ct1Files   = dir(fullfile(processedDir, 'dose_*_CT_1_B*.mat'));
-    candidates = {};
-    for i = 1:numel(ct1Files)
-        partner = strrep(ct1Files(i).name, '_CT_1_', '_CT_3_');
-        if isfile(fullfile(processedDir, partner))
-            candidates{end+1} = ct1Files(i).name; %#ok<AGROW>
-        end
-    end
-    if isempty(candidates)
-        error('demo_mbr:NoPairs', 'No CT_1 dose with a matching CT_3 dose in %s', processedDir);
-    end
-    rng('shuffle');
-    CONFIG.dose_filename = candidates{randi(numel(candidates))};
-end
-fprintf('[DEMO] Example dose: %s\n', CONFIG.dose_filename);
-fprintf('       (set CONFIG.dose_filename to this name to rerun the same field)\n');
-
-arm = struct('name',      {'R1', 'R3'}, ...
-             'dose_file', {CONFIG.dose_filename, strrep(CONFIG.dose_filename, '_CT_1_', '_CT_3_')}, ...
-             'cbct_var',  {'CBCT1_resampled', 'CBCT3_resampled'});
+arm = struct('name',     {'R1', 'R3'}, ...
+             'ct_label', {'CT_1', 'CT_3'}, ...
+             'cbct_var', {'CBCT1_resampled', 'CBCT3_resampled'});
 
 for a = 1:2
-    fd = load_field_dose_file(fullfile(processedDir, arm(a).dose_file));
-    S  = load(fullfile(processedDir, [arm(a).cbct_var, '.mat']), arm(a).cbct_var);
+    totalFile = fullfile(processedDir, ['total_dose_', arm(a).ct_label, '.mat']);
+    if ~isfile(totalFile)
+        error('demo_mbr:NoTotalDose', 'Per-CT total dose not found: %s (run Step 1.5 first).', totalFile);
+    end
+    T = load(totalFile);
+    if isfield(T, 'ct_total_sparse')
+        totalDose = reshape(full(T.ct_total_sparse), T.ct_total_dims);   % stored sparse to save disk
+    else
+        totalDose = T.ct_total;
+    end
+    S = load(fullfile(processedDir, [arm(a).cbct_var, '.mat']), arm(a).cbct_var);
     arm(a).sct = S.(arm(a).cbct_var);
-    if ~isequal(size(fd.dose_Gy), size(arm(a).sct.cubeHU))
-        error('demo_mbr:GridMismatch', 'Dose and %s grids differ.', arm(a).cbct_var);
+    if ~isequal(size(totalDose), size(arm(a).sct.cubeHU))
+        error('demo_mbr:GridMismatch', 'Total dose and %s grids differ.', arm(a).cbct_var);
     end
     if ~isfield(arm(a).sct, 'couchMask') || isempty(arm(a).sct.couchMask)
         arm(a).sct.couchMask = false(size(arm(a).sct.bodyMask));
     end
-    arm(a).dose_truth = double(fd.dose_Gy) .* double(arm(a).sct.bodyMask);   % dose only exists in the body
-    arm(a).gantry     = fd.gantry_angle;
-    arm(a).meterset   = CONFIG.meterset;                                     % fallback, as in run_standalone_field
-    if isfield(fd, 'meterset') && ~isempty(fd.meterset) && fd.meterset > 0
-        arm(a).meterset = fd.meterset;
+    arm(a).dose_truth = double(totalDose) .* double(arm(a).sct.bodyMask);   % dose only exists in the body
+
+    % Summed meterset of this CT's segments (one segment file in memory at a time)
+    segFiles = dir(fullfile(processedDir, ['dose_*_', arm(a).ct_label, '_B*.mat']));
+    if isempty(segFiles)
+        error('demo_mbr:NoSegments', 'No %s segment doses in %s', arm(a).ct_label, processedDir);
     end
+    arm(a).meterset = 0;
+    for i = 1:numel(segFiles)
+        F = load(fullfile(processedDir, segFiles(i).name), 'field_dose');
+        arm(a).meterset = arm(a).meterset + F.field_dose.meterset;
+    end
+    fprintf('[DEMO] %s truth: %s total, max %.3f Gy, %.1f MU over %d segments\n', ...
+        arm(a).name, arm(a).ct_label, max(arm(a).dose_truth(:)), arm(a).meterset, numel(segFiles));
 end
+clear T S F totalDose
 
 doseDims  = size(arm(1).dose_truth);
 spacingMm = arm(1).sct.spacing(:)';
@@ -170,8 +173,7 @@ end
 md = load(fullfile(processedDir, 'metadata.mat'), 'metadata');
 beamMetadata = md.metadata.beam_metadata;   % all beams: the sensor must avoid every entrance path
 
-fprintf('[DEMO] Grid [%d %d %d], spacing [%.2f %.2f %.2f] mm, gantry %.0f deg, %.1f MU\n', ...
-    doseDims, spacingMm, arm(1).gantry, arm(1).meterset);
+fprintf('[DEMO] Grid [%d %d %d], spacing [%.2f %.2f %.2f] mm\n', doseDims, spacingMm);
 
 %% ========================= 2. ACOUSTIC MEDIA AND TRUE PRESSURE ==========
 %  CT numbers (HU) become the acoustic properties k-Wave needs: density,
@@ -206,7 +208,7 @@ if ~isfield(sctForSensor, 'origin') || isempty(sctForSensor.origin)
     sctForSensor.origin = [0, 0, 0];
 end
 sctForSensor.spacing = spacingMm;
-doseForSensor = struct('dose_Gy', arm(1).dose_truth, 'gantry_angle', arm(1).gantry, ...
+doseForSensor = struct('dose_Gy', arm(1).dose_truth, ...   % no gantry angle: the whole plan
     'origin', sctForSensor.origin, 'spacing', spacingMm, 'dimensions', doseDims);
 [sensorMask, sensorInfo] = determine_sensor_mask_lateral(sctForSensor, doseForSensor, beamMetadata, CONFIG);
 gp = sensorInfo.grid_pad;
@@ -327,7 +329,7 @@ for a = 1:2
     if ~isempty(CONFIG.noise_amp_Pa) && CONFIG.noise_amp_Pa > 0
         arm(a).noise_amp = CONFIG.noise_amp_Pa;                                 % calibrated hardware noise
     else
-        arm(a).noise_amp = CONFIG.conv_noise_level * max(abs(arm(a).clean(:))); % fraction of this field's peak
+        arm(a).noise_amp = CONFIG.conv_noise_level * max(abs(arm(a).clean(:))); % fraction of this dose's peak
     end
     noise = arm(a).noise_amp * randn(size(arm(a).clean));
     arm(a).y = arm(a).clean + noise;
@@ -651,8 +653,8 @@ for a = 1:2
         end
         colorbar(ax);
     end
-    sgtitle(sprintf('%s (%s): dose in Gy  |  gamma %s pass: TR %.1f%%, MBR %.1f%%', ...
-        arm(a).name, strrep(arm(a).dose_file, '_', '\_'), crit{3}, ...
+    sgtitle(sprintf('%s (%s total): dose in Gy  |  gamma %s pass: TR %.1f%%, MBR %.1f%%', ...
+        arm(a).name, strrep(arm(a).ct_label, '_', '\_'), crit{3}, ...
         arm(a).gamma_tr.pass_rates(1), arm(a).gamma_mbr.pass_rates(1)));
 end
 
