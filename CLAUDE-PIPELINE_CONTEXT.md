@@ -40,6 +40,7 @@
 | `CalcGamma.m` | Gamma index calculation (external dependency) |
 | `load_processed_data.m` | Loads previously processed dose/CT data |
 | `load_recon_dose_data.m` | Loads computed recon doses (single/set/total) + RS, ETHOS truth, CBCT, RTPLAN stats — no re-sim. See CLAUDE.md "Analysis Utilities" |
+| `load_beam_total_set.m` | Beam mode: one beam's summed RS dose + beam recon on CT_1/CT_3, shaped like `load_recon_dose_data` `'set'` output (Steps 2.5 / 3) |
 | `compute_local_ssim.m` | Local (per-voxel) SSIM map + masked mean over the 10% region. The only SSIM in the pipeline (Steps 2.5 and 3) |
 | `studies/study_pass_rates_allsegments.m` | Superseded by Step 3 (all its analyses now run there); kept for reference |
 
@@ -65,6 +66,8 @@ load('sct_resampled.mat');       % Contains: sct_resampled struct
 load('total_rs_dose.mat');       % Contains: total_rs_dose 3D array (Gy) — sum of all fields
 load('total_dose_CT_1.mat');     % Contains: ct_total / ct_total_sparse + ct_total_dims — total dose from CT_1 fields only
 load('total_dose_CT_3.mat');     % Same, for CT_3 fields (label matches ct_label in field filenames)
+load('total_dose_CT_1_B6.mat');  % Contains: beam_total_sparse + beam_total_dims (or beam_total), num_segments
+                                 % — sum of beam 6's segments on CT_1 (one file per CT label x beam)
 load('total_recon_dose_<hash8>.mat');  % Contains: total_recon, metadata, config_hash
                                        % <hash8> = compute_sim_config_hash(CONFIG); per-hash file
                                        % see SimulationResults/<id>/<session>/<method>/config_registry.json
@@ -74,6 +77,27 @@ load('total_recon_dose_<hash8>.mat');  % Contains: total_recon, metadata, config
 > field doses carry a CT label in their filename (e.g. `..._adapted_CT_1_B6_103.mat`).
 > Sparse reconstruction: `reshape(full(ct_total_sparse), ct_total_dims)`.
 > Legacy DICOM inputs (no CT label) only produce `total_rs_dose.mat`.
+
+## Reconstruction Mode (`CONFIG.reconstruction_mode`, default `'segment'`)
+
+Set in `get_default_config`; part of the config hash (`'segment'` is dropped from the hash, so
+pre-existing segment caches keep their hashes; `'beam'` gets its own hash/files).
+
+- **`'segment'`**: one Step 2 sim + Step 2.5 gamma/SSIM per segment (thousands). Original behavior.
+- **`'beam'`**: one per (CT label, beam) on the beam's summed dose `total_dose_<CT>_B<n>.mat`
+  (from `pipeline_compress` / Step 1.5); ~15–20 sims.
+  - `pipeline_simulate` swaps `field_index` for `list_beam_doses` output. Recon / sim / lock /
+    status files are named `total_dose_<CT>_B<n>_recon_<hash>.mat` etc.
+  - `load_beam_dose_file` takes metadata (gantry, CT label, meterset) from one segment.
+    step15 stores the RTPLAN **beam** meterset on every segment, so that is already the beam MU.
+  - Step 2.5 treats each beam as one segment (`seg_num` 0) and folds into the CT_1 beam recon.
+    `metrics_plan_type` is not applied. Beam data is loaded by `utils/load_beam_total_set.m`
+    (same shape as `load_recon_dose_data` `'set'` output).
+  - Step 3 Part B reads the beam recons for SNR (2 values per beam: CT_1 + CT_3) and random panels
+    (one pick per beam, labelled segment 0). Needs `config.reconstruction_mode = 'beam'`.
+  - `verify_pipeline_simulate` is skipped.
+  - Not exactly equal to the summed segment recons: each sim adds one noise draw (sum of N segments
+    = N draws), and the LS gain and >1% dose-region mask are nonlinear.
 
 ## Step 2.5 — Per-Segment Metrics (folded into CT_1 recon files)
 

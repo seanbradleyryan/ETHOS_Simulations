@@ -98,16 +98,27 @@ function CONFIG = get_default_config(varargin)
     CONFIG.use_pressure_scale_correction = false;   % rescale by max(p0)/max(recon) before dose conversion
     CONFIG.mask_recon_to_dose_region     = true;    % zero recon dose outside the >1% dose mask
 
-    % --- Reconstruction method: 'tr' (iterative time reversal) | 'das' | 'ubp' ---
+    % --- Reconstruction method: 'tr' (iterative time reversal) | 'das' | 'ubp' | 'adjoint' ---
     %   'ubp' = universal back-projection (utils/ubp3d.m). Its options default via
     %   safe_config in run_single_field_simulation (like the das_* options) and
     %   may be overridden here: ubp_use_elements (true), ubp_band_limit ('auto' |
     %   'none' | cutoff Hz), ubp_aperture_cos (0), ubp_area_weight (true),
     %   ubp_interp ('linear'). Non-ideal sensors (determine_sensor_mask) are
     %   corrected automatically inside ubp3d.
+    %   'adjoint' = Arridge et al. 2016 gradient descent with the k-Wave adjoint,
+    %   adjoint_num_iter iterations (up to 3 k-Wave runs each); stops early on
+    %   convergence_tol.
     CONFIG.reconstruction_method  = 'tr';
     CONFIG.num_time_reversal_iter = 1;
+    CONFIG.adjoint_num_iter       = 5;
     CONFIG.convergence_tol        = 1e-3;
+
+    % --- Reconstruction mode (pipeline_simulate Step 2 / Step 2.5): 'segment' | 'beam' ---
+    %   'segment' = one k-Wave simulation + gamma/SSIM per beam segment (thousands).
+    %   'beam'    = one per beam per CT, on the beam's summed dose
+    %               (total_dose_<CT>_B<n>.mat written by pipeline_compress).
+    %   In the config hash; 'segment' keeps the pre-existing hashes.
+    CONFIG.reconstruction_mode = 'segment';
 
     % --- Pulse convolution / noise / deconvolution (set kernel 0 to disable) ---
     % pulse_shape selects the radiation-pulse profile convolved onto the signal:

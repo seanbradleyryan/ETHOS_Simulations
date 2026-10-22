@@ -68,6 +68,8 @@ function [field_doses, cbct_resampled, total_rs_dose, metadata] = step15_process
 %       - CBCT3_resampled.mat  (variable: CBCT3_resampled)
 %       - total_rs_dose.mat
 %       - total_dose_[CT_label].mat (per-CT-image total; e.g. total_dose_CT_1.mat, total_dose_CT_3.mat)
+%       - total_dose_[CT_label]_B[n].mat (per-beam total on one CT; e.g. total_dose_CT_1_B6.mat)
+%           variables: beam_total_sparse + beam_total_dims (or beam_total), num_segments
 %       - tissue_masks.mat (per-CBCT masks: *_ct1 and *_ct3 variables)
 %       - metadata.mat
 %
@@ -85,6 +87,8 @@ function [field_doses, cbct_resampled, total_rs_dose, metadata] = step15_process
 %      -> save; totals summed as parfor reductions
 %   8. Zero combined total_rs_dose using union-body / intersection-couch;
 %      zero each per-CT total with its own mask; save all outputs
+%   9. Sum each beam's saved field doses per CT label (parfor over beams,
+%      one beam accumulator per worker) -> total_dose_[CT_label]_B[n].mat
 %
 %   KEY TECHNICAL NOTES:
 %   - Z-resolution MUST come from GridFrameOffsetVector. PixelSpacing is
@@ -338,6 +342,7 @@ fprintf('  total_dose_CT_3.mat:   %s\n', presentStr(skip_status.ct3_total_done))
 fprintf('  metadata.mat:          %s\n', presentStr(skip_status.metadata_done));
 fprintf('  Per-field outputs:     %d / %d present\n', ...
     skip_status.num_fields_done, num_files);
+fprintf('  Per-beam totals:       %s\n', presentStr(skip_status.beam_totals_done));
 
 cbct_ready    = config.skip_completed && skip_status.cbct1_done && skip_status.cbct3_done;
 masks_ready   = config.skip_completed && skip_status.masks_done;
@@ -345,8 +350,9 @@ fields_ready  = config.skip_completed && (skip_status.num_fields_done == num_fil
 totals_ready  = config.skip_completed && skip_status.total_rs_done && ...
                 skip_status.ct1_total_done && skip_status.ct3_total_done && ...
                 skip_status.metadata_done;
+beam_totals_ready = config.skip_completed && skip_status.beam_totals_done;
 
-if cbct_ready && masks_ready && fields_ready && totals_ready
+if cbct_ready && masks_ready && fields_ready && totals_ready && beam_totals_ready
     fprintf('\n  All Step 1.5 outputs already exist  loading and returning early.\n');
     [field_doses, cbct_resampled, total_rs_dose, metadata] = ...
         loadExistingStep15Outputs(processed_dir, expected_field_outputs);
@@ -767,6 +773,29 @@ end
 
 end  % if need_total_accum
 
+%% ======================== SAVE PER-BEAM TOTAL DOSES ========================
+% One total per (CT label, beam): the sum of that beam's segment doses on one
+% CBCT. Built from the saved per-field files so each worker holds only one
+% beam accumulator in memory.
+
+if beam_totals_ready
+    fprintf('\n  Per-beam totals already on disk  not re-summing.\n');
+else
+    valid_fields = field_doses(~cellfun(@isempty, field_doses));
+    group_keys = cell(numel(valid_fields), 1);
+    file_paths = cell(numel(valid_fields), 1);
+    for k = 1:numel(valid_fields)
+        group_keys{k} = sprintf('%s_B%d', valid_fields{k}.ct_label, valid_fields{k}.beam_num);
+        file_paths{k} = valid_fields{k}.filepath;
+    end
+    [beam_keys, ~, group_idx] = unique(group_keys);
+
+    fprintf('\n  Summing %d per-beam total dose(s) (CT label x beam)...\n', numel(beam_keys));
+    parfor (g = 1:numel(beam_keys), numWorkers)
+        sumOneBeam(file_paths(group_idx == g), beam_keys{g}, processed_dir, config);
+    end
+end
+
 %% ======================== CREATE PER-CBCT RESAMPLED STRUCTS ========================
 
 CBCT1_resampled = struct();
@@ -893,6 +922,7 @@ function [status, expected_outputs] = detectProcessedOutputs(processed_dir, rd_f
     status.ct3_total_done  = false;
     status.metadata_done   = false;
     status.num_fields_done = 0;
+    status.beam_totals_done = false;
 
     n = numel(rd_files);
     expected_outputs = cell(n, 1);
@@ -909,11 +939,28 @@ function [status, expected_outputs] = detectProcessedOutputs(processed_dir, rd_f
     status.ct3_total_done = isfile(fullfile(processed_dir, 'total_dose_CT_3.mat'));
     status.metadata_done  = isfile(fullfile(processed_dir, 'metadata.mat'));
 
+    % Expected per-beam totals: one total_dose_<CT>_B<n>.mat per CT/beam pair
+    beam_total_names = {};
     for i = 1:n
         out_path = buildFieldOutputPath(processed_dir, rd_files(i).name, patient_id, session);
         expected_outputs{i} = out_path;
         if ~isempty(out_path) && isfile(out_path)
             status.num_fields_done = status.num_fields_done + 1;
+        end
+
+        ct_beam = regexp(rd_files(i).name, '_(CT_\d+)_B(\d+)_\d+\.(?:dcm|mat)$', ...
+            'tokens', 'once', 'ignorecase');
+        if ~isempty(ct_beam)
+            beam_total_names{end+1} = sprintf('total_dose_%s_B%d.mat', ...
+                ct_beam{1}, str2double(ct_beam{2})); %#ok<AGROW>
+        end
+    end
+
+    beam_total_names = unique(beam_total_names);
+    status.beam_totals_done = ~isempty(beam_total_names);
+    for k = 1:numel(beam_total_names)
+        if ~isfile(fullfile(processed_dir, beam_total_names{k}))
+            status.beam_totals_done = false;
         end
     end
 end
@@ -2164,13 +2211,14 @@ function [summary, dose, ct_label, didSave] = processOneField(i, num_files, ...
                 else
                     dose = cfd.dose_Gy;
                 end
-                if isfield(cfd, 'ct_label')
-                    ct_label = cfd.ct_label;
-                end
+            end
+            if isfield(cfd, 'ct_label')
+                ct_label = cfd.ct_label;
             end
 
             summary = struct( ...
                 'filepath',     cached_out, ...
+                'ct_label',     ct_label, ...
                 'beam_num',     cfd.beam_num, ...
                 'seg_num',      cfd.seg_num, ...
                 'field_num',    cfd.field_num, ...
@@ -2335,6 +2383,7 @@ function [summary, dose, ct_label, didSave] = processOneField(i, num_files, ...
         % Lightweight summary for field_doses{i} (no dose array, for memory)
         summary = struct();
         summary.filepath = field_filepath;
+        summary.ct_label = ct_label;
         summary.beam_num = beam_num;
         summary.seg_num = seg_num;
         summary.field_num = field_num;
@@ -2356,4 +2405,41 @@ function [summary, dose, ct_label, didSave] = processOneField(i, num_files, ...
         dose     = [];
         didSave  = false;
     end
+end
+
+
+function sumOneBeam(file_paths, beam_key, processed_dir, config)
+%SUMONEBEAM Sum one beam's field doses on one CBCT and save the total.
+%
+%   beam_key is '<ct_label>_B<beam_num>' (e.g. 'CT_1_B6'); the output is
+%   processed/total_dose_<beam_key>.mat. Field doses were already masked
+%   with their own CBCT's invalid-dose mask, so the sum needs no masking.
+%   Lives in its own function because parfor bodies cannot call save.
+
+    out_path = fullfile(processed_dir, sprintf('total_dose_%s.mat', beam_key));
+    if config.skip_completed && isfile(out_path)
+        return;
+    end
+
+    beam_total = 0;   % becomes a 3D array on the first addition
+    for k = 1:numel(file_paths)
+        s  = load(file_paths{k}, 'field_dose');
+        fd = s.field_dose;
+        if isfield(fd, 'is_sparse') && fd.is_sparse
+            beam_total = beam_total + reshape(full(fd.dose_Gy), fd.dose_dims);
+        else
+            beam_total = beam_total + fd.dose_Gy;
+        end
+    end
+    num_segments = numel(file_paths);
+
+    if config.use_sparse_storage
+        beam_total_dims   = size(beam_total);
+        beam_total_sparse = sparse(reshape(beam_total, [], beam_total_dims(end)));
+        save(out_path, 'beam_total_sparse', 'beam_total_dims', 'num_segments', '-v7.3');
+    else
+        save(out_path, 'beam_total', 'num_segments', '-v7.3');
+    end
+    fprintf('    Saved: total_dose_%s.mat (%d segments, max: %.4f Gy)\n', ...
+        beam_key, num_segments, max(beam_total(:)));
 end

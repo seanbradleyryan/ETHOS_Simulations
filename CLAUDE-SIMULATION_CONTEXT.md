@@ -54,6 +54,21 @@ HU thresholds in a driver.
 | `'full_plane_lateral'` | Full XZ plane at `sensor_y_index` |
 | `'spherical'` | Spherical shell inscribed in the grid. Dose (p0) outside the sphere is zeroed — it is unobservable by this geometry, so the corners are discarded rather than reconstructed. Handled in `run_single_field_simulation.m`. |
 
+## Reconstruction Methods (`reconstruction_method`)
+
+Set in `pipeline_simulate.m` (default from `get_default_config`); handled in `run_single_field_simulation.m`.
+
+| Value | Description |
+|-------|-------------|
+| `'tr'` | Iterative time reversal (Dirichlet source), `num_time_reversal_iter` iterations, × `correction_factor` |
+| `'das'` | Delay-and-sum (`das_reconstruct`), × `correction_factor` |
+| `'ubp'` | Universal back-projection (`ubp3d`), × `correction_factor` |
+| `'adjoint'` | Arridge et al. 2016 gradient descent: additive-source k-Wave adjoint (Appendix B source), exact line search for the step, positivity. `adjoint_num_iter` iterations (default 5, early stop on `convergence_tol`), up to 3 k-Wave runs each. **No** `correction_factor` (already a least-squares fit in Pa) |
+
+- **Adjoint sensor model:** modelled data get the same frequency response as the measured data (`gaussianFilter` band-limit + net pulse/Wiener gain `|H|²/(|H|²+λ)`), and both modelled and measured data are element-averaged (`apply_element_averaging`, passthrough without an element map). Both operators are self-adjoint, so the adjoint run is the true adjoint of the measurement model. Blind recon runs on `kmedium_rec`, as TR does.
+- **Hash:** `adjoint_num_iter` enters the config hash only when the method is `'adjoint'`.
+- **Noise floor:** `noise_ensemble_error_bars` has its own recon copy that supports only `'tr'`/`'das'`; with `'ubp'`/`'adjoint'` Step 2.5 warns and omits `.noise_floor`.
+
 ## Gotchas
 
 - **Slice alignment streaking:** Misaligned CT/dose grids cause horizontal streaking artifacts in body masks. Always verify grid alignment after resampling.

@@ -43,6 +43,8 @@ TIMING.script_start_tic      = tic;          % master start-to-finish stopwatch
 TIMING.all_field_sim_times_sec = [];         % elapsed of every single-field sim
 TIMING.step25_time_sec       = 0;            % running total across sessions
 TIMING.avg_field_sim_sec     = NaN;          % running mean of all_field_sim_times_sec (for ETA)
+TIMING.all_seg_gamma_times_sec = [];         % Step 2.5 gamma seconds of every segment computed
+TIMING.all_seg_ssim_times_sec  = [];         % Step 2.5 SSIM seconds of every segment computed
 % =========================================================================
 
 % Put the utils folder (get_default_config, calibrate_noise_amp, the engine
@@ -62,8 +64,10 @@ addpath(genpath(fullfile(this_script_dir, 'utils')));
 % Inherited unchanged from get_default_config: working_dir, gruneisen_method,
 % dose_per_pulse_cGy, pml_size, cfl_number, Nt_scaling, use_gpu,
 % sensor_placement_method, convolution_kernel / conv_noise_level /
-% conv_deconv_lambda, and tissue_tables (built from the standalone
-% define_tissue_tables.m, identical to this file's local copy).
+% conv_deconv_lambda, tissue_tables (built from the standalone
+% define_tissue_tables.m, identical to this file's local copy), and
+% reconstruction_mode ('segment' = one sim per segment; 'beam' = one sim per
+% beam per CT on the beam's summed dose from pipeline_compress).
 CONFIG = get_default_config();
 
 % --- Patient and Session Selection ---
@@ -73,6 +77,20 @@ CONFIG.treatment_site  = 'Pancreas';
 
 % working_dir is inherited from get_default_config (the git repo root).
 
+% --- Reconstruction Method ---
+%   'tr'      : iterative time reversal (num_time_reversal_iter iterations)
+%   'das'     : delay-and-sum
+%   'ubp'     : universal back-projection
+%   'adjoint' : Arridge et al. 2016 gradient descent with the k-Wave adjoint.
+%               Fits the measured data through the same sensor model
+%               (frequency response, pulse deconvolution, element averaging).
+%               Up to 3 k-Wave runs per iteration; correction_factor is not
+%               applied (the result is already a least-squares fit in Pa).
+% Both are in the config hash (adjoint_num_iter only when 'adjoint').
+% NOTE: the Step 2.5 noise-only floor (noise_ensemble_error_bars) only knows
+% 'tr' / 'das'; with 'ubp' or 'adjoint' it warns and the summary omits it.
+CONFIG.reconstruction_method = 'tr';
+CONFIG.adjoint_num_iter      = 5;
 
 % --- Blind-Geometry Reconstruction (CT_3 / adapted fields) ---
 % When true, every CT_3 (adapted) beam/segment field is FORWARD-propagated on
@@ -163,7 +181,20 @@ fprintf('=========================================================\n');
 fprintf('  Started: %s\n', datetime('now'));
 fprintf('  Working directory: %s\n', CONFIG.working_dir);
 fprintf('  Gruneisen method: %s\n', CONFIG.gruneisen_method);
+fprintf('  Reconstruction mode: %s\n', CONFIG.reconstruction_mode);
+fprintf('  Reconstruction method: %s\n', CONFIG.reconstruction_method);
 fprintf('=========================================================\n\n');
+
+if ~ismember(CONFIG.reconstruction_mode, {'segment', 'beam'})
+    error('pipeline_simulate:BadReconstructionMode', ...
+        'CONFIG.reconstruction_mode must be ''segment'' or ''beam'' (got ''%s'').', ...
+        CONFIG.reconstruction_mode);
+end
+if ~ismember(lower(CONFIG.reconstruction_method), {'tr', 'das', 'ubp', 'adjoint'})
+    error('pipeline_simulate:BadReconstructionMethod', ...
+        'CONFIG.reconstruction_method must be ''tr'', ''das'', ''ubp'' or ''adjoint'' (got ''%s'').', ...
+        CONFIG.reconstruction_method);
+end
 
 % Add required paths
 addpath(genpath(fullfile(CONFIG.working_dir, 'PipelineScripts')));
@@ -260,6 +291,15 @@ for p_idx = 1:length(CONFIG.patients)
             [field_index, dose_metadata] = ...
                 list_processed_field_doses(patient_id, session, CONFIG);
 
+            % Beam mode: replace the per-segment index with one entry per
+            % (CT label, beam). Everything below (claims, manifest, total
+            % assembly) then runs on beams instead of segments.
+            if strcmp(CONFIG.reconstruction_mode, 'beam')
+                field_index = list_beam_doses(field_index, patient_id, session, CONFIG);
+                fprintf('           Beam mode: %d beam dose(s) (CT label x beam).\n', ...
+                    numel(field_index));
+            end
+
             % Load the per-dose CBCT geometries (CT_1 / CT_3). Each field's
             % simulation uses the CBCT the dose was actually computed on
             % (field_dose.ct_label) 
@@ -296,15 +336,10 @@ for p_idx = 1:length(CONFIG.patients)
             % full access, CT_3 blind on CT_1) with the plan sensor mask saved
             % above, then runs the four Step 2.5 comparisons on the totals.
             % Skips itself when its outputs for CONFIG_HASH are already on disk.
-            % ANALYSIS TODO: compare the step205 output (full_field_dose_CT_*_<hash>.mat)
-            % with the output of all the per-field simulations (their sum,
-            % total_recon_dose_<hash>.mat): one whole-plan simulation vs the sum
-            % of the field simulations.
+            % Step 2.5 compares this output (full_field_dose_CT_*_<hash>.mat) with
+            % the per-CT sum of the field recons (results.full_vs_sum).
             if CONFIG.run_step205
                 fprintf('\n[STEP 2.05] Running full-field (total RS dose) simulation...\n');
-                fprintf(['           NOTE: in the analysis, compare this output with the ' ...
-                         'output of all the field simulations (total_recon_dose_%s.mat).\n'], ...
-                    CONFIG_HASH);
                 step205_config             = CONFIG;
                 step205_config.config_hash = CONFIG_HASH;
                 step205_results = step205_run_full_field_simulation(patient_id, session, step205_config);
@@ -443,7 +478,11 @@ for p_idx = 1:length(CONFIG.patients)
                         % the claim so a corrupt file neither orphans the lock nor
                         % aborts the patient.
                         try
-                            fd = load_field_dose_file(meta.file);
+                            if strcmp(CONFIG.reconstruction_mode, 'beam')
+                                fd = load_beam_dose_file(meta);
+                            else
+                                fd = load_field_dose_file(meta.file);
+                            end
                         catch loadME
                             send(progress_queue, struct('kind','fail','field_idx',fi,'gantry',NaN,'message',loadME.message));
                             if isfile(status_path), delete(status_path);   end
@@ -529,7 +568,11 @@ for p_idx = 1:length(CONFIG.patients)
                         % Release the claim on a load failure so a corrupt file
                         % neither orphans the lock nor aborts the patient.
                         try
-                            fd = load_field_dose_file(meta.file);
+                            if strcmp(CONFIG.reconstruction_mode, 'beam')
+                                fd = load_beam_dose_file(meta);
+                            else
+                                fd = load_field_dose_file(meta.file);
+                            end
                         catch loadME
                             fprintf('           Field %d/%d load failed (%s); releasing claim.\n', ...
                                 f, num_pending, loadME.message);
@@ -643,6 +686,11 @@ for p_idx = 1:length(CONFIG.patients)
                 TIMING.step25_time_sec = TIMING.step25_time_sec + step25_elapsed;
                 fprintf('           [TIMING] Step 2.5 took %.1f s (%.1f min)\n', ...
                     step25_elapsed, step25_elapsed / 60);
+                % Collect the per-segment gamma / SSIM times (running over sessions).
+                TIMING.all_seg_gamma_times_sec = [TIMING.all_seg_gamma_times_sec, ...
+                    metrics_summary.timing.gamma_sec_per_segment];
+                TIMING.all_seg_ssim_times_sec  = [TIMING.all_seg_ssim_times_sec, ...
+                    metrics_summary.timing.ssim_sec_per_segment];
                 % --- end TIMING ---
                 RESULTS.patients.(result_key).segment_metrics_summary = metrics_summary;
                 log_msg(log_fid, ['Step 2.5 complete: %d beam(s), %d segment(s) ' ...
@@ -711,6 +759,11 @@ TIMING.total_wall_sec      = toc(TIMING.script_start_tic);   % start -> finish
 TIMING.num_field_sims      = numel(TIMING.all_field_sim_times_sec);
 TIMING.total_field_sim_sec = sum(TIMING.all_field_sim_times_sec);
 % TIMING.avg_field_sim_sec is already the running mean (NaN if all cached).
+TIMING.num_seg_metrics     = numel(TIMING.all_seg_gamma_times_sec);
+TIMING.total_seg_gamma_sec = sum(TIMING.all_seg_gamma_times_sec);
+TIMING.total_seg_ssim_sec  = sum(TIMING.all_seg_ssim_times_sec);
+TIMING.avg_seg_gamma_sec   = mean(TIMING.all_seg_gamma_times_sec);   % NaN if none computed
+TIMING.avg_seg_ssim_sec    = mean(TIMING.all_seg_ssim_times_sec);
 
 fprintf('\n--- Timing Report ---\n');
 fprintf('  Total wall time (start -> finish): %.1f s (%.2f min)\n', ...
@@ -726,6 +779,13 @@ else
 end
 fprintf('  Step 2.5 time: %.1f s (%.2f min)\n', ...
     TIMING.step25_time_sec, TIMING.step25_time_sec / 60);
+fprintf('  Step 2.5 segments computed this run: %d\n', TIMING.num_seg_metrics);
+if TIMING.num_seg_metrics > 0
+    fprintf('  Step 2.5 gamma: %.1f s total, %.1f s/segment avg\n', ...
+        TIMING.total_seg_gamma_sec, TIMING.avg_seg_gamma_sec);
+    fprintf('  Step 2.5 SSIM:  %.1f s total, %.1f s/segment avg\n', ...
+        TIMING.total_seg_ssim_sec, TIMING.avg_seg_ssim_sec);
+end
 fprintf('---------------------\n');
 
 % Fold the timing into RESULTS so it is saved inside the main .mat too.
@@ -752,7 +812,10 @@ fprintf('\n=========================================================\n\n');
 % Check every finished session's outputs and save debug plots to
 % SimulationResults/<id>/<session>/<method>/simulation_debug/. Runs after
 % RESULTS is saved, so a crash here can never lose the simulation results.
-if CONFIG.run_verify
+% verify_pipeline_simulate checks per-segment outputs, so it is skipped in beam mode.
+if CONFIG.run_verify && strcmp(CONFIG.reconstruction_mode, 'beam')
+    fprintf('[VERIFY] Skipped: verification checks per-segment outputs (reconstruction_mode = beam).\n');
+elseif CONFIG.run_verify
     for p_idx = 1:length(CONFIG.patients)
         for s_idx = 1:length(CONFIG.sessions)
             patient_id = CONFIG.patients{p_idx};
@@ -893,6 +956,64 @@ function cbct_by_label = load_cbct_resampled(patient_id, session, config)
         cbct_by_label.(lbl) = cbct;
         fprintf('           Loaded CBCT geometry %s from %s\n', lbl, specs{k, 1});
     end
+end
+
+function beam_index = list_beam_doses(field_index, patient_id, session, config)
+    % Beam mode: one entry per (CT label, beam) instead of one per segment.
+    % .file points at the beam's summed dose total_dose_<CT>_B<n>.mat (written
+    % by pipeline_compress / Step 1.5); .segment_file is one of the beam's
+    % segment files, which supplies the beam metadata. Same fields as
+    % field_index, so recon/lock/status names come out as
+    % total_dose_<CT>_B<n>_recon_<hash>.mat etc.
+    processed_dir = fullfile(config.working_dir, 'RayStationFiles', ...
+        patient_id, session, 'processed');
+
+    beam_keys = cell(1, numel(field_index));
+    for i = 1:numel(field_index)
+        ct = regexp(field_index(i).source_mat_filename, '_(CT_\d+)_B\d+_\d+\.mat$', ...
+            'tokens', 'once');
+        if isempty(ct)
+            error('pipeline_simulate:NoCtLabel', ...
+                'Beam mode needs a CT label in every dose filename: %s', ...
+                field_index(i).source_mat_filename);
+        end
+        beam_keys{i} = sprintf('%s_B%d', ct{1}, field_index(i).beam_index);
+    end
+    [unique_keys, first_idx] = unique(beam_keys, 'stable');
+
+    beam_index = struct('file', {}, 'source_mat_filename', {}, 'beam_index', {}, ...
+        'segment', {}, 'gantry_angle', {}, 'segment_file', {});
+    for k = 1:numel(unique_keys)
+        name  = sprintf('total_dose_%s.mat', unique_keys{k});
+        fpath = fullfile(processed_dir, name);
+        if ~isfile(fpath)
+            error('pipeline_simulate:NoBeamTotal', ...
+                'Beam total not found: %s\nRe-run pipeline_compress (Step 1.5) to write the per-beam totals.', ...
+                fpath);
+        end
+        seg = field_index(first_idx(k));
+        beam_index(k).file                = fpath;
+        beam_index(k).source_mat_filename = name;
+        beam_index(k).beam_index          = seg.beam_index;
+        beam_index(k).segment             = NaN;
+        beam_index(k).gantry_angle        = seg.gantry_angle;
+        beam_index(k).segment_file        = seg.file;
+    end
+end
+
+function fd = load_beam_dose_file(meta)
+    % Beam-mode field_dose: metadata from one segment of the beam, dose replaced
+    % by the beam's summed dose. Gantry, CT label and grid are the same for
+    % every segment of a beam, and step15 stores the RTPLAN *beam* meterset on
+    % every segment, so the segment's meterset is already the beam's MU.
+    fd = load_field_dose_file(meta.segment_file);
+    S  = load(meta.file);
+    if isfield(S, 'beam_total_sparse')
+        fd.dose_Gy = reshape(full(S.beam_total_sparse), S.beam_total_dims);
+    else
+        fd.dose_Gy = S.beam_total;
+    end
+    fd.source_mat_filename = meta.source_mat_filename;
 end
 
 function [cbct, medium] = select_cbct_for_field(field_dose, cbct_by_label, medium_by_label)
@@ -1619,6 +1740,13 @@ function write_timing_report(timing, config)
     end
     fprintf(fid, 'Step 2.5 time                   : %.1f s (%.2f min)\n', ...
         timing.step25_time_sec, timing.step25_time_sec / 60);
+    fprintf(fid, 'Step 2.5 segments computed      : %d\n', timing.num_seg_metrics);
+    if timing.num_seg_metrics > 0
+        fprintf(fid, 'Step 2.5 gamma (total / avg)    : %.1f s / %.1f s per segment\n', ...
+            timing.total_seg_gamma_sec, timing.avg_seg_gamma_sec);
+        fprintf(fid, 'Step 2.5 SSIM  (total / avg)    : %.1f s / %.1f s per segment\n', ...
+            timing.total_seg_ssim_sec, timing.avg_seg_ssim_sec);
+    end
     fclose(fid);
     fprintf('  Timing report saved: %s\n', out_path);
 end

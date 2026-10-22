@@ -46,6 +46,10 @@ function results = step3_analysis(patient_id, session, config)
 %           .analysis_plot_results    - save figures (default true)
 %           .analysis_n_random        - random segment panels (default 5)
 %           .analysis_random_seed     - default 42
+%           .reconstruction_mode      - 'segment' (default) | 'beam'. In beam
+%                                       mode each beam is one "segment" (seg 0):
+%                                       SNR and random panels read the beam
+%                                       recons total_dose_<CT>_B<n>_recon_<hash>.mat
 %
 %   OUTPUTS:
 %       results - Struct:
@@ -121,10 +125,12 @@ if ~isfield(config, 'analysis_noise_floor_pct'), config.analysis_noise_floor_pct
 if ~isfield(config, 'analysis_plot_results'),    config.analysis_plot_results = true; end
 if ~isfield(config, 'analysis_n_random'),        config.analysis_n_random = 5; end
 if ~isfield(config, 'analysis_random_seed'),     config.analysis_random_seed = 42; end
+if ~isfield(config, 'reconstruction_mode'),      config.reconstruction_mode = 'segment'; end
 
-ct1_str = sprintf('CT_%d', min(config.metrics_ct_pair));
-ct3_str = sprintf('CT_%d', max(config.metrics_ct_pair));
-crit    = config.gamma_dose_pct;
+ct1_str   = sprintf('CT_%d', min(config.metrics_ct_pair));
+ct3_str   = sprintf('CT_%d', max(config.metrics_ct_pair));
+crit      = config.gamma_dose_pct;
+beam_mode = strcmp(config.reconstruction_mode, 'beam');
 
 %% ======================== CONSOLE LOG ========================
 % The results folder depends on the resolved hash, so the log starts in the
@@ -291,7 +297,7 @@ end
 
 %% ======================== PART B: SNR ========================
 
-snr = gather_snr(sim_dir, hash8, config.metrics_plan_type, ct1_str, beam_list, n_seg);
+snr = gather_snr(sim_dir, hash8, config.metrics_plan_type, ct1_str, beam_list, n_seg, beam_mode);
 fprintf('\n==================== BEAM SNR (mean +/- SE over fields) ====================\n');
 for n = 1:nB + 1
     fprintf('  beam %-4s  SNR %7.2f +/- %6.2f  (%d field(s))\n', x_labels{n}, ...
@@ -831,11 +837,13 @@ function rk = rank_average(x, y)
 end
 
 
-function snr = gather_snr(sim_dir, hash8, plan_type, ct1_str, beam_list, n_seg)
+function snr = gather_snr(sim_dir, hash8, plan_type, ct1_str, beam_list, n_seg, beam_mode)
 % noise_stats.snr from each recon file (header + small variable only).
 %   .mean/.se/.n : per beam over all its fields (both CTs), last row pooled
 %   .seg_ct1     : {beam} per-segment CT_1 SNR, sorted by segment, aligned
 %                  to the Step 2.5 rows (NaN column when counts disagree)
+% Beam mode reads the beam recons (total_dose_<CT>_B<n>_recon_<hash>.mat), one
+% "segment" (0) per beam; they carry no plan type, so plan_type is not applied.
     nB       = numel(beam_list);
     all_vals = cell(1, nB);
     ct1_seg  = cell(1, nB);
@@ -845,11 +853,18 @@ function snr = gather_snr(sim_dir, hash8, plan_type, ct1_str, beam_list, n_seg)
     listing = dir(fullfile(sim_dir, sprintf('*_recon_%s.mat', hash8)));
     for k = 1:numel(listing)
         name = listing(k).name;
-        tok  = regexp(name, '_B(\d+)_(\d+)_recon_', 'tokens', 'once');
-        if isempty(tok), continue; end
+        if beam_mode
+            tok = regexp(name, '^total_dose_CT_\d+_B(\d+)_recon_', 'tokens', 'once');
+            if isempty(tok), continue; end
+            seg = 0;
+        else
+            tok = regexp(name, '_B(\d+)_(\d+)_recon_', 'tokens', 'once');
+            if isempty(tok), continue; end
+            seg = str2double(tok{2});
+        end
         slot = find(beam_list == str2double(tok{1}), 1);
         if isempty(slot), continue; end
-        if ~strcmpi(plan_type, 'any')
+        if ~beam_mode && ~strcmpi(plan_type, 'any')
             ptok = regexp(name, '_(adapted|reference)_', 'tokens', 'once');
             if isempty(ptok) || ~strcmpi(ptok{1}, plan_type), continue; end
         end
@@ -868,7 +883,7 @@ function snr = gather_snr(sim_dir, hash8, plan_type, ct1_str, beam_list, n_seg)
         end
         % Step 2.5 rows = CT_1 recon files carrying a segment_metrics fold.
         if ~isempty(regexp(name, ct_pat, 'once')) && ismember('segment_metrics', vars)
-            ct1_seg{slot}(end + 1) = str2double(tok{2});
+            ct1_seg{slot}(end + 1) = seg;
             ct1_val{slot}(end + 1) = s;
         end
     end
@@ -1070,6 +1085,7 @@ function picks = select_random_segments(patient_id, session, config, beam_list, 
 % Seeded random segments. For each: axial slice (reference max dose) of
 % truth CT_1, recon CT_1 / CT_3, and the Step 2.5 folded gamma + SSIM maps
 % for truth1_vs_recon1 and truth1_vs_recon3. Loads one beam at a time.
+% Beam mode loads the beam totals + beam recons instead (one pick per beam, seg 0).
     picks = struct('beam', {}, 'seg', {}, 'iz', {}, 'scores', {}, 'rows', {});
     rng(config.analysis_random_seed);
     beam_order = beam_list(randperm(numel(beam_list)));
@@ -1083,7 +1099,11 @@ function picks = select_random_segments(patient_id, session, config, beam_list, 
             args = [args, {'PlanType', config.metrics_plan_type}]; %#ok<AGROW>
         end
         try
-            S = load_recon_dose_data(patient_id, session, config, args{:});
+            if strcmp(config.reconstruction_mode, 'beam')
+                S = load_beam_total_set(patient_id, session, config, b, ct1_str, ct3_str);
+            else
+                S = load_recon_dose_data(patient_id, session, config, args{:});
+            end
         catch ME
             warning('step3_analysis:RandomSkipBeam', 'Random panels: beam #%d skipped: %s', b, ME.message);
             continue;

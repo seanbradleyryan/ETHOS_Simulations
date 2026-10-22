@@ -14,7 +14,9 @@
 %
 %  STEPS EXECUTED:
 %    Step 1.4  Convert RayStation NPZ field doses to .mat
-%    Step 1.5  Process field doses and resample SCT to dose grid
+%    Step 1.5  Process field doses and resample SCT to dose grid;
+%              saves total_rs_dose.mat, total_dose_CT_*.mat and
+%              per-beam totals total_dose_CT_*_B[n].mat
 %
 %  PREREQUISITES:
 %    - MATLAB R2022a or later
@@ -159,9 +161,18 @@ for p_idx = 1:length(CONFIG.patients)
                 RESULTS.patients.(result_key).dose_grid_size    = dose_metadata.dimensions;
                 RESULTS.patients.(result_key).total_rs_dose_max = max(total_rs_dose(:));
 
+                % Confirm the total RS dose and per-beam totals are on disk
+                if ~isfile(fullfile(processed_dir, 'total_rs_dose.mat'))
+                    error('pipeline_compress:MissingTotal', ...
+                        'total_rs_dose.mat was not saved in %s', processed_dir);
+                end
+                num_beam_totals = numel(dir(fullfile(processed_dir, 'total_dose_CT_*_B*.mat')));
+                RESULTS.patients.(result_key).num_beam_totals = num_beam_totals;
+
                 fprintf('[STEP 1.5] Complete. %d fields processed.\n', num_valid);
                 fprintf('           Dose grid: [%d x %d x %d]\n', dose_metadata.dimensions);
                 fprintf('           Max RS dose: %.4f Gy\n', max(total_rs_dose(:)));
+                fprintf('           Saved: total_rs_dose.mat + %d per-beam total(s)\n', num_beam_totals);
             else
                 fprintf('\n[STEP 1.5] Skipped (CONFIG.run_step15 = false).\n');
             end
@@ -256,6 +267,7 @@ function report_processed_status(processed_dir, rs_dir, skip_completed)
 
     field_outs = dir(fullfile(processed_dir, 'dose_*.mat'));
     n_field_out = numel(field_outs);
+    n_beam_totals = numel(dir(fullfile(processed_dir, 'total_dose_CT_*_B*.mat')));
 
     % NPZ vs converted .mat counts in rs_dir (Step 1.4 progress)
     npz_files  = dir(fullfile(rs_dir, 'dose_*.npz'));
@@ -271,6 +283,7 @@ function report_processed_status(processed_dir, rs_dir, skip_completed)
     fprintf('         total_dose_CT_3.mat:     %s\n', present(ct3_total));
     fprintf('         metadata.mat:            %s\n', present(meta));
     fprintf('         Per-field dose .mat:     %d in processed/\n', n_field_out);
+    fprintf('         Per-beam totals:         %d in processed/\n', n_beam_totals);
 end
 
 function s = present(tf)
@@ -290,6 +303,9 @@ function generate_compress_summary(results)
             end
             if isfield(p, 'total_rs_dose_max')
                 fprintf('  Max RS dose: %.4f Gy\n', p.total_rs_dose_max);
+            end
+            if isfield(p, 'num_beam_totals')
+                fprintf('  Per-beam totals saved: %d\n', p.num_beam_totals);
             end
         elseif strcmp(p.status, 'error')
             fprintf('  Error: %s\n', p.error.message);

@@ -38,6 +38,13 @@ function results = step25_segment_metrics(patient_id, session, config)
 %   can be re-expanded on demand without keeping hundreds of GB of dense volumes.
 %   Nothing is written to the CT_3 recon file. See the context .md files.
 %
+%   BEAM MODE (config.reconstruction_mode = 'beam'): Step 2 simulated each beam's
+%   summed dose instead of each segment, so each beam is treated as ONE
+%   "segment" (seg_num 0 = the whole beam): truths are the beam totals
+%   total_dose_<CT>_B<n>.mat, recons are total_dose_<CT>_B<n>_recon_<hash>.mat,
+%   and the metrics fold into the CT_1 beam recon. metrics_plan_type is not
+%   applied (the beam totals sum every segment on that CT).
+%
 %   RESUMABLE: a segment whose CT_1 recon file already carries 'segment_metrics'
 %   is skipped (its stored scalars are still folded into the summary), so the
 %   step can be re-run piecewise as more fields finish, just like the sim.
@@ -56,6 +63,9 @@ function results = step25_segment_metrics(patient_id, session, config)
 %           .metrics_ct_pair       [1 3]  The two CT indices (lo->CT1, hi->CT3).
 %           .metrics_normalize     [true] Least-squares recon->own-truth gain.
 %           .metrics_beams         []     Beams to process ([] => all on disk).
+%           .reconstruction_mode   ['segment'] 'segment' | 'beam'. Beam mode
+%                                  also needs .gruneisen_method and either
+%                                  .config_hash or the full sim CONFIG.
 %           .metrics_overwrite     [false] Recompute even if already folded in.
 %           .metrics_write_summary [true] Write the per-beam rollup .mat.
 %           .metrics_noise_floor   [true] Compute the noise-only null pass rate
@@ -80,9 +90,14 @@ function results = step25_segment_metrics(patient_id, session, config)
 %                 built from -- no figures are produced here. A plotting script
 %                 draws `.noise_floor.mean_pass_rate` as the horizontal null line
 %                 and the differential (truth1_vs_recon1 pass) - (noise mean).
+%                 `.full_vs_sum` (per CT): gamma %, SSIM %, sum ratio of the
+%                 summed field recons vs the Step 2.05 full-field recon.
+%                 `.timing` holds the gamma and SSIM seconds of every segment
+%                 computed this run (worker time), plus their averages/totals.
 %
 %   DEPENDENCIES:
-%       - CalcGamma.m, compute_local_ssim.m (utils), load_recon_dose_data.m
+%       - CalcGamma.m, compute_local_ssim.m (utils), load_recon_dose_data.m,
+%         load_beam_total_set.m (beam mode)
 %       - noise_ensemble_error_bars.m (utils) for the noise-only null floor.
 %       - Pipeline outputs from pipeline_simulate (per-field recon files).
 %
@@ -113,6 +128,7 @@ function results = step25_segment_metrics(patient_id, session, config)
     config = default_field(config, 'metrics_ct_pair',       [1, 3]);
     config = default_field(config, 'metrics_normalize',     true);
     config = default_field(config, 'metrics_beams',         []);
+    config = default_field(config, 'reconstruction_mode',   'segment');
     config = default_field(config, 'metrics_overwrite',     false);
     config = default_field(config, 'metrics_write_summary', true);
     config = default_field(config, 'metrics_noise_floor',   true);
@@ -147,7 +163,8 @@ function results = step25_segment_metrics(patient_id, session, config)
 
     fprintf('\n=========================================================\n');
     fprintf('  [STEP 2.5] Per-Segment Gamma + SSIM Metrics\n');
-    fprintf('  Patient %s | %s | plan=%s\n', patient_id, session, config.metrics_plan_type);
+    fprintf('  Patient %s | %s | plan=%s | mode=%s\n', patient_id, session, ...
+        config.metrics_plan_type, config.reconstruction_mode);
     fprintf('  Gamma: %.1f%%/%.1f mm (cutoff %.1f%% of ref max) | normalize=%d\n', ...
         dose_pct, dist_mm, config.gamma_dose_cutoff_pct, normalize);
     fprintf('=========================================================\n');
@@ -167,6 +184,8 @@ function results = step25_segment_metrics(patient_id, session, config)
 
     % CPU pool for the per-segment gamma/SSIM. Reuse any running pool; the sim's
     % pool is fine (just fewer workers than physical cores).
+    have_pool = false;
+    n_workers = 1;   % used by the time-remaining estimate
     if config.use_parallel
         if config.metrics_auto_workers
             nworkers = detect_num_cores(config.num_parallel_workers);
@@ -174,10 +193,19 @@ function results = step25_segment_metrics(patient_id, session, config)
             nworkers = config.num_parallel_workers;
         end
         ensure_cpu_pool(nworkers);
+        if exist('gcp', 'file') == 2 && ~isempty(gcp('nocreate'))
+            have_pool = true;
+            pool      = gcp('nocreate');
+            n_workers = pool.NumWorkers;
+        end
     end
 
     %% ======================== PER-BEAM PROCESSING ========================
     run_timer = tic;
+    % TIMING: gamma / SSIM seconds of every segment computed this run (same
+    % running-average ETA as Step 2's per-field sims in pipeline_simulate).
+    all_gamma_sec   = zeros(1, 0);
+    all_ssim_sec    = zeros(1, 0);
     beam_list       = nan(1, nBeams);
     n_segments      = zeros(1, nBeams);
     seg_gamma_pass  = cell(1, nBeams);   % {beam} = [nSeg x nComp] gamma pass %
@@ -185,13 +213,19 @@ function results = step25_segment_metrics(patient_id, session, config)
     nproc           = 0;
     sim_dir         = '';
     hash8           = '';
+    recon_sum       = struct();          % .CT_1 / .CT_3 summed field recons
+    spacing         = [];
 
     for bi = 1:nBeams
         b = beams(bi);
         fprintf('\n[Beam %d/%d] beam #%d: loading segments...\n', bi, nBeams, b);
 
         try
-            beam_set = load_beam_set(patient_id, session, config, b);
+            if strcmp(config.reconstruction_mode, 'beam')
+                beam_set = load_beam_total_set(patient_id, session, config, b, ct1_str, ct3_str);
+            else
+                beam_set = load_beam_set(patient_id, session, config, b);
+            end
         catch ME
             warning('step25_segment_metrics:SkipBeam', ...
                 'Skipping beam #%d (load failed): %s', b, ME.message);
@@ -203,6 +237,19 @@ function results = step25_segment_metrics(patient_id, session, config)
             hash8   = beam_set.config_hash;
             sim_dir = fullfile(config.working_dir, 'SimulationResults', ...
                 patient_id, session, beam_set.gruneisen_method);
+        end
+
+        % Running per-CT sum of the raw (un-normalized) field recons, compared
+        % below with the Step 2.05 full-field (total RS dose) recon.
+        for k = 1:numel(beam_set.fields)
+            lbl = field_ct_label(beam_set.fields(k));
+            if ~strcmpi(lbl, ct1_str) && ~strcmpi(lbl, ct3_str)
+                continue;
+            end
+            if ~isfield(recon_sum, lbl)
+                recon_sum.(lbl) = zeros(size(beam_set.fields(k).recon_dose));
+            end
+            recon_sum.(lbl) = recon_sum.(lbl) + double(beam_set.fields(k).recon_dose);
         end
 
         spacing  = beam_set.metadata.spacing(:)';
@@ -218,21 +265,45 @@ function results = step25_segment_metrics(patient_id, session, config)
 
         gamma_pass = nan(ns, nComp);
         ssim_mean  = nan(ns, nComp);
+        gamma_sec  = nan(ns, 1);   % NaN = segment not computed here (skipped)
+        ssim_sec   = nan(ns, 1);
         overwrite  = config.metrics_overwrite;
 
-        if config.use_parallel
+        % TIMING: seed the live estimate with this beam's segment count, a guess
+        % for the beams not yet loaded (mean segments/beam so far), the worker
+        % count, and the gamma/SSIM times recorded so far.
+        later_est = round(mean([n_segments(1:nproc), ns]) * (nBeams - bi));
+        report_segment_progress(struct('kind', 'init', 'n_segments', ns, ...
+            'later_est', later_est, 'workers', n_workers, ...
+            'gamma_times', all_gamma_sec, 'ssim_times', all_ssim_sec));
+
+        if have_pool
+            % Workers send one 'done' message per segment; the client prints it.
+            progress_queue = parallel.pool.DataQueue;
+            afterEach(progress_queue, @report_segment_progress);
             parfor si = 1:ns
-                [gamma_pass(si, :), ssim_mean(si, :)] = process_segment( ...
-                    seg_data{si}, comparisons, dose_pct, dist_mm, cutoff_fr, ...
+                S = seg_data{si};
+                [gamma_pass(si, :), ssim_mean(si, :), gamma_sec(si), ssim_sec(si)] = ...
+                    process_segment(S, comparisons, dose_pct, dist_mm, cutoff_fr, ...
                     normalize, hash8, overwrite);
+                send(progress_queue, struct('kind', 'done', 'beam', b, 'seg', S.seg, ...
+                    'gamma_sec', gamma_sec(si), 'ssim_sec', ssim_sec(si)));
             end
         else
             for si = 1:ns
-                [gamma_pass(si, :), ssim_mean(si, :)] = process_segment( ...
-                    seg_data{si}, comparisons, dose_pct, dist_mm, cutoff_fr, ...
+                S = seg_data{si};
+                [gamma_pass(si, :), ssim_mean(si, :), gamma_sec(si), ssim_sec(si)] = ...
+                    process_segment(S, comparisons, dose_pct, dist_mm, cutoff_fr, ...
                     normalize, hash8, overwrite);
+                report_segment_progress(struct('kind', 'done', 'beam', b, 'seg', S.seg, ...
+                    'gamma_sec', gamma_sec(si), 'ssim_sec', ssim_sec(si)));
             end
         end
+
+        % TIMING: keep the times of the segments actually computed.
+        computed      = ~isnan(gamma_sec);
+        all_gamma_sec = [all_gamma_sec, gamma_sec(computed)']; %#ok<AGROW>
+        all_ssim_sec  = [all_ssim_sec,  ssim_sec(computed)'];  %#ok<AGROW>
 
         nproc = nproc + 1;
         beam_list(nproc)      = b;
@@ -280,12 +351,61 @@ function results = step25_segment_metrics(patient_id, session, config)
         end
     end
 
+    %% ============ FULL-FIELD RECON vs SUM OF FIELD RECONS ============
+    % Step 2.05 simulates each CT's total RS dose in one k-Wave run. Linearity
+    % says that should equal the sum of the per-field recons. Reference = the
+    % full-field recon; target = the summed recon (both raw, no gain).
+    fprintf('\n[STEP 2.5] Comparing full-field recon with summed field recons...\n');
+    full_vs_sum = struct('ct_label', {}, 'gamma_pass_rate', {}, 'ssim_mean', {}, ...
+        'sum_ratio', {}, 'max_full_Gy', {}, 'max_sum_Gy', {});
+    ct_labels = {ct1_str, ct3_str};
+    for k = 1:2
+        lbl       = ct_labels{k};
+        full_file = fullfile(sim_dir, sprintf('full_field_dose_%s_%s.mat', lbl, hash8));
+        if ~isfile(full_file) || ~isfield(recon_sum, lbl)
+            fprintf('  %s: skipped (no full-field recon or no field recons).\n', lbl);
+            continue;
+        end
+        L    = load(full_file, 'recon_dose');
+        ref  = double(L.recon_dose);
+        tgt  = recon_sum.(lbl);
+        if ~isequal(size(ref), size(tgt))
+            warning('step25_segment_metrics:FullFieldGrid', ...
+                '%s: full-field and summed recon grids differ; skipping.', lbl);
+            continue;
+        end
+        mask = ref >= cutoff_fr * max(ref(:));
+
+        gmap = quiet_gamma_map(ref, tgt, dose_pct, dist_mm, spacing);
+        g_pass = NaN;
+        if ~isempty(gmap)
+            g_pass = 100 * mean(gmap(mask) <= 1);
+        end
+        [~, s_frac] = compute_local_ssim(ref, tgt, mask);
+
+        full_vs_sum(end+1) = struct('ct_label', lbl, 'gamma_pass_rate', g_pass, ...
+            'ssim_mean', 100 * s_frac, 'sum_ratio', sum(tgt(:)) / sum(ref(:)), ...
+            'max_full_Gy', max(ref(:)), 'max_sum_Gy', max(tgt(:))); %#ok<AGROW>
+        fprintf('  %s: gamma %.1f%% | SSIM %.1f%% | sum(fields)/full = %.4f\n', ...
+            lbl, g_pass, 100 * s_frac, full_vs_sum(end).sum_ratio);
+    end
+
     %% ======================== SUMMARY ROLLUP ========================
     % Per-beam mean/std over segments, plus a pooled "all segments" aggregate.
     % This is the data the study's plots are drawn from -- no figures here.
     results = build_summary(patient_id, session, hash8, config, comparisons, ...
         beam_list, n_segments, seg_gamma_pass, seg_ssim_mean);
     results.noise_floor = noise_floor;   % [] when disabled/unavailable
+    results.full_vs_sum = full_vs_sum;   % full-field recon vs summed field recons
+
+    % TIMING: per-segment gamma / SSIM worker times (averages NaN if none computed).
+    results.timing = struct();
+    results.timing.gamma_sec_per_segment = all_gamma_sec;
+    results.timing.ssim_sec_per_segment  = all_ssim_sec;
+    results.timing.avg_gamma_sec         = mean(all_gamma_sec);
+    results.timing.avg_ssim_sec          = mean(all_ssim_sec);
+    results.timing.total_gamma_sec       = sum(all_gamma_sec);
+    results.timing.total_ssim_sec        = sum(all_ssim_sec);
 
     if config.metrics_write_summary && ~isempty(sim_dir)
         summary_path = fullfile(sim_dir, ...
@@ -296,6 +416,46 @@ function results = step25_segment_metrics(patient_id, session, config)
 
     fprintf('[STEP 2.5] Complete: %d beam(s), %d segment(s) in %.1f s.\n', ...
         nproc, sum(n_segments), toc(run_timer));
+    fprintf(['[STEP 2.5] Timing: %d segment(s) computed | gamma %.1f s total ' ...
+             '(%.1f s/segment) | SSIM %.1f s total (%.1f s/segment)\n'], ...
+        numel(all_gamma_sec), results.timing.total_gamma_sec, ...
+        results.timing.avg_gamma_sec, results.timing.total_ssim_sec, ...
+        results.timing.avg_ssim_sec);
+end
+
+
+function report_segment_progress(msg)
+%REPORT_SEGMENT_PROGRESS Live Step 2.5 time-remaining estimate (runs on the client).
+%  Same scheme as Step 2's report_field_progress in pipeline_simulate. An 'init'
+%  message (sent before each beam's segment loop) seeds the countdown, the
+%  estimated segments in later beams, the worker count and the gamma/SSIM times
+%  recorded so far. Each segment then sends a 'done' message with its gamma and
+%  SSIM seconds; NaN means it was skipped (already folded in or held by a
+%  sibling instance), which only advances the countdown.
+%  ETA = segments left * (avg gamma + avg SSIM s/segment) / workers.
+    persistent remaining later_est workers gamma_times ssim_times
+    if strcmp(msg.kind, 'init')
+        remaining   = msg.n_segments;
+        later_est   = msg.later_est;
+        workers     = max(msg.workers, 1);
+        gamma_times = msg.gamma_times;
+        ssim_times  = msg.ssim_times;
+        return;
+    end
+    remaining = max(remaining - 1, 0);
+    if isnan(msg.gamma_sec)
+        return;
+    end
+    gamma_times(end+1) = msg.gamma_sec;
+    ssim_times(end+1)  = msg.ssim_sec;
+    avg_gamma = mean(gamma_times);
+    avg_ssim  = mean(ssim_times);
+    eta_min   = (remaining + later_est) * (avg_gamma + avg_ssim) / workers / 60;
+    fprintf(['    [TIMING] beam #%d seg %d: gamma %.1f s, SSIM %.1f s  --  ' ...
+             '%d left in beam (+~%d in later beams), est. %.1f min remaining ' ...
+             '(@ %.1f s gamma + %.1f s SSIM per segment, %d worker(s))\n'], ...
+        msg.beam, msg.seg, msg.gamma_sec, msg.ssim_sec, remaining, later_est, ...
+        eta_min, avg_gamma, avg_ssim, workers);
 end
 
 
@@ -303,16 +463,20 @@ end
 %  PER-SEGMENT WORK (runs on a parfor worker)
 %% =========================================================================
 
-function [gamma_pass, ssim_mean] = process_segment(S, comparisons, ...
+function [gamma_pass, ssim_mean, gamma_sec, ssim_sec] = process_segment(S, comparisons, ...
         dose_pct, dist_mm, cutoff_fr, normalize, hash8, overwrite)
 %PROCESS_SEGMENT Compute the four comparisons for one segment and fold the raw
 %  masked result into the segment's CT_1 recon file. Returns the per-comparison
-%  gamma pass rate (%) and mean local SSIM (%) for the summary rollup. A segment
-%  already folded in (and not overwriting) is not recomputed: its stored scalars
-%  are read back so the summary stays complete on a resumed run.
+%  gamma pass rate (%) and mean local SSIM (%) for the summary rollup, plus the
+%  seconds spent on gamma and on SSIM (summed over the comparisons; NaN when the
+%  segment is not computed here). A segment already folded in (and not
+%  overwriting) is not recomputed: its stored scalars are read back so the
+%  summary stays complete on a resumed run.
     nComp      = size(comparisons, 1);
     gamma_pass = nan(1, nComp);
     ssim_mean  = nan(1, nComp);
+    gamma_sec  = NaN;
+    ssim_sec   = NaN;
 
     ct1_file = S.ct1_recon_file;
 
@@ -335,7 +499,9 @@ function [gamma_pass, ssim_mean] = process_segment(S, comparisons, ...
         return;   % a sibling instance is computing this segment
     end
 
-    vol_size = size(S.rs_CT1);
+    vol_size  = size(S.rs_CT1);
+    gamma_sec = 0;
+    ssim_sec  = 0;
 
     comp = struct('name', {}, 'ref_field', {}, 'tgt_field', {}, ...
         'mask_idx', {}, 'gamma_vals', {}, 'gamma_pass_rate', {}, ...
@@ -355,7 +521,9 @@ function [gamma_pass, ssim_mean] = process_segment(S, comparisons, ...
         mask_idx = uint32(find(mask));
 
         % Global gamma index (CPU, CalcGamma output suppressed).
-        gmap = quiet_gamma_map(ref, tgt, dose_pct, dist_mm, S.spacing);
+        t_metric  = tic;
+        gmap      = quiet_gamma_map(ref, tgt, dose_pct, dist_mm, S.spacing);
+        gamma_sec = gamma_sec + toc(t_metric);
         if isempty(gmap)
             g_vals = single([]);
             g_pass = NaN;
@@ -365,7 +533,9 @@ function [gamma_pass, ssim_mean] = process_segment(S, comparisons, ...
         end
 
         % Local SSIM map + mean over the same eval mask.
+        t_metric       = tic;
         [smap, s_frac] = compute_local_ssim(ref, tgt, mask);
+        ssim_sec       = ssim_sec + toc(t_metric);
         if isempty(smap)
             s_vals = single([]);
             s_pct  = NaN;

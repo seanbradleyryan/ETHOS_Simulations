@@ -103,12 +103,17 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
 %                                                  comes out is pure noise artifact,
 %                                                  a baseline for "is the recon
 %                                                  actually recovering signal?".
-%           .reconstruction_method      ['tr']   - 'tr', 'das', or 'ubp'
+%           .reconstruction_method      ['tr']   - 'tr', 'das', 'ubp', or 'adjoint'
 %                                                  ('ubp' = universal back-
 %                                                  projection via ubp3d; honors
 %                                                  ubp_use_elements, ubp_band_limit,
 %                                                  ubp_aperture_cos, ubp_area_weight,
-%                                                  ubp_interp)
+%                                                  ubp_interp. 'adjoint' = Arridge
+%                                                  et al. 2016 gradient descent
+%                                                  with the k-Wave adjoint)
+%           .adjoint_num_iter           [5]      - 'adjoint' iterations (up to 3
+%                                                  k-Wave runs each); stops early
+%                                                  on convergence_tol
 %           .blind_recon                [false]  - When true (and medium_recon is
 %                                                  supplied), forward on `medium`
 %                                                  but reconstruct on medium_recon.
@@ -173,7 +178,7 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
 %           .conv_max_pressure  - Per-iteration max pressure
 %           .conv_rel_change    - Per-iteration relative change
 %           .grid_padding       - Original / padded / expanded sizes
-%           .recon_method       - Which branch ran ('tr' | 'das' | 'ubp')
+%           .recon_method       - Which branch ran ('tr' | 'das' | 'ubp' | 'adjoint')
 %           .blind_recon        - Logical: true when forward and reconstruction
 %                                 media differed (blind geometry)
 %           .sensor_stages      - Only with CONFIG.sensor_stages_only: .names
@@ -208,6 +213,7 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
     cfl                 = safe_config(config, 'cfl_number', 0.3);
     use_gpu             = safe_config(config, 'use_gpu', true);
     num_tr_iter         = safe_config(config, 'num_time_reversal_iter', 30);
+    num_adj_iter        = safe_config(config, 'adjoint_num_iter', 5);
     convergence_tol     = safe_config(config, 'convergence_tol', 1e-3);
     correction_factor   = safe_config(config, 'correction_factor', 1.9);
     use_grid_padding    = safe_config(config, 'use_grid_padding', true);
@@ -1283,9 +1289,131 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
                 return;
             end
 
+        case 'adjoint'
+            % Gradient descent with the k-Wave adjoint (Arridge et al., Inverse
+            % Problems 32, 115012 (2016); k-Wave adjoint reconstruction example).
+            % Each iteration:
+            %   1. difference = modelled - measured sensor data
+            %   2. adjoint run: the time-reversed difference is ADDED at the
+            %      sensor points ('additive' source; TR overwrites them). The
+            %      final pressure field is the image update (the gradient).
+            %   3. step length nu by exact line search: the nu that minimises
+            %      ||difference - nu * A(image_update)||. The fixed nu = 0.25 of
+            %      the 2D k-Wave example does not carry over to this 3D grid,
+            %      because k-Wave rescales additive sources internally.
+            %   4. p0_estimate = max(p0_estimate - nu * image_update, 0)
+            %   5. forward run on the new estimate -> new modelled data
+            % Sensor model: modelled signals get the same frequency response as
+            % the measured data (band-limit, pulse convolution + Wiener
+            % deconvolution), and both are averaged over each array element, so
+            % A is the measurement model and step 2 is its adjoint (up to a
+            % constant the line search absorbs). Runs on kmedium_rec, so blind
+            % reconstruction works as for TR. No correction_factor: the result
+            % is already a least-squares fit to the data, in Pa.
+            fprintf('        Running adjoint reconstruction (%d iterations, tol=%.1e)...\n', ...
+                num_adj_iter, convergence_tol);
+
+            conv_max_pressure = zeros(num_adj_iter, 1);
+            conv_rel_change   = nan(num_adj_iter, 1);
+
+            try
+                adj_tic = tic;
+
+                % Net frequency response of the pulse convolution + Wiener
+                % deconvolution applied to the measured data above.
+                if conv_kernel_sigma > 0
+                    wiener_gain = H_power ./ (H_power + conv_deconv_lambda);
+                else
+                    wiener_gain = ones(1, size(sensorData_measured, 2));
+                end
+
+                % Measured data as the array reports it: one signal per element
+                % (each voxel of an element carries the element's signal).
+                [~, measured] = apply_element_averaging( ...
+                    double(gather(sensorData_measured)), sensor_info);
+
+                p0_estimate = zeros(gridSize);
+                modelled    = zeros(size(measured));   % a zero image predicts zero signals
+
+                for adj_iter = 1:num_adj_iter
+
+                    % 1. Difference between the modelled and measured data
+                    difference = modelled - measured;
+                    fprintf('          Adjoint iteration %d/%d: data mismatch %.4e\n', ...
+                        adj_iter, num_adj_iter, norm(difference(:)) / norm(measured(:)));
+
+                    % 2. Adjoint run. The difference goes through the sensor
+                    %    response (its own adjoint), then becomes the adjoint
+                    %    source of Appendix B in Arridge et al. 2016.
+                    time_reversed_data = fliplr(apply_sensor_response(difference, FS, wiener_gain));
+                    source_adj        = struct();
+                    source_adj.p_mask = sensor.mask;
+                    source_adj.p      = [time_reversed_data(:, 1), time_reversed_data(:, 1), ...
+                                         time_reversed_data(:, 1:end-1)] + ...
+                                        [zeros(size(time_reversed_data(:, 1))), ...
+                                         time_reversed_data(:, 1:end-1), 2 * time_reversed_data(:, end)];
+                    source_adj.p      = source_adj.p(:, 1:Nt);   % k-Wave only uses the first Nt points
+                    source_adj.p_mode = 'additive';
+
+                    sensor_adj        = struct();
+                    sensor_adj.mask   = ones(Nx, Ny, Nz);
+                    sensor_adj.record = {'p_final'};
+
+                    adj_out      = kspaceFirstOrder3D(kgrid, kmedium_rec, source_adj, sensor_adj, inputArgs{:});
+                    image_update = reshape(double(gather(adj_out.p_final)), [Nx, Ny, Nz]);
+
+                    % 3. Step length by exact line search (one forward run)
+                    update_signals = adjoint_forward_model(image_update, kgrid, kmedium_rec, ...
+                        sensor, inputArgs, sensor_info, FS, wiener_gain);
+                    update_energy  = sum(update_signals(:) .^ 2);
+                    if update_energy == 0
+                        fprintf('          Image update predicts no signal; stopping.\n');
+                        break;
+                    end
+                    nu = sum(update_signals(:) .* difference(:)) / update_energy;
+
+                    % 4. Update the image, then apply the positivity condition
+                    p0_prev     = p0_estimate;
+                    p0_estimate = p0_estimate - nu * image_update;
+                    p0_estimate = p0_estimate .* (p0_estimate >= 0);
+
+                    conv_max_pressure(adj_iter) = max(p0_estimate(:));
+                    num_iters_done = adj_iter;
+                    fprintf('          Step length %.4e, max pressure %.4e Pa\n', ...
+                        nu, conv_max_pressure(adj_iter));
+
+                    norm_prev = norm(p0_prev(:));
+                    if norm_prev > 0
+                        conv_rel_change(adj_iter) = norm(p0_estimate(:) - p0_prev(:)) / norm_prev;
+                        fprintf('          Rel change: %.4e\n', conv_rel_change(adj_iter));
+                        if conv_rel_change(adj_iter) < convergence_tol
+                            fprintf('          *** Converged at iteration %d ***\n', adj_iter);
+                            break;
+                        end
+                    end
+
+                    % 5. Modelled data of the new estimate, for the next iteration
+                    if adj_iter < num_adj_iter
+                        modelled = adjoint_forward_model(p0_estimate, kgrid, kmedium_rec, ...
+                            sensor, inputArgs, sensor_info, FS, wiener_gain);
+                    end
+                end
+
+                reconPressure = p0_estimate;
+                tr_time       = toc(adj_tic);
+                fprintf('        Adjoint reconstruction complete (%.1f s).\n', tr_time);
+                fprintf('        Reconstructed pressure: [%.2e, %.2e] Pa\n', ...
+                    min(reconPressure(:)), max(reconPressure(:)));
+            catch ME
+                warning('run_single_field_simulation:AdjointFail', ...
+                    'Adjoint reconstruction failed: %s', ME.message);
+                recon_dose = zeros(input_dims_for_crop);
+                return;
+            end
+
         otherwise
             error('run_single_field_simulation:UnknownReconMethod', ...
-                'Unknown reconstruction_method: "%s" (use ''tr'', ''das'', or ''ubp'')', recon_method);
+                'Unknown reconstruction_method: "%s" (use ''tr'', ''das'', ''ubp'', or ''adjoint'')', recon_method);
     end
 
     sim_results.tr_time_s         = tr_time;
@@ -1549,6 +1677,31 @@ function stages = sensor_stage_traces(names, arrays, dt)
     for k = 1:numel(arrays)
         stages.mean_abs(k, :) = mean(abs(double(gather(arrays{k}))), 1);
     end
+end
+
+
+function signals = apply_sensor_response(signals, FS, wiener_gain)
+%APPLY_SENSOR_RESPONSE Frequency response the measured sensor data went through:
+%  the transducer band-limit (same gaussianFilter call as the forward chain),
+%  then the pulse convolution + Wiener deconvolution, whose net gain is
+%  wiener_gain = |H|^2 / (|H|^2 + lambda) (all ones without the pulse model).
+%  Both filters are real and zero-phase, so this operator is its own adjoint;
+%  the 'adjoint' branch applies it unchanged on the forward and adjoint side.
+    signals = gaussianFilter(double(gather(signals)), FS, 0.35e6, 100, false);
+    signals = real(ifft(fft(signals, [], 2) .* wiener_gain, [], 2));
+end
+
+
+function signals = adjoint_forward_model(p0, kgrid, kmedium, sensor, inputArgs, sensor_info, FS, wiener_gain)
+%ADJOINT_FORWARD_MODEL Model of the measured data for the 'adjoint' branch:
+%  k-Wave forward run from p0, the sensor frequency response, then averaging
+%  over each array element (apply_element_averaging passes the data through
+%  unchanged when the sensor has no element map). Returns
+%  [num_sensor_voxels x Nt], each voxel carrying its element's signal.
+    source       = struct('p0', p0);
+    signals      = kspaceFirstOrder3D(kgrid, kmedium, source, sensor, inputArgs{:});
+    signals      = apply_sensor_response(signals, FS, wiener_gain);
+    [~, signals] = apply_element_averaging(signals, sensor_info);
 end
 
 
