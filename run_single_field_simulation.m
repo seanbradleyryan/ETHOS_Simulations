@@ -134,8 +134,8 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
 %           .uniform_sound_speed        [1540]
 %           .uniform_alpha_coeff        [0]
 %           .uniform_gruneisen          [1.0]
-%           .plot_results               [false]  - Opt-in: pre-sim sensor view, live TR
-%                                                  figure, post-sim dose panels +
+%           .plot_results               [false]  - Opt-in: pre-sim sensor view, live TR/
+%                                                  adjoint figure, post-sim dose panels +
 %                                                  convergence plot. Must remain false
 %                                                  when called under parfor.
 %       precomputed_sensor - (Optional) Struct holding a plan-level sensor mask
@@ -1126,27 +1126,32 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
     num_iters_done    = 0;
     tr_time           = 0;
 
+    % ---- Set up live reconstruction figure (opt-in, 'tr' and 'adjoint') ----
+    fig_live   = [];
+    ax_recon   = [];
+    hImg_recon = [];
+    hLine_max  = [];
+    cz_live    = 1;
+    if plot_results && any(strcmp(recon_method, {'tr', 'adjoint'}))
+        if strcmp(recon_method, 'tr')
+            num_live_iter = num_tr_iter;
+        else
+            num_live_iter = num_adj_iter;
+        end
+        try
+            [~, dose_max_idx]               = max(doseGrid(:));
+            [~, ~, cz_live]                 = ind2sub([Nx_orig, Ny_orig, Nz_orig], dose_max_idx);
+            [fig_live, ax_recon, hImg_recon, hLine_max] = ...
+                setup_live_recon_figure(p0, Nx_orig, Ny_orig, cz_live, num_live_iter, config);
+        catch ME
+            warning('run_single_field_simulation:LiveFigFail', ...
+                'Live reconstruction figure setup failed: %s', ME.message);
+            fig_live = [];
+        end
+    end
+
     switch recon_method
         case 'tr'
-            % ---- Set up live TR figure (opt-in) ----
-            fig_live   = [];
-            ax_recon   = [];
-            hImg_recon = [];
-            hLine_max  = [];
-            cz_live    = 1;
-            if plot_results
-                try
-                    [~, dose_max_idx]               = max(doseGrid(:));
-                    [~, ~, cz_live]                 = ind2sub([Nx_orig, Ny_orig, Nz_orig], dose_max_idx);
-                    [fig_live, ax_recon, hImg_recon, hLine_max] = ...
-                        setup_live_recon_figure(p0, Nx_orig, Ny_orig, cz_live, num_tr_iter, config);
-                catch ME
-                    warning('run_single_field_simulation:LiveFigFail', ...
-                        'Live TR figure setup failed: %s', ME.message);
-                    fig_live = [];
-                end
-            end
-
             fprintf('        Running iterative time reversal (%d iterations, tol=%.1e)...\n', ...
                 num_tr_iter, convergence_tol);
 
@@ -1202,29 +1207,9 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
                     reconPressure_prev = reconPressure;
 
                     % Live figure update
-                    if plot_results && ~isempty(fig_live) && ishandle(fig_live)
-                        try
-                            recon_slice_crop = squeeze( ...
-                                reconPressure(1:Nx_orig, 1:Ny_orig, cz_live))';
-                            recon_slice_crop = gather(recon_slice_crop);
-                            set(hImg_recon, 'CData', recon_slice_crop);
-                            caxis(ax_recon, [0, max(recon_slice_crop(:)) + eps]);
-                            if converged
-                                title(ax_recon, ...
-                                    sprintf('Reconstructed p_0 (iter %d CONVERGED)', tr_iter), ...
-                                    'FontWeight', 'bold', 'Color', [0, 0.55, 0]);
-                            else
-                                title(ax_recon, ...
-                                    sprintf('Reconstructed p_0 (iter %d / %d)', ...
-                                        tr_iter, num_tr_iter), 'FontWeight', 'bold');
-                            end
-                            set(hLine_max, 'XData', 1:tr_iter, ...
-                                'YData', conv_max_pressure(1:tr_iter));
-                            drawnow;
-                        catch
-                            % Ignore plot errors; don't break the recon
-                        end
-                    end
+                    update_live_recon_figure(fig_live, ax_recon, hImg_recon, hLine_max, ...
+                        reconPressure(1:Nx_orig, 1:Ny_orig, cz_live), tr_iter, num_tr_iter, ...
+                        converged, conv_max_pressure);
 
                     if converged
                         break;
@@ -1405,14 +1390,24 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
                     fprintf('          Step length %.4e, max pressure %.4e Pa\n', ...
                         nu, conv_max_pressure(adj_iter));
 
+                    converged = false;
                     norm_prev = norm(p0_prev(:));
                     if norm_prev > 0
                         conv_rel_change(adj_iter) = norm(p0_estimate(:) - p0_prev(:)) / norm_prev;
                         fprintf('          Rel change: %.4e\n', conv_rel_change(adj_iter));
                         if conv_rel_change(adj_iter) < convergence_tol
                             fprintf('          *** Converged at iteration %d ***\n', adj_iter);
-                            break;
+                            converged = true;
                         end
+                    end
+
+                    % Live figure update
+                    update_live_recon_figure(fig_live, ax_recon, hImg_recon, hLine_max, ...
+                        p0_estimate(1:Nx_orig, 1:Ny_orig, cz_live), adj_iter, num_adj_iter, ...
+                        converged, conv_max_pressure);
+
+                    if converged
+                        break;
                     end
 
                     % 5. Modelled data of the new estimate, for the next iteration
@@ -1870,8 +1865,8 @@ end
 function [fig_live, ax_recon, hImg_recon, hLine_max] = ...
         setup_live_recon_figure(p0, Nx_orig, Ny_orig, cz_live, N_iter, config)
 %SETUP_LIVE_RECON_FIGURE Build the 1x3 live reconstruction figure for the
-%  'tr' branch. Panels: (1) initial p0 slice, (2) current recon, (3) live
-%  max-pressure convergence.
+%  'tr' and 'adjoint' branches. Panels: (1) initial p0 slice, (2) current
+%  recon, (3) live max-pressure convergence.
 
     fig_live = figure('Name', 'Live Reconstruction', 'Color', 'w', ...
         'NumberTitle', 'off', 'Position', [100, 100, 1060, 440]);
@@ -1906,6 +1901,37 @@ function [fig_live, ax_recon, hImg_recon, hLine_max] = ...
     sgtitle(fig_live, sprintf('Live Reconstruction (%s)   Axial Z=%d', ...
         recon_method_label, cz_live), 'FontWeight', 'bold', 'FontSize', 11);
     drawnow;
+end
+
+
+function update_live_recon_figure(fig_live, ax_recon, hImg_recon, hLine_max, ...
+        recon_slice, iter, N_iter, converged, conv_max_pressure)
+%UPDATE_LIVE_RECON_FIGURE Redraw the live figure after one 'tr' or 'adjoint'
+%  iteration: current recon slice (X-Y at cz_live), panel title, and the
+%  max-pressure convergence line. Does nothing when the figure is not open.
+
+    if isempty(fig_live) || ~ishandle(fig_live)
+        return;
+    end
+    try
+        recon_slice_crop = gather(squeeze(recon_slice)');
+        set(hImg_recon, 'CData', recon_slice_crop);
+        caxis(ax_recon, [0, max(recon_slice_crop(:)) + eps]);
+        if converged
+            title(ax_recon, ...
+                sprintf('Reconstructed p_0 (iter %d CONVERGED)', iter), ...
+                'FontWeight', 'bold', 'Color', [0, 0.55, 0]);
+        else
+            title(ax_recon, ...
+                sprintf('Reconstructed p_0 (iter %d / %d)', ...
+                    iter, N_iter), 'FontWeight', 'bold');
+        end
+        set(hLine_max, 'XData', 1:iter, ...
+            'YData', conv_max_pressure(1:iter));
+        drawnow;
+    catch
+        % Ignore plot errors; don't break the recon
+    end
 end
 
 
