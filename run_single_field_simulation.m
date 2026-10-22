@@ -197,6 +197,12 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
 %       - precomputed_sensor lets the caller compute the determine_sensor_mask
 %         placement once for a whole plan and reuse it for every field. When it
 %         is absent or its grid does not match, the mask is computed inline.
+%       - Element averaging (apply_element_averaging) runs on the raw forward
+%         data, before the pulse/noise/deconvolution chain; electronic noise
+%         is then one independent trace per element (element_noise). Every
+%         reconstruction method gets this element-averaged data; the TR
+%         residual re-forward and the adjoint forward model are averaged the
+%         same way. No-op for sensors without an element map.
 %
 %   DATE: May 2026
 %   VERSION: 3.0 (DAS, determine_sensor_mask + grid expansion, scale correction,
@@ -964,11 +970,27 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
         end
     end
 
+    %% ======================== ELEMENT AVERAGING ========================
+    %  The physical array reports one signal per element, not one per voxel:
+    %  each element integrates the pressure over its face. Average the forward
+    %  data over each element's voxels (every voxel of an element then carries
+    %  its element's signal), so every later stage -- including the noise and
+    %  every reconstruction method -- works on what the real array measures.
+    %  The pulse and band-limit filters act on each channel separately, so
+    %  averaging before them gives the same result as averaging after.
+    %  apply_element_averaging passes the data through unchanged when the
+    %  sensor has no element map (plane, sphere, box sensors). DAS/UBP average
+    %  again internally, which changes nothing.
+    [~, sensorData]     = apply_element_averaging(double(gather(sensorData)), sensor_info);
+    sensorData          = single(sensorData);
+    sensorData_measured = sensorData;
+
     %% ================= PULSE CONVOLUTION / FREQUENCY RESPONSE / NOISE / DECONV =================
-    %  Physical measurement chain in acquisition order:
+    %  Physical measurement chain in acquisition order (on element-averaged data):
     %    1. Convolve with the pulse profile (finite radiation pulse)
     %    2. Apply the sensor frequency response (band-limit)
-    %    3. Add electronic noise (downstream of the transducer, after band-limit)
+    %    3. Add electronic noise (downstream of the transducer, after band-limit),
+    %       one independent trace per element channel (element_noise)
     %    4. Wiener-deconvolve the pulse kernel to recover the broadband signal
 
     if conv_kernel_sigma > 0
@@ -1017,7 +1039,7 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
             sensorData_resp(:) = 0;
             fprintf('        [NOISE ONLY] True signal nulled; reconstructing noise alone.\n');
         end
-        sensorData_noisy = sensorData_resp + noise_amp * randn(size(sensorData_resp));
+        sensorData_noisy = sensorData_resp + element_noise(noise_amp, size(sensorData_resp), sensor_info);
 
         % Record the SNR this field actually saw (peak signal / noise amplitude).
         % With a fixed absolute noise this floats field to field; recorded so it
@@ -1072,7 +1094,7 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
             % through the pulse model, so a normal no-pulse run stays noise-free.
             noise_amp     = resolve_noise_amp(config, sensor_signal_peak, conv_noise_level);
             sensorData(:) = 0;
-            sensorData    = sensorData + noise_amp * randn(size(sensorData));
+            sensorData    = sensorData + element_noise(noise_amp, size(sensorData), sensor_info);
             sim_results.noise_amp = noise_amp;
             if noise_amp > 0
                 sim_results.snr = sensor_signal_peak / noise_amp;
@@ -1214,7 +1236,10 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
                         source_resid.p0 = reconPressure;
                         sensorDataRecon = kspaceFirstOrder3D(kgrid, kmedium_rec, ...
                             source_resid, sensor, inputArgs{:});
-                        sensorData = sensorData + (sensorData_measured - sensorDataRecon);
+                        % Element-average the re-forward like the measured data
+                        [~, sensorDataRecon] = apply_element_averaging( ...
+                            double(gather(sensorDataRecon)), sensor_info);
+                        sensorData = sensorData + (sensorData_measured - single(sensorDataRecon));
                     end
                 end
 
@@ -1305,7 +1330,7 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
             %   5. forward run on the new estimate -> new modelled data
             % Sensor model: modelled signals get the same frequency response as
             % the measured data (band-limit, pulse convolution + Wiener
-            % deconvolution), and both are averaged over each array element, so
+            % deconvolution) and the same element averaging, so
             % A is the measurement model and step 2 is its adjoint (up to a
             % constant the line search absorbs). Runs on kmedium_rec, so blind
             % reconstruction works as for TR. No correction_factor: the result
@@ -1327,10 +1352,8 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
                     wiener_gain = ones(1, size(sensorData_measured, 2));
                 end
 
-                % Measured data as the array reports it: one signal per element
-                % (each voxel of an element carries the element's signal).
-                [~, measured] = apply_element_averaging( ...
-                    double(gather(sensorData_measured)), sensor_info);
+                % Measured data (already element-averaged above)
+                measured = double(sensorData_measured);
 
                 p0_estimate = zeros(gridSize);
                 modelled    = zeros(size(measured));   % a zero image predicts zero signals
@@ -1676,6 +1699,28 @@ function stages = sensor_stage_traces(names, arrays, dt)
     stages = struct('names', {names}, 'mean_abs', [], 'dt', dt);
     for k = 1:numel(arrays)
         stages.mean_abs(k, :) = mean(abs(double(gather(arrays{k}))), 1);
+    end
+end
+
+
+function noise = element_noise(noise_amp, sz, sensor_info)
+%ELEMENT_NOISE Electronic noise (std noise_amp, Pa) for sensor data of size sz.
+%  Real electronic noise belongs to an element's channel, not to each voxel, so
+%  every voxel of an element gets the SAME noise trace and the data stay one
+%  signal per element. Uses sensor_info.voxel_element_idx (keyed by
+%  find(sensor.mask), like apply_element_averaging). Sensors without it (plane,
+%  sphere, box, legacy element_map) get one independent trace per voxel.
+    elem = [];
+    if isfield(sensor_info, 'voxel_element_idx') && ~isempty(sensor_info.voxel_element_idx) ...
+            && isfield(sensor_info, 'num_elements') && sensor_info.num_elements > 0
+        elem = double(sensor_info.voxel_element_idx(:));
+        elem = elem(elem > 0);
+    end
+    if numel(elem) == sz(1)
+        noise_per_element = noise_amp * randn(sensor_info.num_elements, sz(2));
+        noise = noise_per_element(elem, :);
+    else
+        noise = noise_amp * randn(sz);
     end
 end
 
