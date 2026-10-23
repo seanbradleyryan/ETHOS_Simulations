@@ -2,6 +2,7 @@ function results = step205_run_full_field_simulation(patient_id, session, config
 %STEP205_RUN_FULL_FIELD_SIMULATION Simulate each CT's total RS dose as one field.
 %
 %   results = step205_run_full_field_simulation(patient_id, session, config)
+%   results = step205_run_full_field_simulation()   % standalone: 1194203, Session_1
 %
 %   PURPOSE:
 %   Step 2 simulates every beam/segment field on its own. This step simulates
@@ -98,6 +99,22 @@ function results = step205_run_full_field_simulation(patient_id, session, config
 %
 %   See also: run_single_field_simulation, pipeline_simulate,
 %             step25_segment_metrics, step3_analysis
+
+    %% ======================== STANDALONE DEFAULTS ========================
+    % Called with no arguments (e.g. the editor's Run button): patient 1194203,
+    % Session_1, and the CONFIG pipeline_simulate builds. blind_recon_ct3 and
+    % blind_recon_reference_label are in the config hash, so they must match
+    % pipeline_simulate for the Step 2 sensor_mask_<hash>.mat to be found.
+    if nargin == 0
+        repo_root = fileparts(fileparts(mfilename('fullpath')));
+        addpath(genpath(fullfile(repo_root, 'utils')));
+        patient_id = '1194203';
+        session    = 'Session_1';
+        config     = get_default_config();
+        config.blind_recon_ct3             = true;
+        config.blind_recon_reference_label = 'CT_1';
+        config.plot_results                = false;   % no engine figures, as in pipeline_simulate
+    end
 
     %% ======================== INPUT VALIDATION ========================
     if ~ischar(patient_id) && ~isstring(patient_id)

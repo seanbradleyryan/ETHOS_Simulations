@@ -149,7 +149,7 @@ CONFIG.plot_results          = false;
 
 % --- Parallel Processing ---
 CONFIG.use_parallel          = true;
-CONFIG.num_parallel_workers  = 8;
+CONFIG.num_parallel_workers  = feature('numcores');   % one worker per physical CPU core
 
 % --- Multi-Instance Coordination ---
 % Multiple copies of this script (e.g. one per remote-desktop session, all
