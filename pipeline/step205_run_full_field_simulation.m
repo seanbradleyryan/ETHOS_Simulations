@@ -49,6 +49,7 @@ function results = step205_run_full_field_simulation(patient_id, session, config
 %                                   gain to its own-CT truth before comparing.
 %           .step205_overwrite      [false] Simulate and compare again even if
 %                                   the outputs are on disk.
+%           .Nt_scaling             Ignored: forced to 2 in this step.
 %           Plus every field run_single_field_simulation and
 %           create_acoustic_medium read.
 %
@@ -142,6 +143,9 @@ function results = step205_run_full_field_simulation(patient_id, session, config
     config = default_field(config, 'gamma_dose_cutoff_pct', 10.0);
     config = default_field(config, 'metrics_normalize',     true);
     config = default_field(config, 'step205_overwrite',     false);
+    % Forced for this step, whatever the caller set. Nt_scaling is not in the
+    % config hash, so recons already on disk under this hash are still reused.
+    config.Nt_scaling = 2;
 
     hash8         = config.config_hash;
     ct_labels     = {'CT_1', 'CT_3'};

@@ -64,7 +64,7 @@ addpath(genpath(fullfile(this_script_dir, 'utils')));
 % Inherited unchanged from get_default_config: working_dir, gruneisen_method,
 % dose_per_pulse_cGy, pml_size, cfl_number, Nt_scaling, use_gpu,
 % sensor_placement_method, convolution_kernel / conv_noise_level /
-% conv_deconv_lambda, tissue_tables (built from the standalone
+% conv_deconv_lambda / conv_variable_lambda, tissue_tables (built from the standalone
 % define_tissue_tables.m, identical to this file's local copy), and
 % reconstruction_mode ('segment' = one sim per segment; 'beam' = one sim per
 % beam per CT on the beam's summed dose from pipeline_compress).

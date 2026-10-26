@@ -95,6 +95,14 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
 %                                                  sim_results.sensor_stages and
 %                                                  return before reconstruction.
 %           .conv_deconv_lambda         [1e-4]   - Wiener deconvolution regularisation
+%           .conv_variable_lambda       [false]  - Deconvolve pulse x transducer with
+%                                                  lambda = noise power / signal
+%                                                  power of THIS field, instead of
+%                                                  the fixed conv_deconv_lambda on
+%                                                  the pulse only. Assumes the signal
+%                                                  spectrum has the sensor response's
+%                                                  shape (warns). See
+%                                                  deconv_pulse_transducer.
 %           .noise_only                 [false]  - Null-signal control: run the
 %                                                  forward sim to fix the noise
 %                                                  amplitude, then discard the true
@@ -170,7 +178,8 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
 %           .p0_max             - Maximum initial pressure (Pa)
 %           .sensor_signal_peak - Pre-noise peak sensor pressure (Pa); the
 %                                 signal the SNR/noise amplitude is measured
-%                                 against (pulse-model path)
+%                                 against (pulse-model path: after the pulse
+%                                 convolution, before the band-limit)
 %           .noise_amp          - Electronic-noise amplitude applied (Pa)
 %           .snr                - This field's SNR (sensor_signal_peak/noise_amp)
 %           .recon_max          - Maximum reconstructed pressure (Pa)
@@ -227,6 +236,7 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
     pulse_shape         = safe_config(config, 'pulse_shape', 'gaussian');
     conv_noise_level    = safe_config(config, 'conv_noise_level', 0.01);
     conv_deconv_lambda  = safe_config(config, 'conv_deconv_lambda', 1e-4);
+    conv_variable_lambda = safe_config(config, 'conv_variable_lambda', false);
     noise_only          = safe_config(config, 'noise_only', false);
 
     recon_method            = lower(safe_config(config, 'reconstruction_method', 'tr'));
@@ -985,13 +995,15 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
     sensorData          = single(sensorData);
     sensorData_measured = sensorData;
 
-    %% ================= PULSE CONVOLUTION / FREQUENCY RESPONSE / NOISE / DECONV =================
+    %% ================= PULSE CONVOLUTION / NOISE / FREQUENCY RESPONSE / DECONV =================
     %  Physical measurement chain in acquisition order (on element-averaged data):
     %    1. Convolve with the pulse profile (finite radiation pulse)
-    %    2. Apply the sensor frequency response (band-limit)
-    %    3. Add electronic noise (downstream of the transducer, after band-limit),
-    %       one independent trace per element channel (element_noise)
-    %    4. Wiener-deconvolve the pulse kernel to recover the broadband signal
+    %    2. Add broadband electronic noise, one independent trace per element
+    %       channel (element_noise), BEFORE the band-limit so the transducer
+    %       filters noise and signal alike
+    %    3. Apply the sensor frequency response (band-limit)
+    %    4. Deconvolve (deconv_pulse_transducer): Wiener on the pulse kernel, or
+    %       with conv_variable_lambda the noise-weighted Wiener on pulse x transducer
 
     if conv_kernel_sigma > 0
         fprintf('        Pulse model: %s, width=%.1f us, lambda=%.1e\n', ...
@@ -1002,20 +1014,17 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
         sensorData_cpu = double(gather(sensorData));
         Nt_data        = size(sensorData_cpu, 2);
 
-        H       = fft(pulse_kernel, Nt_data).';
-        H_conj  = conj(H);
-        H_power = abs(H).^2;
+        H = fft(pulse_kernel, Nt_data).';
 
         % 1. Convolve with the pulse profile
         sensorData_conv = real(ifft(fft(sensorData_cpu, [], 2) .* H, [], 2));
 
-        % 2. Sensor frequency response (band-limit AFTER pulse convolution)
-        sensorData_resp = gaussianFilter(sensorData_conv, FS, 0.35e6, 100, false);
-
-        % Pre-noise peak of THIS field's sensor signal (Pa). This is the quantity
-        % the noise amplitude is measured against, and what calibrate_noise_amp
-        % samples to fix a single blanket noise amplitude for a target mean SNR.
-        sensor_signal_peak             = max(abs(sensorData_resp(:)));
+        % Pre-noise peak of THIS field's sensor signal (Pa), taken where the noise
+        % is added (after the pulse convolution, before the band-limit). This is
+        % the quantity the noise amplitude is measured against, and what
+        % calibrate_noise_amp samples to fix a single blanket noise amplitude for
+        % a target mean SNR.
+        sensor_signal_peak             = max(abs(sensorData_conv(:)));
         sim_results.sensor_signal_peak = sensor_signal_peak;
 
         % Calibration fast-path: calibrate_noise_amp only needs the pre-noise
@@ -1028,7 +1037,8 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
             return;
         end
 
-        % 3. Add electronic noise (after frequency-response filtering).
+        % 2. Add broadband electronic noise (after the pulse convolution, before
+        %    the band-limit).
         %    noise_amp is the FIXED absolute amplitude (config.noise_amp_Pa) once
         %    the pipeline has been calibrated, else the legacy per-field fraction
         %    of this field's own peak (config.conv_noise_level). A noise_only run
@@ -1036,10 +1046,11 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
         %    reaches the reconstruction (see resolve_noise_amp below).
         noise_amp = resolve_noise_amp(config, sensor_signal_peak, conv_noise_level);
         if noise_only
-            sensorData_resp(:) = 0;
+            sensorData_noisy = element_noise(noise_amp, size(sensorData_conv), sensor_info);
             fprintf('        [NOISE ONLY] True signal nulled; reconstructing noise alone.\n');
+        else
+            sensorData_noisy = sensorData_conv + element_noise(noise_amp, size(sensorData_conv), sensor_info);
         end
-        sensorData_noisy = sensorData_resp + element_noise(noise_amp, size(sensorData_resp), sensor_info);
 
         % Record the SNR this field actually saw (peak signal / noise amplitude).
         % With a fixed absolute noise this floats field to field; recorded so it
@@ -1051,10 +1062,15 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
             sim_results.snr = Inf;
         end
 
-        % 4. Wiener deconvolution of the pulse kernel
-        sensorData_deconv = real(ifft( ...
-            fft(sensorData_noisy, [], 2) .* H_conj ./ (H_power + conv_deconv_lambda), ...
-            [], 2));
+        % 3. Sensor frequency response (band-limit), on signal + noise together
+        sensorData_resp = gaussianFilter(sensorData_noisy, FS, 0.35e6, 100, false);
+
+        % 4. Deconvolution. pulse_deconv_gain is the net gain of the pulse
+        %    convolution + deconvolution, reused by the 'adjoint' sensor model.
+        %    sensorData_conv is noise-free (and not nulled under noise_only), so
+        %    the variable lambda matches the signal run's.
+        [sensorData_deconv, pulse_deconv_gain] = deconv_pulse_transducer(sensorData_resp, ...
+            sensorData_conv, H, FS, noise_amp, conv_deconv_lambda, conv_variable_lambda);
 
         sensorData          = single(sensorData_deconv);
         sensorData_measured = single(sensorData_deconv);
@@ -1066,10 +1082,10 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
         % after each stage above, then skip the reconstruction.
         if safe_config(config, 'sensor_stages_only', false)
             sim_results.sensor_stages = sensor_stage_traces( ...
-                {'raw (forward sim)', 'pulse convolved', 'sensor band-limit', ...
-                 'noise added', 'Wiener deconvolved'}, ...
-                {sensorData_cpu, sensorData_conv, sensorData_resp, ...
-                 sensorData_noisy, sensorData_deconv}, dt);
+                {'raw (forward sim)', 'pulse convolved', 'noise added', ...
+                 'sensor band-limit', 'Wiener deconvolved'}, ...
+                {sensorData_cpu, sensorData_conv, sensorData_noisy, ...
+                 sensorData_resp, sensorData_deconv}, dt);
             recon_dose = zeros(input_dims_for_crop);
             return;
         end
@@ -1329,10 +1345,10 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
             try
                 adj_tic = tic;
 
-                % Net frequency response of the pulse convolution + Wiener
+                % Net frequency response of the pulse convolution +
                 % deconvolution applied to the measured data above.
                 if conv_kernel_sigma > 0
-                    wiener_gain = H_power ./ (H_power + conv_deconv_lambda);
+                    wiener_gain = pulse_deconv_gain;   % from deconv_pulse_transducer
                 else
                     wiener_gain = ones(1, size(sensorData_measured, 2));
                 end
@@ -1720,11 +1736,64 @@ function noise = element_noise(noise_amp, sz, sensor_info)
 end
 
 
+function [deconvolved, deconv_gain] = deconv_pulse_transducer(data, clean_conv, H, FS, ...
+        noise_amp, conv_deconv_lambda, use_variable_lambda)
+%DECONV_PULSE_TRANSDUCER Wiener deconvolution of the band-limited sensor data.
+%  data        - [num_sensor_points x Nt] noisy, band-limited sensor data
+%  clean_conv  - [num_sensor_points x Nt] noise-free pulse-convolved data; only
+%                its energy is used (the signal level for the variable lambda)
+%  H           - [1 x Nt] FFT of the pulse kernel
+%
+%  use_variable_lambda = false: Wiener filter on the pulse only, fixed lambda
+%      G = conj(H) / (|H|^2 + conv_deconv_lambda)
+%  The transducer band-limit stays in the data.
+%
+%  use_variable_lambda = true: Wiener filter on the whole system Hs = H * T
+%  (pulse times transducer response T), with lambda(f) = N(f) / S(f):
+%      N(f) = Nt * noise_amp^2 * T(f)^2   noise power (added before the transducer)
+%      S(f) = S0 * T(f)^2                 ASSUMED signal power, shaped like T
+%  T^2 cancels, so lambda = Nt * noise_amp^2 / S0: flat in frequency, set by
+%  this field's SNR. S0 comes from the clean signal energy (Parseval), giving
+%      lambda = noise_amp^2 * sum(|Hs|^2) / mean(sum(clean_conv.^2, 2))
+%  Each frequency is boosted only as far as its SNR, |Hs|^2 / lambda, allows.
+%
+%  deconv_gain - [1 x Nt] net gain H * G of the pulse convolution and this
+%                filter: what the 'adjoint' sensor model applies after the
+%                band-limit (|H|^2 / (|H|^2 + lambda) for the fixed-lambda case).
+    lambda = conv_deconv_lambda;
+    if use_variable_lambda
+        warning('deconv_pulse_transducer:AssumedSignalSpectrum', ...
+            ['conv_variable_lambda assumes the signal power spectrum has the shape of ' ...
+             'the sensor frequency response; the true spectrum differs, so the noise ' ...
+             'weighting is approximate.']);
+
+        % Transducer response T(f): the same gaussianFilter call as the data,
+        % applied to a unit impulse. The filter is zero-phase, so T is real.
+        impulse  = [1, zeros(1, size(data, 2) - 1)];
+        T        = real(fft(gaussianFilter(impulse, FS, 0.35e6, 100, false)));
+        H_system = H .* T;
+
+        % With no noise the noise-based lambda is 0 (an unstable pure inverse),
+        % so conv_deconv_lambda is kept.
+        if noise_amp > 0
+            lambda = noise_amp^2 * sum(abs(H_system).^2) / mean(sum(clean_conv.^2, 2));
+        end
+        fprintf('        Variable-lambda Wiener (pulse x transducer): lambda=%.2e\n', lambda);
+    else
+        H_system = H;
+    end
+
+    G           = conj(H_system) ./ (abs(H_system).^2 + lambda);
+    deconvolved = real(ifft(fft(data, [], 2) .* G, [], 2));
+    deconv_gain = real(H .* G);
+end
+
+
 function signals = apply_sensor_response(signals, FS, wiener_gain)
 %APPLY_SENSOR_RESPONSE Frequency response the measured sensor data went through:
 %  the transducer band-limit (same gaussianFilter call as the forward chain),
-%  then the pulse convolution + Wiener deconvolution, whose net gain is
-%  wiener_gain = |H|^2 / (|H|^2 + lambda) (all ones without the pulse model).
+%  then the pulse convolution + deconvolution, whose net gain wiener_gain comes
+%  from deconv_pulse_transducer (all ones without the pulse model).
 %  Both filters are real and zero-phase, so this operator is its own adjoint;
 %  the 'adjoint' branch applies it unchanged on the forward and adjoint side.
     signals = gaussianFilter(double(gather(signals)), FS, 0.35e6, 100, false);
