@@ -130,6 +130,7 @@ function CONFIG = get_default_config(varargin)
     CONFIG.conv_noise_level    = 0.125;  % legacy noise amp as fraction of THIS field's peak
     CONFIG.conv_deconv_lambda  = 1e-4;   % Wiener regularization for deconvolution
     CONFIG.conv_variable_lambda = false; % true: Wiener on pulse x transducer, lambda from noise/signal power
+    CONFIG.conv_use_deconv     = true;   % false: skip deconvolution (data keep the pulse smear)
 
     % --- Absolute (blanket) electronic-noise amplitude ---
     % By default (noise_amp_Pa empty) the pulse-model noise is a fraction

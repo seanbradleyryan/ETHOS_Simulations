@@ -103,6 +103,11 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
 %                                                  spectrum has the sensor response's
 %                                                  shape (warns). See
 %                                                  deconv_pulse_transducer.
+%           .conv_use_deconv            [true]   - false skips the deconvolution: the
+%                                                  data keep the pulse smear and the
+%                                                  pulse kernel's time delay
+%                                                  (build_pulse_kernel is not
+%                                                  zero-lag centred).
 %           .noise_only                 [false]  - Null-signal control: run the
 %                                                  forward sim to fix the noise
 %                                                  amplitude, then discard the true
@@ -111,17 +116,32 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
 %                                                  comes out is pure noise artifact,
 %                                                  a baseline for "is the recon
 %                                                  actually recovering signal?".
-%           .reconstruction_method      ['tr']   - 'tr', 'das', 'ubp', or 'adjoint'
+%           .reconstruction_method      ['tr']   - 'tr', 'das', 'ubp', 'adjoint', or
+%                                                  'adjoint_tv'
 %                                                  ('ubp' = universal back-
 %                                                  projection via ubp3d; honors
 %                                                  ubp_use_elements, ubp_band_limit,
 %                                                  ubp_aperture_cos, ubp_area_weight,
 %                                                  ubp_interp. 'adjoint' = Arridge
 %                                                  et al. 2016 gradient descent
-%                                                  with the k-Wave adjoint)
-%           .adjoint_num_iter           [5]      - 'adjoint' iterations (up to 3
-%                                                  k-Wave runs each); stops early
-%                                                  on convergence_tol
+%                                                  with the k-Wave adjoint.
+%                                                  'adjoint_tv' = the same operators
+%                                                  with a TV penalty, solved by
+%                                                  FISTA, Huang et al. 2013)
+%           .adjoint_num_iter           [5]      - 'adjoint' / 'adjoint_tv'
+%                                                  iterations ('adjoint': up to 3
+%                                                  k-Wave runs each; 'adjoint_tv':
+%                                                  2 each); stops early on
+%                                                  convergence_tol
+%           .adjoint_tv_lambda          [0.01]   - 'adjoint_tv' TV weight,
+%                                                  dimensionless: the TV-denoise
+%                                                  strength is this fraction of the
+%                                                  peak of the first unregularised
+%                                                  step (0 = no TV, positivity only)
+%           .adjoint_tv_power_iter      [5]      - 'adjoint_tv' power iterations for
+%                                                  the step size (2 k-Wave runs each)
+%           .adjoint_tv_inner_iter      [10]     - 'adjoint_tv' TV-denoise iterations
+%                                                  per outer iteration (no k-Wave)
 %           .blind_recon                [false]  - When true (and medium_recon is
 %                                                  supplied), forward on `medium`
 %                                                  but reconstruct on medium_recon.
@@ -187,7 +207,10 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
 %           .conv_max_pressure  - Per-iteration max pressure
 %           .conv_rel_change    - Per-iteration relative change
 %           .grid_padding       - Original / padded / expanded sizes
-%           .recon_method       - Which branch ran ('tr' | 'das' | 'ubp' | 'adjoint')
+%           .recon_method       - Which branch ran ('tr' | 'das' | 'ubp' | 'adjoint' |
+%                                 'adjoint_tv')
+%           .conv_cost          - 'adjoint_tv' only: objective ||A p - d||^2 +
+%                                 lambda*TV(p) per iteration
 %           .blind_recon        - Logical: true when forward and reconstruction
 %                                 media differed (blind geometry)
 %           .sensor_stages      - Only with CONFIG.sensor_stages_only: .names
@@ -229,6 +252,9 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
     use_gpu             = safe_config(config, 'use_gpu', true);
     num_tr_iter         = safe_config(config, 'num_time_reversal_iter', 30);
     num_adj_iter        = safe_config(config, 'adjoint_num_iter', 5);
+    tv_lambda           = safe_config(config, 'adjoint_tv_lambda', 0.01);
+    tv_power_iter       = safe_config(config, 'adjoint_tv_power_iter', 5);
+    tv_inner_iter       = safe_config(config, 'adjoint_tv_inner_iter', 10);
     convergence_tol     = safe_config(config, 'convergence_tol', 1e-3);
     correction_factor   = safe_config(config, 'correction_factor', 1.9);
     use_grid_padding    = safe_config(config, 'use_grid_padding', true);
@@ -237,6 +263,7 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
     conv_noise_level    = safe_config(config, 'conv_noise_level', 0.01);
     conv_deconv_lambda  = safe_config(config, 'conv_deconv_lambda', 1e-4);
     conv_variable_lambda = safe_config(config, 'conv_variable_lambda', false);
+    conv_use_deconv     = safe_config(config, 'conv_use_deconv', true);
     noise_only          = safe_config(config, 'noise_only', false);
 
     recon_method            = lower(safe_config(config, 'reconstruction_method', 'tr'));
@@ -1068,9 +1095,16 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
         % 4. Deconvolution. pulse_deconv_gain is the net gain of the pulse
         %    convolution + deconvolution, reused by the 'adjoint' sensor model.
         %    sensorData_conv is noise-free (and not nulled under noise_only), so
-        %    the variable lambda matches the signal run's.
-        [sensorData_deconv, pulse_deconv_gain] = deconv_pulse_transducer(sensorData_resp, ...
-            sensorData_conv, H, FS, noise_amp, conv_deconv_lambda, conv_variable_lambda);
+        %    the variable lambda matches the signal run's. With conv_use_deconv
+        %    false the data keep the pulse smear, so the net gain is the pulse H.
+        if conv_use_deconv
+            [sensorData_deconv, pulse_deconv_gain] = deconv_pulse_transducer(sensorData_resp, ...
+                sensorData_conv, H, FS, noise_amp, conv_deconv_lambda, conv_variable_lambda);
+        else
+            fprintf('        Deconvolution disabled (conv_use_deconv = false).\n');
+            sensorData_deconv = sensorData_resp;
+            pulse_deconv_gain = H;
+        end
 
         sensorData          = single(sensorData_deconv);
         sensorData_measured = single(sensorData_deconv);
@@ -1081,9 +1115,13 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
         % Diagnostic fast-path (verify_pipeline_simulate): keep the sensor signal
         % after each stage above, then skip the reconstruction.
         if safe_config(config, 'sensor_stages_only', false)
+            final_stage = 'Wiener deconvolved';
+            if ~conv_use_deconv
+                final_stage = 'no deconvolution';
+            end
             sim_results.sensor_stages = sensor_stage_traces( ...
                 {'raw (forward sim)', 'pulse convolved', 'noise added', ...
-                 'sensor band-limit', 'Wiener deconvolved'}, ...
+                 'sensor band-limit', final_stage}, ...
                 {sensorData_cpu, sensorData_conv, sensorData_noisy, ...
                  sensorData_resp, sensorData_deconv}, dt);
             recon_dose = zeros(input_dims_for_crop);
@@ -1142,13 +1180,13 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
     num_iters_done    = 0;
     tr_time           = 0;
 
-    % ---- Set up live reconstruction figure (opt-in, 'tr' and 'adjoint') ----
+    % ---- Set up live reconstruction figure (opt-in, 'tr', 'adjoint', 'adjoint_tv') ----
     fig_live   = [];
     ax_recon   = [];
     hImg_recon = [];
     hLine_max  = [];
     cz_live    = 1;
-    if plot_results && any(strcmp(recon_method, {'tr', 'adjoint'}))
+    if plot_results && any(strcmp(recon_method, {'tr', 'adjoint', 'adjoint_tv'}))
         if strcmp(recon_method, 'tr')
             num_live_iter = num_tr_iter;
         else
@@ -1348,7 +1386,7 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
                 % Net frequency response of the pulse convolution +
                 % deconvolution applied to the measured data above.
                 if conv_kernel_sigma > 0
-                    wiener_gain = pulse_deconv_gain;   % from deconv_pulse_transducer
+                    wiener_gain = pulse_deconv_gain;   % set in the pulse block above
                 else
                     wiener_gain = ones(1, size(sensorData_measured, 2));
                 end
@@ -1366,25 +1404,10 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
                     fprintf('          Adjoint iteration %d/%d: data mismatch %.4e\n', ...
                         adj_iter, num_adj_iter, norm(difference(:)) / norm(measured(:)));
 
-                    % 2. Adjoint run. The difference goes through the sensor
-                    %    response (its own adjoint), then becomes the adjoint
-                    %    source of Appendix B in Arridge et al. 2016.
-                    time_reversed_data = fliplr(apply_sensor_response(difference, FS, wiener_gain));
-                    source_adj        = struct();
-                    source_adj.p_mask = sensor.mask;
-                    source_adj.p      = [time_reversed_data(:, 1), time_reversed_data(:, 1), ...
-                                         time_reversed_data(:, 1:end-1)] + ...
-                                        [zeros(size(time_reversed_data(:, 1))), ...
-                                         time_reversed_data(:, 1:end-1), 2 * time_reversed_data(:, end)];
-                    source_adj.p      = source_adj.p(:, 1:Nt);   % k-Wave only uses the first Nt points
-                    source_adj.p_mode = 'additive';
-
-                    sensor_adj        = struct();
-                    sensor_adj.mask   = ones(Nx, Ny, Nz);
-                    sensor_adj.record = {'p_final'};
-
-                    adj_out      = kspaceFirstOrder3D(kgrid, kmedium_rec, source_adj, sensor_adj, inputArgs{:});
-                    image_update = reshape(double(gather(adj_out.p_final)), [Nx, Ny, Nz]);
+                    % 2. Adjoint run (adjoint_backward_model). The final
+                    %    pressure field is the image update (the gradient).
+                    image_update = adjoint_backward_model(difference, kgrid, kmedium_rec, ...
+                        sensor, inputArgs, FS, wiener_gain);
 
                     % 3. Step length by exact line search (one forward run)
                     update_signals = adjoint_forward_model(image_update, kgrid, kmedium_rec, ...
@@ -1445,9 +1468,159 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
                 return;
             end
 
+        case 'adjoint_tv'
+            % 'adjoint' with a total-variation penalty (Huang et al., IEEE TMI
+            % 32, 1097 (2013), eq. 43 and Appendix B). Minimises
+            %     J(p) = ||A p - d||^2 + lambda * TV(p),   p >= 0
+            % A = adjoint_forward_model and its adjoint = adjoint_backward_model,
+            % the same operators as 'adjoint'. TV = eq. 44 (calculate_tv).
+            % Setup:
+            %   a. Power iteration, started from the back-projected data. The
+            %      k-Wave adjoint is the true adjoint times a constant (k-Wave
+            %      rescales additive sources); a dot-product test measures it
+            %      and it is divided out. The largest eigenvalue of A'A gives
+            %      the Lipschitz constant Lip = 2 * max eigenvalue (step 1/Lip).
+            %   b. lambda = adjoint_tv_lambda * Lip * peak of the first
+            %      unregularised step, so adjoint_tv_lambda is dimensionless and
+            %      one value works for weak and strong fields.
+            % Each iteration (FISTA, Algorithm 1):
+            %   1. gradient of the data term at the look-ahead point y:
+            %      2 A'(A y - d)
+            %   2. gradient step y - gradient / Lip, then TV denoising with
+            %      positivity (tv_denoise = F_Dnoise, Algorithm 2)
+            %   3. forward run on the new estimate -> modelled data and J
+            %   4. momentum: y = p + (t-1)/t_next * (p - p_prev). A is linear,
+            %      so A y is the same combination of modelled data (no k-Wave run)
+            % k-Wave runs: 1 + 2 * adjoint_tv_power_iter for setup, 2 per
+            % iteration. Runs on kmedium_rec (blind works as for TR). No
+            % correction_factor (a least-squares fit in Pa, as 'adjoint').
+            fprintf('        Running adjoint_tv reconstruction (%d iterations, tol=%.1e)...\n', ...
+                num_adj_iter, convergence_tol);
+
+            conv_max_pressure = zeros(num_adj_iter, 1);
+            conv_rel_change   = nan(num_adj_iter, 1);
+            conv_cost         = nan(num_adj_iter, 1);
+
+            try
+                adj_tic = tic;
+
+                % Net frequency response of the pulse convolution +
+                % deconvolution applied to the measured data above.
+                if conv_kernel_sigma > 0
+                    wiener_gain = pulse_deconv_gain;   % set in the pulse block above
+                else
+                    wiener_gain = ones(1, size(sensorData_measured, 2));
+                end
+
+                % Measured data (already element-averaged above)
+                measured = double(sensorData_measured);
+
+                % a. Power iteration: adjoint scale and largest eigenvalue of A'A
+                back_projection = adjoint_backward_model(measured, kgrid, kmedium_rec, ...
+                    sensor, inputArgs, FS, wiener_gain);
+                power_image = back_projection / norm(back_projection(:));
+                for power_iter = 1:tv_power_iter
+                    power_signals = adjoint_forward_model(power_image, kgrid, kmedium_rec, ...
+                        sensor, inputArgs, sensor_info, FS, wiener_gain);
+                    round_trip    = adjoint_backward_model(power_signals, kgrid, kmedium_rec, ...
+                        sensor, inputArgs, FS, wiener_gain);
+                    % True adjoint: sum(x .* A'(A x)) == sum((A x).^2)
+                    adjoint_scale  = sum(power_image(:) .* round_trip(:)) / sum(power_signals(:) .^ 2);
+                    max_eigenvalue = norm(round_trip(:)) / abs(adjoint_scale);   % power_image has unit length
+                    power_image    = round_trip / norm(round_trip(:));
+                    fprintf('          Power iteration %d/%d: adjoint scale %.4e, max eigenvalue %.4e\n', ...
+                        power_iter, tv_power_iter, adjoint_scale, max_eigenvalue);
+                end
+                % Power iteration approaches the eigenvalue from below: 10% margin
+                lipschitz = 2 * 1.1 * max_eigenvalue;
+
+                % b. TV weight. denoise_weight = lambda / Lip is what tv_denoise uses.
+                first_step     = 2 * (back_projection / adjoint_scale) / lipschitz;
+                denoise_weight = tv_lambda * max(first_step(:));
+                lambda_abs     = denoise_weight * lipschitz;
+                fprintf('          Lipschitz constant %.4e, TV lambda %.4e (denoise weight %.4e Pa)\n', ...
+                    lipschitz, lambda_abs, denoise_weight);
+                clear back_projection first_step power_image power_signals round_trip
+
+                p0_estimate    = zeros(gridSize);
+                p0_prev        = zeros(gridSize);
+                p0_lookahead   = zeros(gridSize);           % y
+                modelled_prev  = zeros(size(measured));
+                modelled_ahead = zeros(size(measured));     % A y (a zero image predicts zero signals)
+                fista_t        = 1;
+
+                for adj_iter = 1:num_adj_iter
+
+                    % 1. Gradient of the data term at y
+                    difference    = modelled_ahead - measured;
+                    data_gradient = 2 * adjoint_backward_model(difference, kgrid, kmedium_rec, ...
+                        sensor, inputArgs, FS, wiener_gain) / adjoint_scale;
+
+                    % 2. Gradient step, then TV denoising with positivity
+                    p0_estimate = tv_denoise(p0_lookahead - data_gradient / lipschitz, ...
+                        denoise_weight, tv_inner_iter);
+
+                    % 3. Modelled data of the new estimate and the objective J
+                    modelled  = adjoint_forward_model(p0_estimate, kgrid, kmedium_rec, ...
+                        sensor, inputArgs, sensor_info, FS, wiener_gain);
+                    data_term = sum((modelled(:) - measured(:)) .^ 2);
+                    tv_term   = lambda_abs * calculate_tv(p0_estimate);
+                    conv_cost(adj_iter) = data_term + tv_term;
+
+                    conv_max_pressure(adj_iter) = max(p0_estimate(:));
+                    num_iters_done = adj_iter;
+                    fprintf(['          Adjoint-TV iteration %d/%d: data mismatch %.4e, ' ...
+                             'cost %.4e (TV %.1f%%), max pressure %.4e Pa\n'], ...
+                        adj_iter, num_adj_iter, sqrt(data_term) / norm(measured(:)), ...
+                        conv_cost(adj_iter), 100 * tv_term / conv_cost(adj_iter), ...
+                        conv_max_pressure(adj_iter));
+
+                    converged = false;
+                    norm_prev = norm(p0_prev(:));
+                    if norm_prev > 0
+                        conv_rel_change(adj_iter) = norm(p0_estimate(:) - p0_prev(:)) / norm_prev;
+                        fprintf('          Rel change: %.4e\n', conv_rel_change(adj_iter));
+                        if conv_rel_change(adj_iter) < convergence_tol
+                            fprintf('          *** Converged at iteration %d ***\n', adj_iter);
+                            converged = true;
+                        end
+                    end
+
+                    % Live figure update
+                    update_live_recon_figure(fig_live, ax_recon, hImg_recon, hLine_max, ...
+                        p0_estimate(1:Nx_orig, 1:Ny_orig, cz_live), adj_iter, num_adj_iter, ...
+                        converged, conv_max_pressure);
+
+                    if converged
+                        break;
+                    end
+
+                    % 4. Momentum step (y and A y)
+                    fista_t_next   = (1 + sqrt(1 + 4 * fista_t^2)) / 2;
+                    momentum       = (fista_t - 1) / fista_t_next;
+                    p0_lookahead   = p0_estimate + momentum * (p0_estimate - p0_prev);
+                    modelled_ahead = modelled + momentum * (modelled - modelled_prev);
+                    p0_prev        = p0_estimate;
+                    modelled_prev  = modelled;
+                    fista_t        = fista_t_next;
+                end
+
+                reconPressure         = p0_estimate;
+                sim_results.conv_cost = conv_cost(1:max(num_iters_done, 1));
+                tr_time               = toc(adj_tic);
+                fprintf('        Adjoint-TV reconstruction complete (%.1f s).\n', tr_time);
+                fprintf('        Reconstructed pressure: [%.2e, %.2e] Pa\n', ...
+                    min(reconPressure(:)), max(reconPressure(:)));
+            catch ME
+                warning('run_single_field_simulation:AdjointTVFail', ...
+                    'Adjoint-TV reconstruction failed: %s', ME.message);
+                recon_dose = zeros(input_dims_for_crop);
+                return;
+            end
+
         otherwise
             error('run_single_field_simulation:UnknownReconMethod', ...
-                'Unknown reconstruction_method: "%s" (use ''tr'', ''das'', ''ubp'', or ''adjoint'')', recon_method);
+                'Unknown reconstruction_method: "%s" (use ''tr'', ''das'', ''ubp'', ''adjoint'', or ''adjoint_tv'')', recon_method);
     end
 
     sim_results.tr_time_s         = tr_time;
@@ -1793,9 +1966,10 @@ function signals = apply_sensor_response(signals, FS, wiener_gain)
 %APPLY_SENSOR_RESPONSE Frequency response the measured sensor data went through:
 %  the transducer band-limit (same gaussianFilter call as the forward chain),
 %  then the pulse convolution + deconvolution, whose net gain wiener_gain comes
-%  from deconv_pulse_transducer (all ones without the pulse model).
-%  Both filters are real and zero-phase, so this operator is its own adjoint;
-%  the 'adjoint' branch applies it unchanged on the forward and adjoint side.
+%  from deconv_pulse_transducer (all ones without the pulse model; the pulse H
+%  itself when conv_use_deconv is false). The band-limit is real and zero-phase,
+%  so the adjoint of this operator is the same call with conj(wiener_gain),
+%  which the 'adjoint' branch passes on the adjoint side.
     signals = gaussianFilter(double(gather(signals)), FS, 0.35e6, 100, false);
     signals = real(ifft(fft(signals, [], 2) .* wiener_gain, [], 2));
 end
@@ -1811,6 +1985,109 @@ function signals = adjoint_forward_model(p0, kgrid, kmedium, sensor, inputArgs, 
     signals      = kspaceFirstOrder3D(kgrid, kmedium, source, sensor, inputArgs{:});
     signals      = apply_sensor_response(signals, FS, wiener_gain);
     [~, signals] = apply_element_averaging(signals, sensor_info);
+end
+
+
+function p_final = adjoint_backward_model(signals, kgrid, kmedium, sensor, inputArgs, FS, wiener_gain)
+%ADJOINT_BACKWARD_MODEL Adjoint of adjoint_forward_model, up to a constant
+%  (k-Wave rescales additive sources), for the 'adjoint' and 'adjoint_tv'
+%  branches. The signals go through the adjoint of the sensor response (conj
+%  of the gain; unchanged when the gain is real, i.e. with deconvolution),
+%  then are time-reversed and ADDED at the sensor points ('additive' source;
+%  TR overwrites them) as the adjoint source of Appendix B in Arridge et al.
+%  2016. Returns the final pressure field [Nx x Ny x Nz]. No element
+%  averaging: the inputs are already element-averaged, and averaging is its
+%  own adjoint, so it would leave them unchanged.
+    time_reversed = fliplr(apply_sensor_response(signals, FS, conj(wiener_gain)));
+    source        = struct();
+    source.p_mask = sensor.mask;
+    source.p      = [time_reversed(:, 1), time_reversed(:, 1), time_reversed(:, 1:end-1)] + ...
+                    [zeros(size(time_reversed(:, 1))), time_reversed(:, 1:end-1), 2 * time_reversed(:, end)];
+    source.p      = source.p(:, 1:kgrid.Nt);   % k-Wave only uses the first Nt points
+    source.p_mode = 'additive';
+
+    recorder        = struct();
+    recorder.mask   = ones(size(sensor.mask));
+    recorder.record = {'p_final'};
+
+    out     = kspaceFirstOrder3D(kgrid, kmedium, source, recorder, inputArgs{:});
+    p_final = reshape(double(gather(out.p_final)), size(sensor.mask));
+end
+
+
+function tv = calculate_tv(p)
+%CALCULATE_TV Total variation of a 3D image, Huang et al. 2013 eq. 44:
+%  the sum over voxels n of sqrt(sum over the 3 dimensions of
+%  (p(n) - p(neighbour before n))^2). The first voxel along a dimension has
+%  no neighbour before it, so that term is 0.
+    [d1, d2, d3] = tv_backward_diff(p);
+    tv = sum(sqrt(d1 .^ 2 + d2 .^ 2 + d3 .^ 2), 'all');
+end
+
+
+function p = tv_denoise(b, weight, num_iter)
+%TV_DENOISE F_Dnoise of Huang et al. 2013 (Appendix B, Algorithm 2; the FGP
+%  algorithm of Beck & Teboulle 2009, extended to 3D). Solves
+%      min over p >= 0 of  ||p - b||^2 + 2 * weight * calculate_tv(p)
+%  through its dual: one vector (q1, q2, q3) per voxel, length <= 1. Each
+%  iteration takes a projected gradient step on the dual (step 1/(12*weight);
+%  12 bounds ||D||^2 in 3D, 4 per dimension, D = tv_backward_diff), with
+%  momentum. The image is p = max(b - weight * D'(q), 0).
+%  weight <= 0 means no TV: only the positivity is applied.
+    if weight <= 0
+        p = max(b, 0);
+        return;
+    end
+
+    q1 = zeros(size(b));  q2 = zeros(size(b));  q3 = zeros(size(b));   % dual
+    r1 = zeros(size(b));  r2 = zeros(size(b));  r3 = zeros(size(b));   % dual look-ahead
+    t  = 1;
+    for k = 1:num_iter
+        p = max(b - weight * tv_backward_diff_transpose(r1, r2, r3), 0);
+        [d1, d2, d3] = tv_backward_diff(p);
+        s1 = r1 + d1 / (12 * weight);
+        s2 = r2 + d2 / (12 * weight);
+        s3 = r3 + d3 / (12 * weight);
+
+        % Project each voxel's vector onto the unit ball
+        vec_len = max(1, sqrt(s1 .^ 2 + s2 .^ 2 + s3 .^ 2));
+        s1 = s1 ./ vec_len;
+        s2 = s2 ./ vec_len;
+        s3 = s3 ./ vec_len;
+
+        t_next = (1 + sqrt(1 + 4 * t^2)) / 2;
+        r1 = s1 + ((t - 1) / t_next) * (s1 - q1);
+        r2 = s2 + ((t - 1) / t_next) * (s2 - q2);
+        r3 = s3 + ((t - 1) / t_next) * (s3 - q3);
+        q1 = s1;  q2 = s2;  q3 = s3;
+        t  = t_next;
+    end
+    p = max(b - weight * tv_backward_diff_transpose(q1, q2, q3), 0);
+end
+
+
+function [d1, d2, d3] = tv_backward_diff(p)
+%TV_BACKWARD_DIFF Difference to the neighbour before each voxel (eq. 44),
+%  p(n) - p(n-1) along array dims 1, 2 and 3; 0 at the first voxel.
+    d1 = zeros(size(p));  d2 = zeros(size(p));  d3 = zeros(size(p));
+    d1(2:end, :, :) = p(2:end, :, :) - p(1:end-1, :, :);
+    d2(:, 2:end, :) = p(:, 2:end, :) - p(:, 1:end-1, :);
+    d3(:, :, 2:end) = p(:, :, 2:end) - p(:, :, 1:end-1);
+end
+
+
+function p = tv_backward_diff_transpose(d1, d2, d3)
+%TV_BACKWARD_DIFF_TRANSPOSE Transpose of tv_backward_diff: for any image x,
+%  sum(D(x) .* (d1, d2, d3)) == sum(x .* tv_backward_diff_transpose(d1, d2, d3)).
+%  Each difference x(n) - x(n-1) adds its weight to voxel n and subtracts it
+%  from voxel n-1.
+    p = zeros(size(d1));
+    p(2:end, :, :)   = p(2:end, :, :)   + d1(2:end, :, :);
+    p(1:end-1, :, :) = p(1:end-1, :, :) - d1(2:end, :, :);
+    p(:, 2:end, :)   = p(:, 2:end, :)   + d2(:, 2:end, :);
+    p(:, 1:end-1, :) = p(:, 1:end-1, :) - d2(:, 2:end, :);
+    p(:, :, 2:end)   = p(:, :, 2:end)   + d3(:, :, 2:end);
+    p(:, :, 1:end-1) = p(:, :, 1:end-1) - d3(:, :, 2:end);
 end
 
 
