@@ -70,9 +70,12 @@ addpath(genpath(fullfile(this_script_dir, 'utils')));
 % beam per CT on the beam's summed dose from pipeline_compress).
 CONFIG = get_default_config();
 
+CONFIG.reconstruction_mode = 'beam';
+
+
 % --- Patient and Session Selection ---
 CONFIG.patients        = {'1194203'};
-CONFIG.sessions        = {'Session_2'};
+CONFIG.sessions        = {'Session_1'};
 CONFIG.treatment_site  = 'Pancreas';
 
 % working_dir is inherited from get_default_config (the git repo root).
@@ -170,7 +173,7 @@ CONFIG.stale_claim_minutes   = 5;
 CONFIG.run_step2   = true;    % Step 2   : k-Wave simulation
 CONFIG.run_step205 = true;    % Step 2.05: total RS dose per CT simulated as one field
 CONFIG.run_step25  = true;    % Step 2.5 : per-segment gamma + SSIM (folded in)
-CONFIG.run_step3   = false;    % Step 3   : Gamma analysis
+CONFIG.run_step3   = true;    % Step 3   : Gamma analysis
 CONFIG.run_verify  = true;     % verify_pipeline_simulate: checks + plots in AnalysisResults/.../verify_pipeline_simulate/
 
 %% ========================= INITIALIZATION ================================

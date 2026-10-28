@@ -45,7 +45,7 @@ function CONFIG = get_default_config(varargin)
     CONFIG.patient_id     = '1194203';
     CONFIG.session        = 'Session_1';
 
-    CONFIG.dose_filename  = 'dose_1194203_Session_1_reference_CT_1_B15_112.mat';
+    CONFIG.dose_filename  = 'dose_1194203_Session_1_reference_CT_1_B1_112.mat';
     % Standalone default geometry: CBCT1 (CT_1), regardless of which CBCT the
     % dose was computed on. Per-dose CBCT selection lives in the multi-field
     % driver, not here.
@@ -73,7 +73,7 @@ function CONFIG = get_default_config(varargin)
     CONFIG.element_size_mm   = 3.65;
 
     % --- Tissue / medium ---
-    CONFIG.gruneisen_method = 'threshold_2';
+    CONFIG.gruneisen_method = 'continuous_1';
 
     CONFIG.force_uniform_density     = false;
     CONFIG.force_uniform_sound_speed = false;

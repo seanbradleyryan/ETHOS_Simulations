@@ -24,10 +24,29 @@ addpath(genpath(fullfile(fileparts(mfilename('fullpath')), 'pipeline')));  % ste
 CONFIG = get_default_config();
 
 % --- Comparison settings ---
-CONFIG.recon_methods  = {'tr', 'adjoint', 'adjoint_tv'};   % any of 'tr','das','ubp','adjoint','adjoint_tv'
-CONFIG.num_iter       = 5;     % iterations for every iterative method
-CONFIG.rng_seed       = 1;     % same electronic-noise draw for every method
-CONFIG.gamma_criteria = {3, 3, '3%/3mm'; 5, 5, '5%/5mm'};
+CONFIG.recon_methods  = {
+    'tr', 
+    'adjoint', 
+    'adjoint_tv'};   % any of 'tr','das','ubp','adjoint','adjoint_tv'
+CONFIG.num_iter       = 10;     % iterations for every iterative method
+CONFIG.rng_seed       = 42;     % same electronic-noise draw for every method
+CONFIG.gamma_criteria = {3, 3, '3%/3mm'};
+CONFIG.Nt_scaling = 3; 
+CONFIG.conv_noise_level = .125; 
+CONFIG.conv_use_deconv = false; 
+CONFIG.gruneisen_method = 'continuous_1'
+
+
+%CONFIG.sensor_placement_method = 'box'; 
+%CONFIG.gruneisen_method = 'continuous_1'; 
+% 96, 94, 94
+
+%CONFIG.num_iter = 1; 
+%CONFIG.Nt_scaling = 3; 
+%33, 30.8, 30
+
+
+
 
 % Same iteration count for every method: tol 0 disables the early stop.
 CONFIG.num_time_reversal_iter = CONFIG.num_iter;

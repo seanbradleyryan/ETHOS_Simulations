@@ -23,7 +23,7 @@ CONFIG = get_default_config();
 CONFIG.sensor_placement_method = 'spherical';
 CONFIG.reconstruction_method = 'ubp'; 
 CONFIG.gruneisen_method = 'uniform';
-
+CONFIG.conv_use_deconv = false; 
 
 % --- Example overrides (uncomment / edit as needed) ---
 % CONFIG.dose_filename          = 'dose_1194203_Session_1_reference_CT_1_B15_112.mat';
@@ -128,7 +128,7 @@ if CONFIG.save_results
     results.fwd_time_sec  = fwd_time;
     results.tr_time_sec   = tr_time;
     if ~isempty(gamma_results)
-        results.gamma = gamma_results;
+        results.gamma = gamma_results;f
     end
     save(output_fname, '-struct', 'results', '-v7.3');
     fprintf('\nResults saved to: %s\n', output_fname);

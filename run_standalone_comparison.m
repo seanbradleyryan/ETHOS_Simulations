@@ -12,6 +12,8 @@
 
 clear; clc; close all;
 
+
+
 % Ensure the moved helper functions in utils/ are on the path (run from root).
 addpath(genpath(fullfile(fileparts(mfilename('fullpath')), 'utils')));
 addpath(genpath(fullfile(fileparts(mfilename('fullpath')), 'pipeline')));  % step* functions live here
@@ -20,9 +22,9 @@ addpath(genpath(fullfile(fileparts(mfilename('fullpath')), 'pipeline')));  % ste
 
 
 CONFIG = get_default_config();
-    CONFIG.dose_filename  = 'dose_1194203_Session_4_reference_CT_1_B15_112.mat';
+    CONFIG.dose_filename  = 'dose_1194203_Session_4_reference_CT_1_B1_112.mat';
 
-CONFIG.mask_recon_to_dose_region     = false;    % zero recon dose outside the >1% dose mask
+CONFIG.mask_recon_to_dose_region     = true;    % zero recon dose outside the >1% dose mask
 
 
 % --- Comparison-specific settings ---
@@ -30,8 +32,9 @@ CONFIG.ct_pair      = [1, 3];   % the two CT images paired for comparison
 CONFIG.reference_ct = 1;        % geometry we (blindly) reconstruct on
 
 CONFIG.num_tr_iter = 1; 
-CONFIG.conv_noise_level = .01;
-CONFIG.reconstruction_method = 'tr'; 
+% CONFIG.reconstruction_method = 'adjoint_tv'; 
+% 94.88, 55.17, 53.96
+
 CONFIG.sensor_side = 'right'; 
 
 % Noise-only null hypothesis: instead of a single noise-only run (which jitters
@@ -40,7 +43,7 @@ CONFIG.sensor_side = 'right';
 % pass rate as the null band / error bar. The ensemble is cached (keyed on the
 % sensor + noise + recon config, NOT the dose), so it is computed once per
 % session and reused for every beam/segment. Set false to skip it entirely.
-CONFIG.include_noise_only     = true;
+CONFIG.include_noise_only     = false;
 CONFIG.noise_ensemble_minutes = 10;    % wall-time budget for a fresh ensemble
 
 % --- Example overrides ---
