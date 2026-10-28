@@ -17,7 +17,8 @@ function results = step25_segment_metrics(patient_id, session, config)
 %   so they need BOTH the CT_1 and CT_3 reconstructions of the same segment. The
 %   sim parfor produces one field (one CT) at a time, so the pair is not yet
 %   available there. This step pairs them and parallelizes across CPUs (parfor
-%   over a beam's segments) while the sim's GPU work is already done.
+%   over a beam's segments; beam mode: over the beams) while the sim's GPU work
+%   is already done.
 %
 %   COMPARISONS (per segment, reference builds the 10% eval mask):
 %       truth1_vs_truth3   rs_CT1    vs rs_CT3
@@ -42,7 +43,9 @@ function results = step25_segment_metrics(patient_id, session, config)
 %   summed dose instead of each segment, so each beam is treated as ONE
 %   "segment" (seg_num 0 = the whole beam): truths are the beam totals
 %   total_dose_<CT>_B<n>.mat, recons are total_dose_<CT>_B<n>_recon_<hash>.mat,
-%   and the metrics fold into the CT_1 beam recon. metrics_plan_type is not
+%   and the metrics fold into the CT_1 beam recon. All beams are loaded first,
+%   then ONE parfor runs over the beams (a parfor over a beam's single segment
+%   would run the beams one at a time). metrics_plan_type is not
 %   applied (the beam totals sum every segment on that CT). When
 %   config.config_hash is set, the mode is read from that hash's registered
 %   config (hashtoconfig), not from config.reconstruction_mode, so a config
@@ -79,7 +82,8 @@ function results = step25_segment_metrics(patient_id, session, config)
 %                                  (once per session; cached by the sim hash).
 %           .metrics_noise_minutes [30]   Ensemble time budget (min) handed to
 %                                  noise_ensemble_error_bars (TimeBudgetMin).
-%           .use_parallel          [true] parfor over a beam's segments (CPU).
+%           .use_parallel          [true] parfor over a beam's segments, or
+%                                  over the beams in beam mode (CPU).
 %           .metrics_auto_workers  [true] size a NEW pool to the physical CPU
 %                                  core count (best for this CPU-bound work);
 %                                  set false to use num_parallel_workers exactly.
@@ -186,7 +190,6 @@ function results = step25_segment_metrics(patient_id, session, config)
         'truth1_vs_recon3', 'rs_CT1', 'recon_CT3'; ...
         'truth3_vs_recon3', 'rs_CT3', 'recon_CT3'  ...
     };
-    nComp = size(comparisons, 1);
 
     fprintf('\n=========================================================\n');
     fprintf('  [STEP 2.5] Per-Segment Gamma + SSIM Metrics\n');
@@ -242,6 +245,7 @@ function results = step25_segment_metrics(patient_id, session, config)
     hash8           = '';
     recon_sum       = struct();          % .CT_1 / .CT_3 summed field recons
     spacing         = [];
+    queued_segs     = {};                % beam mode: each beam's one segment
 
     for bi = 1:nBeams
         b = beams(bi);
@@ -290,11 +294,12 @@ function results = step25_segment_metrics(patient_id, session, config)
             continue;
         end
 
-        gamma_pass = nan(ns, nComp);
-        ssim_mean  = nan(ns, nComp);
-        gamma_sec  = nan(ns, 1);   % NaN = segment not computed here (skipped)
-        ssim_sec   = nan(ns, 1);
-        overwrite  = config.metrics_overwrite;
+        % Beam mode: queue the beam's one segment (seg 0); every beam runs in
+        % one parfor after this loop.
+        if beam_mode
+            queued_segs{end+1} = seg_data{1}; %#ok<AGROW>
+            continue;
+        end
 
         % TIMING: seed the live estimate with this beam's segment count, a guess
         % for the beams not yet loaded (mean segments/beam so far), the worker
@@ -304,28 +309,9 @@ function results = step25_segment_metrics(patient_id, session, config)
             'later_est', later_est, 'workers', n_workers, ...
             'gamma_times', all_gamma_sec, 'ssim_times', all_ssim_sec));
 
-        if have_pool
-            % Workers send one 'done' message per segment; the client prints it.
-            progress_queue = parallel.pool.DataQueue;
-            afterEach(progress_queue, @report_segment_progress);
-            parfor si = 1:ns
-                S = seg_data{si};
-                [gamma_pass(si, :), ssim_mean(si, :), gamma_sec(si), ssim_sec(si)] = ...
-                    process_segment(S, comparisons, dose_pct, dist_mm, cutoff_fr, ...
-                    normalize, hash8, overwrite);
-                send(progress_queue, struct('kind', 'done', 'beam', b, 'seg', S.seg, ...
-                    'gamma_sec', gamma_sec(si), 'ssim_sec', ssim_sec(si)));
-            end
-        else
-            for si = 1:ns
-                S = seg_data{si};
-                [gamma_pass(si, :), ssim_mean(si, :), gamma_sec(si), ssim_sec(si)] = ...
-                    process_segment(S, comparisons, dose_pct, dist_mm, cutoff_fr, ...
-                    normalize, hash8, overwrite);
-                report_segment_progress(struct('kind', 'done', 'beam', b, 'seg', S.seg, ...
-                    'gamma_sec', gamma_sec(si), 'ssim_sec', ssim_sec(si)));
-            end
-        end
+        [gamma_pass, ssim_mean, gamma_sec, ssim_sec] = compute_segments(seg_data, ...
+            have_pool, comparisons, dose_pct, dist_mm, cutoff_fr, normalize, hash8, ...
+            config.metrics_overwrite);
 
         % TIMING: keep the times of the segments actually computed.
         computed      = ~isnan(gamma_sec);
@@ -346,6 +332,38 @@ function results = step25_segment_metrics(patient_id, session, config)
             mean(gamma_pass(:, 2), 'omitnan'), mean(gamma_pass(:, 3), 'omitnan'), ...
             mean(ssim_mean(:, 2),  'omitnan'), mean(ssim_mean(:, 3),  'omitnan'), ...
             elapsed, eta);
+    end
+
+    %% ============ BEAM MODE: ONE PARFOR OVER ALL BEAMS ============
+    % Each beam is a single "segment", so a parfor over one beam's segments
+    % would run the beams one at a time. The loop above only loaded and queued
+    % them; here all beams run in parallel (one worker per beam).
+    if beam_mode && ~isempty(queued_segs)
+        nq = numel(queued_segs);
+        fprintf('\n[STEP 2.5] Beam mode: gamma + SSIM for %d beam(s) in parallel...\n', nq);
+        report_segment_progress(struct('kind', 'init', 'n_segments', nq, ...
+            'later_est', 0, 'workers', n_workers, ...
+            'gamma_times', all_gamma_sec, 'ssim_times', all_ssim_sec));
+
+        [gamma_pass, ssim_mean, gamma_sec, ssim_sec] = compute_segments(queued_segs, ...
+            have_pool, comparisons, dose_pct, dist_mm, cutoff_fr, normalize, hash8, ...
+            config.metrics_overwrite);
+
+        computed      = ~isnan(gamma_sec);
+        all_gamma_sec = gamma_sec(computed)';
+        all_ssim_sec  = ssim_sec(computed)';
+
+        for q = 1:nq
+            nproc = nproc + 1;
+            beam_list(nproc)      = queued_segs{q}.beam;
+            n_segments(nproc)     = 1;
+            seg_gamma_pass{nproc} = gamma_pass(q, :);
+            seg_ssim_mean{nproc}  = ssim_mean(q, :);
+            fprintf(['  beam #%d done: gamma recon1=%.1f%% recon3=%.1f%% | ' ...
+                     'SSIM recon1=%.1f%% recon3=%.1f%%\n'], beam_list(nproc), ...
+                gamma_pass(q, 2), gamma_pass(q, 3), ssim_mean(q, 2), ssim_mean(q, 3));
+        end
+        queued_segs = {};   % free the beam volumes before the noise floor
     end
 
     if nproc == 0
@@ -489,6 +507,42 @@ end
 %% =========================================================================
 %  PER-SEGMENT WORK (runs on a parfor worker)
 %% =========================================================================
+
+function [gamma_pass, ssim_mean, gamma_sec, ssim_sec] = compute_segments(seg_data, ...
+        use_pool, comparisons, dose_pct, dist_mm, cutoff_fr, normalize, hash8, overwrite)
+%COMPUTE_SEGMENTS Run process_segment on every entry of seg_data: parfor when a
+%  pool is up, else a plain loop. Segment mode passes one beam's segments; beam
+%  mode passes every beam (one entry each). Output rows follow seg_data order.
+    ns         = numel(seg_data);
+    nComp      = size(comparisons, 1);
+    gamma_pass = nan(ns, nComp);
+    ssim_mean  = nan(ns, nComp);
+    gamma_sec  = nan(ns, 1);   % NaN = segment not computed here (skipped)
+    ssim_sec   = nan(ns, 1);
+
+    if use_pool
+        % Workers send one 'done' message per segment; the client prints it.
+        progress_queue = parallel.pool.DataQueue;
+        afterEach(progress_queue, @report_segment_progress);
+        parfor si = 1:ns
+            S = seg_data{si};
+            [gamma_pass(si, :), ssim_mean(si, :), gamma_sec(si), ssim_sec(si)] = ...
+                process_segment(S, comparisons, dose_pct, dist_mm, cutoff_fr, ...
+                normalize, hash8, overwrite);
+            send(progress_queue, struct('kind', 'done', 'beam', S.beam, 'seg', S.seg, ...
+                'gamma_sec', gamma_sec(si), 'ssim_sec', ssim_sec(si)));
+        end
+    else
+        for si = 1:ns
+            S = seg_data{si};
+            [gamma_pass(si, :), ssim_mean(si, :), gamma_sec(si), ssim_sec(si)] = ...
+                process_segment(S, comparisons, dose_pct, dist_mm, cutoff_fr, ...
+                normalize, hash8, overwrite);
+            report_segment_progress(struct('kind', 'done', 'beam', S.beam, 'seg', S.seg, ...
+                'gamma_sec', gamma_sec(si), 'ssim_sec', ssim_sec(si)));
+        end
+    end
+end
 
 function [gamma_pass, ssim_mean, gamma_sec, ssim_sec] = process_segment(S, comparisons, ...
         dose_pct, dist_mm, cutoff_fr, normalize, hash8, overwrite)

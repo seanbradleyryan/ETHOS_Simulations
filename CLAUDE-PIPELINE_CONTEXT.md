@@ -120,7 +120,8 @@ pre-existing segment caches keep their hashes; `'beam'` gets its own hash/files)
     exist, so the loaders silently used segment data. `pipeline_simulate` passes `config_hash` to
     Step 2.5 (as it does for 2.05 and 3). Step 2.5 without `config_hash` still uses the config's mode.
   - Step 2.5 runs the four comparisons once per beam on the beam totals (`seg_num` 0) and folds into
-    the CT_1 beam recon. `metrics_plan_type` is not applied. Beam data is loaded by
+    the CT_1 beam recon. All beams are loaded first, then one `parfor` runs over the beams (not over
+    a beam's segments, which would be one item). `metrics_plan_type` is not applied. Beam data is loaded by
     `utils/load_beam_total_set.m` (same shape as `load_recon_dose_data` `'set'` output).
   - Step 3 Part A is unchanged. Part B prints a per-beam table (one value per beam,
     All = mean ± SE over beams) and draws the by-beam plots without per-beam error bars. SNR is
