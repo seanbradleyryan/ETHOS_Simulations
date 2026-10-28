@@ -94,10 +94,14 @@ function [hash_hex, canonical] = compute_sim_config_hash(config)
     end
 
     % Backward compatibility: adjoint_num_iter only matters for the 'adjoint'
-    % reconstruction method. Remove it for every other method so existing
-    % caches keep their hashes.
-    if ~strcmpi(canonical.reconstruction_method, 'adjoint')
+    % and 'adjoint_tv' reconstruction methods, and the adjoint_tv_* knobs only
+    % for 'adjoint_tv'. Remove them for every other method so existing caches
+    % keep their hashes.
+    if ~any(strcmpi(canonical.reconstruction_method, {'adjoint', 'adjoint_tv'}))
         canonical = rmfield(canonical, 'adjoint_num_iter');
+    end
+    if ~strcmpi(canonical.reconstruction_method, 'adjoint_tv')
+        canonical = rmfield(canonical, {'adjoint_tv_inner_iter', 'adjoint_tv_lambda', 'adjoint_tv_power_iter'});
     end
 
     json     = jsonencode(canonical);
@@ -115,6 +119,9 @@ function fields = sim_config_fields()
     % intentionally excluded.  Sorted for deterministic JSON key order.
     fields = sort({ ...
         'adjoint_num_iter', ...
+        'adjoint_tv_inner_iter', ...
+        'adjoint_tv_lambda', ...
+        'adjoint_tv_power_iter', ...
         'alpha_power', ...
         'blind_recon_ct3', ...
         'blind_recon_reference_label', ...

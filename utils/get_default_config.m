@@ -103,7 +103,7 @@ function CONFIG = get_default_config(varargin)
     CONFIG.use_pressure_scale_correction = false;   % rescale by max(p0)/max(recon) before dose conversion
     CONFIG.mask_recon_to_dose_region     = true;    % zero recon dose outside the >1% dose mask
 
-    % --- Reconstruction method: 'tr' (iterative time reversal) | 'das' | 'ubp' | 'adjoint' ---
+    % --- Reconstruction method: 'tr' (iterative time reversal) | 'das' | 'ubp' | 'adjoint' | 'adjoint_tv' ---
     %   'ubp' = universal back-projection (utils/ubp3d.m). Its options default via
     %   safe_config in run_single_field_simulation (like the das_* options) and
     %   may be overridden here: ubp_use_elements (true), ubp_band_limit ('auto' |
@@ -113,9 +113,17 @@ function CONFIG = get_default_config(varargin)
     %   'adjoint' = Arridge et al. 2016 gradient descent with the k-Wave adjoint,
     %   adjoint_num_iter iterations (up to 3 k-Wave runs each); stops early on
     %   convergence_tol.
+    %   'adjoint_tv' = 'adjoint' + TV penalty (Huang et al. 2013), FISTA,
+    %   adjoint_num_iter iterations (2 k-Wave runs each). adjoint_tv_lambda is
+    %   the dimensionless TV weight (0 = no TV); adjoint_tv_power_iter sets the
+    %   step size (2 k-Wave runs each); adjoint_tv_inner_iter = TV-denoise
+    %   iterations per outer iteration (no k-Wave).
     CONFIG.reconstruction_method  = 'tr';
     CONFIG.num_time_reversal_iter = 1;
     CONFIG.adjoint_num_iter       = 5;
+    CONFIG.adjoint_tv_lambda      = 0.01;
+    CONFIG.adjoint_tv_power_iter  = 5;
+    CONFIG.adjoint_tv_inner_iter  = 10;
     CONFIG.convergence_tol        = 1e-3;
 
     % --- Reconstruction mode (pipeline_simulate Step 2 / Step 2.5): 'segment' | 'beam' ---
