@@ -186,6 +186,8 @@ segments and Step 3 totals).
   the stats tests, plots, SNR and random segment panels.
 - **Outputs:** figures, `.mat`, CSVs and the console log, all in
   `AnalysisResults/<pid>/<session>/<label>/step3_analysis/`.
+- **Beam mode** (taken from the hash's registered config): one value per beam, a panel for every beam,
+  no segment statistics. See `CLAUDE-PIPELINE_CONTEXT.md` ("Reconstruction Mode").
 
 See `CLAUDE-PIPELINE_CONTEXT.md` ("Step 3").
 

@@ -24,6 +24,14 @@ function results = step3_analysis(patient_id, session, config)
 %     Plus per-beam electronic-noise SNR and N random segment panels
 %     (truth | recon | gamma map | SSIM map).
 %
+%   BEAM MODE (the hash's registered reconstruction_mode = 'beam'): Step 2
+%     reconstructed each beam's summed dose, so Part B has ONE value per beam
+%     per comparison (Step 2.5 on the beam totals). It prints a per-beam table
+%     (All = mean +/- SE over beams), draws the same by-beam plots without
+%     per-beam error bars, and one panel per beam (beam_panel_B<n>.png). The
+%     segment statistics (t-test, floor, correlations) need many segments per
+%     beam, so they and segment_statistics.csv are skipped. Part A is unchanged.
+%
 %   INPUTS:
 %       patient_id  - String, patient identifier (e.g., '1194203')
 %       session     - String, session name (e.g., 'Session_1')
@@ -46,10 +54,11 @@ function results = step3_analysis(patient_id, session, config)
 %           .analysis_plot_results    - save figures (default true)
 %           .analysis_n_random        - random segment panels (default 5)
 %           .analysis_random_seed     - default 42
-%           .reconstruction_mode      - 'segment' (default) | 'beam'. In beam
-%                                       mode each beam is one "segment" (seg 0):
-%                                       SNR and random panels read the beam
-%                                       recons total_dose_<CT>_B<n>_recon_<hash>.mat
+%           .reconstruction_mode      - 'segment' (default) | 'beam'. Replaced by
+%                                       the hash's registered mode (warns if they
+%                                       differ). Beam mode: see BEAM MODE above;
+%                                       SNR and panels read the beam recons
+%                                       total_dose_<CT>_B<n>_recon_<hash>.mat
 %
 %   OUTPUTS:
 %       results - Struct:
@@ -58,6 +67,7 @@ function results = step3_analysis(patient_id, session, config)
 %               .ssim (mean_pct, ssim_map)
 %           .recon_gain       - LS gain applied to the total recon
 %           .segments.gamma / .segments.ssim - per-beam table + segment stats
+%               (beam mode: one value per beam, no .statistics)
 %           .snr              - per-beam SNR (mean, se, n)
 %           .noise_floor      - Step 2.5 noise-only null (or [])
 %           .random_segments  - beam/segment/scores of the random panels
@@ -68,7 +78,7 @@ function results = step3_analysis(patient_id, session, config)
 %   differ from get_default_config, e.g. 'reconstruction_method.das'):
 %       step3_results.mat         - the results struct
 %       beam_summary.csv          - per-beam means/SE, both metrics, + SNR
-%       segment_statistics.csv    - t-test / floor / correlation rows
+%       segment_statistics.csv    - t-test / floor / correlation rows (segment mode)
 %       step3_console_log.txt     - full console output of this run
 %       figures/*.png             - every figure
 %
@@ -130,10 +140,9 @@ if ~isfield(config, 'analysis_n_random'),        config.analysis_n_random = 5; e
 if ~isfield(config, 'analysis_random_seed'),     config.analysis_random_seed = 42; end
 if ~isfield(config, 'reconstruction_mode'),      config.reconstruction_mode = 'segment'; end
 
-ct1_str   = sprintf('CT_%d', min(config.metrics_ct_pair));
-ct3_str   = sprintf('CT_%d', max(config.metrics_ct_pair));
-crit      = config.gamma_dose_pct;
-beam_mode = strcmp(config.reconstruction_mode, 'beam');
+ct1_str = sprintf('CT_%d', min(config.metrics_ct_pair));
+ct3_str = sprintf('CT_%d', max(config.metrics_ct_pair));
+crit    = config.gamma_dose_pct;
 
 %% ======================== CONSOLE LOG ========================
 % The results folder depends on the resolved hash, so the log starts in the
@@ -168,9 +177,24 @@ hash8              = T.config_hash;
 config.config_hash = hash8;   % pin for Step 2.5 / random-panel loads
 sim_dir       = get_simulation_dir(config.working_dir, patient_id, session, T.gruneisen_method);
 processed_dir = fullfile(config.working_dir, 'RayStationFiles', patient_id, session, 'processed');
-% The label comes from the hash's registered config, so a partial config
-% (working_dir + config_hash) still lands in the right folder.
-out_dir       = fullfile(session_dir, config_label(hashtoconfig(hash8, config)), 'step3_analysis');
+% The label and the segment/beam mode come from the hash's registered config,
+% so a partial config (working_dir + config_hash) still lands in the right
+% folder and reads the right recons. The hash leaves reconstruction_mode out
+% when it is 'segment'. config.reconstruction_mode (default 'segment') is only
+% checked against it: trusting it would send a beam run to segment files.
+run_cfg  = hashtoconfig(hash8, config);
+run_mode = 'segment';
+if isfield(run_cfg, 'reconstruction_mode')
+    run_mode = run_cfg.reconstruction_mode;
+end
+if ~strcmp(run_mode, config.reconstruction_mode)
+    warning('step3_analysis:ModeFromHash', ...
+        'config.reconstruction_mode = ''%s'' but hash %s is a ''%s''-mode run; using ''%s''.', ...
+        config.reconstruction_mode, hash8, run_mode, run_mode);
+end
+config.reconstruction_mode = run_mode;   % also used by Step 2.5 and the panels
+beam_mode     = strcmp(run_mode, 'beam');
+out_dir       = fullfile(session_dir, config_label(run_cfg), 'step3_analysis');
 fig_dir       = fullfile(out_dir, 'figures');
 if ~isfolder(fig_dir), mkdir(fig_dir); end
 fprintf('  Results folder: %s\n', out_dir);
@@ -234,7 +258,11 @@ clear ethos_truth rs_ct_total rs_total recon_total body_mask sensor_mask;
 
 %% ======================== PART B: STEP 2.5 SUMMARY ========================
 
-fprintf('\n[STEP 3] Part B: per-segment study (Step 2.5 results)\n');
+if beam_mode
+    fprintf('\n[STEP 3] Part B: per-beam study (Step 2.5 results, beam mode)\n');
+else
+    fprintf('\n[STEP 3] Part B: per-segment study (Step 2.5 results)\n');
+end
 SM = load_step25_summary(patient_id, session, config, sim_dir, hash8);
 
 if ~strcmpi(char(SM.plan_type), char(config.metrics_plan_type))
@@ -281,8 +309,8 @@ noise_floor = [];
 if isfield(SM, 'noise_floor') && ~isempty(SM.noise_floor)
     noise_floor = SM.noise_floor;
 end
-floor_pct = config.analysis_noise_floor_pct;
-if isempty(floor_pct)
+floor_pct = config.analysis_noise_floor_pct;   % used by the segment statistics only
+if isempty(floor_pct) && ~beam_mode
     if ~isempty(noise_floor)
         floor_pct = noise_floor.mean_pass_rate;
     else
@@ -292,8 +320,13 @@ if isempty(floor_pct)
     end
 end
 
-fprintf('  Plan %s | hash %s | beams %s (%d segments)\n', config.metrics_plan_type, ...
-    hash8, mat2str(beam_list), sum(n_seg));
+if beam_mode
+    fprintf('  Beam mode | hash %s | beams %s (one recon per beam per CT)\n', ...
+        hash8, mat2str(beam_list));
+else
+    fprintf('  Plan %s | hash %s | beams %s (%d segments)\n', config.metrics_plan_type, ...
+        hash8, mat2str(beam_list), sum(n_seg));
+end
 if ~isempty(noise_floor)
     fprintf('  Noise-only floor: %.2f +/- %.2f %% (n=%d)\n', noise_floor.mean_pass_rate, ...
         noise_floor.std_pass_rate, noise_floor.num_samples);
@@ -332,51 +365,86 @@ for m = 1:2
     end
 
     B = beam_stats(seg_by_beam);   % rows 1..nB = beams, row nB+1 = All
-    fprintf('\n==================== BEAM %s (mean +/- SE over segments) ====================\n', ...
-        upper(mword));
-    for n = 1:nB + 1
-        fprintf('\n----- [beam %s]  (%d segments) -----\n', x_labels{n}, B.n(n));
-        for c = 1:numel(SM.comparisons)
-            fprintf('  %-18s   %6.2f%% +/- %5.2f%%\n', SM.comparisons{c}, B.mean(n, c), B.se(n, c));
-        end
-    end
+    D = differential_stats(seg_by_beam, c_r1, c_r3, c_tt);
 
-    D     = differential_stats(seg_by_beam, c_r1, c_r3, c_tt);
-    stats = segment_statistics(seg_by_beam, c_r1, c_r3, c_tt, snr.seg_ct1, fl, x_labels);
+    if beam_mode
+        % One value per beam, so a beam has no spread (NaN = no error bar).
+        % The All row is the mean +/- SE over beams.
+        B.std(1:nB, :)   = NaN;
+        B.se(1:nB, :)    = NaN;
+        D.recon_se(1:nB) = NaN;
+        D.truth_se(1:nB) = NaN;
 
-    fprintf('\n==================== %s SEGMENT STATISTICS ====================\n', upper(mword));
-    fprintf('A = recon_CT1 vs truth_CT1 | B = recon_CT3 vs truth_CT1 | diff = A - B\n');
-    for n = 1:nB + 1
-        s = stats(n);
-        fprintf('\n----- [beam %s] -----\n', x_labels{n});
-        fprintf('  (1) Paired t: A > B in %5.1f%% of %d seg | t = %7.3f, one-sided p = %.3g\n', ...
-            s.pct_a_gt_b, s.n_pairs, s.t_stat, s.p_one_sided);
-        if isfinite(fl)
-            fprintf('  (2) Above %.1f%% floor: A %5.1f%% +/- %4.1f%% | B %5.1f%% +/- %4.1f%%\n', ...
-                fl, s.above_floor_a_pct, s.above_floor_a_se, s.above_floor_b_pct, s.above_floor_b_se);
+        fprintf('\n==================== BEAM %s (one value per beam) ====================\n', ...
+            upper(mword));
+        fprintf('  %-6s', 'beam');
+        fprintf('%20s', SM.comparisons{:});
+        fprintf('\n');
+        for n = 1:nB
+            fprintf('  %-6s', x_labels{n});
+            fprintf('%19.2f%%', B.mean(n, :));
+            fprintf('\n');
         end
-        fprintf('  (3) diff vs truth: R^2 = %.3f, rho = %+.3f | diff vs SNR: R^2 = %.3f, rho = %+.3f\n', ...
-            s.r2_vs_truth, s.rho_vs_truth, s.r2_vs_snr, s.rho_vs_snr);
+        fprintf('  %-6s', 'All');
+        fprintf('%10.2f +/-%5.2f%%', [B.mean(nB + 1, :); B.se(nB + 1, :)]);
+        fprintf('   (mean +/- SE over %d beams)\n', nB);
+    else
+        fprintf('\n==================== BEAM %s (mean +/- SE over segments) ====================\n', ...
+            upper(mword));
+        for n = 1:nB + 1
+            fprintf('\n----- [beam %s]  (%d segments) -----\n', x_labels{n}, B.n(n));
+            for c = 1:numel(SM.comparisons)
+                fprintf('  %-18s   %6.2f%% +/- %5.2f%%\n', SM.comparisons{c}, B.mean(n, c), B.se(n, c));
+            end
+        end
+
+        % Segment statistics need many segments per beam; beam mode has one.
+        stats = segment_statistics(seg_by_beam, c_r1, c_r3, c_tt, snr.seg_ct1, fl, x_labels);
+
+        fprintf('\n==================== %s SEGMENT STATISTICS ====================\n', upper(mword));
+        fprintf('A = recon_CT1 vs truth_CT1 | B = recon_CT3 vs truth_CT1 | diff = A - B\n');
+        for n = 1:nB + 1
+            s = stats(n);
+            fprintf('\n----- [beam %s] -----\n', x_labels{n});
+            fprintf('  (1) Paired t: A > B in %5.1f%% of %d seg | t = %7.3f, one-sided p = %.3g\n', ...
+                s.pct_a_gt_b, s.n_pairs, s.t_stat, s.p_one_sided);
+            if isfinite(fl)
+                fprintf('  (2) Above %.1f%% floor: A %5.1f%% +/- %4.1f%% | B %5.1f%% +/- %4.1f%%\n', ...
+                    fl, s.above_floor_a_pct, s.above_floor_a_se, s.above_floor_b_pct, s.above_floor_b_se);
+            end
+            fprintf('  (3) diff vs truth: R^2 = %.3f, rho = %+.3f | diff vs SNR: R^2 = %.3f, rho = %+.3f\n', ...
+                s.r2_vs_truth, s.rho_vs_truth, s.r2_vs_snr, s.rho_vs_snr);
+        end
     end
 
     if config.analysis_plot_results
         title_tag = sprintf('%s / %s', strrep(patient_id, '_', '\_'), strrep(session, '_', '\_'));
-        plot_pass_rates(x_labels, B, c_r1, c_r3, c_tt, nf, mlabel, mword, title_tag, ...
+        % What the points and error bars are, added to the by-beam titles.
+        if beam_mode
+            spread_tag = [title_tag, ' | All = mean \pm SE over beams'];
+        else
+            spread_tag = [title_tag, ' | mean \pm SE over segments'];
+        end
+        plot_pass_rates(x_labels, B, c_r1, c_r3, c_tt, nf, mlabel, mword, spread_tag, ...
             fullfile(fig_dir, sprintf('%s_pass_rates_by_beam.png', key)));
-        plot_differentials(x_labels, D, B.mean(:, c_r1), nf, mword, title_tag, ...
+        plot_differentials(x_labels, D, B.mean(:, c_r1), nf, mword, spread_tag, ...
             fullfile(fig_dir, sprintf('%s_differentials_by_beam.png', key)));
-        plot_fidelity(x_labels, B, c_r1, c_33, mlabel, title_tag, ...
+        plot_fidelity(x_labels, B, c_r1, c_33, mlabel, spread_tag, ...
             fullfile(fig_dir, sprintf('%s_recon_fidelity_by_beam.png', key)));
-        plot_correlations(stats(end).pooled_diff, stats(end).pooled_truth, ...
-            stats(end).pooled_snr, mword, title_tag, ...
-            fullfile(fig_dir, sprintf('%s_diff_correlations.png', key)));
+        if ~beam_mode
+            plot_correlations(stats(end).pooled_diff, stats(end).pooled_truth, ...
+                stats(end).pooled_snr, mword, title_tag, ...
+                fullfile(fig_dir, sprintf('%s_diff_correlations.png', key)));
+        end
     end
 
     results.segments.(key).comparisons  = SM.comparisons;
     results.segments.(key).beam_labels  = x_labels;
     results.segments.(key).beam_stats   = B;
     results.segments.(key).differential = D;
-    results.segments.(key).statistics   = rmfield(stats, {'pooled_diff', 'pooled_truth', 'pooled_snr'});
+    if ~beam_mode
+        results.segments.(key).statistics = rmfield(stats, {'pooled_diff', 'pooled_truth', 'pooled_snr'});
+    end
     results.segments.(key).seg_by_beam  = seg_by_beam;
     results.segments.(key).floor_pct    = fl;
 end
@@ -384,13 +452,29 @@ results.noise_floor = noise_floor;
 
 %% ======================== PART B: RANDOM SEGMENT PANELS ========================
 
+% Segment mode: analysis_n_random random segments. Beam mode: every beam, since
+% each beam has only one recon per CT (nothing to sample).
+n_panels = config.analysis_n_random;
+if beam_mode
+    n_panels = nB;
+end
 results.random_segments = [];
-if config.analysis_plot_results && config.analysis_n_random > 0
-    fprintf('\n----------- RANDOM SEGMENT PANELS -----------\n');
-    picks = select_random_segments(patient_id, session, config, beam_list, ct1_str, ct3_str);
+if config.analysis_plot_results && n_panels > 0
+    if beam_mode
+        fprintf('\n----------- BEAM PANELS -----------\n');
+    else
+        fprintf('\n----------- RANDOM SEGMENT PANELS -----------\n');
+    end
+    picks = select_random_segments(patient_id, session, config, beam_list, ct1_str, ct3_str, n_panels);
     for i = 1:numel(picks)
-        plot_random_segment(picks(i), crit, fullfile(fig_dir, ...
-            sprintf('random_segment_B%d_S%d.png', picks(i).beam, picks(i).seg)));
+        if beam_mode
+            fig_title = sprintf('Beam %d (whole beam)', picks(i).beam);
+            fig_name  = sprintf('beam_panel_B%d.png', picks(i).beam);
+        else
+            fig_title = sprintf('Beam %d, Segment %d', picks(i).beam, picks(i).seg);
+            fig_name  = sprintf('random_segment_B%d_S%d.png', picks(i).beam, picks(i).seg);
+        end
+        plot_random_segment(picks(i), crit, fig_title, fullfile(fig_dir, fig_name));
     end
     results.random_segments = rmfield(picks, 'rows');
 end
@@ -410,7 +494,9 @@ results.metadata.output_dir   = out_dir;
 save(fullfile(out_dir, 'step3_results.mat'), 'results', '-v7.3');
 fprintf('    Saved: step3_results.mat\n');
 write_beam_csv(fullfile(out_dir, 'beam_summary.csv'), results, beam_list);
-write_stats_csv(fullfile(out_dir, 'segment_statistics.csv'), results);
+if ~beam_mode
+    write_stats_csv(fullfile(out_dir, 'segment_statistics.csv'), results);
+end
 
 %% ======================== SUMMARY ========================
 
@@ -420,10 +506,16 @@ fprintf('  ETHOS vs RS %s: gamma %.1f%% | local SSIM %.1f%%\n', config.analysis_
     results.ethos_vs_rs.gamma.pass_rate, results.ethos_vs_rs.ssim.mean_pct);
 fprintf('  RS vs Recon total: gamma %.1f%% | local SSIM %.1f%%\n', ...
     results.rs_vs_recon.gamma.pass_rate, results.rs_vs_recon.ssim.mean_pct);
-fprintf('  All-segment gamma: recon1 %.1f%% | recon3 %.1f%% | paired p = %.3g\n', ...
-    results.segments.gamma.beam_stats.mean(end, c_r1), ...
-    results.segments.gamma.beam_stats.mean(end, c_r3), ...
-    results.segments.gamma.statistics(end).p_one_sided);
+if beam_mode
+    fprintf('  Mean over beams, gamma: recon1 %.1f%% | recon3 %.1f%%\n', ...
+        results.segments.gamma.beam_stats.mean(end, c_r1), ...
+        results.segments.gamma.beam_stats.mean(end, c_r3));
+else
+    fprintf('  All-segment gamma: recon1 %.1f%% | recon3 %.1f%% | paired p = %.3g\n', ...
+        results.segments.gamma.beam_stats.mean(end, c_r1), ...
+        results.segments.gamma.beam_stats.mean(end, c_r3), ...
+        results.segments.gamma.statistics(end).p_one_sided);
+end
 fprintf('  Output: %s\n', out_dir);
 fprintf('=========================================================\n\n');
 
@@ -958,7 +1050,7 @@ function plot_pass_rates(x_labels, B, c_r1, c_r3, c_tt, noise_floor, mlabel, mwo
     yline(ax, 90, 'k--', '90%');
     beam_axis(ax, x_labels);
     ylim(ax, [0, 105]); ylabel(ax, mlabel);
-    title(ax, sprintf('%s by beam (mean \\pm SE over segments) | %s', mword, title_tag));
+    title(ax, sprintf('%s by beam | %s', mword, title_tag));
     legend(ax, h, leg, 'Location', 'best', 'FontSize', 9);
     save_figure(fig, fpath);
 end
@@ -992,7 +1084,7 @@ function plot_differentials(x_labels, D, m_r1, noise_floor, mword, title_tag, fp
     end
     beam_axis(ax, x_labels);
     ylabel(ax, sprintf('%s differential (%%)', mword));
-    title(ax, sprintf('Change-detection differentials (mean \\pm SE) | %s', title_tag));
+    title(ax, sprintf('Change-detection differentials | %s', title_tag));
     legend(ax, h, leg, 'Location', 'best', 'FontSize', 9);
     save_figure(fig, fpath);
 end
@@ -1014,7 +1106,7 @@ function plot_fidelity(x_labels, B, c_r1, c_33, mlabel, title_tag, fpath)
     yline(ax, 90, 'k--', '90%');
     beam_axis(ax, x_labels);
     ylim(ax, [0, 105]); ylabel(ax, mlabel);
-    title(ax, sprintf('Reconstruction fidelity vs own-CT truth (mean \\pm SE) | %s', title_tag));
+    title(ax, sprintf('Reconstruction fidelity vs own-CT truth | %s', title_tag));
     legend(ax, [h1, h2], {'Truth CT\_1 vs Recon CT\_1', 'Truth CT\_3 vs Recon CT\_3'}, ...
         'Location', 'best', 'FontSize', 9);
     save_figure(fig, fpath);
@@ -1085,10 +1177,10 @@ end
 %  PART B: RANDOM SEGMENT PANELS
 %  =========================================================================
 
-function picks = select_random_segments(patient_id, session, config, beam_list, ct1_str, ct3_str)
-% Seeded random segments. For each: axial slice (reference max dose) of
-% truth CT_1, recon CT_1 / CT_3, and the Step 2.5 folded gamma + SSIM maps
-% for truth1_vs_recon1 and truth1_vs_recon3. Loads one beam at a time.
+function picks = select_random_segments(patient_id, session, config, beam_list, ct1_str, ct3_str, n_panels)
+% Up to n_panels seeded random segments. For each: axial slice (reference max
+% dose) of truth CT_1, recon CT_1 / CT_3, and the Step 2.5 folded gamma + SSIM
+% maps for truth1_vs_recon1 and truth1_vs_recon3. Loads one beam at a time.
 % Beam mode loads the beam totals + beam recons instead (one pick per beam, seg 0).
     picks = struct('beam', {}, 'seg', {}, 'iz', {}, 'scores', {}, 'rows', {});
     rng(config.analysis_random_seed);
@@ -1096,7 +1188,7 @@ function picks = select_random_segments(patient_id, session, config, beam_list, 
     comps = {'truth1_vs_recon1', 'Recon CT\_1'; 'truth1_vs_recon3', 'Recon CT\_3'};
 
     for b = beam_order
-        if numel(picks) >= config.analysis_n_random, break; end
+        if numel(picks) >= n_panels, break; end
         args = {'Mode', 'set', 'Beam', b, 'IncludeEthos', false, 'IncludeCBCT', false, ...
                 'Hash', config.config_hash};
         if ~strcmpi(config.metrics_plan_type, 'any')
@@ -1119,7 +1211,7 @@ function picks = select_random_segments(patient_id, session, config, beam_list, 
         useg = useg(randperm(numel(useg)));
 
         for s = useg(:)'
-            if numel(picks) >= config.analysis_n_random, break; end
+            if numel(picks) >= n_panels, break; end
             i1 = find(segs == s & strcmp(cts, ct1_str), 1);
             i3 = find(segs == s & strcmp(cts, ct3_str), 1);
             if isempty(i1) || isempty(i3), continue; end
@@ -1155,7 +1247,7 @@ function picks = select_random_segments(patient_id, session, config, beam_list, 
         end
         clear S;
     end
-    fprintf('  Selected %d random segment(s) (requested %d).\n', numel(picks), config.analysis_n_random);
+    fprintf('  Selected %d panel(s) (requested %d).\n', numel(picks), n_panels);
 end
 
 
@@ -1183,12 +1275,12 @@ function [gmap, gpass, smap, smean] = folded_maps(recon_file, comp_name, hash8, 
 end
 
 
-function plot_random_segment(pk, crit, fpath)
+function plot_random_segment(pk, crit, fig_title, fpath)
 % 2 rows (recon CT_1, recon CT_3) x 4 columns (truth | recon | gamma | SSIM).
     fig = figure('Visible', 'off', 'Color', 'w', 'Position', [80, 80, 1400, 650]);
     tl  = tiledlayout(fig, 2, 4, 'TileSpacing', 'compact', 'Padding', 'compact');
-    title(tl, sprintf('Beam %d, Segment %d | axial slice %d (truth CT\\_1 max)', ...
-        pk.beam, pk.seg, pk.iz), 'FontWeight', 'bold');
+    title(tl, sprintf('%s | axial slice %d (truth CT\\_1 max)', fig_title, pk.iz), ...
+        'FontWeight', 'bold');
     for r = 1:numel(pk.rows)
         row  = pk.rows(r);
         cmax = max(row.truth(:));

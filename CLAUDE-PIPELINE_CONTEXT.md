@@ -114,11 +114,18 @@ pre-existing segment caches keep their hashes; `'beam'` gets its own hash/files)
     status files are named `total_dose_<CT>_B<n>_recon_<hash>.mat` etc.
   - `load_beam_dose_file` takes metadata (gantry, CT label, meterset) from one segment.
     step15 stores the RTPLAN **beam** meterset on every segment, so that is already the beam MU.
-  - Step 2.5 treats each beam as one segment (`seg_num` 0) and folds into the CT_1 beam recon.
-    `metrics_plan_type` is not applied. Beam data is loaded by `utils/load_beam_total_set.m`
-    (same shape as `load_recon_dose_data` `'set'` output).
-  - Step 3 Part B reads the beam recons for SNR (2 values per beam: CT_1 + CT_3) and random panels
-    (one pick per beam, labelled segment 0). Needs `config.reconstruction_mode = 'beam'`.
+  - **Mode comes from the hash.** Steps 2.5 and 3 read `reconstruction_mode` from the hash's
+    registered config (`hashtoconfig`), not from `config.reconstruction_mode` (warns if they differ).
+    Reason: a config left at the `'segment'` default hashes to the old segment run, whose files
+    exist, so the loaders silently used segment data. `pipeline_simulate` passes `config_hash` to
+    Step 2.5 (as it does for 2.05 and 3). Step 2.5 without `config_hash` still uses the config's mode.
+  - Step 2.5 runs the four comparisons once per beam on the beam totals (`seg_num` 0) and folds into
+    the CT_1 beam recon. `metrics_plan_type` is not applied. Beam data is loaded by
+    `utils/load_beam_total_set.m` (same shape as `load_recon_dose_data` `'set'` output).
+  - Step 3 Part A is unchanged. Part B prints a per-beam table (one value per beam,
+    All = mean ± SE over beams) and draws the by-beam plots without per-beam error bars. SNR is
+    2 values per beam (CT_1 + CT_3), with one panel per beam (`beam_panel_B<n>.png`). It skips the
+    segment statistics (t-test, floor, correlations), the correlation plot and `segment_statistics.csv`.
   - `verify_pipeline_simulate` is skipped.
   - Not exactly equal to the summed segment recons: each sim adds one noise draw (sum of N segments
     = N draws), and the LS gain and >1% dose-region mask are nonlinear.
