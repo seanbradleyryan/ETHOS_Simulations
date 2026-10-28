@@ -43,7 +43,10 @@ function results = step25_segment_metrics(patient_id, session, config)
 %   "segment" (seg_num 0 = the whole beam): truths are the beam totals
 %   total_dose_<CT>_B<n>.mat, recons are total_dose_<CT>_B<n>_recon_<hash>.mat,
 %   and the metrics fold into the CT_1 beam recon. metrics_plan_type is not
-%   applied (the beam totals sum every segment on that CT).
+%   applied (the beam totals sum every segment on that CT). When
+%   config.config_hash is set, the mode is read from that hash's registered
+%   config (hashtoconfig), not from config.reconstruction_mode, so a config
+%   left at the 'segment' default cannot load an older segment run instead.
 %
 %   RESUMABLE: a segment whose CT_1 recon file already carries 'segment_metrics'
 %   is skipped (its stored scalars are still folded into the summary), so the
@@ -63,9 +66,13 @@ function results = step25_segment_metrics(patient_id, session, config)
 %           .metrics_ct_pair       [1 3]  The two CT indices (lo->CT1, hi->CT3).
 %           .metrics_normalize     [true] Least-squares recon->own-truth gain.
 %           .metrics_beams         []     Beams to process ([] => all on disk).
-%           .reconstruction_mode   ['segment'] 'segment' | 'beam'. Beam mode
-%                                  also needs .gruneisen_method and either
-%                                  .config_hash or the full sim CONFIG.
+%           .config_hash           ['']   8-char sim hash of the recons to use
+%                                  ('' = from the config). Also sets the mode.
+%           .reconstruction_mode   ['segment'] 'segment' | 'beam'. Overridden
+%                                  by the hash's registered mode when
+%                                  .config_hash is set. Beam mode also needs
+%                                  .gruneisen_method and either .config_hash
+%                                  or the full sim CONFIG.
 %           .metrics_overwrite     [false] Recompute even if already folded in.
 %           .metrics_write_summary [true] Write the per-beam rollup .mat.
 %           .metrics_noise_floor   [true] Compute the noise-only null pass rate
@@ -97,7 +104,7 @@ function results = step25_segment_metrics(patient_id, session, config)
 %
 %   DEPENDENCIES:
 %       - CalcGamma.m, compute_local_ssim.m (utils), load_recon_dose_data.m,
-%         load_beam_total_set.m (beam mode)
+%         load_beam_total_set.m (beam mode), hashtoconfig.m (mode of a hash)
 %       - noise_ensemble_error_bars.m (utils) for the noise-only null floor.
 %       - Pipeline outputs from pipeline_simulate (per-field recon files).
 %
@@ -128,6 +135,7 @@ function results = step25_segment_metrics(patient_id, session, config)
     config = default_field(config, 'metrics_ct_pair',       [1, 3]);
     config = default_field(config, 'metrics_normalize',     true);
     config = default_field(config, 'metrics_beams',         []);
+    config = default_field(config, 'config_hash',           '');
     config = default_field(config, 'reconstruction_mode',   'segment');
     config = default_field(config, 'metrics_overwrite',     false);
     config = default_field(config, 'metrics_write_summary', true);
@@ -141,6 +149,25 @@ function results = step25_segment_metrics(patient_id, session, config)
         error('step25_segment_metrics:NoCalcGamma', ...
             'CalcGamma not found on the path; cannot compute gamma pass rates.');
     end
+
+    % A given hash decides the mode: its registered config says whether Step 2
+    % ran per segment or per beam (the hash leaves reconstruction_mode out when
+    % it is 'segment'). Trusting config.reconstruction_mode instead lets a config
+    % left at the 'segment' default load an older segment run's recons.
+    if ~isempty(config.config_hash)
+        run_cfg  = hashtoconfig(config.config_hash, config);
+        run_mode = 'segment';
+        if isfield(run_cfg, 'reconstruction_mode')
+            run_mode = run_cfg.reconstruction_mode;
+        end
+        if ~strcmp(run_mode, config.reconstruction_mode)
+            warning('step25_segment_metrics:ModeFromHash', ...
+                'config.reconstruction_mode = ''%s'' but hash %s is a ''%s''-mode run; using ''%s''.', ...
+                config.reconstruction_mode, config.config_hash, run_mode, run_mode);
+        end
+        config.reconstruction_mode = run_mode;
+    end
+    beam_mode = strcmp(config.reconstruction_mode, 'beam');
 
     dose_pct   = config.gamma_dose_pct;
     dist_mm    = config.gamma_dist_mm;
@@ -218,12 +245,12 @@ function results = step25_segment_metrics(patient_id, session, config)
 
     for bi = 1:nBeams
         b = beams(bi);
-        fprintf('\n[Beam %d/%d] beam #%d: loading segments...\n', bi, nBeams, b);
-
         try
-            if strcmp(config.reconstruction_mode, 'beam')
+            if beam_mode
+                fprintf('\n[Beam %d/%d] beam #%d: loading beam totals + beam recons...\n', bi, nBeams, b);
                 beam_set = load_beam_total_set(patient_id, session, config, b, ct1_str, ct3_str);
             else
+                fprintf('\n[Beam %d/%d] beam #%d: loading segments...\n', bi, nBeams, b);
                 beam_set = load_beam_set(patient_id, session, config, b);
             end
         catch ME

@@ -689,7 +689,11 @@ for p_idx = 1:length(CONFIG.patients)
             if CONFIG.run_step25
                 fprintf('\n[STEP 2.5] Running per-segment gamma + SSIM metrics...\n');
                 t_step25 = tic;   % TIMING: Step 2.5 stopwatch
-                metrics_summary = step25_segment_metrics(patient_id, session, CONFIG);
+                % Pin the hash so Step 2.5 reads this run's recons (and its
+                % segment/beam mode) and never another hash found on disk.
+                step25_config             = CONFIG;
+                step25_config.config_hash = CONFIG_HASH;
+                metrics_summary = step25_segment_metrics(patient_id, session, step25_config);
                 % --- TIMING: accumulate Step 2.5 time (running total over sessions) ---
                 step25_elapsed         = toc(t_step25);
                 TIMING.step25_time_sec = TIMING.step25_time_sec + step25_elapsed;
