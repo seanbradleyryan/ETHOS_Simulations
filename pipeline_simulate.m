@@ -89,11 +89,21 @@ CONFIG.treatment_site  = 'Pancreas';
 %               (frequency response, pulse deconvolution, element averaging).
 %               Up to 3 k-Wave runs per iteration; correction_factor is not
 %               applied (the result is already a least-squares fit in Pa).
-% Both are in the config hash (adjoint_num_iter only when 'adjoint').
+%   'adjoint_tv': 'adjoint' + total-variation penalty (Huang et al. 2013),
+%               solved by FISTA. adjoint_num_iter iterations, 2 k-Wave runs
+%               each, plus 1 + 2*adjoint_tv_power_iter setup runs per field.
+%               adjoint_tv_lambda is the dimensionless TV weight (0 = no TV).
+%               No correction_factor.
+% All are in the config hash (adjoint_num_iter only for 'adjoint' /
+% 'adjoint_tv'; the adjoint_tv_* knobs only for 'adjoint_tv').
 % NOTE: the Step 2.5 noise-only floor (noise_ensemble_error_bars) only knows
-% 'tr' / 'das'; with 'ubp' or 'adjoint' it warns and the summary omits it.
+% 'tr' / 'das'; with 'ubp', 'adjoint' or 'adjoint_tv' it warns and the summary
+% omits it.
 CONFIG.reconstruction_method = 'tr';
 CONFIG.adjoint_num_iter      = 5;
+CONFIG.adjoint_tv_lambda     = 0.01;
+CONFIG.adjoint_tv_power_iter = 5;
+CONFIG.adjoint_tv_inner_iter = 10;
 
 % --- Blind-Geometry Reconstruction (CT_3 / adapted fields) ---
 % When true, every CT_3 (adapted) beam/segment field is FORWARD-propagated on
@@ -193,9 +203,9 @@ if ~ismember(CONFIG.reconstruction_mode, {'segment', 'beam'})
         'CONFIG.reconstruction_mode must be ''segment'' or ''beam'' (got ''%s'').', ...
         CONFIG.reconstruction_mode);
 end
-if ~ismember(lower(CONFIG.reconstruction_method), {'tr', 'das', 'ubp', 'adjoint'})
+if ~ismember(lower(CONFIG.reconstruction_method), {'tr', 'das', 'ubp', 'adjoint', 'adjoint_tv'})
     error('pipeline_simulate:BadReconstructionMethod', ...
-        'CONFIG.reconstruction_method must be ''tr'', ''das'', ''ubp'' or ''adjoint'' (got ''%s'').', ...
+        'CONFIG.reconstruction_method must be ''tr'', ''das'', ''ubp'', ''adjoint'' or ''adjoint_tv'' (got ''%s'').', ...
         CONFIG.reconstruction_method);
 end
 
