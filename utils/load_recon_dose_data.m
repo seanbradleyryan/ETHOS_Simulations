@@ -12,8 +12,9 @@ function out = load_recon_dose_data(patient_id, session, config, varargin)
 %   truth (resampled onto the dose grid), the associated CBCT geometry, and the
 %   RTPLAN statistics for each dose.
 %
-%   The recon files are written by pipeline_simulate and keyed by an 8-char
-%   CONFIG hash (compute_sim_config_hash). The right hash is auto-discovered
+%   The recon files are written by pipeline_simulate to get_simulation_dir
+%   (RayStationFiles/<id>/<session>/processed/simulation_results/<method>/) and
+%   keyed by an 8-char CONFIG hash (compute_sim_config_hash). The right hash is auto-discovered
 %   from the simulation folder when possible, otherwise derived from a passed
 %   CONFIG, otherwise overridable via the 'Hash' option.
 %
@@ -87,8 +88,8 @@ function out = load_recon_dose_data(patient_id, session, config, varargin)
 %               'Mode','set','PlanType','adapted','CTLabel','CT_3');
 %
 %   DEPENDENCIES:
-%       - compute_sim_config_hash, list_processed_field_doses,
-%         load_field_dose_file
+%       - compute_sim_config_hash, get_simulation_dir,
+%         list_processed_field_doses, load_field_dose_file
 %       - Pipeline outputs from pipeline_simulate and step15_process_doses.
 %
 %   See also: compute_sim_config_hash, list_processed_field_doses,
@@ -123,8 +124,7 @@ function out = load_recon_dose_data(patient_id, session, config, varargin)
         patient_id, session, 'processed');
 
     gruneisen_method = resolve_gruneisen_method(patient_id, session, config);
-    sim_dir = fullfile(config.working_dir, 'SimulationResults', ...
-        patient_id, session, gruneisen_method);
+    sim_dir = get_simulation_dir(config.working_dir, patient_id, session, gruneisen_method);
     if ~isfolder(sim_dir)
         error('load_recon_dose_data:NoSimDir', ...
             'Simulation results directory not found: %s', sim_dir);
@@ -240,10 +240,12 @@ function gm = resolve_gruneisen_method(patient_id, session, config)
         return;
     end
 
-    base = fullfile(config.working_dir, 'SimulationResults', patient_id, session);
+    % Parent of get_simulation_dir: one subfolder per gruneisen method.
+    base = fullfile(config.working_dir, 'RayStationFiles', patient_id, session, ...
+        'processed', 'simulation_results');
     if ~isfolder(base)
         error('load_recon_dose_data:NoSimResults', ...
-            'No SimulationResults directory: %s', base);
+            'No simulation_results directory: %s', base);
     end
 
     d     = dir(base);

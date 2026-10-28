@@ -14,7 +14,7 @@
 | 2 | `run_single_field_simulation.m` | `[recon, results] = run_single_field_simulation(...)` | k-Wave forward + time-reversal for one field |
 | 2.05 | `step205_run_full_field_simulation.m` | `results = step205_run_full_field_simulation(patient_id, session, config)` | Each CT's total RS dose (`total_dose_CT_1/3.mat`) simulated as ONE field (CT_1 full access, CT_3 blind on CT_1) with the Step 2 sensor mask; four Step 2.5 gamma + SSIM comparisons on the totals. Saves `full_field_dose_CT_*_<hash>.mat` beside the recons. To be compared with the summed per-field recon in analysis |
 | 2.5 | `step25_segment_metrics.m` | `results = step25_segment_metrics(patient_id, session, config)` | Per-beam/segment gamma + local SSIM (4 study comparisons); folds raw masked results into each segment's **CT_1** recon file |
-| 3 | `step3_analysis.m` | `results = step3_analysis(patient_id, session, config)` | Total-dose gamma + local SSIM, and the full per-segment study (tables, statistics, figures) from the Step 2.5 summary; everything saved to `AnalysisResults/` |
+| 3 | `step3_analysis.m` | `results = step3_analysis(patient_id, session, config)` | Total-dose gamma + local SSIM, and the full per-segment study (tables, statistics, figures) from the Step 2.5 summary; everything saved to `AnalysisResults/<pid>/<session>/<label>/step3_analysis/` |
 
 ## Orchestrator Scripts
 
@@ -41,6 +41,9 @@
 | `load_processed_data.m` | Loads previously processed dose/CT data |
 | `load_recon_dose_data.m` | Loads computed recon doses (single/set/total) + RS, ETHOS truth, CBCT, RTPLAN stats — no re-sim. See CLAUDE.md "Analysis Utilities" |
 | `load_beam_total_set.m` | Beam mode: one beam's summed RS dose + beam recon on CT_1/CT_3, shaped like `load_recon_dose_data` `'set'` output (Steps 2.5 / 3) |
+| `get_simulation_dir.m` | Path of a session's simulation data: `RayStationFiles/<pid>/<session>/processed/simulation_results/<method>/` |
+| `config_label.m` | AnalysisResults folder name for a config: `'canonical'` or the fields differing from `get_default_config` |
+| `misc/migrate_results_layout.m` | One-off move of pre-overhaul `SimulationResults/` + hash-named analysis folders to the new layout |
 | `compute_local_ssim.m` | Local (per-voxel) SSIM map + masked mean over the 10% region. The only SSIM in the pipeline (Steps 2.5 and 3) |
 | `studies/study_pass_rates_allsegments.m` | Superseded by Step 3 (all its analyses now run there); kept for reference |
 
@@ -70,8 +73,29 @@ load('total_dose_CT_1_B6.mat');  % Contains: beam_total_sparse + beam_total_dims
                                  % — sum of beam 6's segments on CT_1 (one file per CT label x beam)
 load('total_recon_dose_<hash8>.mat');  % Contains: total_recon, metadata, config_hash
                                        % <hash8> = compute_sim_config_hash(CONFIG); per-hash file
-                                       % see SimulationResults/<id>/<session>/<method>/config_registry.json
+                                       % see <simulation dir>/config_registry.json
 ```
+
+## Results Layout
+
+| What | Where | Named by |
+|---|---|---|
+| Step 1.5 doses, CBCTs, totals | `RayStationFiles/<pid>/<session>/processed/` | — |
+| Step 2/2.05/2.5 data (recons, `total_recon_dose`, `sensor_mask`, manifests, `segment_metrics_summary`, `full_field_dose`, noise-ensemble cache, `config_registry.json`, `simulation_log.txt`, `field_status/`) | `get_simulation_dir(...)` = `processed/simulation_results/<method>/` | `<hash>` in filename |
+| Step 3 | `AnalysisResults/<pid>/<session>/<label>/step3_analysis/` | config label |
+| `verify_pipeline_simulate` | `AnalysisResults/<pid>/<session>/<label>/verify_pipeline_simulate/` | config label |
+| `pipeline_simulate` RESULTS + timing (per session) | `AnalysisResults/<pid>/<session>/<label>/pipeline_simulate/` | config label |
+| `verify_pipeline_compress_output`, `verify_plot_dose_from_npz` | `AnalysisResults/<pid>/<session>/<script>/` | none (pre-simulation) |
+
+- **Label** (`utils/config_label.m`): `'canonical'` when every config-hash field equals `get_default_config`;
+  otherwise `<field>.<value>` per differing field, joined by `__` (e.g. `reconstruction_method.das`,
+  `downscale_factor.2__gruneisen_method.threshold_1`). `unset` = field absent in that run. Compares only the
+  hash fields, so label ↔ hash is 1:1. Analysis knobs (gamma criteria etc.) are NOT in the label.
+- Functions that only hold a hash (step3, verify) get the label from the registry:
+  `config_label(hashtoconfig(hash, config))`. pipeline_simulate also stores `.label` per hash in `config_registry.json`.
+- Changing a value in `get_default_config` changes which hash is `canonical`; the old canonical hash then gets
+  a diff label.
+- Pre-overhaul data: run `misc/migrate_results_layout.m` once (dry run first).
 
 > **Per-CT totals** (`total_dose_CT_*.mat`) are written by `step15_process_doses` whenever NPZ-derived
 > field doses carry a CT label in their filename (e.g. `..._adapted_CT_1_B6_103.mat`).
@@ -174,7 +198,7 @@ standalone. It absorbed every analysis from `study_pass_rates_allsegments.m`.
 
   It also produces per-beam `noise_stats.snr` and `analysis_n_random` random segment panels
   (truth | recon | folded gamma map | folded SSIM map). No metric is recomputed here.
-- **Outputs** go to `AnalysisResults/<pid>/<session>/<method>/<hash>/`:
+- **Outputs** go to `AnalysisResults/<pid>/<session>/<label>/step3_analysis/`:
   - `step3_results.mat`
   - `beam_summary.csv`
   - `segment_statistics.csv`

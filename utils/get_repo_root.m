@@ -4,7 +4,7 @@ function repoRoot = get_repo_root()
 %   PURPOSE:
 %   Returns the git repository root so scripts can use it as
 %   CONFIG.working_dir instead of a hard-coded, machine-specific path. All
-%   data trees (EthosExports, RayStationFiles, SimulationResults, ...) live
+%   data trees (EthosExports, RayStationFiles, AnalysisResults, ...) live
 %   under this folder.
 %
 %   INPUTS:

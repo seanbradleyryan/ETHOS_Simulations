@@ -47,7 +47,7 @@ function beam_set = load_beam_total_set(patient_id, session, config, beam, ct1_s
 %       B = load_beam_total_set('1194203', 'Session_1', config, 6, 'CT_1', 'CT_3');
 %
 %   DEPENDENCIES:
-%       - compute_sim_config_hash
+%       - compute_sim_config_hash, get_simulation_dir
 %       - Beam totals from step15_process_doses; beam recons from pipeline_simulate.
 %
 %   See also: load_recon_dose_data, step25_segment_metrics, step3_analysis
@@ -70,8 +70,8 @@ function beam_set = load_beam_total_set(patient_id, session, config, beam, ct1_s
     end
     processed_dir = fullfile(config.working_dir, 'RayStationFiles', ...
         patient_id, session, 'processed');
-    sim_dir = fullfile(config.working_dir, 'SimulationResults', ...
-        patient_id, session, config.gruneisen_method);
+    sim_dir = get_simulation_dir(config.working_dir, patient_id, session, ...
+        config.gruneisen_method);
 
     ct_labels = {ct1_str, ct3_str};
     for k = 1:2

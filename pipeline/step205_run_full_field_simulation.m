@@ -33,9 +33,8 @@ function results = step205_run_full_field_simulation(patient_id, session, config
 %       session    - Char/string session name (e.g. 'Session_2').
 %       config     - Simulation CONFIG, as built in pipeline_simulate
 %                    (defaults in []):
-%           .working_dir            REQUIRED. Root holding RayStationFiles/ and
-%                                   SimulationResults/.
-%           .gruneisen_method       REQUIRED. SimulationResults subfolder.
+%           .working_dir            REQUIRED. Root holding RayStationFiles/.
+%           .gruneisen_method       REQUIRED. Simulation folder (get_simulation_dir).
 %           .config_hash            [computed] 8-char sim hash. Computed with
 %                                   compute_sim_config_hash(config) when absent.
 %           .sensor_placement_method  A determine_sensor_mask method needs the
@@ -60,8 +59,8 @@ function results = step205_run_full_field_simulation(patient_id, session, config
 %           .recon_files  {CT_1 file, CT_3 file}
 %           .metrics      full_field_metrics struct ([] when locked)
 %
-%       Written to SimulationResults/<pid>/<session>/<method>/ (next to the
-%       Step 2 recons):
+%       Written to RayStationFiles/<pid>/<session>/processed/simulation_results/
+%       <method>/ (get_simulation_dir, next to the Step 2 recons):
 %           full_field_dose_CT_1_<hash>.mat  recon_dose, config_hash, ct_label,
 %                                            blind_recon, meterset_MU,
 %                                            noise_stats, full_field_metrics
@@ -86,9 +85,7 @@ function results = step205_run_full_field_simulation(patient_id, session, config
 %
 %   EXAMPLE:
 %       addpath(genpath('utils')); addpath('pipeline');
-%       CONFIG = get_default_config();
-%       CONFIG.blind_recon_ct3             = true;    % match pipeline_simulate
-%       CONFIG.blind_recon_reference_label = 'CT_1';  % so the hash matches
+%       CONFIG = get_default_config();   % same sim fields (and hash) as pipeline_simulate
 %       r = step205_run_full_field_simulation('1194203', 'Session_2', CONFIG);
 %
 %   DEPENDENCIES:
@@ -103,18 +100,15 @@ function results = step205_run_full_field_simulation(patient_id, session, config
 
     %% ======================== STANDALONE DEFAULTS ========================
     % Called with no arguments (e.g. the editor's Run button): patient 1194203,
-    % Session_1, and the CONFIG pipeline_simulate builds. blind_recon_ct3 and
-    % blind_recon_reference_label are in the config hash, so they must match
-    % pipeline_simulate for the Step 2 sensor_mask_<hash>.mat to be found.
+    % Session_1, and the default (canonical) CONFIG pipeline_simulate builds, so
+    % the hash matches and the Step 2 sensor_mask_<hash>.mat is found.
     if nargin == 0
         repo_root = fileparts(fileparts(mfilename('fullpath')));
         addpath(genpath(fullfile(repo_root, 'utils')));
         patient_id = '1194203';
         session    = 'Session_1';
         config     = get_default_config();
-        config.blind_recon_ct3             = true;
-        config.blind_recon_reference_label = 'CT_1';
-        config.plot_results                = false;   % no engine figures, as in pipeline_simulate
+        config.plot_results = false;   % no engine figures, as in pipeline_simulate
     end
 
     %% ======================== INPUT VALIDATION ========================
@@ -149,8 +143,8 @@ function results = step205_run_full_field_simulation(patient_id, session, config
 
     hash8         = config.config_hash;
     ct_labels     = {'CT_1', 'CT_3'};
-    sim_dir       = fullfile(config.working_dir, 'SimulationResults', patient_id, ...
-        session, config.gruneisen_method);
+    sim_dir       = get_simulation_dir(config.working_dir, patient_id, session, ...
+        config.gruneisen_method);
     processed_dir = fullfile(config.working_dir, 'RayStationFiles', patient_id, ...
         session, 'processed');
     recon_files   = {fullfile(sim_dir, sprintf('full_field_dose_CT_1_%s.mat', hash8)), ...

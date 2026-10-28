@@ -17,7 +17,7 @@
 %
 %  Where Step 2.5 stores its results (read here):
 %    - segment_metrics_summary_<hash>.mat  (beside the recon doses in
-%      SimulationResults/[PatientID]/[Session]/[method]/) -- per-beam & pooled
+%      get_simulation_dir: RayStationFiles/.../processed/simulation_results/[method]/) -- per-beam & pooled
 %      mean/std of the gamma pass rate (%) and mean local SSIM (%) per
 %      comparison, the per-segment matrices, and the noise-only null floor.
 %      This drives the summary figures and the console table.
@@ -156,8 +156,8 @@ end
 
 % Cache/log directory: the recon-dose folder unless explicitly overridden.
 if isempty(CONFIG.output_dir)
-    CONFIG.output_dir = fullfile(CONFIG.working_dir, 'SimulationResults', ...
-        CONFIG.patient_id, CONFIG.session, CONFIG.gruneisen_method);
+    CONFIG.output_dir = get_simulation_dir(CONFIG.working_dir, CONFIG.patient_id, ...
+        CONFIG.session, CONFIG.gruneisen_method);
 end
 if ~isfolder(CONFIG.output_dir)
     mkdir(CONFIG.output_dir);

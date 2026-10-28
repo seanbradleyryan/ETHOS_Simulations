@@ -63,7 +63,9 @@ function results = step3_analysis(patient_id, session, config)
 %           .random_segments  - beam/segment/scores of the random panels
 %           .metadata
 %
-%   FILES CREATED (AnalysisResults/[PatientID]/[Session]/[method]/[hash]/):
+%   FILES CREATED (AnalysisResults/[PatientID]/[Session]/[label]/step3_analysis/,
+%   [label] = config_label of the hash's config: 'canonical' or the fields that
+%   differ from get_default_config, e.g. 'reconstruction_method.das'):
 %       step3_results.mat         - the results struct
 %       beam_summary.csv          - per-beam means/SE, both metrics, + SNR
 %       segment_statistics.csv    - t-test / floor / correlation rows
@@ -85,7 +87,8 @@ function results = step3_analysis(patient_id, session, config)
 %
 %   DEPENDENCIES:
 %       CalcGamma, compute_local_ssim, load_recon_dose_data,
-%       step25_segment_metrics, Image Processing Toolbox (ssim).
+%       step25_segment_metrics, get_simulation_dir, hashtoconfig, config_label,
+%       Image Processing Toolbox (ssim).
 %       Statistics are base MATLAB (no Statistics Toolbox).
 %
 %   See also: step25_segment_metrics, load_recon_dose_data, compute_local_ssim
@@ -163,10 +166,11 @@ T = load_recon_dose_data(patient_id, session, config, load_args{:});
 
 hash8              = T.config_hash;
 config.config_hash = hash8;   % pin for Step 2.5 / random-panel loads
-sim_dir       = fullfile(config.working_dir, 'SimulationResults', patient_id, session, ...
-    T.gruneisen_method);
+sim_dir       = get_simulation_dir(config.working_dir, patient_id, session, T.gruneisen_method);
 processed_dir = fullfile(config.working_dir, 'RayStationFiles', patient_id, session, 'processed');
-out_dir       = fullfile(session_dir, T.gruneisen_method, hash8);
+% The label comes from the hash's registered config, so a partial config
+% (working_dir + config_hash) still lands in the right folder.
+out_dir       = fullfile(session_dir, config_label(hashtoconfig(hash8, config)), 'step3_analysis');
 fig_dir       = fullfile(out_dir, 'figures');
 if ~isfolder(fig_dir), mkdir(fig_dir); end
 fprintf('  Results folder: %s\n', out_dir);

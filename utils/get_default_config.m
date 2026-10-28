@@ -23,6 +23,11 @@ function CONFIG = get_default_config(varargin)
 %   (possibly overridden) CONFIG.uniform_* values -- unless the caller overrides
 %   tissue_tables explicitly, in which case the supplied tables are kept.
 %
+%   These defaults are the CANONICAL calculation. config_label names each
+%   AnalysisResults/<patient>/<session>/<label>/ folder 'canonical' when a run's
+%   simulation fields all match these defaults, otherwise after the fields that
+%   differ. Changing a default here changes which config counts as 'canonical'.
+%
 %   This function covers SIMULATION config only. The pipeline orchestration
 %   scripts (pipeline_setup / pipeline_simulate / step*) keep their own,
 %   structurally different CONFIG blocks (patients, sessions, directories, MLC).
@@ -119,6 +124,13 @@ function CONFIG = get_default_config(varargin)
     %               (total_dose_<CT>_B<n>.mat written by pipeline_compress).
     %   In the config hash; 'segment' keeps the pre-existing hashes.
     CONFIG.reconstruction_mode = 'segment';
+
+    % --- Blind-geometry reconstruction (pipeline_simulate Step 2 / 2.05) ---
+    %   true: CT_3 (adapted) fields are forward-simulated on CT_3 but
+    %   reconstructed on the blind_recon_reference_label CBCT, the only geometry
+    %   a live IRAI system has. In the config hash.
+    CONFIG.blind_recon_ct3             = true;
+    CONFIG.blind_recon_reference_label = 'CT_1';
 
     % --- Pulse convolution / noise / deconvolution (set kernel 0 to disable) ---
     % pulse_shape selects the radiation-pulse profile convolved onto the signal:

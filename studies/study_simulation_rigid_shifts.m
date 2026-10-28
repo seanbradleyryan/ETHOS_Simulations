@@ -151,8 +151,8 @@ engine_config.plot_results            = false;
 
 processed_dir = fullfile(CONFIG.working_dir, 'RayStationFiles', ...
     CONFIG.patient_id, CONFIG.session, 'processed');
-out_dir = fullfile(CONFIG.working_dir, 'SimulationResults', ...
-    CONFIG.patient_id, CONFIG.session, CONFIG.gruneisen_method);
+out_dir = get_simulation_dir(CONFIG.working_dir, CONFIG.patient_id, CONFIG.session, ...
+    CONFIG.gruneisen_method);
 if ~isfolder(out_dir)
     mkdir(out_dir);
 end

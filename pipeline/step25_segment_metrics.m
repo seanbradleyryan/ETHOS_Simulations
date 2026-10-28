@@ -235,8 +235,8 @@ function results = step25_segment_metrics(patient_id, session, config)
         % Capture the recon location / hash from the first successful load.
         if isempty(hash8)
             hash8   = beam_set.config_hash;
-            sim_dir = fullfile(config.working_dir, 'SimulationResults', ...
-                patient_id, session, beam_set.gruneisen_method);
+            sim_dir = get_simulation_dir(config.working_dir, patient_id, session, ...
+                beam_set.gruneisen_method);
         end
 
         % Running per-CT sum of the raw (un-normalized) field recons, compared
@@ -837,9 +837,10 @@ function ens = compute_session_noise_floor(patient_id, session, config, ...
     config.patient_id = patient_id;
     config.session    = session;
 
+    % Same path noise_ensemble_error_bars writes to (its default CacheDir).
     nf_hash    = compute_sim_config_hash(config);   % equals hash8 for the sim CONFIG
-    cache_file = fullfile(config.working_dir, 'AnalysisResults', patient_id, ...
-        session, sprintf('noise_ensemble_%s_%s_%s.mat', patient_id, session, nf_hash));
+    cache_file = fullfile(get_simulation_dir(config.working_dir, patient_id, session, ...
+        config.gruneisen_method), sprintf('noise_ensemble_%s_%s_%s.mat', patient_id, session, nf_hash));
 
     have_lock = false;
     lock_dir  = [cache_file, '.lock'];

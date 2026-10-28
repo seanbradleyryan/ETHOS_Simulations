@@ -7,8 +7,9 @@ function config_block = hashtoconfig(hash, config)
 %   cannot be inverted.  Instead, pipeline_simulate records every hash it runs
 %   in a per-session config_registry.json, storing the canonical (allow-listed)
 %   CONFIG sub-struct alongside each hash.  This util scans those registries
-%   under <working_dir>/SimulationResults and returns the config block for the
-%   requested hash.
+%   (RayStationFiles/<id>/<session>/processed/simulation_results/<method>/,
+%   see get_simulation_dir) and returns the config block for the requested hash.
+%   config_label(config_block) gives that hash's AnalysisResults folder name.
 %
 %   INPUTS:
 %       hash   - 8-character hex config hash (e.g. 'a1b2c3d4'). Case-insensitive.
@@ -37,14 +38,17 @@ function config_block = hashtoconfig(hash, config)
             'config must be a struct with a .working_dir field.');
     end
 
-    sim_root = fullfile(config.working_dir, 'SimulationResults');
+    sim_root = fullfile(config.working_dir, 'RayStationFiles');
     if ~exist(sim_root, 'dir')
-        error('hashtoconfig:NoSimResults', ...
-            'SimulationResults directory not found: %s', sim_root);
+        error('hashtoconfig:NoRayStationFiles', ...
+            'RayStationFiles directory not found: %s', sim_root);
     end
 
-    % Registries live at SimulationResults/[patient]/[session]/[method]/config_registry.json
-    reg_files = dir(fullfile(sim_root, '**', 'config_registry.json'));
+    % One registry per get_simulation_dir: [patient]/[session]/processed/
+    % simulation_results/[method]/config_registry.json (wildcards, not '**', so
+    % the DICOM folders are not walked).
+    reg_files = dir(fullfile(sim_root, '*', '*', 'processed', 'simulation_results', ...
+        '*', 'config_registry.json'));
     if isempty(reg_files)
         error('hashtoconfig:NoRegistry', ...
             'No config_registry.json files found under %s', sim_root);

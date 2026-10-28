@@ -40,11 +40,26 @@ C:/Users/80030361/ETHOS_Simulations/
 │   └── sct/                                        # Sorted SCT + matched RT files (Step 0 output)
 ├── Raystation_Input/[PatientID]/[Session]/         # Exploded-segment RTPLAN files (Step 0.6 output)
 ├── RayStationFiles/[PatientID]/[Session]/          # Field dose DICOMs from RayStation
-│   └── processed/                                   # Processed .mat files (Step 1.5 output)
-├── SimulationResults/[PatientID]/[Session]/[method]/ # k-Wave outputs (Step 2)
-├── AnalysisResults/[PatientID]/[Session]/           # Gamma/SSIM results (Step 3)
+│   └── processed/                                   # ALL data the analysis reads
+│       ├── dose_*.mat, CBCT*_resampled.mat, total_*.mat, metadata.mat   # Step 1.5 output
+│       └── simulation_results/[method]/             # Steps 2/2.05/2.5 data, files keyed by <hash>
+├── AnalysisResults/[PatientID]/[Session]/           # Analysis outputs (figures, tables, logs)
+│   ├── verify_pipeline_compress_output/             # config-independent checks (Step 1.5 inputs)
+│   ├── verify_plot_dose_from_npz/
+│   └── [label]/                                     # 'canonical' or e.g. 'reconstruction_method.das'
+│       ├── step3_analysis/
+│       ├── verify_pipeline_simulate/
+│       └── pipeline_simulate/                       # pipeline_results_<ts>.mat, timing_report_<ts>.txt
 └── PipelineScripts/                                 # All pipeline .m files
 ```
+
+**Results layout rules:**
+- Data → `get_simulation_dir(working_dir, pid, session, method)` (= `processed/simulation_results/[method]/`), named by config hash. Never write data to `AnalysisResults/`.
+- Analysis outputs → `AnalysisResults/[pid]/[session]/[label]/[script_name]/`. `[label] = config_label(config)`:
+  `'canonical'` when every config-hash field equals `get_default_config`, else `<field>.<value>` per differing field joined by `__`.
+  `get_default_config` IS the canonical calculation. Scripts holding only a hash use `config_label(hashtoconfig(hash, config))`.
+- `config_registry.json` (in the simulation dir) maps hash → config + label.
+- `misc/migrate_results_layout.m` moves pre-overhaul `SimulationResults/` + old `AnalysisResults/<method>/<hash>/` folders (one-off, dry run default).
 
 ## Architecture Patterns
 
@@ -150,7 +165,7 @@ A = load_recon_dose_data('1194203','Session_1',config,'Mode','set','PlanType','a
 ```
 
 Reuses `compute_sim_config_hash`, `list_processed_field_doses`, and `load_field_dose_file`. Reads
-recon outputs from `SimulationResults/[PatientID]/[Session]/[method]/` (`<base>_recon_<hash>.mat`,
+recon outputs from `get_simulation_dir` = `RayStationFiles/[PatientID]/[Session]/processed/simulation_results/[method]/` (`<base>_recon_<hash>.mat`,
 `total_recon_dose_<hash>.mat`) and RayStation/CBCT inputs from `RayStationFiles/[PatientID]/[Session]/processed/`.
 
 ### `compute_local_ssim.m` — local SSIM map + masked mean
@@ -170,7 +185,7 @@ segments and Step 3 totals).
 - **Part B:** the study analyses from the Step 2.5 summary, run for gamma and for SSIM: per-beam tables,
   the stats tests, plots, SNR and random segment panels.
 - **Outputs:** figures, `.mat`, CSVs and the console log, all in
-  `AnalysisResults/<pid>/<session>/<method>/<hash>/`.
+  `AnalysisResults/<pid>/<session>/<label>/step3_analysis/`.
 
 See `CLAUDE-PIPELINE_CONTEXT.md` ("Step 3").
 
