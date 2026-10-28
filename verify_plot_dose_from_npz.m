@@ -4,7 +4,9 @@
 %   and CT_3 in RayStationFiles/<patient_id>/<session>/ and plots each one:
 %   one figure per combination, rows = CT_1 / CT_3, columns = transverse /
 %   coronal / sagittal slices through that CT's max-dose voxel. Both rows
-%   share one color scale so the two CTs can be compared directly.
+%   share one color scale so the two CTs can be compared directly. Each figure
+%   is also saved as <combination>.png in
+%   AnalysisResults/<patient_id>/<session>/verify_plot_dose_from_npz/.
 %
 %   NPZ files come from calc_beam_plan_doses.py:
 %       dose_{id}_{session}_{plan_type}_{CT_1|CT_3}_{origbeam}_{seg:02d}.npz
@@ -46,12 +48,17 @@ end
 
 picked = common_keys(randperm(numel(common_keys), min(n_pick, numel(common_keys))));
 
+out_dir = fullfile(working_dir, 'AnalysisResults', patient_id, session, 'verify_plot_dose_from_npz');
+if ~isfolder(out_dir)
+    mkdir(out_dir);
+end
+
 %% ---- Plot each picked combination ----
 ct_labels = {'CT_1', 'CT_3'};
 for p = 1:numel(picked)
     % key is "<plan_type>_<beam>_<seg>"; the CT label sits between plan_type and beam
     parts = strsplit(picked{p}, '_');
-    figure('Name', picked{p}, 'Color', 'w');
+    fig = figure('Name', picked{p}, 'Color', 'w');
 
     dose = cell(1, 2);
     for c = 1:2
@@ -101,4 +108,6 @@ for p = 1:numel(picked)
         colorbar;
     end
     sgtitle(sprintf('%s %s  %s', patient_id, session, picked{p}), 'Interpreter', 'none');
+    exportgraphics(fig, fullfile(out_dir, [picked{p} '.png']), 'Resolution', 150);
 end
+fprintf('Figures saved to %s\n', out_dir);

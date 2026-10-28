@@ -52,7 +52,8 @@
 %                                     CT_1 dose and ETHOS dose, both Gy/fraction,
 %                                     one shared color scale
 %    Each tab is also saved as a PNG in
-%    AnalysisResults/<id>/<session>/compress_verification/
+%    AnalysisResults/<id>/<session>/verify_pipeline_compress_output/ (no config
+%    label: these checks are on the Step 1.5 inputs, before any simulation)
 %      pair_<plan>_B<beam>_S<seg>.png   (test 1)
 %      body_contours.png                (test 2)
 %      rs_vs_ethos_total.png            (test 4)
@@ -144,7 +145,7 @@ for pIdx = 1:numel(CONFIG.patients)
             % Step 0.6 copies the ETHOS truth dose + its plan here for the RayStation import
             rsInputDir   = fullfile(CONFIG.working_dir, 'Raystation_Input', patientID, session);
             outDir       = fullfile(CONFIG.working_dir, 'AnalysisResults', patientID, session, ...
-                'compress_verification');
+                'verify_pipeline_compress_output');
             if ~isfolder(outDir)
                 mkdir(outDir);
             end

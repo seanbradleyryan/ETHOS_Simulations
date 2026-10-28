@@ -61,9 +61,11 @@ function results = verify_pipeline_simulate(patient_id, session, config, config_
 %   OUTPUTS:
 %       results - struct: .patient_id, .session, .config_hash, .out_dir and
 %                 .tests (struct array with .name, .status, .detail)
-%       PNG figures in SimulationResults/<id>/<session>/<method>/simulation_debug/
-%       named <plot>_<hash>.png (one PNG per tab). They are also shown when
-%       MATLAB has a desktop; plots of the same kind share one window as tabs.
+%       PNG figures in AnalysisResults/<id>/<session>/<label>/verify_pipeline_simulate/
+%       named <plot>_<hash>.png (one PNG per tab); <label> = config_label of the
+%       hash's config ('canonical' or the fields that differ from
+%       get_default_config). They are also shown when MATLAB has a desktop;
+%       plots of the same kind share one window as tabs.
 %
 %   ALGORITHM:
 %       1. Resolve the config hash; index the processed doses; load both CBCTs.
@@ -75,7 +77,8 @@ function results = verify_pipeline_simulate(patient_id, session, config, config_
 %       verify_pipeline_simulate('1194203', 'Session_1', CONFIG, CONFIG_HASH);
 %
 %   DEPENDENCIES:
-%       utils/ (get_default_config, hashtoconfig, list_processed_field_doses,
+%       utils/ (get_default_config, hashtoconfig, config_label,
+%       get_simulation_dir, list_processed_field_doses,
 %       load_field_dose_file, least_squares_gain, compute_gamma, CalcGamma,
 %       create_acoustic_medium), run_single_field_simulation + k-Wave (test 6),
 %       Image Processing Toolbox (dicominfo, dicomread), Parallel Computing
@@ -142,7 +145,7 @@ function results = verify_pipeline_simulate(patient_id, session, config, config_
     %% ========================= PATHS + CONFIG HASH ===========================
     rsDir        = fullfile(config.working_dir, 'RayStationFiles', patient_id, session);
     processedDir = fullfile(rsDir, 'processed');
-    simDir       = fullfile(config.working_dir, 'SimulationResults', patient_id, session, ...
+    simDir       = get_simulation_dir(config.working_dir, patient_id, session, ...
         config.gruneisen_method);
     % Folders that may hold the RTPLAN / ETHOS RTDOSE DICOMs, in search order
     dicomDirs = {rsDir, ...
@@ -177,7 +180,9 @@ function results = verify_pipeline_simulate(patient_id, session, config, config_
         end
     end
 
-    outDir = fullfile(simDir, 'simulation_debug');
+    % Label from the hash's registered config, so standalone and pipeline runs agree
+    outDir = fullfile(config.working_dir, 'AnalysisResults', patient_id, session, ...
+        config_label(hashtoconfig(config_hash, config)), 'verify_pipeline_simulate');
     if ~isfolder(outDir)
         mkdir(outDir);
     end

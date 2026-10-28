@@ -138,8 +138,14 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
 %                                                  strength is this fraction of the
 %                                                  peak of the first unregularised
 %                                                  step (0 = no TV, positivity only)
+%           .adjoint_tv_force_power_recalc [false] - 'adjoint_tv': true ignores the
+%                                                  cached power iteration
+%                                                  (processed/adjoint_power_cache_
+%                                                  <hash>.mat), recomputes it and
+%                                                  overwrites the cache
 %           .adjoint_tv_power_iter      [5]      - 'adjoint_tv' power iterations for
-%                                                  the step size (2 k-Wave runs each)
+%                                                  the step size (2 k-Wave runs each,
+%                                                  skipped when cached)
 %           .adjoint_tv_inner_iter      [10]     - 'adjoint_tv' TV-denoise iterations
 %                                                  per outer iteration (no k-Wave)
 %           .blind_recon                [false]  - When true (and medium_recon is
@@ -253,6 +259,7 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
     num_tr_iter         = safe_config(config, 'num_time_reversal_iter', 30);
     num_adj_iter        = safe_config(config, 'adjoint_num_iter', 5);
     tv_lambda           = safe_config(config, 'adjoint_tv_lambda', 0.01);
+    tv_force_power_recalc = safe_config(config, 'adjoint_tv_force_power_recalc', false);
     tv_power_iter       = safe_config(config, 'adjoint_tv_power_iter', 5);
     tv_inner_iter       = safe_config(config, 'adjoint_tv_inner_iter', 10);
     convergence_tol     = safe_config(config, 'convergence_tol', 1e-3);
@@ -1480,6 +1487,11 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
             %      rescales additive sources); a dot-product test measures it
             %      and it is divided out. The largest eigenvalue of A'A gives
             %      the Lipschitz constant Lip = 2 * max eigenvalue (step 1/Lip).
+            %      Both depend on the operator A, not on this field (the field
+            %      is only the starting image), so they are cached in
+            %      processed/adjoint_power_cache_<hash>.mat (adjoint_power_hash:
+            %      reconstruction medium, grid and dt/Nt, sensor, PML, sensor
+            %      response, power_iter) and reused on the next run.
             %   b. lambda = adjoint_tv_lambda * Lip * peak of the first
             %      unregularised step, so adjoint_tv_lambda is dimensionless and
             %      one value works for weak and strong fields.
@@ -1491,8 +1503,8 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
             %   3. forward run on the new estimate -> modelled data and J
             %   4. momentum: y = p + (t-1)/t_next * (p - p_prev). A is linear,
             %      so A y is the same combination of modelled data (no k-Wave run)
-            % k-Wave runs: 1 + 2 * adjoint_tv_power_iter for setup, 2 per
-            % iteration. Runs on kmedium_rec (blind works as for TR). No
+            % k-Wave runs: 1 + 2 * adjoint_tv_power_iter for setup (1 when
+            % cached), 2 per iteration. Runs on kmedium_rec (blind works as for TR). No
             % correction_factor (a least-squares fit in Pa, as 'adjoint').
             fprintf('        Running adjoint_tv reconstruction (%d iterations, tol=%.1e)...\n', ...
                 num_adj_iter, convergence_tol);
@@ -1518,18 +1530,47 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
                 % a. Power iteration: adjoint scale and largest eigenvalue of A'A
                 back_projection = adjoint_backward_model(measured, kgrid, kmedium_rec, ...
                     sensor, inputArgs, FS, wiener_gain);
-                power_image = back_projection / norm(back_projection(:));
-                for power_iter = 1:tv_power_iter
-                    power_signals = adjoint_forward_model(power_image, kgrid, kmedium_rec, ...
-                        sensor, inputArgs, sensor_info, FS, wiener_gain);
-                    round_trip    = adjoint_backward_model(power_signals, kgrid, kmedium_rec, ...
-                        sensor, inputArgs, FS, wiener_gain);
-                    % True adjoint: sum(x .* A'(A x)) == sum((A x).^2)
-                    adjoint_scale  = sum(power_image(:) .* round_trip(:)) / sum(power_signals(:) .^ 2);
-                    max_eigenvalue = norm(round_trip(:)) / abs(adjoint_scale);   % power_image has unit length
-                    power_image    = round_trip / norm(round_trip(:));
-                    fprintf('          Power iteration %d/%d: adjoint scale %.4e, max eigenvalue %.4e\n', ...
-                        power_iter, tv_power_iter, adjoint_scale, max_eigenvalue);
+
+                % Cache file beside the CBCT files (no caching without a path)
+                power_cache_file = '';
+                if isfield(config, 'working_dir') && isfield(cbct_resampled, 'patient_id') ...
+                        && isfield(cbct_resampled, 'session')
+                    power_hash = adjoint_power_hash(kmedium_rec, kgrid, sensor, sensor_info, ...
+                        pml_size, wiener_gain, tv_power_iter);
+                    power_cache_file = fullfile(config.working_dir, 'RayStationFiles', ...
+                        cbct_resampled.patient_id, cbct_resampled.session, 'processed', ...
+                        sprintf('adjoint_power_cache_%s.mat', power_hash));
+                end
+
+                if ~tv_force_power_recalc && ~isempty(power_cache_file) && isfile(power_cache_file)
+                    cached         = load(power_cache_file, 'adjoint_scale', 'max_eigenvalue');
+                    adjoint_scale  = cached.adjoint_scale;
+                    max_eigenvalue = cached.max_eigenvalue;
+                    fprintf('          Power iteration loaded from %s: adjoint scale %.4e, max eigenvalue %.4e\n', ...
+                        power_cache_file, adjoint_scale, max_eigenvalue);
+                else
+                    power_image = back_projection / norm(back_projection(:));
+                    for power_iter = 1:tv_power_iter
+                        power_signals = adjoint_forward_model(power_image, kgrid, kmedium_rec, ...
+                            sensor, inputArgs, sensor_info, FS, wiener_gain);
+                        round_trip    = adjoint_backward_model(power_signals, kgrid, kmedium_rec, ...
+                            sensor, inputArgs, FS, wiener_gain);
+                        % True adjoint: sum(x .* A'(A x)) == sum((A x).^2)
+                        adjoint_scale  = sum(power_image(:) .* round_trip(:)) / sum(power_signals(:) .^ 2);
+                        max_eigenvalue = norm(round_trip(:)) / abs(adjoint_scale);   % power_image has unit length
+                        power_image    = round_trip / norm(round_trip(:));
+                        fprintf('          Power iteration %d/%d: adjoint scale %.4e, max eigenvalue %.4e\n', ...
+                            power_iter, tv_power_iter, adjoint_scale, max_eigenvalue);
+                    end
+                    if ~isempty(power_cache_file)
+                        try
+                            save(power_cache_file, 'adjoint_scale', 'max_eigenvalue');
+                            fprintf('          Power iteration saved to %s\n', power_cache_file);
+                        catch ME
+                            warning('run_single_field_simulation:PowerCacheSaveFail', ...
+                                'Could not save power iteration cache %s: %s', power_cache_file, ME.message);
+                        end
+                    end
                 end
                 % Power iteration approaches the eigenvalue from below: 10% margin
                 lipschitz = 2 * 1.1 * max_eigenvalue;
@@ -2012,6 +2053,29 @@ function p_final = adjoint_backward_model(signals, kgrid, kmedium, sensor, input
 
     out     = kspaceFirstOrder3D(kgrid, kmedium, source, recorder, inputArgs{:});
     p_final = reshape(double(gather(out.p_final)), size(sensor.mask));
+end
+
+
+function hash_hex = adjoint_power_hash(kmedium, kgrid, sensor, sensor_info, pml_size, wiener_gain, num_power_iter)
+%ADJOINT_POWER_HASH 8-character MD5 key of the cached 'adjoint_tv' power
+%  iteration: everything the operator A (adjoint_forward_model) depends on --
+%  reconstruction medium, grid and time step, sensor mask and element map, PML
+%  size, sensor frequency response -- plus the number of power iterations.
+%  The field dose is left out: it is only the power iteration's starting image.
+    parts = {kmedium.density, kmedium.sound_speed, kmedium.alpha_coeff, kmedium.alpha_power, ...
+             [kgrid.Nx, kgrid.Ny, kgrid.Nz, kgrid.dx, kgrid.dy, kgrid.dz, kgrid.dt, kgrid.Nt], ...
+             find(sensor.mask), pml_size, real(wiener_gain), imag(wiener_gain), num_power_iter};
+    if isfield(sensor_info, 'voxel_element_idx'), parts{end+1} = sensor_info.voxel_element_idx; end
+    if isfield(sensor_info, 'element_map'),       parts{end+1} = sensor_info.element_map;       end
+
+    md = java.security.MessageDigest.getInstance('MD5');
+    for k = 1:numel(parts)
+        if ~isempty(parts{k})
+            md.update(typecast(double(gather(parts{k}(:))), 'uint8'));
+        end
+    end
+    raw      = typecast(md.digest(), 'uint8');
+    hash_hex = sprintf('%02x', raw(1:4));
 end
 
 

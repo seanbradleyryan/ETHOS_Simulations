@@ -36,6 +36,7 @@ CONFIG.convergence_tol        = 0;
 
 % --- adjoint_tv knobs (see run_single_field_simulation) ---
 CONFIG.adjoint_tv_lambda     = 0.01;
+CONFIG.adjoint_tv_force_power_recalc = false;   % true = ignore processed/adjoint_power_cache_<hash>.mat, recompute + overwrite
 CONFIG.adjoint_tv_power_iter = 5;
 CONFIG.adjoint_tv_inner_iter = 10;
 

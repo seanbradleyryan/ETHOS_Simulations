@@ -131,7 +131,7 @@ CONFIG.metrics_noise_floor   = true;        % compute the noise-only null once/s
 CONFIG.metrics_noise_minutes = 30;          % ensemble time budget (min)
 
 % --- Step 3 Analysis (totals + per-segment study; figures/stats/log saved to
-%     AnalysisResults/<patient>/<session>/<method>/<hash>/) ---
+%     AnalysisResults/<patient>/<session>/<config label>/step3_analysis/) ---
 CONFIG.analysis_plot_results    = true;    % Save PNG figures
 CONFIG.analysis_ethos_ct_label  = 'CT_1';  % RS per-CT total compared with the ETHOS RTDOSE
 CONFIG.analysis_beams           = [];      % [] => every beam in the Step 2.5 summary
@@ -154,7 +154,7 @@ CONFIG.num_parallel_workers  = feature('numcores');   % one worker per physical 
 % --- Multi-Instance Coordination ---
 % Multiple copies of this script (e.g. one per remote-desktop session, all
 % sharing working_dir) coordinate per-field through lock + status files under
-% SimulationResults/<patient>/<session>/<method>/field_status/. Before a field
+% <simulation dir>/field_status/ (get_simulation_dir). Before a field
 % is processed its lock is claimed atomically and an 'in_progress' status is
 % written so sibling instances skip it; on completion the status is overwritten
 % with 'complete'. A lock whose status file is older than stale_claim_minutes
@@ -171,7 +171,7 @@ CONFIG.run_step2   = true;    % Step 2   : k-Wave simulation
 CONFIG.run_step205 = true;    % Step 2.05: total RS dose per CT simulated as one field
 CONFIG.run_step25  = true;    % Step 2.5 : per-segment gamma + SSIM (folded in)
 CONFIG.run_step3   = false;    % Step 3   : Gamma analysis
-CONFIG.run_verify  = true;     % verify_pipeline_simulate: checks + plots in <method>/simulation_debug/
+CONFIG.run_verify  = true;     % verify_pipeline_simulate: checks + plots in AnalysisResults/.../verify_pipeline_simulate/
 
 %% ========================= INITIALIZATION ================================
 
@@ -212,6 +212,12 @@ end
 % reusing stale ones.
 [CONFIG_HASH, CONFIG_CANONICAL] = compute_sim_config_hash(CONFIG);
 fprintf('  Config hash: %s\n', CONFIG_HASH);
+% Simulation data is stored by hash under RayStationFiles/<id>/<session>/
+% processed/simulation_results/<method>/ (get_simulation_dir). Analysis output
+% goes to AnalysisResults/<id>/<session>/<CONFIG_LABEL>/, where CONFIG_LABEL is
+% 'canonical' or the fields that differ from get_default_config.
+CONFIG_LABEL = config_label(CONFIG);
+fprintf('  Config label: %s\n', CONFIG_LABEL);
 
 % Report which electronic-noise model this run uses. A fixed absolute amplitude
 % (from calibrate_noise_amp) lets the SNR float field to field; the legacy
@@ -255,7 +261,7 @@ for p_idx = 1:length(CONFIG.patients)
         RESULTS.patients.(result_key) = init_patient_result(patient_id, session);
 
         % Open per-session log file (appends across runs)
-        ensure_config_registry(CONFIG_HASH, CONFIG_CANONICAL, ...
+        ensure_config_registry(CONFIG_HASH, CONFIG_CANONICAL, CONFIG_LABEL, ...
             patient_id, session, CONFIG);
         log_fid = open_simulation_log(patient_id, session, CONFIG, ...
             CONFIG_HASH, CONFIG_CANONICAL);
@@ -317,7 +323,7 @@ for p_idx = 1:length(CONFIG.patients)
             % Compute the sensor mask ONCE for the whole plan and reuse it
             % for every field, instead of recomputing determine_sensor_mask
             % inside each run_single_field_simulation call. The mask is
-            % saved to disk (SimulationResults/<method>/sensor_mask_<hash>.mat)
+            % saved to disk (<simulation dir>/sensor_mask_<hash>.mat)
             % so the exact sensor geometry can be recovered for analysis.
             % Returns [] for non-determine_sensor_mask methods (or when no
             % summed plan dose is available), in which case each field falls
@@ -792,25 +798,32 @@ fprintf('---------------------\n');
 RESULTS.timing = TIMING;
 % =========================================================================
 
-results_filename = sprintf('pipeline_results_%s.mat', datestr(now, 'yyyymmdd_HHMMSS'));
-results_path     = fullfile(CONFIG.working_dir, 'AnalysisResults', results_filename);
-if ~exist(fullfile(CONFIG.working_dir, 'AnalysisResults'), 'dir')
-    mkdir(fullfile(CONFIG.working_dir, 'AnalysisResults'));
+% Save RESULTS once per patient/session, holding only that session's entry, in
+% AnalysisResults/<id>/<session>/<CONFIG_LABEL>/pipeline_simulate/. The timing
+% report covers the whole run, so each session folder gets the same copy (it
+% can be read without loading RESULTS).
+run_stamp    = datestr(now, 'yyyymmdd_HHMMSS');
+all_patients = RESULTS.patients;
+result_keys  = fieldnames(all_patients);
+for k = 1:numel(result_keys)
+    p_res   = all_patients.(result_keys{k});
+    out_dir = fullfile(CONFIG.working_dir, 'AnalysisResults', p_res.patient_id, ...
+        p_res.session, CONFIG_LABEL, 'pipeline_simulate');
+    if ~exist(out_dir, 'dir'), mkdir(out_dir); end
+    RESULTS.patients = struct(result_keys{k}, p_res);
+    results_path = fullfile(out_dir, sprintf('pipeline_results_%s.mat', run_stamp));
+    save(results_path, 'RESULTS', '-v7.3');
+    fprintf('  Results saved: %s\n', results_path);
+    write_timing_report(TIMING, fullfile(out_dir, sprintf('timing_report_%s.txt', run_stamp)));
 end
-save(results_path, 'RESULTS', '-v7.3');
-fprintf('  Results saved: %s\n', results_path);
-
-% ==================== TIMING (save standalone report) ====================
-% Also drop the timing on its own so it can be found without loading RESULTS.
-write_timing_report(TIMING, CONFIG);
-% =========================================================================
+RESULTS.patients = all_patients;
 
 generate_simulation_summary(RESULTS);
 fprintf('\n=========================================================\n\n');
 
 %% ========================= VERIFICATION ==================================
 % Check every finished session's outputs and save debug plots to
-% SimulationResults/<id>/<session>/<method>/simulation_debug/. Runs after
+% AnalysisResults/<id>/<session>/<CONFIG_LABEL>/verify_pipeline_simulate/. Runs after
 % RESULTS is saved, so a crash here can never lose the simulation results.
 % verify_pipeline_simulate checks per-segment outputs, so it is skipped in beam mode.
 if CONFIG.run_verify && strcmp(CONFIG.reconstruction_mode, 'beam')
@@ -1317,8 +1330,10 @@ function rs_dir = get_raystation_directory(patient_id, session, config)
 end
 
 function sim_dir = get_simulation_directory(patient_id, session, config)
-    sim_dir = fullfile(config.working_dir, 'SimulationResults', patient_id, ...
-        session, config.gruneisen_method);
+    % RayStationFiles/<id>/<session>/processed/simulation_results/<method>/,
+    % created on first use.
+    sim_dir = get_simulation_dir(config.working_dir, patient_id, session, ...
+        config.gruneisen_method);
     if ~exist(sim_dir, 'dir')
         mkdir(sim_dir);
     end
@@ -1709,15 +1724,10 @@ function print_field_eta(n_done, n_total, avg_sec_per_field, n_workers)
         n_done, n_total, n_left, eta_sec / 60, avg_sec_per_field, n_workers);
 end
 
-function write_timing_report(timing, config)
-    % Write the timing rollup to a plain-text file in AnalysisResults so it can
-    % be read without loading the RESULTS .mat. Best-effort: warns and returns
-    % on any file error rather than aborting the finished run.
-    out_dir = fullfile(config.working_dir, 'AnalysisResults');
-    if ~exist(out_dir, 'dir'), mkdir(out_dir); end
-    out_path = fullfile(out_dir, ...
-        sprintf('timing_report_%s.txt', datestr(now, 'yyyymmdd_HHMMSS')));
-
+function write_timing_report(timing, out_path)
+    % Write the timing rollup to a plain-text file (out_path) so it can be read
+    % without loading the RESULTS .mat. Best-effort: warns and returns on any
+    % file error rather than aborting the finished run.
     fid = fopen(out_path, 'w');
     if fid < 0
         warning('pipeline_simulate:timingReport', ...
@@ -1770,19 +1780,22 @@ function p = config_registry_path(patient_id, session, config)
     p       = fullfile(sim_dir, 'config_registry.json');
 end
 
-function ensure_config_registry(hash_hex, canonical, patient_id, session, config)
+function ensure_config_registry(hash_hex, canonical, label, patient_id, session, config)
     % Append (or refresh) one hash->config entry in
     % <sim_dir>/config_registry.json.  Existing entries are left intact
-    % except for last_updated, which is bumped to the current time.
+    % except for last_updated (bumped to the current time) and label (the
+    % AnalysisResults folder name of this hash, see config_label).
     registry = load_config_registry(patient_id, session, config);
     key      = registry_key(hash_hex);
     now_str  = datestr(now, 'yyyy-mm-dd HH:MM:SS');
 
     if isfield(registry, key)
         registry.(key).last_updated = now_str;
+        registry.(key).label        = label;
     else
         entry.first_seen   = now_str;
         entry.last_updated = now_str;
+        entry.label        = label;
         entry.config       = canonical;
         registry.(key)     = entry;
     end
