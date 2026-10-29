@@ -151,7 +151,7 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
 %           .blind_recon                [false]  - When true (and medium_recon is
 %                                                  supplied), forward on `medium`
 %                                                  but reconstruct on medium_recon.
-%           .use_attenuation            [true]   - Use medium.alpha_coeff in kspaceFirstOrder3D
+%           .use_attenuation            [true]   - Use medium.alpha_coeff in kspaceFirstOrder3DG
 %           .alpha_power                [1.1]    - Acoustic attenuation power exponent
 %           .use_pressure_scale_correction [false]
 %                                                  Rescale reconPressure by max(p0)/max(recon)
@@ -226,7 +226,7 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
 %   NOTES:
 %       - Stateless: safe for parfor execution. Diagnostic plotting must be
 %         disabled under parfor (figures from workers do not render).
-%       - PlotSim disabled inside kspaceFirstOrder3D in all cases.
+%       - PlotSim disabled inside kspaceFirstOrder3DG in all cases.
 %       - Returns zeros if no significant dose or on simulation failure.
 %       - beam_metadata is the FULL plan metadata (all beams), passed through
 %         to determine_sensor_mask for computing the exclusion zone.
@@ -248,7 +248,7 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
 %                 force-uniform medium overrides, opt-in plotting)
 %
 %   See also: determine_sensor_mask, determine_sensor_placement_fixed,
-%             kspaceFirstOrder3D, run_standalone_simulation
+%             kspaceFirstOrder3DG, run_standalone_simulation
 
     %% ======================== CONFIG DEFAULTS ========================
 
@@ -970,7 +970,8 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
 
     try
         fwd_tic = tic;
-        sensorData = kspaceFirstOrder3D(kgrid, kmedium, source_fwd, sensor, inputArgs{:});
+        setenv("HDF5_DISABLE_VERSION_CHECK","1")
+        sensorData = kspaceFirstOrder3DG(kgrid, kmedium, source_fwd, sensor, inputArgs{:});
         fwd_time = toc(fwd_tic);
         fprintf('        Forward complete (%.1f s). Sensor data: [%d x %d]\n', ...
             fwd_time, size(sensorData, 1), size(sensorData, 2));
@@ -998,7 +999,7 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
     if safe_config(config, 'export_forward_sinograms', false)
         sim_results.sinogram_fwd = gather(double(sensorData));
         if blind_recon
-            sd_alt = kspaceFirstOrder3D(kgrid, kmedium_rec, source_fwd, sensor, inputArgs{:});
+            sd_alt = kspaceFirstOrder3DG(kgrid, kmedium_rec, source_fwd, sensor, inputArgs{:});
             sim_results.sinogram_alt = gather(double(sd_alt));
         else
             % Full access: no second medium, so the pair is degenerate.
@@ -1234,7 +1235,7 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
                     sensor_tr.mask   = ones(Nx, Ny, Nz);
                     sensor_tr.record = {'p_final'};
 
-                    p0_recon = kspaceFirstOrder3D(kgrid, kmedium_rec, source_tr, sensor_tr, inputArgs{:});
+                    p0_recon = kspaceFirstOrder3DG(kgrid, kmedium_rec, source_tr, sensor_tr, inputArgs{:});
 
                     if isstruct(p0_recon) && isfield(p0_recon, 'p_final')
                         reconPressure = reshape(p0_recon.p_final, [Nx, Ny, Nz]);
@@ -1280,7 +1281,7 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
                     if tr_iter < num_tr_iter
                         source_resid    = struct();
                         source_resid.p0 = reconPressure;
-                        sensorDataRecon = kspaceFirstOrder3D(kgrid, kmedium_rec, ...
+                        sensorDataRecon = kspaceFirstOrder3DG(kgrid, kmedium_rec, ...
                             source_resid, sensor, inputArgs{:});
                         % Element-average the re-forward like the measured data
                         [~, sensorDataRecon] = apply_element_averaging( ...
@@ -2023,7 +2024,7 @@ function signals = adjoint_forward_model(p0, kgrid, kmedium, sensor, inputArgs, 
 %  unchanged when the sensor has no element map). Returns
 %  [num_sensor_voxels x Nt], each voxel carrying its element's signal.
     source       = struct('p0', p0);
-    signals      = kspaceFirstOrder3D(kgrid, kmedium, source, sensor, inputArgs{:});
+    signals      = kspaceFirstOrder3DG(kgrid, kmedium, source, sensor, inputArgs{:});
     signals      = apply_sensor_response(signals, FS, wiener_gain);
     [~, signals] = apply_element_averaging(signals, sensor_info);
 end
@@ -2051,7 +2052,7 @@ function p_final = adjoint_backward_model(signals, kgrid, kmedium, sensor, input
     recorder.mask   = ones(size(sensor.mask));
     recorder.record = {'p_final'};
 
-    out     = kspaceFirstOrder3D(kgrid, kmedium, source, recorder, inputArgs{:});
+    out     = kspaceFirstOrder3DG(kgrid, kmedium, source, recorder, inputArgs{:});
     p_final = reshape(double(gather(out.p_final)), size(sensor.mask));
 end
 

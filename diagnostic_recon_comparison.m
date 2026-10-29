@@ -26,9 +26,9 @@ CONFIG = get_default_config();
 % --- Comparison settings ---
 CONFIG.recon_methods  = {
     'tr', 
-    'adjoint', 
+    %'adjoint', 
     'adjoint_tv'};   % any of 'tr','das','ubp','adjoint','adjoint_tv'
-CONFIG.num_iter       = 10;     % iterations for every iterative method
+CONFIG.num_iter       = 1;     % iterations for every iterative method
 CONFIG.rng_seed       = 42;     % same electronic-noise draw for every method
 CONFIG.gamma_criteria = {3, 3, '3%/3mm'};
 CONFIG.Nt_scaling = 3; 
@@ -37,13 +37,15 @@ CONFIG.conv_use_deconv = false;
 CONFIG.gruneisen_method = 'continuous_1'
 
 
-%CONFIG.sensor_placement_method = 'box'; 
-%CONFIG.gruneisen_method = 'continuous_1'; 
-% 96, 94, 94
+% CONFIG.sensor_placement_method = 'box'; 
+% CONFIG.gruneisen_method = 'uniform'; 
+% 50, 75
 
 %CONFIG.num_iter = 1; 
 %CONFIG.Nt_scaling = 3; 
 %33, 30.8, 30
+
+% CONFIG.adjoint_tv_lambda = 0; 
 
 
 
@@ -51,13 +53,14 @@ CONFIG.gruneisen_method = 'continuous_1'
 % Same iteration count for every method: tol 0 disables the early stop.
 CONFIG.num_time_reversal_iter = CONFIG.num_iter;
 CONFIG.adjoint_num_iter       = CONFIG.num_iter;
+
 CONFIG.convergence_tol        = 0;
 
 % --- adjoint_tv knobs (see run_single_field_simulation) ---
 CONFIG.adjoint_tv_lambda     = 0.01;
 CONFIG.adjoint_tv_force_power_recalc = false;   % true = ignore processed/adjoint_power_cache_<hash>.mat, recompute + overwrite
 CONFIG.adjoint_tv_power_iter = 5;
-CONFIG.adjoint_tv_inner_iter = 10;
+CONFIG.adjoint_tv_inner_iter = CONFIG.num_iter; 
 
 % --- Example overrides ---
 % CONFIG.dose_filename           = 'dose_1194203_Session_1_reference_CT_1_B15_112.mat';

@@ -70,7 +70,7 @@ addpath(genpath(fullfile(this_script_dir, 'utils')));
 % beam per CT on the beam's summed dose from pipeline_compress).
 CONFIG = get_default_config();
 
-CONFIG.reconstruction_mode = 'beam';
+CONFIG.reconstruction_mode = 'segment';
 
 
 % --- Patient and Session Selection ---
@@ -103,7 +103,7 @@ CONFIG.reconstruction_method = 'tr';
 CONFIG.adjoint_num_iter      = 5;
 CONFIG.adjoint_tv_lambda     = 0.01;
 CONFIG.adjoint_tv_power_iter = 5;
-CONFIG.adjoint_tv_inner_iter = 10;
+% CONFIG.adjoint_tv_inner_iter = 10;
 
 % --- Blind-Geometry Reconstruction (CT_3 / adapted fields) ---
 % When true, every CT_3 (adapted) beam/segment field is FORWARD-propagated on

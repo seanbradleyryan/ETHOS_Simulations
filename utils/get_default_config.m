@@ -91,7 +91,7 @@ function CONFIG = get_default_config(varargin)
     CONFIG.meterset           = 140;
     CONFIG.pml_size           = 10;
     CONFIG.cfl_number         = 0.3;
-    CONFIG.Nt_scaling         = 6;      % >0: when air sets minC, divide Nt by this (0 = disabled)
+    CONFIG.Nt_scaling         = 4;      % >0: when air sets minC, divide Nt by this (0 = disabled)
     CONFIG.use_gpu            = true;
 
     % NOTE: run_standalone_simulation.m set correction_factor to 1.9 and then
@@ -125,6 +125,7 @@ function CONFIG = get_default_config(varargin)
     CONFIG.adjoint_tv_power_iter  = 5;
     CONFIG.adjoint_tv_inner_iter  = 10;
     CONFIG.convergence_tol        = 1e-3;
+    CONFIG.adjoint_tv_inner_iter = 10; 
 
     % --- Reconstruction mode (pipeline_simulate Step 2 / Step 2.5): 'segment' | 'beam' ---
     %   'segment' = one k-Wave simulation + gamma/SSIM per beam segment (thousands).
@@ -150,7 +151,7 @@ function CONFIG = get_default_config(varargin)
     CONFIG.conv_noise_level    = 0.125;  % legacy noise amp as fraction of THIS field's peak
     CONFIG.conv_deconv_lambda  = 1e-4;   % Wiener regularization for deconvolution
     CONFIG.conv_variable_lambda = false; % true: Wiener on pulse x transducer, lambda from noise/signal power
-    CONFIG.conv_use_deconv     = true;   % false: skip deconvolution (data keep the pulse smear)
+    CONFIG.conv_use_deconv     = false;   % false: skip deconvolution (data keep the pulse smear)
 
     % --- Absolute (blanket) electronic-noise amplitude ---
     % By default (noise_amp_Pa empty) the pulse-model noise is a fraction
