@@ -45,8 +45,9 @@ clear; clc; close all;
 TIMING                       = struct();
 TIMING.script_start_wall     = datetime('now');
 TIMING.script_start_tic      = tic;          % master start-to-finish stopwatch
-TIMING.all_field_sim_times_sec = [];         % elapsed of every single-field sim
-TIMING.avg_field_sim_sec     = NaN;          % running mean of all_field_sim_times_sec (for ETA)
+TIMING.all_field_sim_times_sec = [];         % elapsed of every single-field sim (sim + saves)
+TIMING.avg_field_sim_sec     = NaN;          % running mean of all_field_sim_times_sec
+TIMING.all_field_total_times_sec = [];       % load + sim + saves + segment metrics per field (for ETA)
 TIMING.all_seg_gamma_times_sec = [];         % gamma seconds of every segment pair scored
 TIMING.all_seg_ssim_times_sec  = [];         % SSIM seconds of every segment pair scored
 % =========================================================================
@@ -460,6 +461,7 @@ for p_idx = 1:length(CONFIG.patients)
 
                     field_computed = false(num_pending, 1);
                     field_elapsed  = zeros(num_pending, 1);
+                    field_total    = zeros(num_pending, 1);   % load -> metrics done (ETA)
                     field_gantry   = nan(num_pending, 1);
                     seg_gamma_sec  = nan(num_pending, 1);   % NaN = pair not scored by this field
                     seg_ssim_sec   = nan(num_pending, 1);
@@ -477,12 +479,13 @@ for p_idx = 1:length(CONFIG.patients)
                     % times recorded so far. report_field_progress keeps the
                     % running average up to date as fields finish ('done'
                     % messages) and prints an estimated time-remaining with each
-                    % field. (The callback cannot write TIMING itself; TIMING's
-                    % average is refreshed from field_elapsed after the parfor.)
+                    % field. The ETA uses each field's full processing time (load,
+                    % sim, saves, gamma + SSIM). (The callback cannot write TIMING
+                    % itself; TIMING is refreshed from field_total after the parfor.)
                     report_field_progress(struct('kind','init', ...
                         'total', num_pending, ...
                         'workers', CONFIG.num_parallel_workers, ...
-                        'field_times', TIMING.all_field_sim_times_sec));
+                        'field_times', TIMING.all_field_total_times_sec));
 
                     t_parfor       = tic;
                     parfor f = 1:num_pending
@@ -506,6 +509,7 @@ for p_idx = 1:length(CONFIG.patients)
                             send(progress_queue, struct('kind','skip','field_idx',fi,'gantry',NaN,'message',''));
                             continue;
                         end
+                        t_total = tic;   % TIMING: full processing of this field (ETA)
 
                         % Load THIS field's dose from disk (one dose in this
                         % worker, not the whole set). On a load failure release
@@ -547,9 +551,6 @@ for p_idx = 1:length(CONFIG.patients)
                         write_field_status(status_path, 'complete', fi, fd.gantry_angle, CONFIG_HASH);
                         field_computed(f) = true;
                         field_elapsed(f)  = toc(t_field);
-                        % TIMING: report this field's time to the running average.
-                        send(progress_queue, struct('kind','done','field_idx',fi, ...
-                            'gantry',fd.gantry_angle,'message','','elapsed_sec',field_elapsed(f)));
 
                         % If the other CT of this segment is also done, score the
                         % pair now (CPU) while other workers keep the GPUs busy.
@@ -559,6 +560,11 @@ for p_idx = 1:length(CONFIG.patients)
                             [seg_gamma_sec(f), seg_ssim_sec(f)] = fold_segment_metrics(meta, ...
                                 rd, fd, grid_spacing, patient_id, session, CONFIG, CONFIG_HASH);
                         end
+                        % TIMING: report this field's full processing time to the
+                        % running average used for the ETA.
+                        field_total(f) = toc(t_total);
+                        send(progress_queue, struct('kind','done','field_idx',fi, ...
+                            'gantry',fd.gantry_angle,'message','','elapsed_sec',field_total(f)));
                     end
                     elapsed_parfor = toc(t_parfor);
                     % TIMING: gamma / SSIM seconds of the pairs scored here.
@@ -581,6 +587,8 @@ for p_idx = 1:length(CONFIG.patients)
                         TIMING.all_field_sim_times_sec(end+1) = field_elapsed(f);
                     end
                     TIMING.avg_field_sim_sec = mean(TIMING.all_field_sim_times_sec);   % NaN if empty
+                    TIMING.all_field_total_times_sec = [TIMING.all_field_total_times_sec, ...
+                        field_total(field_computed)'];
                     save_cache_manifest(cache_manifest, patient_id, session, CONFIG, CONFIG_HASH);
                     fprintf('         Parallel block done in %.1f s (%d field(s) computed here).\n', ...
                         elapsed_parfor, nnz(field_computed));
@@ -611,6 +619,7 @@ for p_idx = 1:length(CONFIG.patients)
                             log_msg(log_fid, 'Field %d held by another instance; skipping.', fi);
                             continue;
                         end
+                        t_total = tic;   % TIMING: full processing of this field (ETA)
 
                         % Load this field's dose from disk (one dose at a time).
                         % Release the claim on a load failure so a corrupt file
@@ -658,15 +667,9 @@ for p_idx = 1:length(CONFIG.patients)
                         log_msg(log_fid, 'Field %d complete [%s] (%.1f s)', ...
                             fi, CONFIG_HASH, elapsed_f);
                         fprintf('             Done in %.1f s\n', elapsed_f);
-                        % --- TIMING: record this field + estimate time remaining ---
-                        % Just completed a field: collect its time, update the
-                        % running average, and use that average per remaining
-                        % single-field sim to report how much of Step 2 is left
-                        % (fields processed vs. fields still pending). Serial -> 1 worker.
+                        % TIMING: collect this field's sim time.
                         TIMING.all_field_sim_times_sec(end+1) = elapsed_f;
                         TIMING.avg_field_sim_sec = mean(TIMING.all_field_sim_times_sec);
-                        print_field_eta(f, num_pending, TIMING.avg_field_sim_sec, 1);
-                        % --- end TIMING ---
 
                         % Score this segment's CT_1/CT_3 pair if the other CT is done.
                         if CONFIG.run_segment_metrics
@@ -679,6 +682,13 @@ for p_idx = 1:length(CONFIG.patients)
                                 fprintf('             Segment metrics: gamma %.1f s, SSIM %.1f s\n', g_sec, s_sec);
                             end
                         end
+
+                        % --- TIMING: estimate time remaining ---
+                        % Uses the running average of each field's full processing
+                        % time (load, sim, saves, gamma + SSIM). Serial -> 1 worker.
+                        TIMING.all_field_total_times_sec(end+1) = toc(t_total);
+                        print_field_eta(f, num_pending, mean(TIMING.all_field_total_times_sec), 1);
+                        % --- end TIMING ---
                     end
                 end
 
@@ -1561,12 +1571,13 @@ function report_field_progress(msg)
     % iteration sends one 'process' / 'skip' / 'fail' message when it starts;
     % this prints only for fields actually being processed and keeps a live
     % count of how many of the pending fields are still outstanding. Each
-    % computed field also sends a 'done' message with its elapsed time, which
-    % is added to the running average used for the live ETA.
+    % computed field also sends a 'done' message with its full processing time
+    % (load, sim, saves, gamma + SSIM), which is added to the running average
+    % used for the live ETA.
     %
     % Call it once on the client before the parfor begins with a struct of kind
     % 'init' carrying the field count, the worker count, and the field times
-    % already recorded in TIMING.all_field_sim_times_sec.
+    % already recorded in TIMING.all_field_total_times_sec.
     persistent remaining workers field_times
     if strcmp(msg.kind, 'init')
         remaining   = msg.total;
@@ -1750,9 +1761,9 @@ end
 %  print / write timing numbers and never touch the simulation state.
 
 function print_field_eta(n_done, n_total, avg_sec_per_field, n_workers)
-    % Estimate how much of Step 2 is left when a single-field simulation just
-    % finished. Assumes every remaining field costs 'avg_sec_per_field' seconds
-    % (TIMING.avg_field_sim_sec: the running mean of every field timed so far);
+    % Estimate how much of Step 2 is left when a field just finished. Assumes
+    % every remaining field costs 'avg_sec_per_field' seconds (the running mean
+    % of TIMING.all_field_total_times_sec: load, sim, saves, gamma + SSIM);
     % with n_workers in parallel the wall-clock estimate is that total divided
     % by the worker count.
     if nargin < 4 || isempty(n_workers) || n_workers < 1
