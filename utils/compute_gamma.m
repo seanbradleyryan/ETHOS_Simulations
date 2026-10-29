@@ -50,7 +50,7 @@ function gamma_results = compute_gamma(original, recon, spacing_mm, varargin)
         fprintf('  [gamma %s] computing...', lbl);
         try
             gmap = CalcGamma(ref_struct, tgt_struct, pct, dta, ...
-                'local', p.Local, 'limit', dta * 2, 'restrict', p.Restrict);
+                'local', p.Local, 'restrict', p.Restrict);
             maps{gc}       = gmap;
             pass_rates(gc) = 100 * mean(gmap(eval_mask) <= 1);
             fprintf(' pass %.2f%%\n', pass_rates(gc));

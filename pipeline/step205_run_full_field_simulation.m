@@ -339,8 +339,7 @@ function results = step205_run_full_field_simulation(patient_id, session, config
             ref_struct = struct('start', [0, 0, 0], 'width', spacing, 'data', ref);
             tgt_struct = struct('start', [0, 0, 0], 'width', spacing, 'data', tgt);
             gmap = CalcGamma(ref_struct, tgt_struct, config.gamma_dose_pct, ...
-                config.gamma_dist_mm, 'local', 0, 'limit', 2 * config.gamma_dist_mm, ...
-                'restrict', 1, 'cpu', 1);
+                config.gamma_dist_mm, 'local', 0, 'restrict', 1, 'cpu', 1);
             g_vals = single(gmap(mask));
 
             [smap, s_frac] = compute_local_ssim(ref, tgt, mask);

@@ -666,7 +666,7 @@ function p = gamma_pass_rate(ref, tgt, mask, crit, spacing)
     gmap = []; %#ok<NASGU>
     try
         evalc(['gmap = CalcGamma(ref_struct, tgt_struct, crit, crit, ', ...
-               '''local'', 0, ''limit'', crit*2, ''restrict'', 1, ''cpu'', 1);']);
+               '''local'', 0, ''restrict'', 1, ''cpu'', 1);']);
         if any(mask(:))
             p = 100 * mean(gmap(mask) <= 1);
         else

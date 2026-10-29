@@ -13,7 +13,7 @@
 | 1.5 | `step15_process_doses.m` | `[fields, sct, total, meta] = step15_process_doses(...)` | Resample CT to dose grid, process per-field doses (**Windows work laptop** via `pipeline_compress.m`) |
 | 2 | `run_single_field_simulation.m` | `[recon, results] = run_single_field_simulation(...)` | k-Wave forward + time-reversal for one field |
 | 2.05 | `step205_run_full_field_simulation.m` | `results = step205_run_full_field_simulation(patient_id, session, config)` | Each CT's total RS dose (`total_dose_CT_1/3.mat`) simulated as ONE field (CT_1 full access, CT_3 blind on CT_1) with the Step 2 sensor mask; four Step 2.5 gamma + SSIM comparisons on the totals. Saves `full_field_dose_CT_*_<hash>.mat` beside the recons. To be compared with the summed per-field recon in analysis |
-| 2.5 | `step25_segment_metrics.m` | `results = step25_segment_metrics(patient_id, session, config)` | Per-beam/segment gamma + local SSIM (4 study comparisons); folds raw masked results into each segment's **CT_1** recon file |
+| 2.5 | `step25_segment_metrics.m` | `results = step25_segment_metrics(patient_id, session, config)` | Per-beam/segment gamma + local SSIM (4 study comparisons); folds raw masked results into each segment's **CT_1** recon file. `pipeline_simulate` now scores pairs inline in Step 2; step25 builds the summary/noise floor (run by Step 3) |
 | 3 | `step3_analysis.m` | `results = step3_analysis(patient_id, session, config)` | Total-dose gamma + local SSIM, and the full per-segment study (tables, statistics, figures) from the Step 2.5 summary; everything saved to `AnalysisResults/<pid>/<session>/<label>/step3_analysis/` |
 
 ## Orchestrator Scripts
@@ -134,14 +134,18 @@ pre-existing segment caches keep their hashes; `'beam'` gets its own hash/files)
 ## Step 2.5 — Per-Segment Metrics (folded into CT_1 recon files)
 
 `step25_segment_metrics.m` adapts `study_pass_rates_allsegments.m` into a pipeline step (no plots — raw
-data only). It runs after Step 2 (in `pipeline_simulate`, guarded by `CONFIG.run_step25`) and can also be
-run standalone like `step3_analysis`.
+data only). `pipeline_simulate` no longer calls it: Step 3 runs it when `segment_metrics_summary_<hash>.mat`
+is missing, or run it standalone like `step3_analysis`.
 
-- **Why a separate step, not inside the sim `parfor`:** two of the four study comparisons are *cross-CT*
-  (`recon_CT3 vs rs_CT1`, `rs_CT1 vs rs_CT3`), so they need BOTH the CT_1 and CT_3 reconstructions of the
-  same beam/segment. The Step-2 `parfor` produces one field (one CT) at a time, so the pair isn't available
-  there. Step 2.5 pairs the finished recons and parallelizes across CPUs (`parfor` over a beam's segments)
-  while the GPU work is already done. Gamma is forced onto the CPU (`CalcGamma(...,'cpu',1)`).
+- **Inline scoring in Step 2 (`CONFIG.run_segment_metrics`):** two of the four comparisons are *cross-CT*,
+  so they need BOTH the CT_1 and CT_3 recons of a segment. In `pipeline_simulate`, after a field is saved
+  and marked `complete`, `fold_segment_metrics` checks the partner field (same filename, CT number
+  swapped). If the partner's status file says `complete`, this worker scores the pair and folds it into
+  the CT_1 recon, using the same math and schema as Step 2.5. That CPU work overlaps other workers' GPU
+  sims. Gamma is forced onto the CPU (`CalcGamma(...,'cpu',1)`). A run that scores ≥1 pair deletes the
+  stale `segment_metrics_summary_<hash>.mat` so Step 3 rebuilds it.
+- **What step25 still does:** builds the summary rollup, the noise floor and `full_vs_sum`, and scores any
+  pair the inline pass missed (pairs cached from older runs, rare filesystem races).
 - **Four comparisons per segment** (reference builds the 10% eval mask): `truth1_vs_truth3`,
   `truth1_vs_recon1`, `truth1_vs_recon3`, `truth3_vs_recon3`. For each, BOTH the global gamma index
   (`CONFIG.gamma_dose_pct`/`gamma_dist_mm`) and the local SSIM map are computed.

@@ -832,16 +832,15 @@ end
 
 function gmap = quiet_gamma_map(ref, tgt, dose_pct, dist_mm, spacing)
 %QUIET_GAMMA_MAP Full global gamma-index volume (CalcGamma output suppressed).
-%  Global gamma ('local',0), DTA search limited to 2x the criterion, restricted
-%  search for speed, forced onto the CPU so many parfor workers do not contend
-%  over the GPU. Returns [] on failure. Matches study_pass_rates_allsegments.
+%  Global gamma ('local',0), CalcGamma's default search limit (2x the DTA,
+%  gamma capped at 2), restricted search for speed, forced onto the CPU so many
+%  parfor workers do not contend over the GPU. Returns [] on failure.
     ref_struct = struct('start', [0, 0, 0], 'width', spacing, 'data', double(ref));
     tgt_struct = struct('start', [0, 0, 0], 'width', spacing, 'data', double(tgt));
-    limit      = 2 * dist_mm;
     gmap = [];
     try
         evalc(['gmap = CalcGamma(ref_struct, tgt_struct, dose_pct, dist_mm, ', ...
-               '''local'', 0, ''limit'', limit, ''restrict'', 1, ''cpu'', 1);']);
+               '''local'', 0, ''restrict'', 1, ''cpu'', 1);']);
     catch
         gmap = [];
     end

@@ -622,7 +622,7 @@ function [p, gmap] = run_gamma_job(c, k, critv, cspacing, cref, ctgt, cmask, cna
     tgt_struct = struct('start', [0, 0, 0], 'width', sp, 'data', double(ctgt{c}));
     try
         gmap = CalcGamma(ref_struct, tgt_struct, crit, crit, ...
-            'local', 0, 'limit', crit * 2, 'restrict', 1);
+            'local', 0, 'restrict', 1);
         m = cmask{c};
         p = 100 * mean(gmap(m) <= 1);
     catch ME
@@ -1354,7 +1354,7 @@ function pr = gamma_sweep_pass_rates(reconA, reconB, crit_vec, spacing_mm)
         c = crit_vec(k);
         try
             gmap  = CalcGamma(ref_struct, tgt_struct, c, c, ...
-                'local', 0, 'limit', c * 2, 'restrict', 1);
+                'local', 0, 'restrict', 1);
             pr(k) = 100 * mean(gmap(eval_mask) <= 1);
         catch
             pr(k) = NaN;

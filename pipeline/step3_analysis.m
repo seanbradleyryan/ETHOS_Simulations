@@ -605,7 +605,7 @@ function cmp = compare_total_doses(reference, evaluated, spacing, config)
 
     gamma_timer = tic;
     gamma_map = CalcGamma(ref_str, tgt_str, config.gamma_dose_pct, config.gamma_dist_mm, ...
-        'local', 0, 'restrict', 1, 'limit', 2 * config.gamma_dist_mm);
+        'local', 0, 'restrict', 1);
     gamma_map = double(gather(gamma_map));
     g = gamma_map(mask);
     gamma_map(~mask) = NaN;

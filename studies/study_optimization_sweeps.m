@@ -510,7 +510,7 @@ function pr = gamma_pass_rates(ref_vol, tgt_vol, spacing_mm, criteria)
         dta = criteria{gc, 2};
         try
             gmap = CalcGamma(ref_struct, tgt_struct, pct, dta, ...
-                'local', 0, 'limit', dta * 2, 'restrict', 1);
+                'local', 0, 'restrict', 1);
             pr(gc) = 100 * mean(gmap(eval_mask) <= 1);
         catch
             pr(gc) = NaN;

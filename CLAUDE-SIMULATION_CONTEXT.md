@@ -170,6 +170,11 @@ CT_1/CT_3, `least_squares_gain` for the recon→own-CT-truth normalization, the 
 `CalcGamma(...,'local',0,'limit',2*dist,'restrict',1,'cpu',1)` call, and the new `compute_local_ssim.m`
 util for the local-SSIM map/mean over the 10% mask.
 
+- **Inline in Step 2:** `pipeline_simulate` (`fold_segment_metrics`) runs the same four comparisons with
+  the same schema inside the sim loop. The worker that finishes the second CT of a pair scores it.
+  step25 is no longer called there: Step 3 runs it to build the summary and noise floor, and to score
+  any leftover pairs.
+
 - **Four comparisons per segment**, reference builds the `gamma_dose_cutoff_pct` (10%) eval mask:
   `truth1_vs_truth3` (rs_CT1 vs rs_CT3), `truth1_vs_recon1` (rs_CT1 vs recon_CT1), `truth1_vs_recon3`
   (rs_CT1 vs recon_CT3), `truth3_vs_recon3` (rs_CT3 vs recon_CT3). Each yields a gamma pass rate + gamma

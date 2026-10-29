@@ -890,7 +890,7 @@ function [pr, gmap_out] = gamma_pass_rate(ref, tgt, crit, spacing, want_map)
     gmap = [];
     try
         evalc(['gmap = CalcGamma(ref_struct, tgt_struct, crit, crit, ', ...
-               '''local'', 0, ''limit'', crit*2, ''restrict'', 1);']);
+               '''local'', 0, ''restrict'', 1);']);
         pr = 100 * mean(gmap(mask) <= 1);
         if want_map
             gmap_out = gmap;

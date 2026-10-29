@@ -200,9 +200,10 @@ segment's CT_1 recon `.mat`** as a `segment_metrics` variable (masked-region-onl
 / `ssim_vals` + scalars), keyed by the sim `CONFIG_HASH`; a `segment_metrics_summary_<hash>.mat` rollup is
 written beside the recons. Resumable per segment. It also computes the **noise-only null floor** once per
 session (`noise_ensemble_error_bars`: CT_1 truth vs a noise-only recon, mean ± std pass rate) and stores it
-on the summary as `.noise_floor`. See `CLAUDE-PIPELINE_CONTEXT.md` ("Step 2.5") and
-`CLAUDE-SIMULATION_CONTEXT.md` for the schema, the pairing rationale (cross-CT comparisons cannot run
-inside the per-field sim `parfor`), and re-expansion of a stored map.
+on the summary as `.noise_floor`. `pipeline_simulate` no longer calls it. It scores each CT_1/CT_3 pair
+inside the Step 2 loop as soon as both recons exist (`fold_segment_metrics`, same schema), and Step 3 runs
+step25 for the summary and noise floor when the summary is missing. See `CLAUDE-PIPELINE_CONTEXT.md`
+("Step 2.5") and `CLAUDE-SIMULATION_CONTEXT.md` for the schema, the pairing, and re-expansion of a stored map.
 
 ## Visualization Preferences
 
