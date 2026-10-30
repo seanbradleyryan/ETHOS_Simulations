@@ -13,7 +13,7 @@ function out = load_recon_dose_data(patient_id, session, config, varargin)
 %   RTPLAN statistics for each dose.
 %
 %   The recon files are written by pipeline_simulate to get_simulation_dir
-%   (RayStationFiles/<id>/<session>/processed/simulation_results/<method>/) and
+%   (RayStationFiles/<id>/<session>/processed/simulated_doses/) and
 %   keyed by an 8-char CONFIG hash (compute_sim_config_hash). The right hash is auto-discovered
 %   from the simulation folder when possible, otherwise derived from a passed
 %   CONFIG, otherwise overridable via the 'Hash' option.
@@ -25,9 +25,6 @@ function out = load_recon_dose_data(patient_id, session, config, varargin)
 %           .working_dir      - REQUIRED. Base directory path.
 %           .treatment_site   - Optional (default 'Pancreas'). Used to locate
 %                               the ETHOS RTDOSE truth.
-%           .gruneisen_method - Optional. Simulation-results subfolder. When
-%                               omitted, the single existing method folder is
-%                               used (errors if several exist).
 %           May also carry the full simulation CONFIG so the hash can be
 %           computed exactly via compute_sim_config_hash.
 %
@@ -47,7 +44,7 @@ function out = load_recon_dose_data(patient_id, session, config, varargin)
 %
 %   OUTPUTS:
 %       out - Struct with common fields:
-%           .patient_id, .session, .gruneisen_method, .config_hash
+%           .patient_id, .session, .config_hash
 %           .metadata     - Grid metadata (dimensions, spacing, origin,
 %                           beam_metadata).
 %           .ethos_truth  - 3D ETHOS truth dose (Gy) resampled to the dose grid
@@ -70,8 +67,7 @@ function out = load_recon_dose_data(patient_id, session, config, varargin)
 %
 %   ALGORITHM:
 %       1. Validate inputs; parse options.
-%       2. Resolve gruneisen_method and the config hash (auto-discover -> config
-%          -> 'Hash' override).
+%       2. Resolve the config hash (auto-discover -> config -> 'Hash' override).
 %       3. total: load total_recon_dose_<hash>.mat + total_rs_dose + both CBCTs.
 %          set/single: index dose files, filter, load <base>_recon_<hash>.mat
 %          per field plus its RS dose, RTPLAN stats and CBCT.
@@ -80,7 +76,6 @@ function out = load_recon_dose_data(patient_id, session, config, varargin)
 %   EXAMPLE:
 %       config.working_dir      = get_repo_root();
 %       config.treatment_site   = 'Pancreas';
-%       config.gruneisen_method = 'threshold_2';
 %       T = load_recon_dose_data('1194203','Session_1',config);
 %       S = load_recon_dose_data('1194203','Session_1',config, ...
 %               'Mode','single','Beam',15,'Segment',112);
@@ -123,8 +118,7 @@ function out = load_recon_dose_data(patient_id, session, config, varargin)
     processed_dir = fullfile(config.working_dir, 'RayStationFiles', ...
         patient_id, session, 'processed');
 
-    gruneisen_method = resolve_gruneisen_method(patient_id, session, config);
-    sim_dir = get_simulation_dir(config.working_dir, patient_id, session, gruneisen_method);
+    sim_dir = get_simulation_dir(config.working_dir, patient_id, session);
     if ~isfolder(sim_dir)
         error('load_recon_dose_data:NoSimDir', ...
             'Simulation results directory not found: %s', sim_dir);
@@ -134,16 +128,14 @@ function out = load_recon_dose_data(patient_id, session, config, varargin)
 
     %% ======================== ASSEMBLE OUTPUT ========================
 
-    out                  = struct();
-    out.patient_id       = patient_id;
-    out.session          = session;
-    out.gruneisen_method = gruneisen_method;
-    out.config_hash      = hash8;
-    out.metadata         = struct();
+    out             = struct();
+    out.patient_id  = patient_id;
+    out.session     = session;
+    out.config_hash = hash8;
+    out.metadata    = struct();
 
-    fprintf(['[load_recon_dose_data] %s / %s | method=%s | hash=%s | ' ...
-             'mode=%s\n'], patient_id, session, gruneisen_method, hash8, ...
-             opts.Mode);
+    fprintf('[load_recon_dose_data] %s / %s | hash=%s | mode=%s\n', ...
+        patient_id, session, hash8, opts.Mode);
 
     switch opts.Mode
         case 'total'
@@ -231,38 +223,8 @@ end
 
 
 %% =========================================================================
-%  METHOD + HASH RESOLUTION
+%  HASH RESOLUTION
 %% =========================================================================
-
-function gm = resolve_gruneisen_method(patient_id, session, config)
-    if isfield(config, 'gruneisen_method') && ~isempty(config.gruneisen_method)
-        gm = char(config.gruneisen_method);
-        return;
-    end
-
-    % Parent of get_simulation_dir: one subfolder per gruneisen method.
-    base = fullfile(config.working_dir, 'RayStationFiles', patient_id, session, ...
-        'processed', 'simulation_results');
-    if ~isfolder(base)
-        error('load_recon_dose_data:NoSimResults', ...
-            'No simulation_results directory: %s', base);
-    end
-
-    d     = dir(base);
-    names = {d([d.isdir]).name};
-    names = names(~ismember(names, {'.', '..'}));
-
-    if isempty(names)
-        error('load_recon_dose_data:NoMethodFolder', ...
-            'No gruneisen-method subfolders under: %s', base);
-    elseif numel(names) > 1
-        error('load_recon_dose_data:AmbiguousMethod', ...
-            ['Multiple gruneisen-method folders under %s: %s\n', ...
-             'Set config.gruneisen_method to disambiguate.'], ...
-            base, strjoin(names, ', '));
-    end
-    gm = names{1};
-end
 
 function hash8 = resolve_config_hash(sim_dir, mode, config, hash_override)
     if ~isempty(hash_override)

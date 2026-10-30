@@ -145,8 +145,7 @@ function results = verify_pipeline_simulate(patient_id, session, config, config_
     %% ========================= PATHS + CONFIG HASH ===========================
     rsDir        = fullfile(config.working_dir, 'RayStationFiles', patient_id, session);
     processedDir = fullfile(rsDir, 'processed');
-    simDir       = get_simulation_dir(config.working_dir, patient_id, session, ...
-        config.gruneisen_method);
+    simDir       = get_simulation_dir(config.working_dir, patient_id, session);
     % Folders that may hold the RTPLAN / ETHOS RTDOSE DICOMs, in search order
     dicomDirs = {rsDir, ...
         fullfile(config.working_dir, 'Raystation_Input', patient_id, session), ...

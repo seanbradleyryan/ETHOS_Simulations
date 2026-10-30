@@ -4,26 +4,35 @@
 %  =========================================================================
 %
 %  PURPOSE:
-%  The pipeline now keeps simulation data beside the processed doses and names
-%  analysis folders after the config instead of the hash. This script moves
-%  results that were written in the old layout:
+%  The pipeline now keeps all simulation data in one flat folder,
+%  RayStationFiles/<id>/<session>/processed/simulated_doses/ (get_simulation_dir),
+%  and names analysis folders after the config instead of the hash. processed/
+%  itself holds only the pipeline_compress outputs. This script moves results
+%  that were written in an old layout:
 %    1. SimulationResults/<id>/<session>/<method>/simulation_debug/<plot>_<hash>.png
 %         -> AnalysisResults/<id>/<session>/<label>/verify_pipeline_simulate/
 %    2. SimulationResults/<id>/<session>/<method>/*  (recons, totals, masks,
 %       manifests, config_registry.json, simulation_log.txt, field_status/,
 %       Step 2.5 / 2.05 files)
-%         -> RayStationFiles/<id>/<session>/processed/simulation_results/<method>/
+%         -> processed/simulated_doses/
 %    3. AnalysisResults/<id>/<session>/noise_ensemble_<id>_<session>_<hash>.mat
-%         -> the simulation_results/<method>/ folder of that hash
+%         -> processed/simulated_doses/
 %    4. AnalysisResults/<id>/<session>/<method>/<hash>/  (Step 3 outputs)
 %         -> AnalysisResults/<id>/<session>/<label>/step3_analysis/
 %    5. AnalysisResults/<id>/<session>/compress_verification/
 %         -> AnalysisResults/<id>/<session>/verify_pipeline_compress_output/
+%    6. processed/simulation_results/<method>/*  -> processed/simulated_doses/
+%    7. Simulation files directly in processed/ (adjoint_power_cache_*.mat,
+%       *_recon_*.mat, *.lock, ...)  -> processed/simulated_doses/
 %  <label> = config_label of the hash's config in config_registry.json
 %  ('canonical' or the fields that differ from get_default_config).
+%  Registries and simulation logs of several methods are merged into one;
+%  field_status/ folders are merged item by item.
 %
 %  Left in place: AnalysisResults/pipeline_results_*.mat and timing_report_*.txt
-%  (one file covers several sessions), and hashes missing from every registry.
+%  (one file covers several sessions), hashes missing from every registry, and
+%  the old *_sim_<hash>.mat copies in simulated_doses/ (identical to
+%  *_recon_<hash>.mat; pipeline_simulate no longer writes them, delete by hand).
 %  Nothing is overwritten: an item whose destination exists is skipped and listed.
 %  Emptied old folders are removed.
 %
@@ -48,13 +57,21 @@ CONFIG.working_dir = get_repo_root();
 workingDir   = CONFIG.working_dir;
 oldSimRoot   = fullfile(workingDir, 'SimulationResults');
 analysisRoot = fullfile(workingDir, 'AnalysisResults');
+rsRoot       = fullfile(workingDir, 'RayStationFiles');
 if CONFIG.dry_run
     fprintf('DRY RUN: nothing is moved.\n');
 end
 
-% Every patient/session that has an old SimulationResults or AnalysisResults folder
+% Simulation files that may sit directly in processed/ (step 7). 'field_status*'
+% keeps the wildcard: dir() of an exact folder name lists the folder's contents.
+strayPatterns = {'adjoint_power_cache_*.mat', '*_recon_*.mat', 'total_recon_dose_*.mat', ...
+    'sensor_mask_*.mat', 'cache_manifest_*.mat', 'segment_metrics_summary_*.mat', ...
+    'full_field_dose_*.mat', 'noise_ensemble_*.mat', 'config_registry.json', ...
+    'simulation_log.txt', 'field_status*', '*.lock', '*.metrics_lock'};
+
+% Every patient/session that has a SimulationResults, AnalysisResults or RayStationFiles folder
 sessions = cell(0, 2);   % rows of {patient_id, session}
-for root = {oldSimRoot, analysisRoot}
+for root = {oldSimRoot, analysisRoot, rsRoot}
     patients = list_subfolders(root{1});
     for p = 1:numel(patients)
         sessionNames = list_subfolders(fullfile(root{1}, patients{p}));
@@ -72,27 +89,29 @@ for k = 1:size(sessions, 1)
     fprintf('\n=== %s / %s ===\n', pid, session);
     oldSessionDir      = fullfile(oldSimRoot, pid, session);
     analysisSessionDir = fullfile(analysisRoot, pid, session);
+    processedDir       = fullfile(rsRoot, pid, session, 'processed');
+    newSimDir          = get_simulation_dir(workingDir, pid, session);
 
     % Hash -> gruneisen method and label, from the old and new registries
     regFiles = [dir(fullfile(oldSessionDir, '*', 'config_registry.json')); ...
-                dir(fullfile(workingDir, 'RayStationFiles', pid, session, 'processed', ...
-                    'simulation_results', '*', 'config_registry.json'))];
+                dir(fullfile(processedDir, 'simulation_results', '*', 'config_registry.json')); ...
+                dir(fullfile(processedDir, 'config_registry.json')); ...
+                dir(fullfile(newSimDir, 'config_registry.json'))];
     hashes = {};
     methods = {};
     labels = {};
     for r = 1:numel(regFiles)
-        [~, method] = fileparts(regFiles(r).folder);
         registry = jsondecode(fileread(fullfile(regFiles(r).folder, regFiles(r).name)));
         keys = fieldnames(registry);
         for i = 1:numel(keys)
             hashes{end + 1}  = keys{i}(3:end);   %#ok<SAGROW> key is 'h_<hash>'
-            methods{end + 1} = method;           %#ok<SAGROW>
+            methods{end + 1} = char(registry.(keys{i}).config.gruneisen_method); %#ok<SAGROW>
             labels{end + 1}  = config_label(registry.(keys{i}).config); %#ok<SAGROW>
-            fprintf('  hash %s (%s) -> %s\n', hashes{end}, method, labels{end});
+            fprintf('  hash %s (%s) -> %s\n', hashes{end}, methods{end}, labels{end});
         end
     end
 
-    % 1 + 2. Old simulation folders: debug plots to AnalysisResults, the rest to processed/
+    % 1 + 2. Old simulation folders: debug plots to AnalysisResults, the rest to simulated_doses/
     oldMethods = list_subfolders(oldSessionDir);
     for m = 1:numel(oldMethods)
         oldMethodDir = fullfile(oldSessionDir, oldMethods{m});
@@ -112,21 +131,7 @@ for k = 1:size(sessions, 1)
                 'verify_pipeline_simulate', pngs(i).name), CONFIG.dry_run);
         end
         remove_if_empty(debugDir, CONFIG.dry_run);
-
-        newSimDir = get_simulation_dir(workingDir, pid, session, oldMethods{m});
-        items = dir(oldMethodDir);
-        items = items(~ismember({items.name}, {'.', '..', 'simulation_debug'}));
-        fprintf('  %d item(s): %s\n    -> %s\n', numel(items), oldMethodDir, newSimDir);
-        for i = 1:numel(items)
-            src = fullfile(oldMethodDir, items(i).name);
-            dst = fullfile(newSimDir, items(i).name);
-            if strcmp(items(i).name, 'config_registry.json') && isfile(dst)
-                merge_registries(src, dst, CONFIG.dry_run);   % pipeline already ran in the new layout
-            else
-                move_item(src, dst, CONFIG.dry_run, true);
-            end
-        end
-        remove_if_empty(oldMethodDir, CONFIG.dry_run);
+        merge_folder(oldMethodDir, newSimDir, CONFIG.dry_run);
     end
     remove_if_empty(oldSessionDir, CONFIG.dry_run);
     remove_if_empty(fileparts(oldSessionDir), CONFIG.dry_run);
@@ -143,8 +148,8 @@ for k = 1:size(sessions, 1)
             fprintf('  SKIP (hash not in a registry): %s\n', caches(i).name);
             continue;
         end
-        move_item(fullfile(analysisSessionDir, caches(i).name), fullfile(get_simulation_dir( ...
-            workingDir, pid, session, methods{idx}), caches(i).name), CONFIG.dry_run);
+        move_item(fullfile(analysisSessionDir, caches(i).name), ...
+            fullfile(newSimDir, caches(i).name), CONFIG.dry_run);
     end
 
     % 4. Step 3: <method>/<hash>/ -> <label>/step3_analysis/ (only registry methods,
@@ -168,6 +173,23 @@ for k = 1:size(sessions, 1)
     % 5. Compress verification folder rename
     move_item(fullfile(analysisSessionDir, 'compress_verification'), ...
         fullfile(analysisSessionDir, 'verify_pipeline_compress_output'), CONFIG.dry_run);
+
+    % 6. processed/simulation_results/<method>/ -> processed/simulated_doses/
+    oldResultsDir = fullfile(processedDir, 'simulation_results');
+    resultMethods = list_subfolders(oldResultsDir);
+    for m = 1:numel(resultMethods)
+        merge_folder(fullfile(oldResultsDir, resultMethods{m}), newSimDir, CONFIG.dry_run);
+    end
+    remove_if_empty(oldResultsDir, CONFIG.dry_run);
+
+    % 7. Simulation files directly in processed/ -> processed/simulated_doses/
+    for j = 1:numel(strayPatterns)
+        strays = dir(fullfile(processedDir, strayPatterns{j}));
+        for i = 1:numel(strays)
+            move_or_merge(fullfile(processedDir, strays(i).name), ...
+                fullfile(newSimDir, strays(i).name), CONFIG.dry_run);
+        end
+    end
 end
 remove_if_empty(oldSimRoot, CONFIG.dry_run);
 fprintf('\nDone.\n');
@@ -208,6 +230,38 @@ function move_item(src, dst, dryRun, quiet)
     if dryRun, return; end
     if ~isfolder(fileparts(dst)), mkdir(fileparts(dst)); end
     movefile(src, dst);
+end
+
+function merge_folder(srcDir, dstDir, dryRun)
+    % Move every item of srcDir into dstDir (except simulation_debug/, handled
+    % in step 1), then remove srcDir if it ended up empty.
+    items = dir(srcDir);
+    items = items(~ismember({items.name}, {'.', '..', 'simulation_debug'}));
+    fprintf('  %d item(s): %s\n    -> %s\n', numel(items), srcDir, dstDir);
+    for i = 1:numel(items)
+        move_or_merge(fullfile(srcDir, items(i).name), fullfile(dstDir, items(i).name), dryRun);
+    end
+    remove_if_empty(srcDir, dryRun);
+end
+
+function move_or_merge(src, dst, dryRun)
+    % Move src to dst. When dst already exists: merge a registry, append a
+    % simulation log, or merge a folder (e.g. field_status/) item by item.
+    [~, name, ext] = fileparts(src);
+    if strcmp([name ext], 'config_registry.json') && isfile(dst)
+        merge_registries(src, dst, dryRun);
+    elseif strcmp([name ext], 'simulation_log.txt') && isfile(dst)
+        fprintf('  append %s\n    -> %s\n', src, dst);
+        if dryRun, return; end
+        fid = fopen(dst, 'a');
+        fprintf(fid, '%s', fileread(src));
+        fclose(fid);
+        delete(src);
+    elseif isfolder(src) && isfolder(dst)
+        merge_folder(src, dst, dryRun);
+    else
+        move_item(src, dst, dryRun, true);
+    end
 end
 
 function merge_registries(src, dst, dryRun)

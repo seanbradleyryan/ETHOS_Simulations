@@ -41,7 +41,7 @@
 | `load_processed_data.m` | Loads previously processed dose/CT data |
 | `load_recon_dose_data.m` | Loads computed recon doses (single/set/total) + RS, ETHOS truth, CBCT, RTPLAN stats — no re-sim. See CLAUDE.md "Analysis Utilities" |
 | `load_beam_total_set.m` | Beam mode: one beam's summed RS dose + beam recon on CT_1/CT_3, shaped like `load_recon_dose_data` `'set'` output (Steps 2.5 / 3) |
-| `get_simulation_dir.m` | Path of a session's simulation data: `RayStationFiles/<pid>/<session>/processed/simulation_results/<method>/` |
+| `get_simulation_dir.m` | Path of a session's simulation data: `RayStationFiles/<pid>/<session>/processed/simulated_doses/` (flat; all methods) |
 | `config_label.m` | AnalysisResults folder name for a config: `'canonical'` or the fields differing from `get_default_config` |
 | `misc/migrate_results_layout.m` | One-off move of pre-overhaul `SimulationResults/` + hash-named analysis folders to the new layout |
 | `compute_local_ssim.m` | Local (per-voxel) SSIM map + masked mean over the 10% region. The only SSIM in the pipeline (Steps 2.5 and 3) |
@@ -80,8 +80,8 @@ load('total_recon_dose_<hash8>.mat');  % Contains: total_recon, metadata, config
 
 | What | Where | Named by |
 |---|---|---|
-| Step 1.5 doses, CBCTs, totals | `RayStationFiles/<pid>/<session>/processed/` | — |
-| Step 2/2.05/2.5 data (recons, `total_recon_dose`, `sensor_mask`, manifests, `segment_metrics_summary`, `full_field_dose`, noise-ensemble cache, `config_registry.json`, `simulation_log.txt`, `field_status/`) | `get_simulation_dir(...)` = `processed/simulation_results/<method>/` | `<hash>` in filename |
+| Step 1.5 doses, CBCTs, totals (nothing else) | `RayStationFiles/<pid>/<session>/processed/` | — |
+| Step 2/2.05/2.5 data (recons, `total_recon_dose`, `sensor_mask`, manifests, `segment_metrics_summary`, `full_field_dose`, noise-ensemble + adjoint-power caches, `*.lock` / `*.metrics_lock`, `config_registry.json`, `simulation_log.txt`, `field_status/`) | `get_simulation_dir(...)` = `processed/simulated_doses/` (flat) | `<hash>` in filename |
 | Step 3 | `AnalysisResults/<pid>/<session>/<label>/step3_analysis/` | config label |
 | `verify_pipeline_simulate` | `AnalysisResults/<pid>/<session>/<label>/verify_pipeline_simulate/` | config label |
 | `pipeline_simulate` RESULTS + timing (per session) | `AnalysisResults/<pid>/<session>/<label>/pipeline_simulate/` | config label |
@@ -95,7 +95,8 @@ load('total_recon_dose_<hash8>.mat');  % Contains: total_recon, metadata, config
   `config_label(hashtoconfig(hash, config))`. pipeline_simulate also stores `.label` per hash in `config_registry.json`.
 - Changing a value in `get_default_config` changes which hash is `canonical`; the old canonical hash then gets
   a diff label.
-- Pre-overhaul data: run `misc/migrate_results_layout.m` once (dry run first).
+- Pre-overhaul data (`SimulationResults/`, `processed/simulation_results/<method>/`, sim files loose in
+  `processed/`): run `misc/migrate_results_layout.m` once (dry run first). Without it Step 2 re-simulates.
 
 > **Per-CT totals** (`total_dose_CT_*.mat`) are written by `step15_process_doses` whenever NPZ-derived
 > field doses carry a CT label in their filename (e.g. `..._adapted_CT_1_B6_103.mat`).

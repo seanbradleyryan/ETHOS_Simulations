@@ -140,8 +140,9 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
 %                                                  step (0 = no TV, positivity only)
 %           .adjoint_tv_force_power_recalc [false] - 'adjoint_tv': true ignores the
 %                                                  cached power iteration
-%                                                  (processed/adjoint_power_cache_
-%                                                  <hash>.mat), recomputes it and
+%                                                  (processed/simulated_doses/
+%                                                  adjoint_power_cache_<hash>.mat),
+%                                                  recomputes it and
 %                                                  overwrites the cache
 %           .adjoint_tv_power_iter      [5]      - 'adjoint_tv' power iterations for
 %                                                  the step size (2 k-Wave runs each,
@@ -1503,7 +1504,7 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
             %      the Lipschitz constant Lip = 2 * max eigenvalue (step 1/Lip).
             %      Both depend on the operator A, not on this field (the field
             %      is only the starting image), so they are cached in
-            %      processed/adjoint_power_cache_<hash>.mat (adjoint_power_hash:
+            %      processed/simulated_doses/adjoint_power_cache_<hash>.mat (adjoint_power_hash:
             %      reconstruction medium, grid and dt/Nt, sensor, PML, sensor
             %      response, power_iter) and reused on the next run.
             %   b. lambda = adjoint_tv_lambda * Lip * peak of the first
@@ -1545,14 +1546,14 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
                 back_projection = adjoint_backward_model(measured, kgrid, kmedium_rec, ...
                     sensor, inputArgs, FS, wiener_gain);
 
-                % Cache file beside the CBCT files (no caching without a path)
+                % Cache file in the simulation folder (no caching without a path)
                 power_cache_file = '';
                 if isfield(config, 'working_dir') && isfield(cbct_resampled, 'patient_id') ...
                         && isfield(cbct_resampled, 'session')
                     power_hash = adjoint_power_hash(kmedium_rec, kgrid, sensor, sensor_info, ...
                         pml_size, wiener_gain, tv_power_iter);
-                    power_cache_file = fullfile(config.working_dir, 'RayStationFiles', ...
-                        cbct_resampled.patient_id, cbct_resampled.session, 'processed', ...
+                    power_cache_file = fullfile(get_simulation_dir(config.working_dir, ...
+                        cbct_resampled.patient_id, cbct_resampled.session), ...
                         sprintf('adjoint_power_cache_%s.mat', power_hash));
                 end
 
@@ -1578,6 +1579,9 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
                     end
                     if ~isempty(power_cache_file)
                         try
+                            if ~isfolder(fileparts(power_cache_file))
+                                mkdir(fileparts(power_cache_file));
+                            end
                             save(power_cache_file, 'adjoint_scale', 'max_eigenvalue');
                             fprintf('          Power iteration saved to %s\n', power_cache_file);
                         catch ME

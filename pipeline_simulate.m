@@ -235,7 +235,7 @@ end
 [CONFIG_HASH, CONFIG_CANONICAL] = compute_sim_config_hash(CONFIG);
 fprintf('  Config hash: %s\n', CONFIG_HASH);
 % Simulation data is stored by hash under RayStationFiles/<id>/<session>/
-% processed/simulation_results/<method>/ (get_simulation_dir). Analysis output
+% processed/simulated_doses/ (get_simulation_dir). Analysis output
 % goes to AnalysisResults/<id>/<session>/<CONFIG_LABEL>/, where CONFIG_LABEL is
 % 'canonical' or the fields that differ from get_default_config.
 CONFIG_LABEL = config_label(CONFIG);
@@ -556,7 +556,6 @@ for p_idx = 1:length(CONFIG.patients)
                                 'gantry',fd.gantry_angle,'message',warn_msg));
                         end
                         save_field_reconstruction(rd, sd, fd, patient_id, session, CONFIG, CONFIG_HASH);
-                        save_simulated_dose(rd, fd, patient_id, session, CONFIG, CONFIG_HASH);
 
                         % Overwrite IN PROGRESS with COMPLETE.
                         write_field_status(status_path, 'complete', fi, fd.gantry_angle, CONFIG_HASH);
@@ -668,7 +667,6 @@ for p_idx = 1:length(CONFIG.patients)
                             fprintf('             WARNING: reconstruction returned zero dose.\n');
                         end
                         save_field_reconstruction(recon_dose, sim_results, fd, patient_id, session, CONFIG, CONFIG_HASH);
-                        save_simulated_dose(recon_dose, fd, patient_id, session, CONFIG, CONFIG_HASH);
 
                         % Overwrite IN PROGRESS with COMPLETE.
                         write_field_status(status_path, 'complete', fi, fd.gantry_angle, CONFIG_HASH);
@@ -1218,23 +1216,6 @@ function v = gather_scalar(x)
     end
 end
 
-function save_simulated_dose(recon_dose, field_dose, patient_id, session, config, hash8)
-    %SAVE_SIMULATED_DOSE Save per-field reconstruction next to the processed
-    %  input dose files, named <input_basename>_sim_<hash8>.mat. Variable inside
-    %  is sim_dose. Falls back to a synthetic name if the source filename was
-    %  not propagated by load_processed_data.  Only the hash is embedded.
-    sim_dose_dir = fullfile(config.working_dir, 'RayStationFiles', ...
-        patient_id, session, 'processed', 'simulated_doses');
-    if ~exist(sim_dose_dir, 'dir')
-        mkdir(sim_dose_dir);
-    end
-
-    out_path    = expected_sim_path(field_dose, patient_id, session, config, hash8);
-    sim_dose    = recon_dose;  %#ok<NASGU>  saved variable name
-    config_hash = hash8;       %#ok<NASGU>  saved variable name
-    save(out_path, 'sim_dose', 'config_hash', '-v7.3');
-end
-
 function save_total_reconstruction(total_recon, metadata, patient_id, session, config, hash8)
     out_path    = expected_total_recon_path(patient_id, session, config, hash8);
     config_hash = hash8;  %#ok<NASGU>  saved variable name
@@ -1403,10 +1384,9 @@ function rs_dir = get_raystation_directory(patient_id, session, config)
 end
 
 function sim_dir = get_simulation_directory(patient_id, session, config)
-    % RayStationFiles/<id>/<session>/processed/simulation_results/<method>/,
-    % created on first use.
-    sim_dir = get_simulation_dir(config.working_dir, patient_id, session, ...
-        config.gruneisen_method);
+    % RayStationFiles/<id>/<session>/processed/simulated_doses/, created on
+    % first use.
+    sim_dir = get_simulation_dir(config.working_dir, patient_id, session);
     if ~exist(sim_dir, 'dir')
         mkdir(sim_dir);
     end
@@ -1930,8 +1910,8 @@ end
 %% =========================================================================
 
 function base = get_field_basename(field_dose, patient_id, session)
-    % Derive the stem used for <stem>_recon_<hash>.mat and <stem>_sim_<hash>.mat
-    % so reconstructions sit alongside their input dose by name.  Mirrors
+    % Derive the stem used for <stem>_recon_<hash>.mat so reconstructions
+    % pair with their input dose by name.  Mirrors
     % step15_process_doses naming via field_dose.source_mat_filename.
     if isfield(field_dose, 'source_mat_filename') && ~isempty(field_dose.source_mat_filename)
         [~, base, ~] = fileparts(field_dose.source_mat_filename);
@@ -1949,13 +1929,6 @@ function p = expected_recon_path(field_dose, patient_id, session, config, hash8)
     sim_dir = get_simulation_directory(patient_id, session, config);
     base    = get_field_basename(field_dose, patient_id, session);
     p       = fullfile(sim_dir, sprintf('%s_recon_%s.mat', base, hash8));
-end
-
-function p = expected_sim_path(field_dose, patient_id, session, config, hash8)
-    sim_dose_dir = fullfile(config.working_dir, 'RayStationFiles', ...
-        patient_id, session, 'processed', 'simulated_doses');
-    base = get_field_basename(field_dose, patient_id, session);
-    p    = fullfile(sim_dose_dir, sprintf('%s_sim_%s.mat', base, hash8));
 end
 
 function p = expected_total_recon_path(patient_id, session, config, hash8)

@@ -18,7 +18,6 @@ function beam_set = load_beam_total_set(patient_id, session, config, beam, ct1_s
 %       session    - Char/string session name (e.g. 'Session_1').
 %       config     - Struct with:
 %           .working_dir      - Base directory path.
-%           .gruneisen_method - Simulation-results subfolder.
 %           .config_hash      - 8-char sim hash. When absent/empty the hash is
 %                               computed from config (needs the full sim CONFIG).
 %       beam       - Beam number.
@@ -27,7 +26,7 @@ function beam_set = load_beam_total_set(patient_id, session, config, beam, ct1_s
 %
 %   OUTPUTS:
 %       beam_set - Struct with:
-%           .config_hash, .gruneisen_method
+%           .config_hash
 %           .metadata - processed/metadata.mat (spacing, dimensions, ...)
 %           .fields   - 1x2 struct array (ct1_str, ct3_str), each with
 %                       .recon_dose, .rs_dose, .rtplan (.seg_num = 0, .ct_label),
@@ -42,7 +41,6 @@ function beam_set = load_beam_total_set(patient_id, session, config, beam, ct1_s
 %
 %   EXAMPLE:
 %       config.working_dir      = get_repo_root();
-%       config.gruneisen_method = 'threshold_2';
 %       config.config_hash      = 'a1b2c3d4';
 %       B = load_beam_total_set('1194203', 'Session_1', config, 6, 'CT_1', 'CT_3');
 %
@@ -70,8 +68,7 @@ function beam_set = load_beam_total_set(patient_id, session, config, beam, ct1_s
     end
     processed_dir = fullfile(config.working_dir, 'RayStationFiles', ...
         patient_id, session, 'processed');
-    sim_dir = get_simulation_dir(config.working_dir, patient_id, session, ...
-        config.gruneisen_method);
+    sim_dir = get_simulation_dir(config.working_dir, patient_id, session);
 
     ct_labels = {ct1_str, ct3_str};
     for k = 1:2
@@ -91,8 +88,7 @@ function beam_set = load_beam_total_set(patient_id, session, config, beam, ct1_s
 
     L = load(fullfile(processed_dir, 'metadata.mat'), 'metadata');
     beam_set = struct();
-    beam_set.config_hash      = hash8;
-    beam_set.gruneisen_method = config.gruneisen_method;
-    beam_set.metadata         = L.metadata;
-    beam_set.fields           = ct_fields;
+    beam_set.config_hash = hash8;
+    beam_set.metadata    = L.metadata;
+    beam_set.fields      = ct_fields;
 end
