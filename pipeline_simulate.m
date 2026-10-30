@@ -541,9 +541,20 @@ for p_idx = 1:length(CONFIG.patients)
                         % on CT_1); CT_1 fields keep the standard single-field
                         % simulation. Selection of the field's own CBCT/medium
                         % happens inside the dispatcher.
-                        [rd, sd] = run_field_dispatch(fd, cbct_by_label, medium_by_label, ...
+                        [rd, sd, sim_warn] = run_field_dispatch(fd, cbct_by_label, medium_by_label, ...
                             beam_metadata, CONFIG, precomputed_sensor, true);
                         rd = gather(rd);
+                        % Print what evalc hid: the engine's warnings (a failed
+                        % forward sim / reconstruction warns and returns zeros)
+                        % and an all-zero reconstruction.
+                        for w = 1:numel(sim_warn)
+                            send(progress_queue, struct('kind','warn','field_idx',fi, ...
+                                'gantry',fd.gantry_angle,'message',sim_warn{w}));
+                        end
+                        if ~any(rd(:))
+                            send(progress_queue, struct('kind','warn','field_idx',fi, ...
+                                'gantry',fd.gantry_angle,'message','Reconstruction returned zero dose.'));
+                        end
                         save_field_reconstruction(rd, sd, fd, patient_id, session, CONFIG, CONFIG_HASH);
                         save_simulated_dose(rd, fd, patient_id, session, CONFIG, CONFIG_HASH);
 
@@ -653,6 +664,9 @@ for p_idx = 1:length(CONFIG.patients)
                         [recon_dose, sim_results] = run_field_dispatch(fd, cbct_by_label, ...
                             medium_by_label, beam_metadata, CONFIG, precomputed_sensor, false);
                         sim_elapsed_f = toc(t_field);
+                        if ~any(recon_dose(:))
+                            fprintf('             WARNING: reconstruction returned zero dose.\n');
+                        end
                         save_field_reconstruction(recon_dose, sim_results, fd, patient_id, session, CONFIG, CONFIG_HASH);
                         save_simulated_dose(recon_dose, fd, patient_id, session, CONFIG, CONFIG_HASH);
 
@@ -1097,7 +1111,7 @@ function [cbct, medium] = select_cbct_for_field(field_dose, cbct_by_label, mediu
     medium = medium_by_label.(lbl);
 end
 
-function [recon_dose, sim_results] = run_field_dispatch(field_dose, cbct_by_label, medium_by_label, ...
+function [recon_dose, sim_results, sim_warnings] = run_field_dispatch(field_dose, cbct_by_label, medium_by_label, ...
         beam_metadata, config, precomputed_sensor, quiet)
     % Route a single field to the correct reconstruction mode of the merged
     % run_single_field_simulation:
@@ -1114,9 +1128,11 @@ function [recon_dose, sim_results] = run_field_dispatch(field_dose, cbct_by_labe
     %
     % quiet = true (parfor): evalc captures and discards everything the engine
     % and k-Wave print, keeping the console to one progress line per field.
+    % The warning lines are kept and returned in sim_warnings (cell of char)
+    % so the caller can print them.
     % quiet = false (serial): the engine and k-Wave print normally, so the
     % per-stage timings (grid size, dt/Nt, forward / time-reversal seconds) are
-    % visible.
+    % visible. sim_warnings is empty (the warnings already printed).
     [cbct_fd, medium_fwd] = select_cbct_for_field(field_dose, cbct_by_label, medium_by_label);
 
     ref_label = blind_recon_reference_label(config);
@@ -1137,9 +1153,11 @@ function [recon_dose, sim_results] = run_field_dispatch(field_dose, cbct_by_labe
         config.blind_recon = true;
     end
 
+    sim_warnings = {};
     if quiet
-        [~, recon_dose, sim_results] = evalc(['run_single_field_simulation(field_dose, ' ...
+        [sim_text, recon_dose, sim_results] = evalc(['run_single_field_simulation(field_dose, ' ...
             'cbct_fd, medium_fwd, beam_metadata, config, precomputed_sensor, medium_recon)']);
+        sim_warnings = regexp(sim_text, 'Warning: [^\n]*', 'match');
     else
         [recon_dose, sim_results] = run_single_field_simulation(field_dose, ...
             cbct_fd, medium_fwd, beam_metadata, config, precomputed_sensor, medium_recon);
@@ -1573,7 +1591,8 @@ function report_field_progress(msg)
     % count of how many of the pending fields are still outstanding. Each
     % computed field also sends a 'done' message with its full processing time
     % (load, sim, saves, gamma + SSIM), which is added to the running average
-    % used for the live ETA.
+    % used for the live ETA. A 'warn' message (engine warning, e.g. a failed
+    % forward sim, or a zero-dose reconstruction) is printed as is.
     %
     % Call it once on the client before the parfor begins with a struct of kind
     % 'init' carrying the field count, the worker count, and the field times
@@ -1587,6 +1606,12 @@ function report_field_progress(msg)
     end
     if strcmp(msg.kind, 'done')
         field_times(end+1) = msg.elapsed_sec;
+        return;
+    end
+    if strcmp(msg.kind, 'warn')
+        % A warning from a field's simulation (does not change the count).
+        fprintf('         Field %d (gantry %.1f deg): %s\n', ...
+            msg.field_idx, msg.gantry, msg.message);
         return;
     end
     remaining = max(remaining - 1, 0);
