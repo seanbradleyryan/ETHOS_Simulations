@@ -103,7 +103,7 @@ function CONFIG = get_default_config(varargin)
     CONFIG.use_pressure_scale_correction = false;   % rescale by max(p0)/max(recon) before dose conversion
     CONFIG.mask_recon_to_dose_region     = true;    % zero recon dose outside the >1% dose mask
 
-    % --- Reconstruction method: 'tr' (iterative time reversal) | 'das' | 'ubp' | 'adjoint' | 'adjoint_tv' ---
+    % --- Reconstruction method: 'tr' (iterative time reversal) | 'das' | 'ubp' | 'adjoint' | 'adjoint_tv' | 'adjoint_tv_tr' ---
     %   'ubp' = universal back-projection (utils/ubp3d.m). Its options default via
     %   safe_config in run_single_field_simulation (like the das_* options) and
     %   may be overridden here: ubp_use_elements (true), ubp_band_limit ('auto' |
@@ -118,6 +118,8 @@ function CONFIG = get_default_config(varargin)
     %   the dimensionless TV weight (0 = no TV); adjoint_tv_power_iter sets the
     %   step size (2 k-Wave runs each); adjoint_tv_inner_iter = TV-denoise
     %   iterations per outer iteration (no k-Wave).
+    %   'adjoint_tv_tr' = 'adjoint_tv' started from a TR image; same adjoint_tv_*
+    %   knobs (TV pressure scale = warm-start peak, so the same lambda is stronger).
     CONFIG.reconstruction_method  = 'tr';
     CONFIG.num_time_reversal_iter = 1;
     CONFIG.adjoint_num_iter       = 5;

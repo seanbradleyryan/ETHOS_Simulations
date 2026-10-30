@@ -93,14 +93,14 @@ function [hash_hex, canonical] = compute_sim_config_hash(config)
         canonical = rmfield(canonical, 'conv_use_deconv');
     end
 
-    % Backward compatibility: adjoint_num_iter only matters for the 'adjoint'
-    % and 'adjoint_tv' reconstruction methods, and the adjoint_tv_* knobs only
-    % for 'adjoint_tv'. Remove them for every other method so existing caches
-    % keep their hashes.
-    if ~any(strcmpi(canonical.reconstruction_method, {'adjoint', 'adjoint_tv'}))
+    % Backward compatibility: adjoint_num_iter only matters for the 'adjoint',
+    % 'adjoint_tv' and 'adjoint_tv_tr' reconstruction methods, and the
+    % adjoint_tv_* knobs only for 'adjoint_tv' / 'adjoint_tv_tr'. Remove them for
+    % every other method so existing caches keep their hashes.
+    if ~any(strcmpi(canonical.reconstruction_method, {'adjoint', 'adjoint_tv', 'adjoint_tv_tr'}))
         canonical = rmfield(canonical, 'adjoint_num_iter');
     end
-    if ~strcmpi(canonical.reconstruction_method, 'adjoint_tv')
+    if ~any(strcmpi(canonical.reconstruction_method, {'adjoint_tv', 'adjoint_tv_tr'}))
         canonical = rmfield(canonical, {'adjoint_tv_inner_iter', 'adjoint_tv_lambda', 'adjoint_tv_power_iter'});
     end
 

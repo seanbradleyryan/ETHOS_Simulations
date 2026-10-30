@@ -116,8 +116,8 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
 %                                                  comes out is pure noise artifact,
 %                                                  a baseline for "is the recon
 %                                                  actually recovering signal?".
-%           .reconstruction_method      ['tr']   - 'tr', 'das', 'ubp', 'adjoint', or
-%                                                  'adjoint_tv'
+%           .reconstruction_method      ['tr']   - 'tr', 'das', 'ubp', 'adjoint',
+%                                                  'adjoint_tv', or 'adjoint_tv_tr'
 %                                                  ('ubp' = universal back-
 %                                                  projection via ubp3d; honors
 %                                                  ubp_use_elements, ubp_band_limit,
@@ -127,28 +127,35 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
 %                                                  with the k-Wave adjoint.
 %                                                  'adjoint_tv' = the same operators
 %                                                  with a TV penalty, solved by
-%                                                  FISTA, Huang et al. 2013)
-%           .adjoint_num_iter           [5]      - 'adjoint' / 'adjoint_tv'
-%                                                  iterations ('adjoint': up to 3
-%                                                  k-Wave runs each; 'adjoint_tv':
-%                                                  2 each); stops early on
-%                                                  convergence_tol
-%           .adjoint_tv_lambda          [0.01]   - 'adjoint_tv' TV weight,
-%                                                  dimensionless: the TV-denoise
-%                                                  strength is this fraction of the
-%                                                  peak of the first unregularised
-%                                                  step (0 = no TV, positivity only)
-%           .adjoint_tv_force_power_recalc [false] - 'adjoint_tv': true ignores the
+%                                                  FISTA, Huang et al. 2013.
+%                                                  'adjoint_tv_tr' = 'adjoint_tv'
+%                                                  started from a TR image)
+%           .adjoint_num_iter           [5]      - 'adjoint' / 'adjoint_tv' /
+%                                                  'adjoint_tv_tr' iterations
+%                                                  ('adjoint': up to 3 k-Wave runs
+%                                                  each; the TV methods: 2 each);
+%                                                  stops early on convergence_tol
+%           .adjoint_tv_lambda          [0.01]   - 'adjoint_tv' / 'adjoint_tv_tr' TV
+%                                                  weight, dimensionless: the
+%                                                  TV-denoise strength is this
+%                                                  fraction of the peak of the first
+%                                                  unregularised step ('adjoint_tv')
+%                                                  or of the warm-start image
+%                                                  ('adjoint_tv_tr'); 0 = no TV,
+%                                                  positivity only
+%           .adjoint_tv_force_power_recalc [false] - 'adjoint_tv' / 'adjoint_tv_tr': true ignores the
 %                                                  cached power iteration
 %                                                  (processed/simulated_doses/
 %                                                  adjoint_power_cache_<hash>.mat),
 %                                                  recomputes it and
 %                                                  overwrites the cache
-%           .adjoint_tv_power_iter      [5]      - 'adjoint_tv' power iterations for
-%                                                  the step size (2 k-Wave runs each,
-%                                                  skipped when cached)
-%           .adjoint_tv_inner_iter      [10]     - 'adjoint_tv' TV-denoise iterations
-%                                                  per outer iteration (no k-Wave)
+%           .adjoint_tv_power_iter      [5]      - 'adjoint_tv' / 'adjoint_tv_tr' power
+%                                                  iterations for the step size (2
+%                                                  k-Wave runs each, skipped when
+%                                                  cached)
+%           .adjoint_tv_inner_iter      [10]     - 'adjoint_tv' / 'adjoint_tv_tr'
+%                                                  TV-denoise iterations per outer
+%                                                  iteration (no k-Wave)
 %           .blind_recon                [false]  - When true (and medium_recon is
 %                                                  supplied), forward on `medium`
 %                                                  but reconstruct on medium_recon.
@@ -215,9 +222,9 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
 %           .conv_rel_change    - Per-iteration relative change
 %           .grid_padding       - Original / padded / expanded sizes
 %           .recon_method       - Which branch ran ('tr' | 'das' | 'ubp' | 'adjoint' |
-%                                 'adjoint_tv')
-%           .conv_cost          - 'adjoint_tv' only: objective ||A p - d||^2 +
-%                                 lambda*TV(p) per iteration
+%                                 'adjoint_tv' | 'adjoint_tv_tr')
+%           .conv_cost          - 'adjoint_tv' / 'adjoint_tv_tr' only: objective
+%                                 ||A p - d||^2 + lambda*TV(p) per iteration
 %           .blind_recon        - Logical: true when forward and reconstruction
 %                                 media differed (blind geometry)
 %           .sensor_stages      - Only with CONFIG.sensor_stages_only: .names
@@ -1202,13 +1209,13 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
     num_iters_done    = 0;
     tr_time           = 0;
 
-    % ---- Set up live reconstruction figure (opt-in, 'tr', 'adjoint', 'adjoint_tv') ----
+    % ---- Set up live reconstruction figure (opt-in, 'tr' and the adjoint methods) ----
     fig_live   = [];
     ax_recon   = [];
     hImg_recon = [];
     hLine_max  = [];
     cz_live    = 1;
-    if plot_results && any(strcmp(recon_method, {'tr', 'adjoint', 'adjoint_tv'}))
+    if plot_results && any(strcmp(recon_method, {'tr', 'adjoint', 'adjoint_tv', 'adjoint_tv_tr'}))
         if strcmp(recon_method, 'tr')
             num_live_iter = num_tr_iter;
         else
@@ -1240,24 +1247,7 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
 
                     fprintf('          TR iteration %d/%d...\n', tr_iter, num_tr_iter);
 
-                    source_tr        = struct();
-                    source_tr.p_mask = sensor.mask;
-                    source_tr.p      = fliplr(sensorData);
-                    source_tr.p_mode = 'dirichlet';
-
-                    sensor_tr        = struct();
-                    sensor_tr.mask   = ones(Nx, Ny, Nz);
-                    sensor_tr.record = {'p_final'};
-
-                    p0_recon = kspaceFirstOrder3DG(kgrid, kmedium_rec, source_tr, sensor_tr, inputArgs{:});
-
-                    if isstruct(p0_recon) && isfield(p0_recon, 'p_final')
-                        reconPressure = reshape(p0_recon.p_final, [Nx, Ny, Nz]);
-                    else
-                        reconPressure = reshape(p0_recon, [Nx, Ny, Nz]);
-                    end
-
-                    reconPressure = max(reconPressure, 0);
+                    reconPressure = time_reversal_image(sensorData, kgrid, kmedium_rec, sensor, inputArgs);
 
                     conv_max_pressure(tr_iter) = max(reconPressure(:));
                     num_iters_done = tr_iter;
@@ -1490,9 +1480,11 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
                 return;
             end
 
-        case 'adjoint_tv'
+        case {'adjoint_tv', 'adjoint_tv_tr'}
             % 'adjoint' with a total-variation penalty (Huang et al., IEEE TMI
-            % 32, 1097 (2013), eq. 43 and Appendix B). Minimises
+            % 32, 1097 (2013), eq. 43 and Appendix B). 'adjoint_tv' starts from
+            % a zero image; 'adjoint_tv_tr' starts from one time-reversal pass
+            % (warm start, see c. below). Minimises
             %     J(p) = ||A p - d||^2 + lambda * TV(p),   p >= 0
             % A = adjoint_forward_model and its adjoint = adjoint_backward_model,
             % the same operators as 'adjoint'. TV = eq. 44 (calculate_tv).
@@ -1507,9 +1499,16 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
             %      processed/simulated_doses/adjoint_power_cache_<hash>.mat (adjoint_power_hash:
             %      reconstruction medium, grid and dt/Nt, sensor, PML, sensor
             %      response, power_iter) and reused on the next run.
-            %   b. lambda = adjoint_tv_lambda * Lip * peak of the first
-            %      unregularised step, so adjoint_tv_lambda is dimensionless and
-            %      one value works for weak and strong fields.
+            %   b. lambda = adjoint_tv_lambda * Lip * pressure scale, so
+            %      adjoint_tv_lambda is dimensionless and one value works for
+            %      weak and strong fields. Pressure scale: 'adjoint_tv' = peak of
+            %      the first unregularised step from zero; 'adjoint_tv_tr' = peak
+            %      of the warm-start image (closer to the true peak, so the same
+            %      adjoint_tv_lambda gives stronger TV than in 'adjoint_tv').
+            %   c. 'adjoint_tv_tr' only: start image = TR image (time_reversal_image),
+            %      scaled by the least-squares fit of its modelled data to the
+            %      measured data. TR already fills the poorly-seen regions that
+            %      FISTA from zero needs many iterations to reach.
             % Each iteration (FISTA, Algorithm 1):
             %   1. gradient of the data term at the look-ahead point y:
             %      2 A'(A y - d)
@@ -1518,11 +1517,14 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
             %   3. forward run on the new estimate -> modelled data and J
             %   4. momentum: y = p + (t-1)/t_next * (p - p_prev). A is linear,
             %      so A y is the same combination of modelled data (no k-Wave run)
-            % k-Wave runs: 1 + 2 * adjoint_tv_power_iter for setup (1 when
-            % cached), 2 per iteration. Runs on kmedium_rec (blind works as for TR). No
-            % correction_factor (a least-squares fit in Pa, as 'adjoint').
-            fprintf('        Running adjoint_tv reconstruction (%d iterations, tol=%.1e)...\n', ...
-                num_adj_iter, convergence_tol);
+            % k-Wave runs for setup: 'adjoint_tv' 1 + 2 * adjoint_tv_power_iter
+            % (1 when cached); 'adjoint_tv_tr' 2 + 1 + 2 * adjoint_tv_power_iter
+            % (2 when cached). Then 2 per iteration. Runs on kmedium_rec (blind
+            % works as for TR). No correction_factor (a least-squares fit in Pa,
+            % as 'adjoint').
+            warm_start = strcmp(recon_method, 'adjoint_tv_tr');
+            fprintf('        Running %s reconstruction (%d iterations, tol=%.1e)...\n', ...
+                recon_method, num_adj_iter, convergence_tol);
 
             conv_max_pressure = zeros(num_adj_iter, 1);
             conv_rel_change   = nan(num_adj_iter, 1);
@@ -1543,9 +1545,6 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
                 measured = double(sensorData_measured);
 
                 % a. Power iteration: adjoint scale and largest eigenvalue of A'A
-                back_projection = adjoint_backward_model(measured, kgrid, kmedium_rec, ...
-                    sensor, inputArgs, FS, wiener_gain);
-
                 % Cache file in the simulation folder (no caching without a path)
                 power_cache_file = '';
                 if isfield(config, 'working_dir') && isfield(cbct_resampled, 'patient_id') ...
@@ -1556,8 +1555,17 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
                         cbct_resampled.patient_id, cbct_resampled.session), ...
                         sprintf('adjoint_power_cache_%s.mat', power_hash));
                 end
+                use_power_cache = ~tv_force_power_recalc && ~isempty(power_cache_file) && isfile(power_cache_file);
 
-                if ~tv_force_power_recalc && ~isempty(power_cache_file) && isfile(power_cache_file)
+                % Back-projected data: the power iteration's start image and
+                % the 'adjoint_tv' pressure scale. A warm start with a cached
+                % power iteration needs neither, so skips this k-Wave run.
+                if ~use_power_cache || ~warm_start
+                    back_projection = adjoint_backward_model(measured, kgrid, kmedium_rec, ...
+                        sensor, inputArgs, FS, wiener_gain);
+                end
+
+                if use_power_cache
                     cached         = load(power_cache_file, 'adjoint_scale', 'max_eigenvalue');
                     adjoint_scale  = cached.adjoint_scale;
                     max_eigenvalue = cached.max_eigenvalue;
@@ -1593,19 +1601,40 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
                 % Power iteration approaches the eigenvalue from below: 10% margin
                 lipschitz = 2 * 1.1 * max_eigenvalue;
 
+                % c. Start image, and the pressure scale for the TV weight
+                if warm_start
+                    tr_image   = double(time_reversal_image(sensorData_measured, kgrid, kmedium_rec, ...
+                        sensor, inputArgs));
+                    tr_signals = adjoint_forward_model(tr_image, kgrid, kmedium_rec, ...
+                        sensor, inputArgs, sensor_info, FS, wiener_gain);
+                    tr_energy  = sum(tr_signals(:) .^ 2);
+                    tr_gain    = 0;
+                    if tr_energy > 0
+                        tr_gain = sum(tr_signals(:) .* measured(:)) / tr_energy;
+                    end
+                    p0_estimate    = tr_gain * tr_image;
+                    modelled       = tr_gain * tr_signals;   % A is linear: no extra k-Wave run
+                    pressure_scale = max(p0_estimate(:));
+                    fprintf('          Warm start: TR image, LSQ gain %.4e, data mismatch %.4e\n', ...
+                        tr_gain, norm(modelled(:) - measured(:)) / norm(measured(:)));
+                else
+                    p0_estimate    = zeros(gridSize);
+                    modelled       = zeros(size(measured));  % a zero image predicts zero signals
+                    first_step     = 2 * (back_projection / adjoint_scale) / lipschitz;   % unregularised step from zero
+                    pressure_scale = max(first_step(:));
+                end
+
                 % b. TV weight. denoise_weight = lambda / Lip is what tv_denoise uses.
-                first_step     = 2 * (back_projection / adjoint_scale) / lipschitz;
-                denoise_weight = tv_lambda * max(first_step(:));
+                denoise_weight = tv_lambda * pressure_scale;
                 lambda_abs     = denoise_weight * lipschitz;
                 fprintf('          Lipschitz constant %.4e, TV lambda %.4e (denoise weight %.4e Pa)\n', ...
                     lipschitz, lambda_abs, denoise_weight);
-                clear back_projection first_step power_image power_signals round_trip
+                clear back_projection first_step power_image power_signals round_trip tr_image tr_signals
 
-                p0_estimate    = zeros(gridSize);
-                p0_prev        = zeros(gridSize);
-                p0_lookahead   = zeros(gridSize);           % y
-                modelled_prev  = zeros(size(measured));
-                modelled_ahead = zeros(size(measured));     % A y (a zero image predicts zero signals)
+                p0_prev        = p0_estimate;
+                p0_lookahead   = p0_estimate;   % y
+                modelled_prev  = modelled;
+                modelled_ahead = modelled;      % A y
                 fista_t        = 1;
 
                 for adj_iter = 1:num_adj_iter
@@ -1679,7 +1708,7 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
 
         otherwise
             error('run_single_field_simulation:UnknownReconMethod', ...
-                'Unknown reconstruction_method: "%s" (use ''tr'', ''das'', ''ubp'', ''adjoint'', or ''adjoint_tv'')', recon_method);
+                'Unknown reconstruction_method: "%s" (use ''tr'', ''das'', ''ubp'', ''adjoint'', ''adjoint_tv'', or ''adjoint_tv_tr'')', recon_method);
     end
 
     sim_results.tr_time_s         = tr_time;
@@ -2071,6 +2100,30 @@ function p_final = adjoint_backward_model(signals, kgrid, kmedium, sensor, input
 
     out     = kspaceFirstOrder3DG(kgrid, kmedium, source, recorder, inputArgs{:});
     p_final = reshape(double(gather(out.p_final)), size(sensor.mask));
+end
+
+
+function recon = time_reversal_image(signals, kgrid, kmedium, sensor, inputArgs)
+%TIME_REVERSAL_IMAGE One time-reversal pass, for the 'tr' branch and the
+%  'adjoint_tv_tr' warm start: the time-reversed signals are forced at the
+%  sensor points (Dirichlet source), and the final pressure field, with
+%  negatives set to zero, is the image [Nx x Ny x Nz].
+    source        = struct();
+    source.p_mask = sensor.mask;
+    source.p      = fliplr(signals);
+    source.p_mode = 'dirichlet';
+
+    recorder        = struct();
+    recorder.mask   = ones(size(sensor.mask));
+    recorder.record = {'p_final'};
+
+    out = kspaceFirstOrder3DG(kgrid, kmedium, source, recorder, inputArgs{:});
+    if isstruct(out) && isfield(out, 'p_final')
+        recon = reshape(out.p_final, size(sensor.mask));
+    else
+        recon = reshape(out, size(sensor.mask));
+    end
+    recon = max(recon, 0);
 end
 
 

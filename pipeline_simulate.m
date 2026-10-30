@@ -99,11 +99,16 @@ CONFIG.treatment_site  = 'Pancreas';
 %               each, plus 1 + 2*adjoint_tv_power_iter setup runs per field.
 %               adjoint_tv_lambda is the dimensionless TV weight (0 = no TV).
 %               No correction_factor.
+%   'adjoint_tv_tr': 'adjoint_tv' started from one TR pass (least-squares
+%               scaled) instead of zero; same adjoint_tv_* knobs. +2 k-Wave
+%               runs per field (TR + one forward). The TV pressure scale is the
+%               warm-start peak, so the same adjoint_tv_lambda gives stronger TV.
 % All are in the config hash (adjoint_num_iter only for 'adjoint' /
-% 'adjoint_tv'; the adjoint_tv_* knobs only for 'adjoint_tv').
+% 'adjoint_tv' / 'adjoint_tv_tr'; the adjoint_tv_* knobs only for the two TV
+% methods).
 % NOTE: the Step 2.5 noise-only floor (noise_ensemble_error_bars) only knows
-% 'tr' / 'das'; with 'ubp', 'adjoint' or 'adjoint_tv' it warns and the summary
-% omits it.
+% 'tr' / 'das'; with 'ubp', 'adjoint', 'adjoint_tv' or 'adjoint_tv_tr' it warns
+% and the summary omits it.
 CONFIG.reconstruction_method = 'tr';
 CONFIG.adjoint_num_iter      = 5;
 CONFIG.adjoint_tv_lambda     = 0.01;
@@ -212,9 +217,9 @@ if ~ismember(CONFIG.reconstruction_mode, {'segment', 'beam'})
         'CONFIG.reconstruction_mode must be ''segment'' or ''beam'' (got ''%s'').', ...
         CONFIG.reconstruction_mode);
 end
-if ~ismember(lower(CONFIG.reconstruction_method), {'tr', 'das', 'ubp', 'adjoint', 'adjoint_tv'})
+if ~ismember(lower(CONFIG.reconstruction_method), {'tr', 'das', 'ubp', 'adjoint', 'adjoint_tv', 'adjoint_tv_tr'})
     error('pipeline_simulate:BadReconstructionMethod', ...
-        'CONFIG.reconstruction_method must be ''tr'', ''das'', ''ubp'', ''adjoint'' or ''adjoint_tv'' (got ''%s'').', ...
+        'CONFIG.reconstruction_method must be ''tr'', ''das'', ''ubp'', ''adjoint'', ''adjoint_tv'' or ''adjoint_tv_tr'' (got ''%s'').', ...
         CONFIG.reconstruction_method);
 end
 
