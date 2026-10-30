@@ -12,6 +12,14 @@
 %  dose, the pass rates are tabulated, and the best lambda per TV method is
 %  printed.
 %
+%  CONFIG.eval_ct3_blind = true also runs the CT_3 partner field (same name,
+%  _CT_1_ -> _CT_3_) blind for every run: forward on CBCT3, reconstruction on
+%  CBCT1, with the CT_1 run's sensor, as in Step 2. It then scores the Step
+%  2.5 cross-CT comparisons: truth3 vs recon3, truth1 vs recon3 and truth1
+%  vs truth3. Recon differential = (truth1 vs recon1) - (truth1 vs recon3), as in Step 3. It
+%  should stay near the truth differential, 100 - (truth1 vs truth3). A method
+%  that raises pass rates by smearing out the CT_1/CT_3 difference shrinks it.
+%
 %  Note: run_standalone_field re-runs the forward simulation for every
 %  method; rng(CONFIG.rng_seed) before each run makes the noise identical.
 %  =========================================================================
@@ -34,7 +42,9 @@ CONFIG.recon_methods  = {
 CONFIG.num_iter       = 1;     % iterations for every iterative method
 CONFIG.rng_seed       = 42;     % same electronic-noise draw for every method
 CONFIG.gamma_criteria = {3, 3, '3%/3mm'};
-CONFIG.Nt_scaling = 3; 
+CONFIG.eval_ct3_blind    = true;                   % also run the CT_3 partner field blind (doubles the k-Wave runs)
+CONFIG.cbct_filename_ct3 = 'CBCT3_resampled.mat';  % CT_3 forward geometry; recon uses CONFIG.cbct_filename (CT_1)
+CONFIG.Nt_scaling = 3;
 CONFIG.conv_noise_level = .125; 
 CONFIG.conv_use_deconv = false; 
 CONFIG.gruneisen_method = 'continuous_1'
@@ -74,6 +84,15 @@ if exist('CalcGamma', 'file') ~= 2
     error('diagnostic_recon_comparison:NoCalcGamma', 'CalcGamma must be on the MATLAB path.');
 end
 
+% CT_3 partner of the CT_1 dose file: same beam/segment, other CT image.
+if CONFIG.eval_ct3_blind
+    doseFilenameCT3 = strrep(CONFIG.dose_filename, '_CT_1_', '_CT_3_');
+    if strcmp(doseFilenameCT3, CONFIG.dose_filename)
+        error('diagnostic_recon_comparison:NoCT3Name', ...
+            'CONFIG.dose_filename has no _CT_1_ token to swap for _CT_3_: %s', CONFIG.dose_filename);
+    end
+end
+
 numMethods = numel(CONFIG.recon_methods);
 isTV       = startsWith(CONFIG.recon_methods, 'adjoint_tv');   % only these use adjoint_tv_lambda
 numRuns    = sum(~isTV) + sum(isTV) * numel(CONFIG.tv_lambdas);
@@ -87,6 +106,10 @@ fprintf('  Sensor:       %s\n', CONFIG.sensor_placement_method);
 fprintf('  Tissue model: %s\n', CONFIG.gruneisen_method);
 fprintf('  Methods:      %s (%d iterations each)\n', strjoin(CONFIG.recon_methods, ', '), CONFIG.num_iter);
 fprintf('  TV lambdas:   %s (%d runs total)\n', mat2str(CONFIG.tv_lambdas), numRuns);
+if CONFIG.eval_ct3_blind
+    fprintf('  CT_3 blind:   %s (forward %s, recon %s)\n', ...
+        doseFilenameCT3, CONFIG.cbct_filename_ct3, CONFIG.cbct_filename);
+end
 fprintf('=========================================================\n\n');
 
 %% ========================= RUN EACH METHOD x LAMBDA =====================
@@ -123,6 +146,19 @@ for mi = 1:numMethods
         RES(ri).recon_dose     = out.recon_dose;
         RES(ri).tr_time        = getf(sr, 'tr_time_s', 0);
         RES(ri).num_iters_done = getf(sr, 'num_iters_done', 1);
+
+        if CONFIG.eval_ct3_blind
+            fprintf('\n########## RUN %d/%d: %s, CT_3 blind ##########\n', ri, numRuns, label);
+            cfg3                     = cfg;
+            cfg3.dose_filename       = doseFilenameCT3;
+            cfg3.cbct_filename       = CONFIG.cbct_filename_ct3;   % forward on CT_3
+            cfg3.blind_recon         = true;
+            cfg3.recon_cbct_filename = CONFIG.cbct_filename;       % reconstruct on CT_1
+            cfg3.precomputed_sensor  = getf(sr, 'precomputed_sensor', []);   % CT_1 sensor ([] = geometric methods, placed identically)
+            rng(CONFIG.rng_seed);
+            out3 = run_standalone_field(cfg3);
+            RES(ri).recon_dose_ct3 = out3.recon_dose;
+        end
     end
 end
 
@@ -131,10 +167,14 @@ doseGrid    = out.doseGrid;
 spacing_mm  = out.spacing;
 sensor_mask = out.sensor_mask;
 density     = out.density;
+if CONFIG.eval_ct3_blind
+    doseGridCT3 = out3.doseGrid;
+end
 
 %% ========================= NORMALIZE + GAMMA ============================
 %  'max' : divide both doses by their own maxima.
 %  'lsq' : scale each recon by the least-squares gain to the (unscaled) truth.
+%  The CT_3 recon is scaled to its own-CT truth (truth3), as in Step 2.5.
 
 norm_method = 'none';
 if CONFIG.normalize
@@ -142,24 +182,31 @@ if CONFIG.normalize
 end
 if strcmp(norm_method, 'max')
     doseGrid = doseGrid / max(doseGrid(:));
+    if CONFIG.eval_ct3_blind
+        doseGridCT3 = doseGridCT3 / max(doseGridCT3(:));
+    end
+end
+
+% The real CT_1/CT_3 difference: the same for every method.
+if CONFIG.eval_ct3_blind
+    fprintf('\n[Gamma] truth1 vs truth3\n');
+    gammaT1T3 = compute_gamma(doseGrid, doseGridCT3, spacing_mm, 'Criteria', CONFIG.gamma_criteria);
 end
 
 for ri = 1:numRuns
-    recon = RES(ri).recon_dose;
-    switch norm_method
-        case 'max'
-            if max(recon(:)) > 0, recon = recon / max(recon(:)); end
-        case 'lsq'
-            recon = recon * least_squares_gain(doseGrid, recon);
-        case 'none'
-        otherwise
-            error('diagnostic_recon_comparison:BadNormalizeMethod', ...
-                'Unknown CONFIG.normalize_method "%s" (use ''max'' or ''lsq'').', norm_method);
-    end
-    RES(ri).recon_dose = recon;
+    RES(ri).recon_dose = normalize_recon(RES(ri).recon_dose, doseGrid, norm_method);
+    fprintf('\n[Gamma] %s: truth1 vs recon1\n', RES(ri).label);
+    RES(ri).gamma = compute_gamma(doseGrid, RES(ri).recon_dose, spacing_mm, 'Criteria', CONFIG.gamma_criteria);
 
-    fprintf('\n[Gamma] %s\n', RES(ri).label);
-    RES(ri).gamma = compute_gamma(doseGrid, recon, spacing_mm, 'Criteria', CONFIG.gamma_criteria);
+    if CONFIG.eval_ct3_blind
+        RES(ri).recon_dose_ct3 = normalize_recon(RES(ri).recon_dose_ct3, doseGridCT3, norm_method);
+        fprintf('\n[Gamma] %s: truth3 vs recon3 (blind)\n', RES(ri).label);
+        RES(ri).gamma_t3r3 = compute_gamma(doseGridCT3, RES(ri).recon_dose_ct3, spacing_mm, ...
+            'Criteria', CONFIG.gamma_criteria);
+        fprintf('\n[Gamma] %s: truth1 vs recon3 (blind)\n', RES(ri).label);
+        RES(ri).gamma_t1r3 = compute_gamma(doseGrid, RES(ri).recon_dose_ct3, spacing_mm, ...
+            'Criteria', CONFIG.gamma_criteria);
+    end
 end
 
 %% ========================= SUMMARY TABLE ================================
@@ -175,6 +222,30 @@ for ri = 1:numRuns
     fprintf('  %-28s %6d %12.1f', RES(ri).label, RES(ri).num_iters_done, RES(ri).tr_time);
     fprintf(' %9.2f%%', passRates(ri, :));
     fprintf('\n');
+end
+
+% CT_3 blind: one table per criterion. Recon diff = T1vR1 - T1vR3 (Step 3's
+% recon differential); it should stay near the truth differential.
+if CONFIG.eval_ct3_blind
+    passT1T3  = gammaT1T3.pass_rates(:)';
+    truthDiff = 100 - passT1T3;
+    passT3R3  = zeros(numRuns, numel(critLabels));
+    passT1R3  = zeros(numRuns, numel(critLabels));
+    for ri = 1:numRuns
+        passT3R3(ri, :) = RES(ri).gamma_t3r3.pass_rates(:)';
+        passT1R3(ri, :) = RES(ri).gamma_t1r3.pass_rates(:)';
+    end
+    reconDiff = passRates - passT1R3;
+
+    for gc = 1:numel(critLabels)
+        fprintf('\n  CT_3 blind, %s: truth1 vs truth3 %.2f%%, truth differential %.2f%%\n', ...
+            critLabels{gc}, passT1T3(gc), truthDiff(gc));
+        fprintf('  %-28s %10s %10s %10s %11s\n', 'Method', 'T1vR1', 'T3vR3', 'T1vR3', 'Recon diff');
+        for ri = 1:numRuns
+            fprintf('  %-28s %9.2f%% %9.2f%% %9.2f%% %10.2f%%\n', RES(ri).label, ...
+                passRates(ri, gc), passT3R3(ri, gc), passT1R3(ri, gc), reconDiff(ri, gc));
+        end
+    end
 end
 
 % Best lambda per TV method, ranked by the first gamma criterion.
@@ -201,6 +272,12 @@ if CONFIG.save_results
     results.sensor_mask   = sensor_mask;
     results.spacing_mm    = spacing_mm;
     results.config        = CONFIG;
+    if CONFIG.eval_ct3_blind
+        results.pass_rates_t3r3   = passT3R3;
+        results.pass_rates_t1r3   = passT1R3;
+        results.pass_rates_t1t3   = passT1T3;
+        results.original_dose_ct3 = doseGridCT3;
+    end
     save(output_fname, '-struct', 'results', '-v7.3');
     fprintf('\nResults saved to: %s\n', output_fname);
 end
@@ -217,6 +294,19 @@ if CONFIG.plot_results
     ylabel('Gamma pass rate (%)');
     legend([critLabels, {'90%'}], 'Location', 'southoutside', 'Orientation', 'horizontal');
     title(sprintf('Truth vs recon, %d iterations each', CONFIG.num_iter));
+
+    if CONFIG.eval_ct3_blind
+        % First criterion. Dashed line = truth1 vs truth3: a recon that keeps
+        % the CT_1/CT_3 difference has its T1vR3 bar near this line.
+        figure('Name', 'CT_3 Blind Pass Rates', 'Color', 'w', 'NumberTitle', 'off');
+        bar(categorical(runLabels, runLabels), [passRates(:, 1), passT3R3(:, 1), passT1R3(:, 1)]);
+        yline(passT1T3(1), 'k--', 'LineWidth', 1.5);
+        ylim([0, 100]); grid on;
+        ylabel(sprintf('Gamma pass rate (%%), %s', critLabels{1}));
+        legend({'truth1 vs recon1', 'truth3 vs recon3 (blind)', 'truth1 vs recon3 (blind)', ...
+            'truth1 vs truth3'}, 'Location', 'southoutside', 'Orientation', 'horizontal');
+        title('T1vR3 should stay near truth1 vs truth3 (no smearing)');
+    end
 
     % Dose panels and gamma maps: one window each, one tab per run.
     [~, max_dose_idx] = max(doseGrid(:));
@@ -237,7 +327,22 @@ end
 fprintf('\nReconstruction comparison complete.\n');
 
 
-%% ========================= LOCAL HELPER =================================
+%% ========================= LOCAL HELPERS ================================
+
+function recon = normalize_recon(recon, truth, norm_method)
+%NORMALIZE_RECON 'max' = divide by its own max; 'lsq' = least-squares gain to
+%  the (unscaled) truth; 'none' = unchanged.
+    switch norm_method
+        case 'max'
+            if max(recon(:)) > 0, recon = recon / max(recon(:)); end
+        case 'lsq'
+            recon = recon * least_squares_gain(truth, recon);
+        case 'none'
+        otherwise
+            error('diagnostic_recon_comparison:BadNormalizeMethod', ...
+                'Unknown CONFIG.normalize_method "%s" (use ''max'' or ''lsq'').', norm_method);
+    end
+end
 
 function v = getf(s, f, d)
 %GETF Struct field with default.

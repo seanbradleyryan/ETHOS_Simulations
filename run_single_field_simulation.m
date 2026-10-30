@@ -227,7 +227,10 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
 %                                 ||A p - d||^2 + lambda*TV(p) per iteration
 %           .blind_recon        - Logical: true when forward and reconstruction
 %                                 media differed (blind geometry)
-%           .sensor_stages      - Only with CONFIG.sensor_stages_only: .names
+%           .precomputed_sensor - determine_sensor_mask* methods only: the
+%                                 sensor used, in the precomputed_sensor input
+%                                 layout (.sensor_mask, .sensor_info)
+%           .sensor_stages     - Only with CONFIG.sensor_stages_only: .names
 %                                 (stage labels), .mean_abs ([stage x Nt] mean
 %                                 |p| over all sensor points, Pa), .dt (s)
 %
@@ -664,6 +667,10 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
             end
 
             sensor_info = sensor_info_orig;
+            % Same layout as the precomputed_sensor input, so a caller can
+            % reuse this exact sensor on another field (e.g. a blind CT_3 run).
+            sim_results.precomputed_sensor = struct('sensor_mask', sensor_mask_orig, ...
+                'sensor_info', sensor_info_orig);
 
             % ---- Grid expansion ----
             % determine_sensor_mask labels dim 1=Y, dim 2=X, dim 3=Z but
