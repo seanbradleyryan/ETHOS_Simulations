@@ -76,6 +76,7 @@ Set in `pipeline_simulate.m` (default from `get_default_config`); handled in `ru
 
 - **Slice alignment streaking:** Misaligned CT/dose grids cause horizontal streaking artifacts in body masks. Always verify grid alignment after resampling.
 - **GPU memory:** 256³ grids with complex tissue models can exhaust GPU memory. Monitor with `gpuDevice`; fall back to CPU if needed.
+- **CUDA binary temp files / GPU:** `kspaceFirstOrder3DG` runs a separate binary through `.h5` files in `tempdir`, named by default to the second. Parallel workers then collide (forward fails with "Unable to open", or simulates another field). `run_single_field_simulation` passes a unique `'DataName'` per field (`tempname`) and `'DeviceNum'` = MATLAB's GPU index − 1, since the binary ignores `gpuDevice`.
 
 ## Gamma Pass-Rate Individual Analysis (`study_pass_rates_individual.m`)
 

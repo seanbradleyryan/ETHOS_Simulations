@@ -941,11 +941,13 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
 
     %% ======================== DATA CAST (GPU/CPU) ========================
 
+    gpuIndex = [];   % MATLAB's GPU for this process (1-based); [] = none
     if use_gpu
         try
-            gpuDevice;
+            gpu = gpuDevice;
+            gpuIndex = gpu.Index;
             dataCast = 'gpuArray-single';
-            fprintf('        Compute: GPU\n');
+            fprintf('        Compute: GPU %d\n', gpuIndex);
         catch
             dataCast = 'single';
             fprintf('        Compute: CPU (GPU unavailable)\n');
@@ -955,11 +957,22 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
         fprintf('        Compute: CPU\n');
     end
 
+    % kspaceFirstOrder3DG runs a separate CUDA binary that reads and writes
+    % .h5 files in tempdir. By default the files are named by the time to the
+    % second, so parfor workers starting in the same second overwrite each
+    % other's files (forward sim fails, or simulates another field's dose).
+    % A unique DataName per field avoids that. The binary also ignores MATLAB's
+    % GPU selection, so DeviceNum passes this worker's GPU (binary counts from 0).
+    [~, kwaveDataName] = fileparts(tempname);
     inputArgs = {'Smooth', false, ...
                  'PMLInside', false, ...
                  'PMLSize', pml_size, ...
                  'DataCast', dataCast, ...
-                 'PlotSim', false};
+                 'PlotSim', false, ...
+                 'DataName', kwaveDataName};
+    if ~isempty(gpuIndex)
+        inputArgs = [inputArgs, {'DeviceNum', gpuIndex - 1}];
+    end
 
     %% ======================== FORWARD SIMULATION ========================
 
