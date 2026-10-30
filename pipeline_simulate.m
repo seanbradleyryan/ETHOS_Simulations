@@ -98,7 +98,9 @@ CONFIG.treatment_site  = 'Pancreas';
 %               solved by FISTA. adjoint_num_iter iterations, 2 k-Wave runs
 %               each, plus 1 + 2*adjoint_tv_power_iter setup runs per field.
 %               adjoint_tv_lambda is the dimensionless TV weight (0 = no TV).
-%               No correction_factor.
+%               No correction_factor. The power iteration is cached per CT;
+%               with parfor, one CT_1 and one CT_3 field run serially first
+%               to fill the cache (also for 'adjoint_tv_tr').
 %   'adjoint_tv_tr': 'adjoint_tv' started from one TR pass (least-squares
 %               scaled) instead of zero; same adjoint_tv_* knobs. +2 k-Wave
 %               runs per field (TR + one forward). The TV pressure scale is the
@@ -438,9 +440,133 @@ for p_idx = 1:length(CONFIG.patients)
                 grid_spacing = dose_metadata.spacing(:)';
                 n_scored     = 0;   % segment pairs scored by this instance
 
-                if CONFIG.use_parallel && num_pending > 1
+                % Split the pending fields: serial_idxs run one at a time on this
+                % client, parfor_idxs in the parfor. Serial mode: every field.
+                % Parfor with 'adjoint_tv' / 'adjoint_tv_tr': one field per CBCT
+                % label (CT_1, CT_3) runs serially first, so each CT's power
+                % iteration cache (run_single_field_simulation) is on disk before
+                % the workers start. Otherwise every worker computes it at once
+                % and saves the same file.
+                use_parfor  = CONFIG.use_parallel && num_pending > 1;
+                serial_idxs = pending_idxs;
+                if use_parfor
+                    serial_idxs = [];
+                    if ismember(lower(CONFIG.reconstruction_method), {'adjoint_tv', 'adjoint_tv_tr'})
+                        pending_names = {field_index(pending_idxs).source_mat_filename};
+                        for li = 1:numel(cbct_labels)
+                            first_idx   = find(contains(pending_names, ['_' cbct_labels{li} '_']), 1);
+                            serial_idxs = [serial_idxs, pending_idxs(first_idx)]; %#ok<AGROW>
+                        end
+                    end
+                end
+                parfor_idxs = setdiff(pending_idxs, serial_idxs, 'stable');
+                num_serial  = numel(serial_idxs);
+                num_parfor  = numel(parfor_idxs);
+
+                if num_serial > 0
+                    if use_parfor
+                        fprintf('         Power-cache warm-up: %d field(s) serially before the parfor...\n', num_serial);
+                        log_msg(log_fid, 'Power-cache warm-up: %d field(s) serial', num_serial);
+                    else
+                        fprintf('         Using serial processing...\n');
+                        log_msg(log_fid, 'Serial mode: %d fields pending', num_serial);
+                    end
+                    for f = 1:num_serial
+                        fi          = serial_idxs(f);
+                        meta        = field_index(fi);
+                        recon_path  = expected_recon_path(meta, patient_id, session, CONFIG, CONFIG_HASH);
+                        lock_path   = field_lock_path(meta, patient_id, session, CONFIG, CONFIG_HASH);
+                        status_path = field_status_path(meta, patient_id, session, CONFIG, CONFIG_HASH);
+
+                        if isfile(recon_path)
+                            fprintf('           Field %d/%d already on disk; skipping.\n', f, num_serial);
+                            continue;
+                        end
+
+                        [claimed, why] = claim_field(lock_path, status_path, stale_minutes);
+                        if ~claimed
+                            fprintf('           Field %d/%d held by another instance; skipping.\n', f, num_serial);
+                            log_msg(log_fid, 'Field %d held by another instance; skipping.', fi);
+                            continue;
+                        end
+                        t_total = tic;   % TIMING: full processing of this field (ETA)
+
+                        % Load this field's dose from disk (one dose at a time).
+                        % Release the claim on a load failure so a corrupt file
+                        % neither orphans the lock nor aborts the patient.
+                        try
+                            if strcmp(CONFIG.reconstruction_mode, 'beam')
+                                fd = load_beam_dose_file(meta);
+                            else
+                                fd = load_field_dose_file(meta.file);
+                            end
+                        catch loadME
+                            fprintf('           Field %d/%d load failed (%s); releasing claim.\n', ...
+                                f, num_serial, loadME.message);
+                            log_msg(log_fid, 'Field %d load failed: %s', fi, loadME.message);
+                            if isfile(status_path), delete(status_path);   end
+                            if isfolder(lock_path), rmdir(lock_path, 's'); end
+                            continue;
+                        end
+
+                        % First thing: announce IN PROGRESS to sibling instances.
+                        write_field_status(status_path, 'in_progress', fi, fd.gantry_angle, CONFIG_HASH);
+                        log_msg(log_fid, 'Field %d IN PROGRESS (gantry %.1f deg, host %s)', ...
+                            fi, fd.gantry_angle, get_hostname());
+                        fprintf('           Field %d/%d (gantry: %.1f deg) [claim: %s]...\n', ...
+                            f, num_serial, fd.gantry_angle, why);
+
+                        t_field = tic;
+                        % CT_3 fields -> blind-geometry second-field simulation;
+                        % CT_1 fields -> standard single-field simulation.
+                        % quiet = false: serial shows the engine + k-Wave output.
+                        [recon_dose, sim_results] = run_field_dispatch(fd, cbct_by_label, ...
+                            medium_by_label, beam_metadata, CONFIG, precomputed_sensor, false);
+                        sim_elapsed_f = toc(t_field);
+                        if ~any(recon_dose(:))
+                            fprintf('             WARNING: reconstruction returned zero dose.\n');
+                        end
+                        save_field_reconstruction(recon_dose, sim_results, fd, patient_id, session, CONFIG, CONFIG_HASH);
+
+                        % Overwrite IN PROGRESS with COMPLETE.
+                        write_field_status(status_path, 'complete', fi, fd.gantry_angle, CONFIG_HASH);
+                        elapsed_f = toc(t_field);
+                        fprintf('             Simulation %.1f s, saves + status %.1f s\n', ...
+                            sim_elapsed_f, elapsed_f - sim_elapsed_f);
+                        cache_manifest = update_manifest_field(cache_manifest, fi, ...
+                            fd, patient_id, session, elapsed_f);
+                        save_cache_manifest(cache_manifest, patient_id, session, CONFIG, CONFIG_HASH);
+                        log_msg(log_fid, 'Field %d complete [%s] (%.1f s)', ...
+                            fi, CONFIG_HASH, elapsed_f);
+                        fprintf('             Done in %.1f s\n', elapsed_f);
+                        % TIMING: collect this field's sim time.
+                        TIMING.all_field_sim_times_sec(end+1) = elapsed_f;
+                        TIMING.avg_field_sim_sec = mean(TIMING.all_field_sim_times_sec);
+
+                        % Score this segment's CT_1/CT_3 pair if the other CT is done.
+                        if CONFIG.run_segment_metrics
+                            [g_sec, s_sec] = fold_segment_metrics(meta, recon_dose, fd, ...
+                                grid_spacing, patient_id, session, CONFIG, CONFIG_HASH);
+                            if ~isnan(g_sec)
+                                n_scored = n_scored + 1;
+                                TIMING.all_seg_gamma_times_sec(end+1) = g_sec;
+                                TIMING.all_seg_ssim_times_sec(end+1)  = s_sec;
+                                fprintf('             Segment metrics: gamma %.1f s, SSIM %.1f s\n', g_sec, s_sec);
+                            end
+                        end
+
+                        % --- TIMING: estimate time remaining ---
+                        % Uses the running average of each field's full processing
+                        % time (load, sim, saves, gamma + SSIM). Serial -> 1 worker.
+                        TIMING.all_field_total_times_sec(end+1) = toc(t_total);
+                        print_field_eta(f, num_serial, mean(TIMING.all_field_total_times_sec), 1);
+                        % --- end TIMING ---
+                    end
+                end
+
+                if use_parfor && num_parfor > 0
                     fprintf('         Using parallel processing (parfor)...\n');
-                    log_msg(log_fid, 'Parallel mode: %d fields pending', num_pending);
+                    log_msg(log_fid, 'Parallel mode: %d fields pending', num_parfor);
                     pool = gcp('nocreate');
                     if isempty(pool) || pool.NumWorkers ~= CONFIG.num_parallel_workers
                         if ~isempty(pool), delete(pool); end
@@ -462,14 +588,14 @@ for p_idx = 1:length(CONFIG.patients)
                     % ships one small struct per iteration. The heavy dose_Gy is
                     % NOT held here -- each worker loads its own dose from disk
                     % (load_field_dose_file) rather than broadcasting all doses.
-                    pending_meta = field_index(pending_idxs);
+                    pending_meta = field_index(parfor_idxs);
 
-                    field_computed = false(num_pending, 1);
-                    field_elapsed  = zeros(num_pending, 1);
-                    field_total    = zeros(num_pending, 1);   % load -> metrics done (ETA)
-                    field_gantry   = nan(num_pending, 1);
-                    seg_gamma_sec  = nan(num_pending, 1);   % NaN = pair not scored by this field
-                    seg_ssim_sec   = nan(num_pending, 1);
+                    field_computed = false(num_parfor, 1);
+                    field_elapsed  = zeros(num_parfor, 1);
+                    field_total    = zeros(num_parfor, 1);   % load -> metrics done (ETA)
+                    field_gantry   = nan(num_parfor, 1);
+                    seg_gamma_sec  = nan(num_parfor, 1);   % NaN = pair not scored by this field
+                    seg_ssim_sec   = nan(num_parfor, 1);
 
                     % Route per-field progress through a DataQueue so the only
                     % console output from the parfor block is one clean line per
@@ -488,13 +614,13 @@ for p_idx = 1:length(CONFIG.patients)
                     % sim, saves, gamma + SSIM). (The callback cannot write TIMING
                     % itself; TIMING is refreshed from field_total after the parfor.)
                     report_field_progress(struct('kind','init', ...
-                        'total', num_pending, ...
+                        'total', num_parfor, ...
                         'workers', CONFIG.num_parallel_workers, ...
                         'field_times', TIMING.all_field_total_times_sec));
 
                     t_parfor       = tic;
-                    parfor f = 1:num_pending
-                        fi   = pending_idxs(f);
+                    parfor f = 1:num_parfor
+                        fi   = parfor_idxs(f);
                         meta = pending_meta(f);
                         recon_path  = expected_recon_path(meta, patient_id, session, CONFIG, CONFIG_HASH);
                         lock_path   = field_lock_path(meta, patient_id, session, CONFIG, CONFIG_HASH);
@@ -584,12 +710,12 @@ for p_idx = 1:length(CONFIG.patients)
                     elapsed_parfor = toc(t_parfor);
                     % TIMING: gamma / SSIM seconds of the pairs scored here.
                     scored   = ~isnan(seg_gamma_sec);
-                    n_scored = nnz(scored);
+                    n_scored = n_scored + nnz(scored);   % + pairs scored in the warm-up
                     TIMING.all_seg_gamma_times_sec = [TIMING.all_seg_gamma_times_sec, seg_gamma_sec(scored)'];
                     TIMING.all_seg_ssim_times_sec  = [TIMING.all_seg_ssim_times_sec,  seg_ssim_sec(scored)'];
-                    for f = 1:num_pending
+                    for f = 1:num_parfor
                         if ~field_computed(f), continue; end
-                        fi = pending_idxs(f);
+                        fi = parfor_idxs(f);
                         % Merge the real gantry (read in the worker) into the
                         % lightweight metadata for the manifest entry.
                         mi = field_index(fi);
@@ -612,100 +738,6 @@ for p_idx = 1:length(CONFIG.patients)
                     if any(field_computed)
                         fprintf('         Effective %.1f s/field wall-clock (each field took %.1f s on its worker).\n', ...
                             elapsed_parfor / nnz(field_computed), mean(field_elapsed(field_computed)));
-                    end
-                else
-                    fprintf('         Using serial processing...\n');
-                    log_msg(log_fid, 'Serial mode: %d fields pending', num_pending);
-                    for f = 1:num_pending
-                        fi          = pending_idxs(f);
-                        meta        = field_index(fi);
-                        recon_path  = expected_recon_path(meta, patient_id, session, CONFIG, CONFIG_HASH);
-                        lock_path   = field_lock_path(meta, patient_id, session, CONFIG, CONFIG_HASH);
-                        status_path = field_status_path(meta, patient_id, session, CONFIG, CONFIG_HASH);
-
-                        if isfile(recon_path)
-                            fprintf('           Field %d/%d already on disk; skipping.\n', f, num_pending);
-                            continue;
-                        end
-
-                        [claimed, why] = claim_field(lock_path, status_path, stale_minutes);
-                        if ~claimed
-                            fprintf('           Field %d/%d held by another instance; skipping.\n', f, num_pending);
-                            log_msg(log_fid, 'Field %d held by another instance; skipping.', fi);
-                            continue;
-                        end
-                        t_total = tic;   % TIMING: full processing of this field (ETA)
-
-                        % Load this field's dose from disk (one dose at a time).
-                        % Release the claim on a load failure so a corrupt file
-                        % neither orphans the lock nor aborts the patient.
-                        try
-                            if strcmp(CONFIG.reconstruction_mode, 'beam')
-                                fd = load_beam_dose_file(meta);
-                            else
-                                fd = load_field_dose_file(meta.file);
-                            end
-                        catch loadME
-                            fprintf('           Field %d/%d load failed (%s); releasing claim.\n', ...
-                                f, num_pending, loadME.message);
-                            log_msg(log_fid, 'Field %d load failed: %s', fi, loadME.message);
-                            if isfile(status_path), delete(status_path);   end
-                            if isfolder(lock_path), rmdir(lock_path, 's'); end
-                            continue;
-                        end
-
-                        % First thing: announce IN PROGRESS to sibling instances.
-                        write_field_status(status_path, 'in_progress', fi, fd.gantry_angle, CONFIG_HASH);
-                        log_msg(log_fid, 'Field %d IN PROGRESS (gantry %.1f deg, host %s)', ...
-                            fi, fd.gantry_angle, get_hostname());
-                        fprintf('           Field %d/%d (gantry: %.1f deg) [claim: %s]...\n', ...
-                            f, num_pending, fd.gantry_angle, why);
-
-                        t_field = tic;
-                        % CT_3 fields -> blind-geometry second-field simulation;
-                        % CT_1 fields -> standard single-field simulation.
-                        % quiet = false: serial shows the engine + k-Wave output.
-                        [recon_dose, sim_results] = run_field_dispatch(fd, cbct_by_label, ...
-                            medium_by_label, beam_metadata, CONFIG, precomputed_sensor, false);
-                        sim_elapsed_f = toc(t_field);
-                        if ~any(recon_dose(:))
-                            fprintf('             WARNING: reconstruction returned zero dose.\n');
-                        end
-                        save_field_reconstruction(recon_dose, sim_results, fd, patient_id, session, CONFIG, CONFIG_HASH);
-
-                        % Overwrite IN PROGRESS with COMPLETE.
-                        write_field_status(status_path, 'complete', fi, fd.gantry_angle, CONFIG_HASH);
-                        elapsed_f = toc(t_field);
-                        fprintf('             Simulation %.1f s, saves + status %.1f s\n', ...
-                            sim_elapsed_f, elapsed_f - sim_elapsed_f);
-                        cache_manifest = update_manifest_field(cache_manifest, fi, ...
-                            fd, patient_id, session, elapsed_f);
-                        save_cache_manifest(cache_manifest, patient_id, session, CONFIG, CONFIG_HASH);
-                        log_msg(log_fid, 'Field %d complete [%s] (%.1f s)', ...
-                            fi, CONFIG_HASH, elapsed_f);
-                        fprintf('             Done in %.1f s\n', elapsed_f);
-                        % TIMING: collect this field's sim time.
-                        TIMING.all_field_sim_times_sec(end+1) = elapsed_f;
-                        TIMING.avg_field_sim_sec = mean(TIMING.all_field_sim_times_sec);
-
-                        % Score this segment's CT_1/CT_3 pair if the other CT is done.
-                        if CONFIG.run_segment_metrics
-                            [g_sec, s_sec] = fold_segment_metrics(meta, recon_dose, fd, ...
-                                grid_spacing, patient_id, session, CONFIG, CONFIG_HASH);
-                            if ~isnan(g_sec)
-                                n_scored = n_scored + 1;
-                                TIMING.all_seg_gamma_times_sec(end+1) = g_sec;
-                                TIMING.all_seg_ssim_times_sec(end+1)  = s_sec;
-                                fprintf('             Segment metrics: gamma %.1f s, SSIM %.1f s\n', g_sec, s_sec);
-                            end
-                        end
-
-                        % --- TIMING: estimate time remaining ---
-                        % Uses the running average of each field's full processing
-                        % time (load, sim, saves, gamma + SSIM). Serial -> 1 worker.
-                        TIMING.all_field_total_times_sec(end+1) = toc(t_total);
-                        print_field_eta(f, num_pending, mean(TIMING.all_field_total_times_sec), 1);
-                        % --- end TIMING ---
                     end
                 end
 

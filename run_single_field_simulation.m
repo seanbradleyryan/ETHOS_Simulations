@@ -1505,7 +1505,9 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
             %      is only the starting image), so they are cached in
             %      processed/simulated_doses/adjoint_power_cache_<hash>.mat (adjoint_power_hash:
             %      reconstruction medium, grid and dt/Nt, sensor, PML, sensor
-            %      response, power_iter) and reused on the next run.
+            %      response, power_iter) and reused on the next run. Saved by
+            %      rename (never half-written); an unreadable file is recomputed.
+            %      pipeline_simulate fills the cache before its parfor.
             %   b. lambda = adjoint_tv_lambda * Lip * pressure scale, so
             %      adjoint_tv_lambda is dimensionless and one value works for
             %      weak and strong fields. Pressure scale: 'adjoint_tv' = peak of
@@ -1563,6 +1565,21 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
                         sprintf('adjoint_power_cache_%s.mat', power_hash));
                 end
                 use_power_cache = ~tv_force_power_recalc && ~isempty(power_cache_file) && isfile(power_cache_file);
+                if use_power_cache
+                    try
+                        cached         = load(power_cache_file, 'adjoint_scale', 'max_eigenvalue');
+                        adjoint_scale  = cached.adjoint_scale;
+                        max_eigenvalue = cached.max_eigenvalue;
+                        fprintf('          Power iteration loaded from %s: adjoint scale %.4e, max eigenvalue %.4e\n', ...
+                            power_cache_file, adjoint_scale, max_eigenvalue);
+                    catch ME
+                        % Unreadable (e.g. corrupted by workers saving it at once): recompute, overwrite
+                        warning('run_single_field_simulation:PowerCacheReadFail', ...
+                            'Could not read power iteration cache %s (%s); recomputing it.', ...
+                            power_cache_file, ME.message);
+                        use_power_cache = false;
+                    end
+                end
 
                 % Back-projected data: the power iteration's start image and
                 % the 'adjoint_tv' pressure scale. A warm start with a cached
@@ -1572,13 +1589,7 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
                         sensor, inputArgs, FS, wiener_gain);
                 end
 
-                if use_power_cache
-                    cached         = load(power_cache_file, 'adjoint_scale', 'max_eigenvalue');
-                    adjoint_scale  = cached.adjoint_scale;
-                    max_eigenvalue = cached.max_eigenvalue;
-                    fprintf('          Power iteration loaded from %s: adjoint scale %.4e, max eigenvalue %.4e\n', ...
-                        power_cache_file, adjoint_scale, max_eigenvalue);
-                else
+                if ~use_power_cache
                     power_image = back_projection / norm(back_projection(:));
                     for power_iter = 1:tv_power_iter
                         power_signals = adjoint_forward_model(power_image, kgrid, kmedium_rec, ...
@@ -1597,7 +1608,12 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
                             if ~isfolder(fileparts(power_cache_file))
                                 mkdir(fileparts(power_cache_file));
                             end
-                            save(power_cache_file, 'adjoint_scale', 'max_eigenvalue');
+                            % Save under a unique temporary name, then rename. The
+                            % rename is atomic, so no worker reads a half-written file.
+                            [~, tmp_name] = fileparts(tempname);
+                            tmp_file = fullfile(fileparts(power_cache_file), [tmp_name '.mat']);
+                            save(tmp_file, 'adjoint_scale', 'max_eigenvalue');
+                            movefile(tmp_file, power_cache_file, 'f');
                             fprintf('          Power iteration saved to %s\n', power_cache_file);
                         catch ME
                             warning('run_single_field_simulation:PowerCacheSaveFail', ...
