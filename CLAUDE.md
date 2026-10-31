@@ -42,7 +42,9 @@ C:/Users/80030361/ETHOS_Simulations/
 ├── RayStationFiles/[PatientID]/[Session]/          # Field dose DICOMs from RayStation
 │   └── processed/                                   # ALL data the analysis reads
 │       ├── dose_*.mat, CBCT*_resampled.mat, total_*.mat, metadata.mat   # Step 1.5 output ONLY
-│       └── simulated_doses/                         # ALL Steps 2/2.05/2.5 data, locks, caches; keyed by <hash>
+│       └── simulated_doses/                         # config_registry.json + adjoint_power_cache_* (shared)
+│           └── <hash>/                              # ALL Steps 2/2.05/2.5 data, locks, caches of one config
+│               └── <label>/                         # empty; names the config (= config_label)
 ├── AnalysisResults/[PatientID]/[Session]/           # Analysis outputs (figures, tables, logs)
 │   ├── verify_pipeline_compress_output/             # config-independent checks (Step 1.5 inputs)
 │   ├── verify_plot_dose_from_npz/
@@ -54,12 +56,12 @@ C:/Users/80030361/ETHOS_Simulations/
 ```
 
 **Results layout rules:**
-- Data → `get_simulation_dir(working_dir, pid, session)` (= `processed/simulated_doses/`, flat — `gruneisen_method` is in the hash), named by config hash. Every sim output, `*.lock` / `*.metrics_lock`, and cache (noise ensemble, adjoint power) goes here. `processed/` itself is only for `pipeline_compress` outputs. Never write data to `AnalysisResults/`.
+- Data → `get_simulation_dir(working_dir, pid, session, hash)` (= `processed/simulated_doses/<hash>/`; `gruneisen_method` is in the hash). Every sim output, `*.lock` / `*.metrics_lock`, `field_status/`, `simulation_log.txt` and noise-ensemble cache of that config goes here, plus an empty `<label>/` folder (made/renamed by `pipeline_simulate`) so the hash's config is visible when browsing. Without `hash` it returns `simulated_doses/`, which holds only cross-hash files: `config_registry.json` and `adjoint_power_cache_*.mat` (keyed by its own operator hash, shared across configs). `processed/` itself is only for `pipeline_compress` outputs. Never write data to `AnalysisResults/`.
 - Analysis outputs → `AnalysisResults/[pid]/[session]/[label]/[script_name]/`. `[label] = config_label(config)`:
   `'canonical'` when every config-hash field equals `get_default_config`, else `<field>.<value>` per differing field joined by `__`.
   `get_default_config` IS the canonical calculation. Scripts holding only a hash use `config_label(hashtoconfig(hash, config))`.
 - `config_registry.json` (in the simulation dir) maps hash → config + label.
-- `misc/migrate_results_layout.m` moves pre-overhaul `SimulationResults/`, `processed/simulation_results/<method>/`, stray sim files in `processed/`, and old `AnalysisResults/<method>/<hash>/` folders (one-off, dry run default).
+- `misc/migrate_results_layout.m` moves pre-overhaul `SimulationResults/`, `processed/simulation_results/<method>/`, stray sim files in `processed/`, flat `simulated_doses/*_<hash>.*` files into `simulated_doses/<hash>/`, and old `AnalysisResults/<method>/<hash>/` folders (one-off, dry run default). Without it Step 2 re-simulates.
 
 ## Architecture Patterns
 
@@ -138,9 +140,9 @@ dose grid), the CBCT geometry, and the RTPLAN statistics.
 | `'Hash'` | 8-char hex | explicit config-hash override |
 | `'IncludeRS'` / `'IncludeEthos'` / `'IncludeCBCT'` | logical (default `true`) | skip heavy items for speed |
 
-**Config hash:** auto-discovers the recon hash on disk; otherwise uses the hash computed from CONFIG;
-`'Hash'` overrides. All methods share one folder, so with several configs on disk pass `'Hash'` (or the
-full CONFIG). Errors (listing the available hashes) on ambiguity or when nothing matches, and warns on an
+**Config hash:** auto-discovers the recon hash on disk (the `simulated_doses/<hash>/` folders); otherwise
+uses the hash computed from CONFIG; `'Hash'` overrides. With several hash folders on disk pass `'Hash'` (or
+the full CONFIG). Errors (listing the available hashes) on ambiguity or when nothing matches, and warns on an
 embedded-hash mismatch.
 
 **Returns** `out` with common `.patient_id/.session/.config_hash`, `.metadata`
@@ -164,7 +166,7 @@ A = load_recon_dose_data('1194203','Session_1',config,'Mode','set','PlanType','a
 ```
 
 Reuses `compute_sim_config_hash`, `list_processed_field_doses`, and `load_field_dose_file`. Reads
-recon outputs from `get_simulation_dir` = `RayStationFiles/[PatientID]/[Session]/processed/simulated_doses/` (`<base>_recon_<hash>.mat`,
+recon outputs from `get_simulation_dir` = `RayStationFiles/[PatientID]/[Session]/processed/simulated_doses/<hash>/` (`<base>_recon_<hash>.mat`,
 `total_recon_dose_<hash>.mat`) and RayStation/CBCT inputs from `RayStationFiles/[PatientID]/[Session]/processed/`.
 
 ### `compute_local_ssim.m` — local SSIM map + masked mean

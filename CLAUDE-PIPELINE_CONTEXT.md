@@ -41,9 +41,9 @@
 | `load_processed_data.m` | Loads previously processed dose/CT data |
 | `load_recon_dose_data.m` | Loads computed recon doses (single/set/total) + RS, ETHOS truth, CBCT, RTPLAN stats — no re-sim. See CLAUDE.md "Analysis Utilities" |
 | `load_beam_total_set.m` | Beam mode: one beam's summed RS dose + beam recon on CT_1/CT_3, shaped like `load_recon_dose_data` `'set'` output (Steps 2.5 / 3) |
-| `get_simulation_dir.m` | Path of a session's simulation data: `RayStationFiles/<pid>/<session>/processed/simulated_doses/` (flat; all methods) |
+| `get_simulation_dir.m` | Path of a config's simulation data: `RayStationFiles/<pid>/<session>/processed/simulated_doses/<hash>/` (4th arg `hash`; without it, the session folder `simulated_doses/` holding `config_registry.json` + adjoint power caches) |
 | `config_label.m` | AnalysisResults folder name for a config: `'canonical'` or the fields differing from `get_default_config` |
-| `misc/migrate_results_layout.m` | One-off move of pre-overhaul `SimulationResults/` + hash-named analysis folders to the new layout |
+| `misc/migrate_results_layout.m` | One-off move of pre-overhaul `SimulationResults/`, hash-named analysis folders and flat `simulated_doses/` files to the new layout (per-hash folders) |
 | `compute_local_ssim.m` | Local (per-voxel) SSIM map + masked mean over the 10% region. The only SSIM in the pipeline (Steps 2.5 and 3) |
 | `studies/study_pass_rates_allsegments.m` | Superseded by Step 3 (all its analyses now run there); kept for reference |
 
@@ -72,8 +72,8 @@ load('total_dose_CT_3.mat');     % Same, for CT_3 fields (label matches ct_label
 load('total_dose_CT_1_B6.mat');  % Contains: beam_total_sparse + beam_total_dims (or beam_total), num_segments
                                  % — sum of beam 6's segments on CT_1 (one file per CT label x beam)
 load('total_recon_dose_<hash8>.mat');  % Contains: total_recon, metadata, config_hash
-                                       % <hash8> = compute_sim_config_hash(CONFIG); per-hash file
-                                       % see <simulation dir>/config_registry.json
+                                       % <hash8> = compute_sim_config_hash(CONFIG); in simulated_doses/<hash8>/
+                                       % see simulated_doses/config_registry.json
 ```
 
 ## Results Layout
@@ -81,7 +81,8 @@ load('total_recon_dose_<hash8>.mat');  % Contains: total_recon, metadata, config
 | What | Where | Named by |
 |---|---|---|
 | Step 1.5 doses, CBCTs, totals (nothing else) | `RayStationFiles/<pid>/<session>/processed/` | — |
-| Step 2/2.05/2.5 data (recons, `total_recon_dose`, `sensor_mask`, manifests, `segment_metrics_summary`, `full_field_dose`, noise-ensemble + adjoint-power caches, `*.lock` / `*.metrics_lock`, `config_registry.json`, `simulation_log.txt`, `field_status/`) | `get_simulation_dir(...)` = `processed/simulated_doses/` (flat) | `<hash>` in filename |
+| Step 2/2.05/2.5 data (recons, `total_recon_dose`, `sensor_mask`, manifests, `segment_metrics_summary`, `full_field_dose`, noise-ensemble cache, `*.lock` / `*.metrics_lock`, `simulation_log.txt`, `field_status/`) + empty `<label>/` folder | `get_simulation_dir(..., hash)` = `processed/simulated_doses/<hash>/` | `<hash>` folder + filename |
+| `config_registry.json`, `adjoint_power_cache_*.mat` (shared by all hashes) | `get_simulation_dir(...)` = `processed/simulated_doses/` | — |
 | Step 3 | `AnalysisResults/<pid>/<session>/<label>/step3_analysis/` | config label |
 | `verify_pipeline_simulate` | `AnalysisResults/<pid>/<session>/<label>/verify_pipeline_simulate/` | config label |
 | `pipeline_simulate` RESULTS + timing (per session) | `AnalysisResults/<pid>/<session>/<label>/pipeline_simulate/` | config label |
@@ -94,9 +95,11 @@ load('total_recon_dose_<hash8>.mat');  % Contains: total_recon, metadata, config
 - Functions that only hold a hash (step3, verify) get the label from the registry:
   `config_label(hashtoconfig(hash, config))`. pipeline_simulate also stores `.label` per hash in `config_registry.json`.
 - Changing a value in `get_default_config` changes which hash is `canonical`; the old canonical hash then gets
-  a diff label.
+  a diff label. Data paths use only the hash, so nothing moves; the `<hash>/<label>/` marker is renamed the next
+  time `pipeline_simulate` runs that hash.
 - Pre-overhaul data (`SimulationResults/`, `processed/simulation_results/<method>/`, sim files loose in
-  `processed/`): run `misc/migrate_results_layout.m` once (dry run first). Without it Step 2 re-simulates.
+  `processed/` or flat in `simulated_doses/`): run `misc/migrate_results_layout.m` once (dry run first). Without
+  it Step 2 re-simulates.
 
 > **Per-CT totals** (`total_dose_CT_*.mat`) are written by `step15_process_doses` whenever NPZ-derived
 > field doses carry a CT label in their filename (e.g. `..._adapted_CT_1_B6_103.mat`).
@@ -223,3 +226,4 @@ standalone. It absorbed every analysis from `study_pass_rates_allsegments.m`.
 
 - **Memory limits:** Never load all field doses simultaneously for large grids. Process one field at a time; save individually.
 - **Gamma analysis cutoff:** Default 10% low-dose cutoff excludes voxels below 10% of max dose — intentional. Low-dose regions are clinically less relevant and noisy in reconstruction.
+- **Failed fields (Step 2):** a failed forward sim / reconstruction (engine `*Fail` warning, which sets `sim_results.failure_report` = `getReport` extended text, or an uncaught engine error) is not saved. `pipeline_simulate` prints the full report (parfor too), writes it to `simulation_log.txt`, and marks the field `status = failed` in `field_status/` with its lock kept, so no instance retries it that run. The next run's start deletes the failed status + lock and retries it. Runs before this saved failures as all-zero recons marked complete; delete those recon files to retry them.

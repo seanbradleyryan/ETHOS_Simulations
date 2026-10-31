@@ -7,6 +7,8 @@
 %    - method       CONFIG.recon_methods
 %    - TV weight    CONFIG.tv_lambdas (adjoint_tv* methods only)
 %    - iterations   CONFIG.num_iters  (iterative methods; 'das'/'ubp' run once)
+%    - Nt_scaling   CONFIG.Nt_scalings (every method; changes the simulated
+%                   time window, so the measured data too)
 %  One combination = one job. Each job goes through run_standalone_field
 %  (load dose+CBCT -> build medium -> run_single_field_simulation). Every
 %  setting on a dose file sees the SAME measured data (same dose, sensor and
@@ -27,8 +29,8 @@
 %
 %  CONFIG.use_parallel = true runs the jobs in a parfor, each worker pinned to
 %  a GPU round-robin (as in pipeline_simulate). With adjoint_tv* methods the
-%  first TV job of each dose file runs serially first, so the adjoint power
-%  cache is on disk before the workers start.
+%  first TV job of each dose file and Nt_scaling runs serially first, so the
+%  adjoint power cache is on disk before the workers start.
 %
 %  Note: every job re-runs the forward simulation; rng(CONFIG.rng_seed) before
 %  each run makes the noise identical. Every recon and truth1-vs-recon1 gamma
@@ -46,7 +48,7 @@ addpath(genpath(fullfile(fileparts(mfilename('fullpath')), 'pipeline')));  % ste
 
 CONFIG = get_default_config();
 
-% --- Sweep settings: every dose file x method x lambda x iteration count ---
+% --- Sweep settings: every dose file x method x lambda x iteration count x Nt_scaling ---
 CONFIG.dose_filenames = {
     CONFIG.dose_filename
     % 'dose_1194203_Session_1_reference_CT_1_B15_112.mat'
@@ -61,7 +63,7 @@ CONFIG.rng_seed       = 42;     % same electronic-noise draw for every method
 CONFIG.gamma_criteria = {3, 3, '3%/3mm'};
 CONFIG.eval_ct3_blind    = true;                   % also run the CT_3 partner field blind (doubles the k-Wave runs)
 CONFIG.cbct_filename_ct3 = 'CBCT3_resampled.mat';  % CT_3 forward geometry; recon uses CONFIG.cbct_filename (CT_1)
-CONFIG.Nt_scaling = 5;
+CONFIG.Nt_scalings = 5;   % Nt_scaling values to sweep, e.g. [2, 3, 5] (every method)
 CONFIG.conv_noise_level = .125;
 CONFIG.conv_use_deconv = false;
 CONFIG.gruneisen_method = 'continuous_1'
@@ -130,7 +132,7 @@ if CONFIG.normalize
 end
 
 %% ========================= SETTINGS AND JOBS ============================
-% A setting = method x lambda x iteration count. A job = one setting on one
+% A setting = method x lambda x iteration count x Nt_scaling. A job = one setting on one
 % dose file. Jobs go dose file by dose file: job j = setting s on dose file d,
 % with j = (d-1)*numSettings + s.
 
@@ -149,16 +151,20 @@ for mi = 1:numel(CONFIG.recon_methods)
     end
     for li = 1:numel(lambdas)
         for ii = 1:numel(iters)
-            s = numel(SETTINGS) + 1;
-            SETTINGS(s).method    = CONFIG.recon_methods{mi};
-            SETTINGS(s).tv_lambda = lambdas(li);
-            SETTINGS(s).num_iter  = iters(ii);
-            SETTINGS(s).label     = CONFIG.recon_methods{mi};
-            if ~isnan(lambdas(li))
-                SETTINGS(s).label = sprintf('%s, lambda=%g', SETTINGS(s).label, lambdas(li));
-            end
-            if ~isnan(iters(ii))
-                SETTINGS(s).label = sprintf('%s, iter=%d', SETTINGS(s).label, iters(ii));
+            for ni = 1:numel(CONFIG.Nt_scalings)
+                s = numel(SETTINGS) + 1;
+                SETTINGS(s).method     = CONFIG.recon_methods{mi};
+                SETTINGS(s).tv_lambda  = lambdas(li);
+                SETTINGS(s).num_iter   = iters(ii);
+                SETTINGS(s).nt_scaling = CONFIG.Nt_scalings(ni);
+                SETTINGS(s).label      = CONFIG.recon_methods{mi};
+                if ~isnan(lambdas(li))
+                    SETTINGS(s).label = sprintf('%s, lambda=%g', SETTINGS(s).label, lambdas(li));
+                end
+                if ~isnan(iters(ii))
+                    SETTINGS(s).label = sprintf('%s, iter=%d', SETTINGS(s).label, iters(ii));
+                end
+                SETTINGS(s).label = sprintf('%s, Nt=%g', SETTINGS(s).label, CONFIG.Nt_scalings(ni));
             end
         end
     end
@@ -177,7 +183,8 @@ for d = 1:numDoses
         JOBS(j).method            = SETTINGS(s).method;
         JOBS(j).tv_lambda         = SETTINGS(s).tv_lambda;
         JOBS(j).num_iter          = SETTINGS(s).num_iter;
-        JOBS(j).label             = SETTINGS(s).label;
+        JOBS(j).nt_scaling        = SETTINGS(s).nt_scaling;
+        JOBS(j).label            = SETTINGS(s).label;
         JOBS(j).score_truth       = (s == 1);   % one job per dose file also keeps the truths + scores truth1 vs truth3
     end
 end
@@ -199,6 +206,7 @@ fprintf('  Sensor:       %s\n', CONFIG.sensor_placement_method);
 fprintf('  Tissue model: %s\n', CONFIG.gruneisen_method);
 fprintf('  Methods:      %s\n', strjoin(CONFIG.recon_methods, ', '));
 fprintf('  Iterations:   %s\n', mat2str(CONFIG.num_iters));
+fprintf('  Nt_scaling:   %s\n', mat2str(CONFIG.Nt_scalings));
 fprintf('  TV lambdas:   %s\n', mat2str(CONFIG.tv_lambdas));
 fprintf('  Jobs:         %d settings x %d dose file(s) = %d (parallel: %d)\n', ...
     numSettings, numDoses, numJobs, CONFIG.use_parallel);
@@ -211,14 +219,18 @@ fprintf('=========================================================\n\n');
 serialJobs = 1:numJobs;
 parJobs    = [];
 if CONFIG.use_parallel && numJobs > 1
-    % The first adjoint_tv* job of each dose file runs first, so its adjoint
-    % power cache (run_single_field_simulation) is on disk before the workers
-    % start. Otherwise every worker computes it at once and saves the same
-    % file (same warm-up as pipeline_simulate).
+    % The first adjoint_tv* job of each dose file and Nt_scaling (the cache
+    % key includes dt/Nt) runs first, so its adjoint power cache
+    % (run_single_field_simulation) is on disk before the workers start.
+    % Otherwise every worker computes it at once and saves the same file
+    % (same warm-up as pipeline_simulate).
     serialJobs = [];
     for d = 1:numDoses
-        firstTV    = find([JOBS.dose_idx] == d & startsWith({JOBS.method}, 'adjoint_tv'), 1);
-        serialJobs = [serialJobs, firstTV]; %#ok<AGROW>
+        for ni = 1:numel(CONFIG.Nt_scalings)
+            firstTV = find([JOBS.dose_idx] == d & [JOBS.nt_scaling] == CONFIG.Nt_scalings(ni) ...
+                & startsWith({JOBS.method}, 'adjoint_tv'), 1);
+            serialJobs = [serialJobs, firstTV]; %#ok<AGROW>
+        end
     end
     parJobs = setdiff(1:numJobs, serialJobs);
 end
@@ -279,7 +291,7 @@ end
 fprintf('\n========= TRUTH1 vs RECON1 (normalization: %s) =========\n', norm_method);
 for m = 1:numMetrics
     fprintf('\n  %s (%%)\n', metricLabels{m});
-    fprintf('  %-36s %10s', 'Setting', 'Recon (s)');
+    fprintf('  %-44s %10s', 'Setting', 'Recon (s)');
     for d = 1:numDoses
         fprintf(' %10s', sprintf('Dose %d', d));
     end
@@ -288,7 +300,7 @@ for m = 1:numMetrics
     end
     fprintf('\n');
     for s = 1:numSettings
-        fprintf('  %-36s %10.1f', SETTINGS(s).label, reconTime(s));
+        fprintf('  %-44s %10.1f', SETTINGS(s).label, reconTime(s));
         fprintf(' %10.2f', T1R1(s, :, m));
         if numDoses > 1
             fprintf(' %16s', mean_std_str(T1R1(s, :, m)));
@@ -305,16 +317,16 @@ if CONFIG.eval_ct3_blind
     for m = 1:numMetrics
         fprintf('\n  %s: truth1 vs truth3 %s, truth differential %s\n', metricLabels{m}, ...
             mean_std_str(T1T3(:, m)), mean_std_str(100 - T1T3(:, m)));
-        fprintf('  %-36s %16s %16s %16s %16s\n', 'Setting', 'T1vR1', 'T3vR3', 'T1vR3', 'Recon diff');
+        fprintf('  %-44s %16s %16s %16s %16s\n', 'Setting', 'T1vR1', 'T3vR3', 'T1vR3', 'Recon diff');
         for s = 1:numSettings
-            fprintf('  %-36s %16s %16s %16s %16s\n', SETTINGS(s).label, ...
+            fprintf('  %-44s %16s %16s %16s %16s\n', SETTINGS(s).label, ...
                 mean_std_str(T1R1(s, :, m)), mean_std_str(T3R3(s, :, m)), ...
                 mean_std_str(T1R3(s, :, m)), mean_std_str(T1R1(s, :, m) - T1R3(s, :, m)));
         end
     end
 end
 
-% Best setting per method (over its lambdas and iteration counts), ranked by
+% Best setting per method (over its lambdas, iteration counts and Nt_scalings), ranked by
 % the first metric's mean over dose files.
 fprintf('\n');
 for mi = 1:numel(CONFIG.recon_methods)
@@ -412,6 +424,7 @@ function R = run_job(CONFIG, job, norm_method)
     cfg = CONFIG;
     cfg.dose_filename         = job.dose_filename;
     cfg.reconstruction_method = job.method;
+    cfg.Nt_scaling            = job.nt_scaling;
     if ~isnan(job.tv_lambda)
         cfg.adjoint_tv_lambda = job.tv_lambda;
     end

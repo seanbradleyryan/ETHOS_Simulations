@@ -17,7 +17,7 @@
 %
 %  Where Step 2.5 stores its results (read here):
 %    - segment_metrics_summary_<hash>.mat  (beside the recon doses in
-%      get_simulation_dir: RayStationFiles/.../processed/simulated_doses/) -- per-beam & pooled
+%      get_simulation_dir: RayStationFiles/.../processed/simulated_doses/<hash>/) -- per-beam & pooled
 %      mean/std of the gamma pass rate (%) and mean local SSIM (%) per
 %      comparison, the per-segment matrices, and the noise-only null floor.
 %      This drives the summary figures and the console table.
@@ -88,7 +88,8 @@ CONFIG.plan_type = 'reference';   % 'reference' | 'adapted' | 'any'
 % The two CT image indices (lower -> *_CT1 volumes, higher -> *_CT3 volumes).
 CONFIG.ct_pair = [1, 3];
 
-% Recon config-hash. '' => auto-discover the single summary on disk.
+% Recon config-hash: picks the simulated_doses/<hash>/ folder. '' => auto-discover
+% the single summary in CONFIG.output_dir (only when output_dir is set).
 CONFIG.config_hash = '3fe4d7d8';
 
 % Needed by load_recon_dose_data (random panels) to resolve the method folder.
@@ -154,9 +155,14 @@ if strcmp(CONFIG.eval_method, 'ssim')
     CONFIG.random_cache_file = add_name_suffix(CONFIG.random_cache_file, '_ssim');
 end
 
-% Cache/log directory: the recon-dose folder unless explicitly overridden.
+% Cache/log directory: the recon-dose (hash) folder unless explicitly overridden.
 if isempty(CONFIG.output_dir)
-    CONFIG.output_dir = get_simulation_dir(CONFIG.working_dir, CONFIG.patient_id, CONFIG.session);
+    if isempty(CONFIG.config_hash)
+        error('study_pass_rates_allsegments:NoHash', ...
+            'Set CONFIG.config_hash: recon doses are stored per hash in simulated_doses/<hash>/.');
+    end
+    CONFIG.output_dir = get_simulation_dir(CONFIG.working_dir, CONFIG.patient_id, ...
+        CONFIG.session, CONFIG.config_hash);
 end
 if ~isfolder(CONFIG.output_dir)
     mkdir(CONFIG.output_dir);
