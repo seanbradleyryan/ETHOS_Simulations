@@ -145,27 +145,27 @@ function results = verify_pipeline_simulate(patient_id, session, config, config_
     %% ========================= PATHS + CONFIG HASH ===========================
     rsDir        = fullfile(config.working_dir, 'RayStationFiles', patient_id, session);
     processedDir = fullfile(rsDir, 'processed');
-    simDir       = get_simulation_dir(config.working_dir, patient_id, session);
+    simRoot      = get_simulation_dir(config.working_dir, patient_id, session);   % one <hash>/ folder per config
     % Folders that may hold the RTPLAN / ETHOS RTDOSE DICOMs, in search order
     dicomDirs = {rsDir, ...
         fullfile(config.working_dir, 'Raystation_Input', patient_id, session), ...
         fullfile(config.working_dir, 'EthosExports', patient_id, treatmentSite, session, 'sct')};
 
     if isempty(config_hash)
-        % Standalone: use the one hash present in the recon file names
-        reconFiles = dir(fullfile(simDir, '*_recon_*.mat'));
+        % Standalone: use the one hash folder that holds recon files
+        hashDirs = dir(simRoot);
         hashes = {};
-        for i = 1:numel(reconFiles)
-            tok = regexp(reconFiles(i).name, '_recon_([0-9a-f]{8})\.mat$', 'tokens', 'once');
-            if ~isempty(tok)
-                hashes{end + 1} = tok{1}; %#ok<AGROW>
+        for i = 1:numel(hashDirs)
+            name = hashDirs(i).name;
+            if hashDirs(i).isdir && ~isempty(regexp(name, '^[0-9a-f]{8}$', 'once')) ...
+                    && ~isempty(dir(fullfile(simRoot, name, '*_recon_*.mat')))
+                hashes{end + 1} = name; %#ok<AGROW>
             end
         end
-        hashes = unique(hashes);
         if numel(hashes) ~= 1
             error('verify_pipeline_simulate:AmbiguousHash', ...
-                'Expected one config hash in %s, found %d (%s). Set config_hash.', ...
-                simDir, numel(hashes), strjoin(hashes(:)', ', '));
+                'Expected one config hash folder in %s, found %d (%s). Set config_hash.', ...
+                simRoot, numel(hashes), strjoin(hashes, ', '));
         end
         config_hash = hashes{1};
         % Take the simulation fields that produced this hash from config_registry.json
@@ -178,6 +178,7 @@ function results = verify_pipeline_simulate(patient_id, session, config, config_
             end
         end
     end
+    simDir = get_simulation_dir(config.working_dir, patient_id, session, config_hash);
 
     % Label from the hash's registered config, so standalone and pipeline runs agree
     outDir = fullfile(config.working_dir, 'AnalysisResults', patient_id, session, ...

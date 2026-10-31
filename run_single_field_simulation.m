@@ -233,6 +233,10 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
 %           .sensor_stages     - Only with CONFIG.sensor_stages_only: .names
 %                                 (stage labels), .mean_abs ([stage x Nt] mean
 %                                 |p| over all sensor points, Pa), .dt (s)
+%           .failure_report     - Only when the forward sim or reconstruction
+%                                 failed (recon_dose is then all zeros): the
+%                                 full error text + stack (getReport extended),
+%                                 also issued as the warning
 %
 %   NOTES:
 %       - Stateless: safe for parfor execution. Diagnostic plotting must be
@@ -1005,8 +1009,9 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
             fwd_time, size(sensorData, 1), size(sensorData, 2));
         sim_results.forward_time_s = fwd_time;
     catch ME
-        warning('run_single_field_simulation:ForwardFail', ...
-            'Forward simulation failed: %s', ME.message);
+        sim_results.failure_report = sprintf('Forward simulation failed:\n%s', ...
+            getReport(ME, 'extended', 'hyperlinks', 'off'));
+        warning('run_single_field_simulation:ForwardFail', '%s', sim_results.failure_report);
         recon_dose = zeros(input_dims_for_crop);
         return;
     end
@@ -1308,8 +1313,9 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
                     min(reconPressure(:)), max(reconPressure(:)));
 
             catch ME
-                warning('run_single_field_simulation:TRFail', ...
-                    'Time reversal failed: %s', ME.message);
+                sim_results.failure_report = sprintf('Time reversal failed:\n%s', ...
+                    getReport(ME, 'extended', 'hyperlinks', 'off'));
+                warning('run_single_field_simulation:TRFail', '%s', sim_results.failure_report);
                 recon_dose = zeros(input_dims_for_crop);
                 return;
             end
@@ -1336,8 +1342,9 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
                 fprintf('        Reconstructed pressure: [%.2e, %.2e] Pa\n', ...
                     min(reconPressure(:)), max(reconPressure(:)));
             catch ME
-                warning('run_single_field_simulation:DASFail', ...
-                    'DAS reconstruction failed: %s', ME.message);
+                sim_results.failure_report = sprintf('DAS reconstruction failed:\n%s', ...
+                    getReport(ME, 'extended', 'hyperlinks', 'off'));
+                warning('run_single_field_simulation:DASFail', '%s', sim_results.failure_report);
                 recon_dose = zeros(input_dims_for_crop);
                 return;
             end
@@ -1366,8 +1373,9 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
                 fprintf('        Reconstructed pressure: [%.2e, %.2e] Pa\n', ...
                     min(reconPressure(:)), max(reconPressure(:)));
             catch ME
-                warning('run_single_field_simulation:UBPFail', ...
-                    'UBP reconstruction failed: %s', ME.message);
+                sim_results.failure_report = sprintf('UBP reconstruction failed:\n%s', ...
+                    getReport(ME, 'extended', 'hyperlinks', 'off'));
+                warning('run_single_field_simulation:UBPFail', '%s', sim_results.failure_report);
                 recon_dose = zeros(input_dims_for_crop);
                 return;
             end
@@ -1481,8 +1489,9 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
                 fprintf('        Reconstructed pressure: [%.2e, %.2e] Pa\n', ...
                     min(reconPressure(:)), max(reconPressure(:)));
             catch ME
-                warning('run_single_field_simulation:AdjointFail', ...
-                    'Adjoint reconstruction failed: %s', ME.message);
+                sim_results.failure_report = sprintf('Adjoint reconstruction failed:\n%s', ...
+                    getReport(ME, 'extended', 'hyperlinks', 'off'));
+                warning('run_single_field_simulation:AdjointFail', '%s', sim_results.failure_report);
                 recon_dose = zeros(input_dims_for_crop);
                 return;
             end
@@ -1723,8 +1732,9 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
                 fprintf('        Reconstructed pressure: [%.2e, %.2e] Pa\n', ...
                     min(reconPressure(:)), max(reconPressure(:)));
             catch ME
-                warning('run_single_field_simulation:AdjointTVFail', ...
-                    'Adjoint-TV reconstruction failed: %s', ME.message);
+                sim_results.failure_report = sprintf('Adjoint-TV reconstruction failed:\n%s', ...
+                    getReport(ME, 'extended', 'hyperlinks', 'off'));
+                warning('run_single_field_simulation:AdjointTVFail', '%s', sim_results.failure_report);
                 recon_dose = zeros(input_dims_for_crop);
                 return;
             end

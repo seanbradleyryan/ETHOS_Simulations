@@ -183,11 +183,13 @@ CONFIG.num_parallel_workers  = feature('numcores');   % one worker per physical 
 % --- Multi-Instance Coordination ---
 % Multiple copies of this script (e.g. one per remote-desktop session, all
 % sharing working_dir) coordinate per-field through lock + status files under
-% <simulation dir>/field_status/ (get_simulation_dir). Before a field
+% <simulation dir>/<hash>/field_status/ (get_simulation_dir). Before a field
 % is processed its lock is claimed atomically and an 'in_progress' status is
 % written so sibling instances skip it; on completion the status is overwritten
 % with 'complete'. A lock whose status file is older than stale_claim_minutes
 % is assumed orphaned (crashed sibling) and may be overtaken.
+% A failed simulation is written as 'failed' (full error in simulation_log.txt)
+% and is not retried, by any instance, until a run's start clears it.
 % NOTE: there is no heartbeat -- the 'in_progress' status is stamped once
 % when a field starts and only rewritten as 'complete' at the end, so this
 % age is measured from when the dose STARTED, not from last progress. Keep
@@ -241,9 +243,10 @@ end
 % reusing stale ones.
 [CONFIG_HASH, CONFIG_CANONICAL] = compute_sim_config_hash(CONFIG);
 fprintf('  Config hash: %s\n', CONFIG_HASH);
-% Simulation data is stored by hash under RayStationFiles/<id>/<session>/
-% processed/simulated_doses/ (get_simulation_dir). Analysis output
-% goes to AnalysisResults/<id>/<session>/<CONFIG_LABEL>/, where CONFIG_LABEL is
+% Simulation data is stored in RayStationFiles/<id>/<session>/processed/
+% simulated_doses/<CONFIG_HASH>/ (get_simulation_dir), which also holds an empty
+% <CONFIG_LABEL>/ folder naming the config. Analysis output goes to
+% AnalysisResults/<id>/<session>/<CONFIG_LABEL>/, where CONFIG_LABEL is
 % 'canonical' or the fields that differ from get_default_config.
 CONFIG_LABEL = config_label(CONFIG);
 fprintf('  Config label: %s\n', CONFIG_LABEL);
@@ -352,7 +355,7 @@ for p_idx = 1:length(CONFIG.patients)
             % Compute the sensor mask ONCE for the whole plan and reuse it
             % for every field, instead of recomputing determine_sensor_mask
             % inside each run_single_field_simulation call. The mask is
-            % saved to disk (<simulation dir>/sensor_mask_<hash>.mat)
+            % saved to disk (<simulation dir>/<hash>/sensor_mask_<hash>.mat)
             % so the exact sensor geometry can be recovered for analysis.
             % Returns [] for non-determine_sensor_mask methods (or when no
             % summed plan dose is available), in which case each field falls
@@ -405,6 +408,23 @@ for p_idx = 1:length(CONFIG.patients)
 
                 fprintf('         Processing %d field(s)...\n', num_fields);
 
+                % Fields that failed in an earlier run are retried: delete their
+                % 'failed' status file and lock so they count as pending again.
+                num_cleared = 0;
+                for fi = valid_field_indices(:).'
+                    status_path = field_status_path(field_index(fi), patient_id, session, CONFIG, CONFIG_HASH);
+                    if field_status_is(status_path, 'failed')
+                        delete(status_path);
+                        lock_path = field_lock_path(field_index(fi), patient_id, session, CONFIG, CONFIG_HASH);
+                        if isfolder(lock_path), rmdir(lock_path, 's'); end
+                        num_cleared = num_cleared + 1;
+                    end
+                end
+                if num_cleared > 0
+                    fprintf('         Cleared %d failed field(s) from an earlier run; retrying them.\n', num_cleared);
+                    log_msg(log_fid, 'Cleared %d failed field(s); retrying them', num_cleared);
+                end
+
                 % --- Load per-hash cache manifest and cross-check against
                 %     reconstruction files on disk for the ACTIVE hash only.
                 %     Files belonging to a different config are invisible here.
@@ -431,7 +451,7 @@ for p_idx = 1:length(CONFIG.patients)
                 % Ensure the cross-instance status directory exists and read the
                 % stale-claim threshold (minutes) used to overtake locks left
                 % behind by crashed sibling instances.
-                status_dir = get_status_directory(patient_id, session, CONFIG);
+                status_dir = get_status_directory(patient_id, session, CONFIG, CONFIG_HASH);
                 if ~exist(status_dir, 'dir'), mkdir(status_dir); end
                 stale_minutes = CONFIG.stale_claim_minutes;
 
@@ -523,6 +543,16 @@ for p_idx = 1:length(CONFIG.patients)
                         [recon_dose, sim_results] = run_field_dispatch(fd, cbct_by_label, ...
                             medium_by_label, beam_metadata, CONFIG, precomputed_sensor, false);
                         sim_elapsed_f = toc(t_field);
+                        % Failed: the full report is already on the console. Mark
+                        % the field FAILED (lock kept) so it is not retried this
+                        % run; the next run's start clears the mark.
+                        if isfield(sim_results, 'failure_report')
+                            write_field_status(status_path, 'failed', fi, fd.gantry_angle, CONFIG_HASH);
+                            log_msg(log_fid, 'Field %d FAILED (gantry %.1f deg), not retried this run:\n%s', ...
+                                fi, fd.gantry_angle, sim_results.failure_report);
+                            fprintf('             FAILED (logged); not retried until the next run.\n');
+                            continue;
+                        end
                         if ~any(recon_dose(:))
                             fprintf('             WARNING: reconstruction returned zero dose.\n');
                         end
@@ -605,7 +635,7 @@ for p_idx = 1:length(CONFIG.patients)
                     % parfor -- is suppressed: workers send a message instead, and
                     % report_field_progress prints it serialized on the client.
                     progress_queue = parallel.pool.DataQueue;
-                    afterEach(progress_queue, @report_field_progress);
+                    afterEach(progress_queue, @(msg) report_field_progress(msg, log_fid));
                     % TIMING: seed the countdown, the worker count, and the field
                     % times recorded so far. report_field_progress keeps the
                     % running average up to date as fields finish ('done'
@@ -616,7 +646,7 @@ for p_idx = 1:length(CONFIG.patients)
                     report_field_progress(struct('kind','init', ...
                         'total', num_parfor, ...
                         'workers', CONFIG.num_parallel_workers, ...
-                        'field_times', TIMING.all_field_total_times_sec));
+                        'field_times', TIMING.all_field_total_times_sec), log_fid);
 
                     t_parfor       = tic;
                     parfor f = 1:num_parfor
@@ -674,10 +704,18 @@ for p_idx = 1:length(CONFIG.patients)
                         % happens inside the dispatcher.
                         [rd, sd, last_warning] = run_field_dispatch(fd, cbct_by_label, medium_by_label, ...
                             beam_metadata, CONFIG, precomputed_sensor, true);
+                        % Failed: the client prints + logs the full report. Mark
+                        % the field FAILED (lock kept) so it is not retried this
+                        % run; the next run's start clears the mark.
+                        if isfield(sd, 'failure_report')
+                            write_field_status(status_path, 'failed', fi, fd.gantry_angle, CONFIG_HASH);
+                            send(progress_queue, struct('kind','sim_fail','field_idx',fi, ...
+                                'gantry',fd.gantry_angle,'message',sd.failure_report));
+                            continue;
+                        end
                         rd = gather(rd);
-                        % A failed forward sim / reconstruction warns and returns
-                        % zeros, so on a zero-dose recon print the last engine
-                        % warning (the cause, which evalc hid).
+                        % On a zero-dose recon print the last engine warning (the
+                        % cause, which evalc hid).
                         if ~any(rd(:))
                             warn_msg = 'Reconstruction returned zero dose.';
                             if ~isempty(last_warning)
@@ -746,7 +784,7 @@ for p_idx = 1:length(CONFIG.patients)
                 if n_scored > 0
                     fprintf('         Segment metrics folded for %d pair(s) this run.\n', n_scored);
                     log_msg(log_fid, 'Segment metrics folded for %d pair(s) [%s]', n_scored, CONFIG_HASH);
-                    summary_path = fullfile(get_simulation_directory(patient_id, session, CONFIG), ...
+                    summary_path = fullfile(get_simulation_directory(patient_id, session, CONFIG, CONFIG_HASH), ...
                         sprintf('segment_metrics_summary_%s.mat', CONFIG_HASH));
                     if isfile(summary_path)
                         delete(summary_path);
@@ -759,29 +797,46 @@ for p_idx = 1:length(CONFIG.patients)
                 %     fields completed by sibling instances, not just this one.
                 total_recon  = zeros(grid_dims);
                 missing_idxs = [];
+                failed_idxs  = [];
                 for fi = valid_field_indices(:).'
                     rp = expected_recon_path(field_index(fi), patient_id, session, CONFIG, CONFIG_HASH);
                     if isfile(rp)
                         cd_ = load(rp, 'recon_dose');
                         total_recon = total_recon + cd_.recon_dose;
+                    elseif field_status_is(field_status_path(field_index(fi), ...
+                            patient_id, session, CONFIG, CONFIG_HASH), 'failed')
+                        failed_idxs(end+1) = fi; %#ok<AGROW>
                     else
                         missing_idxs(end+1) = fi; %#ok<AGROW>
                     end
                 end
 
                 % If any field is still unprocessed (a sibling instance owns it
-                % and hasn't finished), defer total assembly and analysis. Re-run
-                % once the siblings complete to pick the remaining fields up.
-                if ~isempty(missing_idxs)
-                    fprintf('\n[STEP 2] DEFERRED: %d field(s) still pending: %s\n', ...
-                        numel(missing_idxs), mat2str(missing_idxs));
-                    fprintf('         These are likely in progress on sibling instances.\n');
-                    fprintf('         Re-run this script once they finish to assemble the\n');
-                    fprintf('         total reconstruction and run the analysis steps.\n');
-                    log_msg(log_fid, ['Step 2 deferred: %d field(s) pending on sibling ' ...
-                        'instances %s -- total not assembled'], ...
-                        numel(missing_idxs), mat2str(missing_idxs));
-                    RESULTS.patients.(result_key).status = 'awaiting_siblings';
+                % and hasn't finished) or failed, defer total assembly and
+                % analysis. Re-run once the siblings complete / the cause of the
+                % failure is fixed to pick the remaining fields up.
+                if ~isempty(missing_idxs) || ~isempty(failed_idxs)
+                    if ~isempty(missing_idxs)
+                        fprintf('\n[STEP 2] DEFERRED: %d field(s) still pending: %s\n', ...
+                            numel(missing_idxs), mat2str(missing_idxs));
+                        fprintf('         These are likely in progress on sibling instances.\n');
+                        fprintf('         Re-run this script once they finish to assemble the\n');
+                        fprintf('         total reconstruction and run the analysis steps.\n');
+                        log_msg(log_fid, ['Step 2 deferred: %d field(s) pending on sibling ' ...
+                            'instances %s -- total not assembled'], ...
+                            numel(missing_idxs), mat2str(missing_idxs));
+                        RESULTS.patients.(result_key).status = 'awaiting_siblings';
+                    end
+                    if ~isempty(failed_idxs)
+                        fprintf('\n[STEP 2] DEFERRED: %d field(s) FAILED: %s\n', ...
+                            numel(failed_idxs), mat2str(failed_idxs));
+                        fprintf('         Full errors: %s\n', fullfile(get_simulation_directory( ...
+                            patient_id, session, CONFIG, CONFIG_HASH), 'simulation_log.txt'));
+                        fprintf('         Fix the cause and re-run; failed fields are retried at the start.\n');
+                        log_msg(log_fid, 'Step 2 deferred: %d field(s) failed %s -- total not assembled', ...
+                            numel(failed_idxs), mat2str(failed_idxs));
+                        RESULTS.patients.(result_key).status = 'fields_failed';
+                    end
                     close_simulation_log(log_fid);
                     continue;
                 end
@@ -1163,12 +1218,15 @@ function [recon_dose, sim_results, last_warning] = run_field_dispatch(field_dose
     %
     % quiet = true (parfor): evalc captures and discards everything the engine
     % and k-Wave print, keeping the console to one progress line per field.
-    % The last warning line is returned in last_warning ('' if none): a failed
-    % forward sim / reconstruction warns and then returns zeros, so it is the
-    % cause of a zero-dose recon.
+    % The full text of the last warning is returned in last_warning ('' if
+    % none): it is the cause of a zero-dose recon.
     % quiet = false (serial): the engine and k-Wave print normally, so the
     % per-stage timings (grid size, dt/Nt, forward / time-reversal seconds) are
     % visible. last_warning is '' (the warnings already printed).
+    %
+    % A failed simulation returns sim_results.failure_report (full error text +
+    % stack): set by the engine when its forward sim / reconstruction fails,
+    % or here when the engine throws an error. recon_dose is then not usable.
     [cbct_fd, medium_fwd] = select_cbct_for_field(field_dose, cbct_by_label, medium_by_label);
 
     ref_label = blind_recon_reference_label(config);
@@ -1190,16 +1248,22 @@ function [recon_dose, sim_results, last_warning] = run_field_dispatch(field_dose
     end
 
     last_warning = '';
-    if quiet
-        [sim_text, recon_dose, sim_results] = evalc(['run_single_field_simulation(field_dose, ' ...
-            'cbct_fd, medium_fwd, beam_metadata, config, precomputed_sensor, medium_recon)']);
-        warning_lines = regexp(sim_text, 'Warning: [^\n]*', 'match');
-        if ~isempty(warning_lines)
-            last_warning = warning_lines{end};
+    try
+        if quiet
+            lastwarn('');
+            [~, recon_dose, sim_results] = evalc(['run_single_field_simulation(field_dose, ' ...
+                'cbct_fd, medium_fwd, beam_metadata, config, precomputed_sensor, medium_recon)']);
+            last_warning = lastwarn;
+        else
+            [recon_dose, sim_results] = run_single_field_simulation(field_dose, ...
+                cbct_fd, medium_fwd, beam_metadata, config, precomputed_sensor, medium_recon);
         end
-    else
-        [recon_dose, sim_results] = run_single_field_simulation(field_dose, ...
-            cbct_fd, medium_fwd, beam_metadata, config, precomputed_sensor, medium_recon);
+    catch ME
+        recon_dose  = [];
+        sim_results = struct('failure_report', getReport(ME, 'extended', 'hyperlinks', 'off'));
+        if ~quiet
+            fprintf('%s\n', sim_results.failure_report);
+        end
     end
 end
 
@@ -1216,7 +1280,7 @@ end
 function save_field_reconstruction(recon_dose, sim_results, field_dose, patient_id, session, config, hash8)
     % Save reconstruction as <input_basename>_recon_<hash8>.mat next to other
     % per-config outputs.  Only the hash is embedded; the full config lives
-    % in <sim_dir>/config_registry.json.
+    % in simulated_doses/config_registry.json.
     %
     % noise_stats records the per-field electronic-noise SNR (pre-noise sensor
     % peak, applied noise amplitude, and their ratio) so the SNR each beam/segment
@@ -1290,7 +1354,7 @@ function precomp = compute_plan_sensor_mask(patient_id, session, cbct_by_label, 
     %   and the summed plan dose (total_rs_dose) for placement; the resulting
     %   mask is reused for every field regardless of its ct_label.
     %
-    %   Caches to <sim_dir>/sensor_mask_<hash>.mat and reuses it on later runs.
+    %   Caches to <sim_dir>/<hash>/sensor_mask_<hash>.mat and reuses it on later runs.
     %   Returns [] when not applicable (wrong method, no CBCT, or no summed
     %   dose), so run_single_field_simulation computes the mask inline instead.
     precomp = [];
@@ -1420,10 +1484,10 @@ function rs_dir = get_raystation_directory(patient_id, session, config)
     rs_dir = fullfile(config.working_dir, 'RayStationFiles', patient_id, session);
 end
 
-function sim_dir = get_simulation_directory(patient_id, session, config)
-    % RayStationFiles/<id>/<session>/processed/simulated_doses/, created on
-    % first use.
-    sim_dir = get_simulation_dir(config.working_dir, patient_id, session);
+function sim_dir = get_simulation_directory(patient_id, session, config, hash8)
+    % RayStationFiles/<id>/<session>/processed/simulated_doses/<hash8>/ (the
+    % session folder itself when hash8 is ''), created on first use.
+    sim_dir = get_simulation_dir(config.working_dir, patient_id, session, hash8);
     if ~exist(sim_dir, 'dir')
         mkdir(sim_dir);
     end
@@ -1475,10 +1539,10 @@ end
 %% =========================================================================
 
 function log_fid = open_simulation_log(patient_id, session, config, hash8, canonical)
-    % Opens (or creates) a per-session append-mode log file and writes a
-    % header that includes the active config hash and a dump of every
-    % sim-affecting CONFIG field.
-    log_dir  = get_simulation_directory(patient_id, session, config);
+    % Opens (or creates) a per-(session, config) append-mode log file in the
+    % hash folder and writes a header that includes the active config hash and
+    % a dump of every sim-affecting CONFIG field.
+    log_dir  = get_simulation_directory(patient_id, session, config, hash8);
     log_path = fullfile(log_dir, 'simulation_log.txt');
     log_fid  = fopen(log_path, 'a');
     if log_fid == -1
@@ -1562,6 +1626,12 @@ function [claimed, reason] = claim_field(lock_path, status_path, stale_minutes)
         return;
     end
     claimed = false; reason = 'held';
+    % A field that failed this run is never overtaken (no retry until the
+    % next run's start clears its 'failed' status).
+    if field_status_is(status_path, 'failed')
+        reason = 'failed';
+        return;
+    end
     if stale_minutes > 0 && isfile(status_path)
         info = dir(status_path);
         if ~isempty(info)
@@ -1575,8 +1645,8 @@ end
 
 function write_field_status(status_path, state, field_idx, gantry, hash8)
     % Overwrite the per-field status file with the current state
-    % ('in_progress' | 'complete'). This file is the cross-instance signal
-    % board sibling processes read to see what is taken and what is done.
+    % ('in_progress' | 'complete' | 'failed'). This file is the cross-instance
+    % signal board sibling processes read to see what is taken and what is done.
     fid = fopen(status_path, 'w');
     if fid < 0, return; end
     fprintf(fid, 'status  = %s\n', state);
@@ -1587,6 +1657,15 @@ function write_field_status(status_path, state, field_idx, gantry, hash8)
     fprintf(fid, 'pid     = %d\n', feature('getpid'));
     fprintf(fid, 'updated = %s\n', datestr(now, 'yyyy-mm-dd HH:MM:SS'));
     fclose(fid);
+end
+
+function tf = field_status_is(status_path, state)
+    % True when the field's .status file exists and records this state.
+    try
+        tf = isfile(status_path) && contains(fileread(status_path), ['status  = ' state]);
+    catch
+        tf = false;   % status file rewritten or deleted mid-read
+    end
 end
 
 function h = get_hostname()
@@ -1604,7 +1683,7 @@ function h = get_hostname()
     if isempty(h), h = 'unknown'; end
 end
 
-function report_field_progress(msg)
+function report_field_progress(msg, log_fid)
     % afterEach callback (runs serialized on the CLIENT) that turns the parfor
     % block's per-worker chatter into a single clean line per field. Each parfor
     % iteration sends one 'process' / 'skip' / 'fail' message when it starts;
@@ -1613,7 +1692,9 @@ function report_field_progress(msg)
     % computed field also sends a 'done' message with its full processing time
     % (load, sim, saves, gamma + SSIM), which is added to the running average
     % used for the live ETA. A 'warn' message (zero-dose reconstruction, with
-    % the last engine warning as its cause) is printed as is.
+    % the last engine warning as its cause) is printed as is. A 'sim_fail'
+    % message (failed simulation, full error report) is printed and written to
+    % the simulation log (log_fid).
     %
     % Call it once on the client before the parfor begins with a struct of kind
     % 'init' carrying the field count, the worker count, and the field times
@@ -1632,6 +1713,14 @@ function report_field_progress(msg)
     if strcmp(msg.kind, 'warn')
         % A field's zero-dose recon + its cause (does not change the count).
         fprintf('         Field %d (gantry %.1f deg): %s\n', ...
+            msg.field_idx, msg.gantry, msg.message);
+        return;
+    end
+    if strcmp(msg.kind, 'sim_fail')
+        % Already counted by its 'process' message.
+        fprintf('         Field %d (gantry %.1f deg) FAILED; not retried until the next run:\n%s\n', ...
+            msg.field_idx, msg.gantry, msg.message);
+        log_msg(log_fid, 'Field %d FAILED (gantry %.1f deg), not retried this run:\n%s', ...
             msg.field_idx, msg.gantry, msg.message);
         return;
     end
@@ -1872,18 +1961,32 @@ function key = registry_key(hash_hex)
 end
 
 function p = config_registry_path(patient_id, session, config)
-    sim_dir = get_simulation_directory(patient_id, session, config);
+    % One registry per session, shared by every hash folder.
+    sim_dir = get_simulation_directory(patient_id, session, config, '');
     p       = fullfile(sim_dir, 'config_registry.json');
 end
 
 function ensure_config_registry(hash_hex, canonical, label, patient_id, session, config)
     % Append (or refresh) one hash->config entry in
-    % <sim_dir>/config_registry.json.  Existing entries are left intact
+    % simulated_doses/config_registry.json.  Existing entries are left intact
     % except for last_updated (bumped to the current time) and label (the
     % AnalysisResults folder name of this hash, see config_label).
+    % Also makes the empty <hash>/<label>/ folder that names the config of
+    % the hash folder. The label changes when get_default_config changes, so
+    % the folder of the previous label is removed (rmdir without 's' only
+    % removes an empty folder).
     registry = load_config_registry(patient_id, session, config);
     key      = registry_key(hash_hex);
     now_str  = datestr(now, 'yyyy-mm-dd HH:MM:SS');
+
+    hash_dir = get_simulation_directory(patient_id, session, config, hash_hex);
+    if isfield(registry, key) && isfield(registry.(key), 'label') && ...
+            ~strcmp(registry.(key).label, label)
+        [~] = rmdir(fullfile(hash_dir, registry.(key).label));
+    end
+    if ~isfolder(fullfile(hash_dir, label))
+        mkdir(fullfile(hash_dir, label));
+    end
 
     if isfield(registry, key)
         registry.(key).last_updated = now_str;
@@ -1963,42 +2066,42 @@ function base = get_field_basename(field_dose, patient_id, session)
 end
 
 function p = expected_recon_path(field_dose, patient_id, session, config, hash8)
-    sim_dir = get_simulation_directory(patient_id, session, config);
+    sim_dir = get_simulation_directory(patient_id, session, config, hash8);
     base    = get_field_basename(field_dose, patient_id, session);
     p       = fullfile(sim_dir, sprintf('%s_recon_%s.mat', base, hash8));
 end
 
 function p = expected_total_recon_path(patient_id, session, config, hash8)
-    sim_dir = get_simulation_directory(patient_id, session, config);
+    sim_dir = get_simulation_directory(patient_id, session, config, hash8);
     p       = fullfile(sim_dir, sprintf('total_recon_dose_%s.mat', hash8));
 end
 
 function p = expected_sensor_mask_path(patient_id, session, config, hash8)
-    sim_dir = get_simulation_directory(patient_id, session, config);
+    sim_dir = get_simulation_directory(patient_id, session, config, hash8);
     p       = fullfile(sim_dir, sprintf('sensor_mask_%s.mat', hash8));
 end
 
 function p = expected_manifest_path(patient_id, session, config, hash8)
-    sim_dir = get_simulation_directory(patient_id, session, config);
+    sim_dir = get_simulation_directory(patient_id, session, config, hash8);
     p       = fullfile(sim_dir, sprintf('cache_manifest_%s.mat', hash8));
 end
 
-function status_dir = get_status_directory(patient_id, session, config)
+function status_dir = get_status_directory(patient_id, session, config, hash8)
     % Per-(session, config) directory holding the cross-instance lock dirs and
     % .status files. The caller is responsible for creating it once.
-    status_dir = fullfile(get_simulation_directory(patient_id, session, config), ...
+    status_dir = fullfile(get_simulation_directory(patient_id, session, config, hash8), ...
         'field_status');
 end
 
 function p = field_status_path(field_dose, patient_id, session, config, hash8)
     base = get_field_basename(field_dose, patient_id, session);
-    p    = fullfile(get_status_directory(patient_id, session, config), ...
+    p    = fullfile(get_status_directory(patient_id, session, config, hash8), ...
         sprintf('%s_%s.status', base, hash8));
 end
 
 function p = field_lock_path(field_dose, patient_id, session, config, hash8)
     base = get_field_basename(field_dose, patient_id, session);
-    p    = fullfile(get_status_directory(patient_id, session, config), ...
+    p    = fullfile(get_status_directory(patient_id, session, config, hash8), ...
         sprintf('%s_%s.lock', base, hash8));
 end
 
