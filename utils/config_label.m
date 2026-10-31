@@ -40,12 +40,12 @@ function label = config_label(config)
     names = union(fieldnames(run), fieldnames(standard));   % sorted
     parts = {};
     for i = 1:numel(names)
-        name = names{i};
+        name = names{i}
         if isfield(run, name) && isfield(standard, name) && isequal(run.(name), standard.(name))
             continue;
         end
         if isfield(run, name)
-            value = run.(name);
+            value = run.(name)
         else
             value = '__unset__';
         end

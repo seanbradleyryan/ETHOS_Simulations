@@ -46,6 +46,8 @@ function CONFIG = get_default_config(varargin)
     CONFIG.session        = 'Session_1';
 
     CONFIG.dose_filename  = 'dose_1194203_Session_1_reference_CT_1_B1_112.mat';
+    CONFIG.dose_filename  = 'dose_1194203_Session_1_reference_CT_1_B11_154.mat';
+
     % Standalone default geometry: CBCT1 (CT_1), regardless of which CBCT the
     % dose was computed on. Per-dose CBCT selection lives in the multi-field
     % driver, not here.
@@ -91,7 +93,7 @@ function CONFIG = get_default_config(varargin)
     CONFIG.meterset           = 140;
     CONFIG.pml_size           = 10;
     CONFIG.cfl_number         = 0.3;
-    CONFIG.Nt_scaling         = 4;      % >0: when air sets minC, divide Nt by this (0 = disabled)
+    CONFIG.Nt_scaling         = 5;      % >0: when air sets minC, divide Nt by this (0 = disabled)
     CONFIG.use_gpu            = true;
 
     % NOTE: run_standalone_simulation.m set correction_factor to 1.9 and then
@@ -124,10 +126,9 @@ function CONFIG = get_default_config(varargin)
     CONFIG.num_time_reversal_iter = 1;
     CONFIG.adjoint_num_iter       = 5;
     CONFIG.adjoint_tv_lambda      = 0.01;
-    CONFIG.adjoint_tv_power_iter  = 5;
-    CONFIG.adjoint_tv_inner_iter  = 10;
+    CONFIG.adjoint_tv_power_iter  = 6;
     CONFIG.convergence_tol        = 1e-3;
-    CONFIG.adjoint_tv_inner_iter = 10; 
+    CONFIG.adjoint_tv_inner_iter =  5; 
 
     % --- Reconstruction mode (pipeline_simulate Step 2 / Step 2.5): 'segment' | 'beam' ---
     %   'segment' = one k-Wave simulation + gamma/SSIM per beam segment (thousands).
