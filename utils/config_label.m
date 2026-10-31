@@ -13,6 +13,8 @@ function label = config_label(config)
 %       'downscale_factor.2__gruneisen_method.threshold_1'
 %   Only the fields in the config hash are compared (compute_sim_config_hash),
 %   so one label <-> one hash; paths, plotting and analysis knobs are ignored.
+%   pipeline_simulate also makes an empty folder with this name inside the
+%   hash's data folder, simulated_doses/<hash>/<label>/ (get_simulation_dir).
 %
 %   'unset' means the field was absent from that run's CONFIG. A hash keeps some
 %   legacy values as absent (pulse_shape 'gaussian', sensor_side 'right'), so a
