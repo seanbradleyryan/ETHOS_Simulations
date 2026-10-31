@@ -69,8 +69,8 @@ function ens = noise_ensemble_error_bars(config, ref_truth, spacing_mm, sct, gan
 %                              ref_truth before gamma (matches the pipeline; also
 %                              what makes the single forward faithful, see above).
 %     'GammaCriteria'  {3,3,'3%/3mm'} - single {pct, dta_mm, label} row.
-%     'CacheDir'       get_simulation_dir(working_dir, patient_id, session),
-%                              beside the recons
+%     'CacheDir'       get_simulation_dir(working_dir, patient_id, session, hash),
+%                              beside the recons of this config hash
 %     'BaseSeed'       10000 - realization r uses rng seed BaseSeed + r (reproducible).
 %
 %   OUTPUT (struct ens)
@@ -100,7 +100,7 @@ function ens = noise_ensemble_error_bars(config, ref_truth, spacing_mm, sct, gan
     %% ---- Cache location + key ----
     config_hash = compute_sim_config_hash(config);
     if isempty(p.CacheDir)
-        p.CacheDir = get_simulation_dir(config.working_dir, config.patient_id, config.session);
+        p.CacheDir = get_simulation_dir(config.working_dir, config.patient_id, config.session, config_hash);
     end
     if ~isfolder(p.CacheDir)
         mkdir(p.CacheDir);

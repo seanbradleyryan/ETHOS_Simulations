@@ -13,10 +13,10 @@ function out = load_recon_dose_data(patient_id, session, config, varargin)
 %   RTPLAN statistics for each dose.
 %
 %   The recon files are written by pipeline_simulate to get_simulation_dir
-%   (RayStationFiles/<id>/<session>/processed/simulated_doses/) and
-%   keyed by an 8-char CONFIG hash (compute_sim_config_hash). The right hash is auto-discovered
-%   from the simulation folder when possible, otherwise derived from a passed
-%   CONFIG, otherwise overridable via the 'Hash' option.
+%   (RayStationFiles/<id>/<session>/processed/simulated_doses/<hash>/), one
+%   folder per 8-char CONFIG hash (compute_sim_config_hash). The right hash is
+%   auto-discovered from the hash folders when possible, otherwise derived from
+%   a passed CONFIG, otherwise overridable via the 'Hash' option.
 %
 %   INPUTS:
 %       patient_id - Char/string, patient identifier (e.g., '1194203').
@@ -118,13 +118,14 @@ function out = load_recon_dose_data(patient_id, session, config, varargin)
     processed_dir = fullfile(config.working_dir, 'RayStationFiles', ...
         patient_id, session, 'processed');
 
-    sim_dir = get_simulation_dir(config.working_dir, patient_id, session);
-    if ~isfolder(sim_dir)
+    sim_root = get_simulation_dir(config.working_dir, patient_id, session);
+    if ~isfolder(sim_root)
         error('load_recon_dose_data:NoSimDir', ...
-            'Simulation results directory not found: %s', sim_dir);
+            'Simulation results directory not found: %s', sim_root);
     end
 
-    hash8 = resolve_config_hash(sim_dir, opts.Mode, config, opts.Hash);
+    hash8   = resolve_config_hash(sim_root, opts.Mode, config, opts.Hash);
+    sim_dir = get_simulation_dir(config.working_dir, patient_id, session, hash8);
 
     %% ======================== ASSEMBLE OUTPUT ========================
 
@@ -226,7 +227,8 @@ end
 %  HASH RESOLUTION
 %% =========================================================================
 
-function hash8 = resolve_config_hash(sim_dir, mode, config, hash_override)
+function hash8 = resolve_config_hash(sim_root, mode, config, hash_override)
+    % sim_root = simulated_doses/, holding one <hash>/ folder per config.
     if ~isempty(hash_override)
         hash8 = lower(hash_override);
         return;
@@ -239,54 +241,49 @@ function hash8 = resolve_config_hash(sim_dir, mode, config, hash_override)
     catch
         candidate = '';
     end
-    if ~isempty(candidate) && hash_has_outputs(sim_dir, mode, candidate)
+    if ~isempty(candidate) && hash_has_outputs(sim_root, mode, candidate)
         hash8 = candidate;
         return;
     end
 
     % Fall back to scanning what is actually on disk.
-    hashes = scan_hashes(sim_dir, mode);
+    hashes = scan_hashes(sim_root, mode);
     if isempty(hashes)
         error('load_recon_dose_data:NoReconFiles', ...
-            'No reconstruction outputs found in %s for mode ''%s''.', ...
-            sim_dir, mode);
+            'No reconstruction outputs found in the hash folders of %s for mode ''%s''.', ...
+            sim_root, mode);
     elseif numel(hashes) > 1
         error('load_recon_dose_data:AmbiguousHash', ...
             ['Multiple config hashes present in %s:\n  %s\n', ...
              'Pass ''Hash'' or a CONFIG that hashes to one of them ', ...
-             '(see config_registry.json).'], ...
-            sim_dir, strjoin(hashes, ', '));
+             '(see config_registry.json or the label folder inside each hash folder).'], ...
+            sim_root, strjoin(hashes, ', '));
     end
     hash8 = hashes{1};
 end
 
-function tf = hash_has_outputs(sim_dir, mode, hash8)
+function tf = hash_has_outputs(sim_root, mode, hash8)
+    hash_dir = fullfile(sim_root, hash8);
     if strcmp(mode, 'total')
-        tf = isfile(fullfile(sim_dir, ...
+        tf = isfile(fullfile(hash_dir, ...
             sprintf('total_recon_dose_%s.mat', hash8)));
     else
-        tf = ~isempty(dir(fullfile(sim_dir, ...
+        tf = ~isempty(dir(fullfile(hash_dir, ...
             sprintf('*_recon_%s.mat', hash8))));
     end
 end
 
-function hashes = scan_hashes(sim_dir, mode)
-    if strcmp(mode, 'total')
-        files = dir(fullfile(sim_dir, 'total_recon_dose_*.mat'));
-        pat   = '^total_recon_dose_([0-9a-fA-F]{8})\.mat$';
-    else
-        files = dir(fullfile(sim_dir, '*_recon_*.mat'));
-        pat   = '_recon_([0-9a-fA-F]{8})\.mat$';
-    end
-
-    found = {};
-    for i = 1:numel(files)
-        tok = regexp(files(i).name, pat, 'tokens', 'once');
-        if ~isempty(tok)
-            found{end + 1} = lower(tok{1}); %#ok<AGROW>
+function hashes = scan_hashes(sim_root, mode)
+    % Names of the 8-hex <hash>/ folders that hold outputs for this mode.
+    folders = dir(sim_root);
+    hashes  = {};
+    for i = 1:numel(folders)
+        name = folders(i).name;
+        if folders(i).isdir && ~isempty(regexp(name, '^[0-9a-f]{8}$', 'once')) ...
+                && hash_has_outputs(sim_root, mode, name)
+            hashes{end + 1} = name; %#ok<AGROW>
         end
     end
-    hashes = unique(found);
 end
 
 

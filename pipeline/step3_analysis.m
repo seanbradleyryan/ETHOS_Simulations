@@ -175,7 +175,7 @@ T = load_recon_dose_data(patient_id, session, config, load_args{:});
 
 hash8              = T.config_hash;
 config.config_hash = hash8;   % pin for Step 2.5 / random-panel loads
-sim_dir       = get_simulation_dir(config.working_dir, patient_id, session);
+sim_dir       = get_simulation_dir(config.working_dir, patient_id, session, hash8);
 processed_dir = fullfile(config.working_dir, 'RayStationFiles', patient_id, session, 'processed');
 % The label and the segment/beam mode come from the hash's registered config,
 % so a partial config (working_dir + config_hash) still lands in the right

@@ -4,11 +4,11 @@
 %  =========================================================================
 %
 %  PURPOSE:
-%  The pipeline now keeps all simulation data in one flat folder,
-%  RayStationFiles/<id>/<session>/processed/simulated_doses/ (get_simulation_dir),
-%  and names analysis folders after the config instead of the hash. processed/
-%  itself holds only the pipeline_compress outputs. This script moves results
-%  that were written in an old layout:
+%  The pipeline now keeps the simulation data of each config hash in its own
+%  folder, RayStationFiles/<id>/<session>/processed/simulated_doses/<hash>/
+%  (get_simulation_dir), and names analysis folders after the config instead of
+%  the hash. processed/ itself holds only the pipeline_compress outputs. This
+%  script moves results that were written in an old layout:
 %    1. SimulationResults/<id>/<session>/<method>/simulation_debug/<plot>_<hash>.png
 %         -> AnalysisResults/<id>/<session>/<label>/verify_pipeline_simulate/
 %    2. SimulationResults/<id>/<session>/<method>/*  (recons, totals, masks,
@@ -24,6 +24,12 @@
 %    6. processed/simulation_results/<method>/*  -> processed/simulated_doses/
 %    7. Simulation files directly in processed/ (adjoint_power_cache_*.mat,
 %       *_recon_*.mat, *.lock, ...)  -> processed/simulated_doses/
+%    8. Files in simulated_doses/ named ..._<hash>.<ext> (steps 1-7 put them
+%       there, or the earlier flat layout did)  -> simulated_doses/<hash>/,
+%       field_status/ items -> simulated_doses/<hash>/field_status/, and an
+%       empty simulated_doses/<hash>/<label>/ folder naming the config.
+%       config_registry.json, adjoint_power_cache_*.mat (own operator hash) and
+%       the old shared simulation_log.txt stay in simulated_doses/.
 %  <label> = config_label of the hash's config in config_registry.json
 %  ('canonical' or the fields that differ from get_default_config).
 %  Registries and simulation logs of several methods are merged into one;
@@ -31,7 +37,7 @@
 %
 %  Left in place: AnalysisResults/pipeline_results_*.mat and timing_report_*.txt
 %  (one file covers several sessions), hashes missing from every registry, and
-%  the old *_sim_<hash>.mat copies in simulated_doses/ (identical to
+%  the old *_sim_<hash>.mat copies in simulated_doses/<hash>/ (identical to
 %  *_recon_<hash>.mat; pipeline_simulate no longer writes them, delete by hand).
 %  Nothing is overwritten: an item whose destination exists is skipped and listed.
 %  Emptied old folders are removed.
@@ -188,6 +194,42 @@ for k = 1:size(sessions, 1)
         for i = 1:numel(strays)
             move_or_merge(fullfile(processedDir, strays(i).name), ...
                 fullfile(newSimDir, strays(i).name), CONFIG.dry_run);
+        end
+    end
+
+    % 8. Flat simulated_doses/ -> simulated_doses/<hash>/. The hash is the
+    %    8 hex characters before the extension(s), e.g. ..._recon_<hash>.mat,
+    %    ..._<hash>.status, ..._<hash>.lock, ..._<hash>.mat.metrics_lock.
+    nMoved = 0;
+    for sub = {'', 'field_status'}
+        srcDir = fullfile(newSimDir, sub{1});
+        items  = dir(srcDir);
+        for i = 1:numel(items)
+            name = items(i).name;
+            tok  = regexp(name, '_([0-9a-f]{8})(\.mat)?(\.status|\.lock|\.metrics_lock)?$', ...
+                'tokens', 'once');
+            if isempty(tok) || startsWith(name, 'adjoint_power_cache_')
+                continue;
+            end
+            if isempty(lookup_label(tok{1}, hashes, labels))
+                fprintf('  SKIP (hash not in a registry): %s\n', fullfile(srcDir, name));
+                continue;
+            end
+            move_item(fullfile(srcDir, name), fullfile(newSimDir, tok{1}, sub{1}, name), ...
+                CONFIG.dry_run, true);
+            nMoved = nMoved + 1;
+        end
+    end
+    if nMoved > 0
+        fprintf('  %d item(s): %s\n    -> %s\n', nMoved, newSimDir, fullfile(newSimDir, '<hash>'));
+    end
+    remove_if_empty(fullfile(newSimDir, 'field_status'), CONFIG.dry_run);
+
+    % Empty <hash>/<label>/ folder naming the config of each hash folder
+    for i = 1:numel(hashes)
+        labelDir = fullfile(newSimDir, hashes{i}, labels{i});
+        if ~CONFIG.dry_run && isfolder(fileparts(labelDir)) && ~isfolder(labelDir)
+            mkdir(labelDir);
         end
     end
 end

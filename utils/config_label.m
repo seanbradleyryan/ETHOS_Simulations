@@ -19,6 +19,9 @@ function label = config_label(config)
 %   'unset' means the field was absent from that run's CONFIG. A hash keeps some
 %   legacy values as absent (pulse_shape 'gaussian', sensor_side 'right'), so a
 %   gaussian-pulse run is labelled 'pulse_shape.unset'.
+%   The adjoint_* fields (hashed only for the adjoint methods) are compared with
+%   the get_default_config values, so an 'adjoint_tv_tr' run with default
+%   adjoint settings is labelled just 'reconstruction_method.adjoint_tv_tr'.
 %
 %   INPUTS:
 %       config - Full simulation CONFIG, or the canonical block of a hash read
@@ -36,18 +39,27 @@ function label = config_label(config)
 %   See also: get_default_config, compute_sim_config_hash, hashtoconfig,
 %             get_simulation_dir
 
-    [~, run]      = compute_sim_config_hash(config);
-    [~, standard] = compute_sim_config_hash(get_default_config());
+    [~, run] = compute_sim_config_hash(config);
+
+    % The adjoint_* fields are hashed only for the adjoint methods. Build the
+    % default's block with the run's method so they are compared with the
+    % get_default_config values instead of all counting as different;
+    % reconstruction_method itself is compared with the real default.
+    defaults                       = get_default_config();
+    default_method                 = defaults.reconstruction_method;
+    defaults.reconstruction_method = run.reconstruction_method;
+    [~, standard]                  = compute_sim_config_hash(defaults);
+    standard.reconstruction_method = default_method;
 
     names = union(fieldnames(run), fieldnames(standard));   % sorted
     parts = {};
     for i = 1:numel(names)
-        name = names{i}
+        name = names{i};
         if isfield(run, name) && isfield(standard, name) && isequal(run.(name), standard.(name))
             continue;
         end
         if isfield(run, name)
-            value = run.(name)
+            value = run.(name);
         else
             value = '__unset__';
         end

@@ -59,7 +59,7 @@ function results = step205_run_full_field_simulation(patient_id, session, config
 %           .recon_files  {CT_1 file, CT_3 file}
 %           .metrics      full_field_metrics struct ([] when locked)
 %
-%       Written to RayStationFiles/<pid>/<session>/processed/simulated_doses/
+%       Written to RayStationFiles/<pid>/<session>/processed/simulated_doses/<hash>/
 %       (get_simulation_dir, next to the Step 2 recons):
 %           full_field_dose_CT_1_<hash>.mat  recon_dose, config_hash, ct_label,
 %                                            blind_recon, meterset_MU,
@@ -143,7 +143,7 @@ function results = step205_run_full_field_simulation(patient_id, session, config
 
     hash8         = config.config_hash;
     ct_labels     = {'CT_1', 'CT_3'};
-    sim_dir       = get_simulation_dir(config.working_dir, patient_id, session);
+    sim_dir       = get_simulation_dir(config.working_dir, patient_id, session, hash8);
     processed_dir = fullfile(config.working_dir, 'RayStationFiles', patient_id, ...
         session, 'processed');
     recon_files   = {fullfile(sim_dir, sprintf('full_field_dose_CT_1_%s.mat', hash8)), ...

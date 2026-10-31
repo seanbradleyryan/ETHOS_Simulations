@@ -68,7 +68,7 @@ function beam_set = load_beam_total_set(patient_id, session, config, beam, ct1_s
     end
     processed_dir = fullfile(config.working_dir, 'RayStationFiles', ...
         patient_id, session, 'processed');
-    sim_dir = get_simulation_dir(config.working_dir, patient_id, session);
+    sim_dir = get_simulation_dir(config.working_dir, patient_id, session, hash8);
 
     ct_labels = {ct1_str, ct3_str};
     for k = 1:2
