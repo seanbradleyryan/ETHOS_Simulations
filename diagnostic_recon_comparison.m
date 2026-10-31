@@ -38,13 +38,14 @@ CONFIG = get_default_config();
 CONFIG.recon_methods  = {
     'tr', 
     %'adjoint', 
-    'adjoint_tv'};   % any of 'tr','das','ubp','adjoint','adjoint_tv','adjoint_tv_tr'
-CONFIG.num_iter       = 1;     % iterations for every iterative method
+    'adjoint_tv',
+    'adjoint_tv_tr'};   % any of 'tr','das','ubp','adjoint','adjoint_tv'
+CONFIG.num_iter       = 10;     % iterations for every iterative method
 CONFIG.rng_seed       = 42;     % same electronic-noise draw for every method
 CONFIG.gamma_criteria = {3, 3, '3%/3mm'};
 CONFIG.eval_ct3_blind    = true;                   % also run the CT_3 partner field blind (doubles the k-Wave runs)
 CONFIG.cbct_filename_ct3 = 'CBCT3_resampled.mat';  % CT_3 forward geometry; recon uses CONFIG.cbct_filename (CT_1)
-CONFIG.Nt_scaling = 3;
+CONFIG.Nt_scaling = 5;
 CONFIG.conv_noise_level = .125; 
 CONFIG.conv_use_deconv = false; 
 CONFIG.gruneisen_method = 'continuous_1'
@@ -60,6 +61,7 @@ CONFIG.gruneisen_method = 'continuous_1'
 
 % CONFIG.adjoint_tv_lambda = 0; 
 
+% Pass rate of 60 percent with lambda .1!!!! Note this
 
 
 
@@ -70,7 +72,16 @@ CONFIG.adjoint_num_iter       = CONFIG.num_iter;
 CONFIG.convergence_tol        = 0;
 
 % --- adjoint_tv knobs (see run_single_field_simulation) ---
-CONFIG.tv_lambdas            = [0, 0.001, 0.01, 0.1];   % adjoint_tv_lambda sweep (adjoint_tv* methods only)
+CONFIG.tv_lambdas            = [   
+    %0, 
+    %0.001, 
+    0.01,
+    .03,
+    0.1,
+    %0.3,
+    %0.5,
+    % 1
+    ];   % adjoint_tv_lambda sweep (adjoint_tv* methods only)
 CONFIG.adjoint_tv_force_power_recalc = false;   % true = ignore processed/simulated_doses/adjoint_power_cache_<hash>.mat, recompute + overwrite
 CONFIG.adjoint_tv_power_iter = 5;
 CONFIG.adjoint_tv_inner_iter = CONFIG.num_iter; 
