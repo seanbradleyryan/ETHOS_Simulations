@@ -22,7 +22,9 @@ addpath(genpath(fullfile(fileparts(mfilename('fullpath')), 'pipeline')));  % ste
 
 
 CONFIG = get_default_config();
-    CONFIG.dose_filename  = 'dose_1194203_Session_4_reference_CT_1_B1_112.mat';
+CONFIG.reconstruction_method = 'adjoint_tv_tr'; 
+CONFIG.reconstruction_method = 'tr'; 
+    CONFIG.dose_filename  = 'dose_1194203_Session_4_reference_CT_1_B11_154.mat';
 
 CONFIG.mask_recon_to_dose_region     = true;    % zero recon dose outside the >1% dose mask
 

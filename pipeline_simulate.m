@@ -111,10 +111,10 @@ CONFIG.treatment_site  = 'Pancreas';
 % NOTE: the Step 2.5 noise-only floor (noise_ensemble_error_bars) only knows
 % 'tr' / 'das'; with 'ubp', 'adjoint', 'adjoint_tv' or 'adjoint_tv_tr' it warns
 % and the summary omits it.
-CONFIG.reconstruction_method = 'tr';
-CONFIG.adjoint_num_iter      = 5;
-CONFIG.adjoint_tv_lambda     = 0.01;
-CONFIG.adjoint_tv_power_iter = 5;
+CONFIG.reconstruction_method = 'adjoint_tv_tr';
+% CONFIG.adjoint_num_iter      = 5;
+% CONFIG.adjoint_tv_lambda     = 0.01;
+% CONFIG.adjoint_tv_power_iter = 5;
 % CONFIG.adjoint_tv_inner_iter = 10;
 
 % --- Blind-Geometry Reconstruction (CT_3 / adapted fields) ---
@@ -177,8 +177,8 @@ CONFIG.analysis_random_seed     = 42;
 CONFIG.plot_results          = false;
 
 % --- Parallel Processing ---
-CONFIG.use_parallel          = true;
-CONFIG.num_parallel_workers  = feature('numcores');   % one worker per physical CPU core
+CONFIG.use_parallel          = false;
+CONFIG.num_parallel_workers  = .75 * feature('numcores');   % one worker per physical CPU core
 
 % --- Multi-Instance Coordination ---
 % Multiple copies of this script (e.g. one per remote-desktop session, all
@@ -199,7 +199,7 @@ CONFIG.stale_claim_minutes   = 5;
 
 % --- Pipeline Control Flags ---
 CONFIG.run_step2   = true;    % Step 2   : k-Wave simulation
-CONFIG.run_step205 = true;    % Step 2.05: total RS dose per CT simulated as one field
+CONFIG.run_step205 = false;    % Step 2.05: total RS dose per CT simulated as one field
 CONFIG.run_segment_metrics = true;   % per-segment gamma + SSIM inside Step 2 (folded in)
 CONFIG.run_step3   = true;    % Step 3   : Gamma analysis
 CONFIG.run_verify  = true;     % verify_pipeline_simulate: checks + plots in AnalysisResults/.../verify_pipeline_simulate/
