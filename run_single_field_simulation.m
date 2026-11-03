@@ -121,8 +121,8 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
 %                                                  ('das' honors the das_* fields
 %                                                  of das_options; its DAS matrix
 %                                                  is cached in processed/
-%                                                  simulated_doses/
-%                                                  das_operator_cache_<key>.mat.
+%                                                  simulated_doses/<hash>/
+%                                                  das_operator_<CT>.mat.
 %                                                  'ubp' = universal back-
 %                                                  projection via ubp3d; honors
 %                                                  ubp_use_elements, ubp_band_limit,
@@ -1331,14 +1331,22 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
                 das_tic = tic;   % includes loading / building the DAS matrix
                 das_opts = das_options(config);
                 % The DAS matrix depends only on the sensor, grid, dt/Nt and the
-                % recon sound speed, not on the field, so it is cached in
-                % processed/simulated_doses/das_operator_cache_<key>.mat (shared by
-                % every config hash with the same geometry) and loaded by the
-                % next field. pipeline_simulate fills the cache before its parfor.
+                % recon sound speed, not on the field's dose. Within one config
+                % hash these are fixed per CT (CT_1 and CT_3 differ in dt/Nt), so
+                % it is cached as simulated_doses/<hash>/das_operator_<CT>.mat and
+                % loaded by every later field of that CT. das_reconstruct checks
+                % the stored geometry and runs the channel loop on a mismatch
+                % (e.g. a sensor placed per field). pipeline_simulate fills the
+                % cache before its parfor.
                 if isfield(config, 'working_dir') && isfield(cbct_resampled, 'patient_id') ...
                         && isfield(cbct_resampled, 'session')
-                    das_opts.operator_cache_dir = get_simulation_dir(config.working_dir, ...
-                        cbct_resampled.patient_id, cbct_resampled.session);
+                    das_ct = 'CT';
+                    if isfield(field_dose, 'ct_label') && ~isempty(field_dose.ct_label)
+                        das_ct = strrep(char(field_dose.ct_label), '-', '_');
+                    end
+                    das_opts.operator_cache_file = fullfile(get_simulation_dir(config.working_dir, ...
+                        cbct_resampled.patient_id, cbct_resampled.session, compute_sim_config_hash(config)), ...
+                        sprintf('das_operator_%s.mat', das_ct));
                 end
                 if blind_recon, das_medium = medium_recon; else, das_medium = medium; end
                 reconPressure = das_reconstruct(sensorData, sensor, sensor_info, das_medium, ...

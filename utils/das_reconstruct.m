@@ -58,16 +58,21 @@ function [reconPressure, operator] = das_reconstruct(sensorData, sensor, sensor_
 %    (Nx*Ny*Nz) x (nCh*Nt) and reused: image = A * sd(:). The matrix gives the
 %    same image as the channel loop up to rounding (the sums run in double).
 %    The path is chosen in this order:
-%      1. opts.operator given        -> multiply with it (its key must match).
-%      2. opts.operator_cache_dir has das_operator_cache_<key>.mat -> load it.
-%      3. Build it, but only when it will be reused (a cache dir is set, or the
-%         caller asks for the 2nd output): one build costs about one channel
-%         loop. With a cache dir it is saved there (temporary name + rename, so
+%      1. opts.operator given             -> multiply with it.
+%      2. opts.operator_cache_file exists -> load it and multiply.
+%      3. Build it, but only when it will be reused (a cache file is set, or
+%         the caller asks for the 2nd output): one build costs about one channel
+%         loop. With a cache file it is saved there (temporary name + rename, so
 %         no reader sees a half-written file).
 %      4. Otherwise (or opts.use_operator = false, or the matrix would need more
 %         than opts.max_operator_gb to build) -> the channel loop.
-%    The key is an MD5 of everything the matrix depends on, so a different
-%    sensor, grid, dt/Nt, sound speed or DAS setting gets its own matrix.
+%    The matrix stores what it was built for: channel positions, grid, dt, Nt,
+%    sound speed and DAS settings. A given or loaded matrix is used only when
+%    these match this call (positions within 1 um, spacing / dt / sound speed
+%    within 1e-6 relative, the rest exactly); otherwise a warning names the
+%    difference and the channel loop runs (the cache file is left alone). So a
+%    cache named only by config hash + CT label is never applied to another
+%    geometry, e.g. a sensor placed per field from that field's dose.
 %
 %  INPUTS
 %    sensorData  - [nCh x Nt] recorded pressure. Row order MUST match
@@ -95,7 +100,7 @@ function [reconPressure, operator] = das_reconstruct(sensorData, sensor, sensor_
 %                                           (falls back to the CPU on error)
 %                  and, not read from CONFIG:
 %                    .operator     ([])     matrix from an earlier call
-%                    .operator_cache_dir ('') folder of the matrix cache
+%                    .operator_cache_file ('') .mat file of the matrix cache
 %                    .clip_negative (true)  max(.,0) on the output; false
 %                                           keeps the signed result (with
 %                                           envelope = false the operator is
@@ -106,13 +111,15 @@ function [reconPressure, operator] = das_reconstruct(sensorData, sensor, sensor_
 %    reconPressure - [Nx x Ny x Nz] double, max(.,0)-clipped unless
 %                    opts.clip_negative = false. The caller applies any
 %                    correction_factor scaling.
-%    operator      - The DAS matrix used (struct: .key, .A), or [] when the
-%                    channel loop ran. Pass it back as opts.operator to skip
-%                    loading.
+%    operator      - The DAS matrix used (struct: .A plus what it was built for:
+%                    .ch_pos, .grid, .dt, .num_samples, .c_das, .settings), or
+%                    [] when the channel loop ran. Pass it back as
+%                    opts.operator to skip loading.
 %
 %  EXAMPLE
 %    opts = das_options(CONFIG);
-%    opts.operator_cache_dir = get_simulation_dir(CONFIG.working_dir, pid, session);
+%    opts.operator_cache_file = fullfile(get_simulation_dir(CONFIG.working_dir, ...
+%        pid, session, compute_sim_config_hash(CONFIG)), 'das_operator_CT_1.mat');
 %    recon = das_reconstruct(sensorData, sensor, sensor_info, medium, ...
 %                            Nx, Ny, Nz, dx, dy, dz, dt, opts);
 %
@@ -128,7 +135,7 @@ function [reconPressure, operator] = das_reconstruct(sensorData, sensor, sensor_
     end
     opts = set_default(opts, 'clip_negative', true);
     opts = set_default(opts, 'operator', []);
-    opts = set_default(opts, 'operator_cache_dir', '');
+    opts = set_default(opts, 'operator_cache_file', '');
 
     % ---- 1. Channel signals (element-averaged) + positions (metres) -----
     sensor_lin = find(sensor.mask);
@@ -205,28 +212,27 @@ function [reconPressure, operator] = das_reconstruct(sensorData, sensor, sensor_
 
     % ---- 4. DAS matrix: given, cached on disk, or built for reuse -------
     if opts.use_operator
-        key = operator_key(ch_pos, Nx, Ny, Nz, dx, dy, dz, dt, Nt_sd, c_das, opts);
-        cache_file = '';
-        if ~isempty(opts.operator_cache_dir)
-            cache_file = fullfile(opts.operator_cache_dir, sprintf('das_operator_cache_%s.mat', key));
-        end
+        % What the matrix depends on (the dose is not part of it)
+        geom = struct('ch_pos', ch_pos, 'grid', [Nx, Ny, Nz, dx, dy, dz], 'dt', dt, ...
+            'num_samples', Nt_sd, 'c_das', c_das, ...
+            'settings', struct('use_elements', logical(opts.use_elements), ...
+                               'use_aperture', logical(opts.use_aperture), ...
+                               'aperture_cos', double(opts.aperture_cos), ...
+                               'depth_weight', logical(opts.depth_weight), ...
+                               'interp',       lower(char(opts.interp))));
+        cache_file = opts.operator_cache_file;
+        matrix_from = '';
+        mismatch   = false;
 
         if ~isempty(opts.operator)
-            if ~isfield(opts.operator, 'key') || ~strcmp(opts.operator.key, key)
-                error('das_reconstruct:OperatorMismatch', ...
-                    ['opts.operator was built for a different sensor, grid, time step, ' ...
-                     'sound speed or DAS setting (this call needs key %s).'], key);
-            end
             operator = opts.operator;
-
+            matrix_from = 'opts.operator';
         elseif ~isempty(cache_file) && isfile(cache_file)
             try
                 load_tic = tic;
                 loaded   = load(cache_file, 'das_operator');
                 operator = loaded.das_operator;
-                if ~strcmp(operator.key, key)
-                    error('das_reconstruct:CacheKeyMismatch', 'stored key %s', operator.key);
-                end
+                matrix_from = cache_file;
                 fprintf('         DAS matrix loaded from %s (%.1f s)\n', cache_file, toc(load_tic));
             catch ME
                 % Unreadable (e.g. a broken save): rebuild below and overwrite it
@@ -236,26 +242,40 @@ function [reconPressure, operator] = das_reconstruct(sensorData, sensor, sensor_
             end
         end
 
+        if ~isempty(operator)
+            why = operator_mismatch(operator, geom);
+            if ~isempty(why)
+                warning('das_reconstruct:OperatorMismatch', ...
+                    ['The DAS matrix from %s was built for a different geometry (%s); ' ...
+                     'using the channel loop for this call. Delete the cache file if ' ...
+                     'the geometry changed on purpose.'], matrix_from, why);
+                operator = [];
+                mismatch = true;     % keep the cache file; do not overwrite it
+            end
+        end
+
         % Build only when it will be reused: a single build costs about one
         % channel loop, so a one-off call is faster with the loop.
-        if isempty(operator) && (~isempty(cache_file) || nargout > 1)
+        if isempty(operator) && ~mismatch && (~isempty(cache_file) || nargout > 1)
             build_tic = tic;
             [~, A] = das_channel_loop(sd, ch_pos, n, arrayCentroid, Nx, Ny, Nz, ...
                 dx, dy, dz, c_das, dt, opts, true);
             if ~isempty(A)
-                operator = struct('key', key, 'A', A);
+                operator   = geom;
+                operator.A = A;
                 fprintf('         DAS matrix built: %d entries (about %.2f GB) in %.1f s\n', ...
                     nnz(A), nnz(A) * 16 / 1e9, toc(build_tic));
                 clear A;
                 if ~isempty(cache_file)
                     try
-                        if ~isfolder(opts.operator_cache_dir)
-                            mkdir(opts.operator_cache_dir);
+                        cache_dir = fileparts(cache_file);
+                        if ~isfolder(cache_dir)
+                            mkdir(cache_dir);
                         end
                         % Save under a unique temporary name, then rename. The
                         % rename is atomic, so no worker reads a half-written file.
                         [~, tmp_name] = fileparts(tempname);
-                        tmp_file = fullfile(opts.operator_cache_dir, [tmp_name '.mat']);
+                        tmp_file = fullfile(cache_dir, [tmp_name '.mat']);
                         das_operator = operator;  %#ok<NASGU>  saved variable name
                         save(tmp_file, 'das_operator', '-v7.3', '-nocompression');
                         movefile(tmp_file, cache_file, 'f');
@@ -462,20 +482,32 @@ function [reconPressure, A] = das_channel_loop(sd, ch_pos, n, arrayCentroid, Nx,
 end
 
 
-function key = operator_key(ch_pos, Nx, Ny, Nz, dx, dy, dz, dt, Nt_sd, c_das, opts)
-%OPERATOR_KEY  8-character MD5 key of everything the DAS matrix depends on:
-%  channel positions (sensor + element map), grid size and spacing, dt, Nt,
-%  sound speed and the DAS settings that enter the weights. The envelope and
-%  clipping act after the multiply, so they are left out.
-    parts = {ch_pos, [Nx, Ny, Nz, dx, dy, dz, dt, Nt_sd, c_das], ...
-             double([opts.use_elements, opts.use_aperture, opts.depth_weight]), ...
-             opts.aperture_cos, double(lower(char(opts.interp)))};
-    md = java.security.MessageDigest.getInstance('MD5');
-    for k = 1:numel(parts)
-        md.update(typecast(double(parts{k}(:)), 'uint8'));
+function why = operator_mismatch(operator, geom)
+%OPERATOR_MISMATCH  '' when the DAS matrix was built for this call's geometry
+%  (geom: channel positions, grid, dt, Nt, sound speed, DAS settings), else a
+%  short description of the first difference. Positions must agree within
+%  1 um and spacing / dt / sound speed within 1e-6 relative, so last-digit
+%  rounding differences (e.g. a mean computed on a parfor worker) still match.
+%  The envelope and clipping act after the multiply, so they are not checked.
+    why = '';
+    needed = {'A', 'ch_pos', 'grid', 'dt', 'num_samples', 'c_das', 'settings'};
+    if ~isstruct(operator) || ~all(isfield(operator, needed))
+        why = 'missing fields (old cache format)';
+    elseif ~isequal(operator.settings, geom.settings)
+        why = 'DAS settings';
+    elseif ~isequal(operator.grid(1:3), geom.grid(1:3)) ...
+            || any(abs(operator.grid(4:6) - geom.grid(4:6)) > 1e-6 * geom.grid(4:6))
+        why = sprintf('grid [%d %d %d] vs [%d %d %d]', operator.grid(1:3), geom.grid(1:3));
+    elseif operator.num_samples ~= geom.num_samples
+        why = sprintf('Nt %d vs %d', operator.num_samples, geom.num_samples);
+    elseif abs(operator.dt - geom.dt) > 1e-6 * geom.dt
+        why = sprintf('dt %.6e vs %.6e s', operator.dt, geom.dt);
+    elseif abs(operator.c_das - geom.c_das) > 1e-6 * geom.c_das
+        why = sprintf('sound speed %.4f vs %.4f m/s', operator.c_das, geom.c_das);
+    elseif ~isequal(size(operator.ch_pos), size(geom.ch_pos)) ...
+            || max(abs(operator.ch_pos(:) - geom.ch_pos(:))) > 1e-6
+        why = 'sensor element positions';
     end
-    raw = typecast(md.digest(), 'uint8');
-    key = sprintf('%02x', raw(1:4));
 end
 
 

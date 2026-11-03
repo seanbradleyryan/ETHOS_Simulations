@@ -123,7 +123,7 @@ CONFIG.reconstruction_method = 'adjoint_tv_tr';
 % checking knobs and do not.
 % CONFIG.das_aperture_cos    = 0.997;   % cone: cos of the half-angle (4.4 deg)
 % CONFIG.das_interp          = 'nearest';
-% CONFIG.das_use_operator    = true;    % precomputed DAS matrix, cached per geometry
+% CONFIG.das_use_operator    = true;    % precomputed DAS matrix, cached per hash + CT
 % CONFIG.das_operator_max_gb = 8;       % above this the channel loop is used
 % CONFIG.das_check_operator  = false;   % true: also run the loop and print the difference
 

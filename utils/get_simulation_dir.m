@@ -13,13 +13,13 @@ function sim_dir = get_simulation_dir(working_dir, patient_id, session, hash)
 %   config:
 %   <base>_recon_<hash>.mat, total_recon_dose_<hash>.mat, sensor_mask_<hash>.mat,
 %   cache_manifest_<hash>.mat, segment_metrics_summary_<hash>.mat,
-%   full_field_dose_CT_*_<hash>.mat, noise_ensemble_*_<hash>.mat, the *.lock /
+%   full_field_dose_CT_*_<hash>.mat, noise_ensemble_*_<hash>.mat,
+%   das_operator_<CT>.mat (the 'das' matrix of each CT), the *.lock /
 %   *.metrics_lock folders, simulation_log.txt and field_status/, plus an empty
 %   <label>/ folder (config_label) that names the config when browsing.
 %   Without hash, the session folder simulated_doses/ itself is returned. It
-%   holds what is shared by all hashes: config_registry.json (hash -> config),
-%   adjoint_power_cache_*.mat and das_operator_cache_*.mat (each keyed by its
-%   own operator hash).
+%   holds what is shared by all hashes: config_registry.json (hash -> config)
+%   and adjoint_power_cache_*.mat (keyed by its own operator hash).
 %   Analysis outputs (figures, tables) go to AnalysisResults/ instead; see
 %   config_label.
 %
