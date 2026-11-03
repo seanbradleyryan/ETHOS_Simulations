@@ -132,6 +132,12 @@ function ens = noise_ensemble_error_bars(config, ref_truth, spacing_mm, sct, gan
     sensor_nnz = nnz(B.sensor.mask);
     bundle_time = toc(t_start);
     fprintf('[noise ensemble] forward bundle built (%.1f s). Redrawing noise...\n', bundle_time);
+    if any(strcmpi(B.reconstruction_method, {'das', 'hybrid'}))
+        fprintf(['[noise ensemble] DAS: aperture_cos %g, interp %s, use_aperture %d, ' ...
+                 'depth_weight %d, envelope %d, use_elements %d\n'], ...
+                B.das_opts.aperture_cos, B.das_opts.interp, B.das_opts.use_aperture, ...
+                B.das_opts.depth_weight, B.das_opts.envelope, B.das_opts.use_elements);
+    end
 
     %% ---- Redraw noise + reconstruct per realization ----
     budget_s   = p.TimeBudgetMin * 60;
@@ -142,7 +148,10 @@ function ens = noise_ensemble_error_bars(config, ref_truth, spacing_mm, sct, gan
         r = numel(pass_rates) + 1;
         try
             sd        = redraw_noisy_deconv(B, p.BaseSeed + r);   % pure-noise trace
-            recon_raw = reconstruct_recon_dose(B, sd);            % ONE reconstruction
+            % ONE reconstruction. With DAS the first realization builds the DAS
+            % matrix (kept in memory, the geometry is the same every time); the
+            % later ones only multiply with it.
+            [recon_raw, B.das_opts.operator] = reconstruct_recon_dose(B, sd);
             recon_g   = recon_raw;
             if p.Normalize
                 recon_g = recon_g * least_squares_gain(ref_embed, recon_g);
@@ -515,7 +524,7 @@ function B = build_forward_bundle(truthDose, sct, gantry_angle, beam_meta, CONFI
     B.doseMask             = doseMask;
     B.num_pulses           = num_pulses;
     B.sensor_info_orig     = sensor_info_orig;
-    B.das_opts             = struct();
+    B.das_opts             = das_options(CONFIG);   % same DAS settings as the pipeline
     B.bodyMask             = bodyMask;
     B.reconstruction_method         = CONFIG.reconstruction_method;
     B.num_time_reversal_iter        = CONFIG.num_time_reversal_iter;
@@ -666,14 +675,18 @@ function sd = redraw_noisy_deconv(B, seed)
     sd = single(deconv);
 end
 
-function recon_dose = reconstruct_recon_dose(B, sensorData_measured)
+function [recon_dose, das_operator] = reconstruct_recon_dose(B, sensorData_measured)
 %RECONSTRUCT_RECON_DOSE  Reconstruct a dose from a (noisy, deconvolved) sensor
 %  trace using the cached forward bundle B. parfor/GPU-safe (no plotting).
+%  das_operator is the DAS matrix das_reconstruct used ('das' / 'hybrid'; []
+%  otherwise); pass it back as B.das_opts.operator so the next call skips
+%  building it.
 
     gridSize = B.gridSize;
     Nx = gridSize(1); Ny = gridSize(2); Nz = gridSize(3);
     inputArgs = B.inputArgs;
     N_iter = B.num_time_reversal_iter;
+    das_operator = [];
 
     switch lower(B.reconstruction_method)
     case 'tr'
@@ -722,13 +735,13 @@ function recon_dose = reconstruct_recon_dose(B, sensorData_measured)
         reconPressure = gather(reconPressure) * B.correction_factor;
 
     case 'das'
-        reconPressure = das_reconstruct(sensorData_measured, B.sensor, B.sensor_info_orig, ...
-            B.medium_pad, Nx, Ny, Nz, B.dx, B.dy, B.dz, B.dt, B.das_opts);
+        [reconPressure, das_operator] = das_reconstruct(sensorData_measured, B.sensor, ...
+            B.sensor_info_orig, B.medium_pad, Nx, Ny, Nz, B.dx, B.dy, B.dz, B.dt, B.das_opts);
         reconPressure = reconPressure * B.correction_factor;
 
     case 'hybrid'
-        reconPressure = das_reconstruct(sensorData_measured, B.sensor, B.sensor_info_orig, ...
-            B.medium_pad, Nx, Ny, Nz, B.dx, B.dy, B.dz, B.dt, B.das_opts);
+        [reconPressure, das_operator] = das_reconstruct(sensorData_measured, B.sensor, ...
+            B.sensor_info_orig, B.medium_pad, Nx, Ny, Nz, B.dx, B.dy, B.dz, B.dt, B.das_opts);
         reconPressure_prev = reconPressure;
         sd      = sensorData_measured;
         sd_meas = sensorData_measured;

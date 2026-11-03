@@ -48,6 +48,8 @@ TIMING.script_start_tic      = tic;          % master start-to-finish stopwatch
 TIMING.all_field_sim_times_sec = [];         % elapsed of every single-field sim (sim + saves)
 TIMING.avg_field_sim_sec     = NaN;          % running mean of all_field_sim_times_sec
 TIMING.all_field_total_times_sec = [];       % load + sim + saves + segment metrics per field (for ETA)
+TIMING.all_field_forward_sec = [];           % k-Wave forward sim seconds of every field
+TIMING.all_field_recon_sec   = [];           % reconstruction seconds of every field
 TIMING.all_seg_gamma_times_sec = [];         % gamma seconds of every segment pair scored
 TIMING.all_seg_ssim_times_sec  = [];         % SSIM seconds of every segment pair scored
 % =========================================================================
@@ -116,6 +118,14 @@ CONFIG.reconstruction_method = 'adjoint_tv_tr';
 % CONFIG.adjoint_tv_lambda     = 0.01;
 % CONFIG.adjoint_tv_power_iter = 5;
 % CONFIG.adjoint_tv_inner_iter = 10;
+% 'das' settings (defaults in das_options). The first ones change the recon and
+% enter the config hash when not default; the das_*operator* ones are speed /
+% checking knobs and do not.
+% CONFIG.das_aperture_cos    = 0.997;   % cone: cos of the half-angle (4.4 deg)
+% CONFIG.das_interp          = 'nearest';
+% CONFIG.das_use_operator    = true;    % precomputed DAS matrix, cached per geometry
+% CONFIG.das_operator_max_gb = 8;       % above this the channel loop is used
+% CONFIG.das_check_operator  = false;   % true: also run the loop and print the difference
 
 % --- Blind-Geometry Reconstruction (CT_3 / adapted fields) ---
 % When true, every CT_3 (adapted) beam/segment field is FORWARD-propagated on
@@ -462,16 +472,18 @@ for p_idx = 1:length(CONFIG.patients)
 
                 % Split the pending fields: serial_idxs run one at a time on this
                 % client, parfor_idxs in the parfor. Serial mode: every field.
-                % Parfor with 'adjoint_tv' / 'adjoint_tv_tr': one field per CBCT
-                % label (CT_1, CT_3) runs serially first, so each CT's power
-                % iteration cache (run_single_field_simulation) is on disk before
-                % the workers start. Otherwise every worker computes it at once
-                % and saves the same file.
+                % Parfor with 'adjoint_tv' / 'adjoint_tv_tr' / 'das': one field
+                % per CBCT label (CT_1, CT_3) runs serially first, so each CT's
+                % power iteration cache or DAS matrix cache
+                % (run_single_field_simulation) is on disk before the workers
+                % start. Otherwise every worker computes it at once and saves the
+                % same file. (CT_1 and CT_3 fields differ in dt/Nt, so each CT
+                % has its own DAS matrix.)
                 use_parfor  = CONFIG.use_parallel && num_pending > 1;
                 serial_idxs = pending_idxs;
                 if use_parfor
                     serial_idxs = [];
-                    if ismember(lower(CONFIG.reconstruction_method), {'adjoint_tv', 'adjoint_tv_tr'})
+                    if ismember(lower(CONFIG.reconstruction_method), {'adjoint_tv', 'adjoint_tv_tr', 'das'})
                         pending_names = {field_index(pending_idxs).source_mat_filename};
                         for li = 1:numel(cbct_labels)
                             first_idx   = find(contains(pending_names, ['_' cbct_labels{li} '_']), 1);
@@ -485,8 +497,8 @@ for p_idx = 1:length(CONFIG.patients)
 
                 if num_serial > 0
                     if use_parfor
-                        fprintf('         Power-cache warm-up: %d field(s) serially before the parfor...\n', num_serial);
-                        log_msg(log_fid, 'Power-cache warm-up: %d field(s) serial', num_serial);
+                        fprintf('         Cache warm-up: %d field(s) serially before the parfor...\n', num_serial);
+                        log_msg(log_fid, 'Cache warm-up: %d field(s) serial', num_serial);
                     else
                         fprintf('         Using serial processing...\n');
                         log_msg(log_fid, 'Serial mode: %d fields pending', num_serial);
@@ -569,9 +581,12 @@ for p_idx = 1:length(CONFIG.patients)
                         log_msg(log_fid, 'Field %d complete [%s] (%.1f s)', ...
                             fi, CONFIG_HASH, elapsed_f);
                         fprintf('             Done in %.1f s\n', elapsed_f);
-                        % TIMING: collect this field's sim time.
+                        % TIMING: collect this field's sim time (and its forward /
+                        % reconstruction split, from the engine's own stopwatches).
                         TIMING.all_field_sim_times_sec(end+1) = elapsed_f;
                         TIMING.avg_field_sim_sec = mean(TIMING.all_field_sim_times_sec);
+                        TIMING.all_field_forward_sec(end+1) = sim_seconds(sim_results, 'forward_time_s');
+                        TIMING.all_field_recon_sec(end+1)   = sim_seconds(sim_results, 'tr_time_s');
 
                         % Score this segment's CT_1/CT_3 pair if the other CT is done.
                         if CONFIG.run_segment_metrics
@@ -623,6 +638,8 @@ for p_idx = 1:length(CONFIG.patients)
                     field_computed = false(num_parfor, 1);
                     field_elapsed  = zeros(num_parfor, 1);
                     field_total    = zeros(num_parfor, 1);   % load -> metrics done (ETA)
+                    field_forward  = nan(num_parfor, 1);     % k-Wave forward seconds
+                    field_recon    = nan(num_parfor, 1);     % reconstruction seconds
                     field_gantry   = nan(num_parfor, 1);
                     seg_gamma_sec  = nan(num_parfor, 1);   % NaN = pair not scored by this field
                     seg_ssim_sec   = nan(num_parfor, 1);
@@ -730,6 +747,8 @@ for p_idx = 1:length(CONFIG.patients)
                         write_field_status(status_path, 'complete', fi, fd.gantry_angle, CONFIG_HASH);
                         field_computed(f) = true;
                         field_elapsed(f)  = toc(t_field);
+                        field_forward(f)  = sim_seconds(sd, 'forward_time_s');
+                        field_recon(f)    = sim_seconds(sd, 'tr_time_s');
 
                         % If the other CT of this segment is also done, score the
                         % pair now (CPU) while other workers keep the GPUs busy.
@@ -768,6 +787,10 @@ for p_idx = 1:length(CONFIG.patients)
                     TIMING.avg_field_sim_sec = mean(TIMING.all_field_sim_times_sec);   % NaN if empty
                     TIMING.all_field_total_times_sec = [TIMING.all_field_total_times_sec, ...
                         field_total(field_computed)'];
+                    TIMING.all_field_forward_sec = [TIMING.all_field_forward_sec, ...
+                        field_forward(field_computed)'];
+                    TIMING.all_field_recon_sec   = [TIMING.all_field_recon_sec, ...
+                        field_recon(field_computed)'];
                     save_cache_manifest(cache_manifest, patient_id, session, CONFIG, CONFIG_HASH);
                     fprintf('         Parallel block done in %.1f s (%d field(s) computed here).\n', ...
                         elapsed_parfor, nnz(field_computed));
@@ -922,6 +945,14 @@ TIMING.total_seg_gamma_sec = sum(TIMING.all_seg_gamma_times_sec);
 TIMING.total_seg_ssim_sec  = sum(TIMING.all_seg_ssim_times_sec);
 TIMING.avg_seg_gamma_sec   = mean(TIMING.all_seg_gamma_times_sec);   % NaN if none computed
 TIMING.avg_seg_ssim_sec    = mean(TIMING.all_seg_ssim_times_sec);
+% Forward vs reconstruction split (NaN = the engine did not report that time).
+TIMING.recon_method        = CONFIG.reconstruction_method;
+TIMING.total_forward_sec   = sum(TIMING.all_field_forward_sec, 'omitnan');
+TIMING.total_recon_sec     = sum(TIMING.all_field_recon_sec, 'omitnan');
+TIMING.avg_forward_sec     = mean(TIMING.all_field_forward_sec, 'omitnan');   % NaN if none
+TIMING.avg_recon_sec       = mean(TIMING.all_field_recon_sec, 'omitnan');
+TIMING.recon_share_pct     = 100 * TIMING.total_recon_sec / ...
+    (TIMING.total_forward_sec + TIMING.total_recon_sec);                      % NaN if none
 
 fprintf('\n--- Timing Report ---\n');
 fprintf('  Total wall time (start -> finish): %.1f s (%.2f min)\n', ...
@@ -934,6 +965,12 @@ if TIMING.num_field_sims > 0
         TIMING.avg_field_sim_sec);
 else
     fprintf('  Average time per single-field simulation: N/A (no fields computed here)\n');
+end
+if TIMING.num_field_sims > 0
+    fprintf('  Forward sim: %.1f s total, %.1f s/field avg\n', ...
+        TIMING.total_forward_sec, TIMING.avg_forward_sec);
+    fprintf('  Reconstruction (%s): %.1f s total, %.1f s/field avg (%.1f%% of forward + recon)\n', ...
+        TIMING.recon_method, TIMING.total_recon_sec, TIMING.avg_recon_sec, TIMING.recon_share_pct);
 end
 fprintf('  Segment pairs scored this run: %d\n', TIMING.num_seg_metrics);
 if TIMING.num_seg_metrics > 0
@@ -1935,6 +1972,14 @@ function write_timing_report(timing, out_path)
     else
         fprintf(fid, 'Average per single-field sim    : N/A (no fields computed)\n');
     end
+    if timing.num_field_sims > 0
+        fprintf(fid, 'Forward sim (total / avg)       : %.1f s / %.1f s per field\n', ...
+            timing.total_forward_sec, timing.avg_forward_sec);
+        fprintf(fid, 'Reconstruction %-6s (tot/avg) : %.1f s / %.1f s per field\n', ...
+            timing.recon_method, timing.total_recon_sec, timing.avg_recon_sec);
+        fprintf(fid, 'Reconstruction share            : %.1f%% of forward + reconstruction\n', ...
+            timing.recon_share_pct);
+    end
     fprintf(fid, 'Segment pairs scored            : %d\n', timing.num_seg_metrics);
     if timing.num_seg_metrics > 0
         fprintf(fid, 'Segment gamma (total / avg)     : %.1f s / %.1f s per segment\n', ...
@@ -1944,6 +1989,15 @@ function write_timing_report(timing, out_path)
     end
     fclose(fid);
     fprintf('  Timing report saved: %s\n', out_path);
+end
+
+function sec = sim_seconds(sim_results, name)
+    % One stopwatch of run_single_field_simulation's sim_results (e.g.
+    % 'forward_time_s', 'tr_time_s'); NaN when the engine did not set it.
+    sec = NaN;
+    if isstruct(sim_results) && isfield(sim_results, name) && ~isempty(sim_results.(name))
+        sec = double(sim_results.(name));
+    end
 end
 
 

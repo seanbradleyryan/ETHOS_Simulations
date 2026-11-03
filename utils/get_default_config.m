@@ -106,8 +106,10 @@ function CONFIG = get_default_config(varargin)
     CONFIG.mask_recon_to_dose_region     = true;    % zero recon dose outside the >1% dose mask
 
     % --- Reconstruction method: 'tr' (iterative time reversal) | 'das' | 'ubp' | 'adjoint' | 'adjoint_tv' | 'adjoint_tv_tr' ---
+    %   'das' options (das_aperture_cos, das_interp, ..., das_use_operator) default
+    %   in utils/das_options.m and may be overridden here.
     %   'ubp' = universal back-projection (utils/ubp3d.m). Its options default via
-    %   safe_config in run_single_field_simulation (like the das_* options) and
+    %   safe_config in run_single_field_simulation and
     %   may be overridden here: ubp_use_elements (true), ubp_band_limit ('auto' |
     %   'none' | cutoff Hz), ubp_aperture_cos (0), ubp_area_weight (true),
     %   ubp_interp ('linear'). Non-ideal sensors (determine_sensor_mask) are

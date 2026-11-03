@@ -118,7 +118,12 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
 %                                                  actually recovering signal?".
 %           .reconstruction_method      ['tr']   - 'tr', 'das', 'ubp', 'adjoint',
 %                                                  'adjoint_tv', or 'adjoint_tv_tr'
-%                                                  ('ubp' = universal back-
+%                                                  ('das' honors the das_* fields
+%                                                  of das_options; its DAS matrix
+%                                                  is cached in processed/
+%                                                  simulated_doses/
+%                                                  das_operator_cache_<key>.mat.
+%                                                  'ubp' = universal back-
 %                                                  projection via ubp3d; honors
 %                                                  ubp_use_elements, ubp_band_limit,
 %                                                  ubp_aperture_cos, ubp_area_weight,
@@ -1323,14 +1328,18 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
         case 'das'
             fprintf('        Running Delay-And-Sum reconstruction...\n');
             try
-                das_tic = tic;
-                das_opts = struct( ...
-                    'use_elements', safe_config(config, 'das_use_elements', true), ...
-                    'envelope',     safe_config(config, 'das_envelope',     true), ...
-                    'use_aperture', safe_config(config, 'das_use_aperture', true), ...
-                    'aperture_cos', safe_config(config, 'das_aperture_cos', 0.997), ...
-                    'depth_weight', safe_config(config, 'das_depth_weight', true), ...
-                    'interp',       safe_config(config, 'das_interp',       'nearest'));
+                das_tic = tic;   % includes loading / building the DAS matrix
+                das_opts = das_options(config);
+                % The DAS matrix depends only on the sensor, grid, dt/Nt and the
+                % recon sound speed, not on the field, so it is cached in
+                % processed/simulated_doses/das_operator_cache_<key>.mat (shared by
+                % every config hash with the same geometry) and loaded by the
+                % next field. pipeline_simulate fills the cache before its parfor.
+                if isfield(config, 'working_dir') && isfield(cbct_resampled, 'patient_id') ...
+                        && isfield(cbct_resampled, 'session')
+                    das_opts.operator_cache_dir = get_simulation_dir(config.working_dir, ...
+                        cbct_resampled.patient_id, cbct_resampled.session);
+                end
                 if blind_recon, das_medium = medium_recon; else, das_medium = medium; end
                 reconPressure = das_reconstruct(sensorData, sensor, sensor_info, das_medium, ...
                                                 Nx, Ny, Nz, dx, dy, dz, dt, das_opts);
