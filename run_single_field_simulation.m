@@ -1334,14 +1334,20 @@ function [recon_dose, sim_results] = run_single_field_simulation(field_dose, cbc
                 % recon sound speed, not on the field's dose. Within one config
                 % hash these are fixed per CT (CT_1 and CT_3 differ in dt/Nt), so
                 % it is cached as simulated_doses/<hash>/das_operator_<CT>.mat and
-                % loaded by every later field of that CT. das_reconstruct checks
+                % loaded by every later field of that CT. <CT> is the label of the
+                % CBCT this field is simulated on (cbct_resampled.ct_label, set by
+                % step15), falling back to field_dose.ct_label: Step 2.05's
+                % whole-plan dose has no ct_label, and naming by the dose alone
+                % gave its CT_1 and CT_3 runs the same file. das_reconstruct checks
                 % the stored geometry and runs the channel loop on a mismatch
                 % (e.g. a sensor placed per field). pipeline_simulate fills the
                 % cache before its parfor.
                 if isfield(config, 'working_dir') && isfield(cbct_resampled, 'patient_id') ...
                         && isfield(cbct_resampled, 'session')
                     das_ct = 'CT';
-                    if isfield(field_dose, 'ct_label') && ~isempty(field_dose.ct_label)
+                    if isfield(cbct_resampled, 'ct_label') && ~isempty(cbct_resampled.ct_label)
+                        das_ct = strrep(char(cbct_resampled.ct_label), '-', '_');
+                    elseif isfield(field_dose, 'ct_label') && ~isempty(field_dose.ct_label)
                         das_ct = strrep(char(field_dose.ct_label), '-', '_');
                     end
                     das_opts.operator_cache_file = fullfile(get_simulation_dir(config.working_dir, ...
