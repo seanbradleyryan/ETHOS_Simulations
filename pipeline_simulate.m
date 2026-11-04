@@ -18,6 +18,9 @@
 %              inside the Step 2 loop as soon as both its CT_1 and CT_3
 %              recons exist (CONFIG.run_segment_metrics), and folded into
 %              the CT_1 recon .mat as 'segment_metrics'.
+%    Step 2.4  step24_medium_null (CONFIG.run_step24): each CT_3 dose simulated
+%              and reconstructed in the CT_1 medium, scored vs Truth CT_1. A
+%              constant-medium control for Step 3's figures/medium_null/ plots.
 %    Step 3    Gamma analysis, SSIM, and visualization (builds the per-segment
 %              summary + noise floor via step25_segment_metrics when missing)
 %    Verify    verify_pipeline_simulate: output checks + debug plots per
@@ -211,6 +214,7 @@ CONFIG.stale_claim_minutes   = 5;
 CONFIG.run_step2   = true;    % Step 2   : k-Wave simulation
 CONFIG.run_step205 = false;    % Step 2.05: total RS dose per CT simulated as one field
 CONFIG.run_segment_metrics = true;   % per-segment gamma + SSIM inside Step 2 (folded in)
+CONFIG.run_step24  = false;   % Step 2.4 : medium null (CT_3 dose in the CT_1 medium); one extra sim per CT_3 field
 CONFIG.run_step3   = true;    % Step 3   : Gamma analysis
 CONFIG.run_verify  = true;     % verify_pipeline_simulate: checks + plots in AnalysisResults/.../verify_pipeline_simulate/
 
@@ -371,7 +375,7 @@ for p_idx = 1:length(CONFIG.patients)
             % summed plan dose is available), in which case each field falls
             % back to its inline placement. Done before Step 2.05, which
             % loads this saved mask.
-            if CONFIG.run_step2 || CONFIG.run_step205
+            if CONFIG.run_step2 || CONFIG.run_step205 || CONFIG.run_step24
                 precomputed_sensor = compute_plan_sensor_mask(patient_id, session, ...
                     cbct_by_label, dose_metadata, beam_metadata, CONFIG, CONFIG_HASH);
             end
@@ -878,6 +882,23 @@ for p_idx = 1:length(CONFIG.patients)
             else
                 fprintf('\n[STEP 2] Loading previously computed reconstruction...\n');
                 [total_recon, ~] = load_total_reconstruction(patient_id, session, CONFIG, CONFIG_HASH);
+            end
+
+            %% ============================================================
+            %  STEP 2.4: Medium Null (CT_3 dose in the CT_1 medium)
+            %% ============================================================
+            % One extra k-Wave run per CT_3 field: the CT_3 initial pressure is
+            % propagated and reconstructed in the CT_1 medium, then scored vs
+            % Truth CT_1. Resumable (skips fields on disk). Step 3 plots it in
+            % figures/medium_null/.
+            if CONFIG.run_step24
+                fprintf('\n[STEP 2.4] Running medium-null simulations...\n');
+                step24_config             = CONFIG;
+                step24_config.config_hash = CONFIG_HASH;
+                step24_results = step24_medium_null(patient_id, session, step24_config);
+                RESULTS.patients.(result_key).step24 = step24_results;
+                log_msg(log_fid, 'Step 2.4: %d simulated, %d locked, %d failed [%s]', ...
+                    step24_results.n_done, step24_results.n_locked, step24_results.n_failed, CONFIG_HASH);
             end
 
             %% ============================================================

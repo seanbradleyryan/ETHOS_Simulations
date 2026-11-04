@@ -24,6 +24,15 @@ function results = step3_analysis(patient_id, session, config)
 %     Plus per-beam electronic-noise SNR and N random segment panels
 %     (truth | recon | gamma map | SSIM map).
 %
+%   MEDIUM NULL (when Step 2.4 files exist for the hash): every recon1 vs
+%     recon3 figure (pass rates, differentials, correlations, random panels)
+%     is drawn again in figures/medium_null/ with recon CT_3 replaced by the
+%     medium-null recon (CT_3 dose forward-simulated and reconstructed in the
+%     CT_1 medium). Pink background + red "MEDIUM NULL - NOT A RESULT" title.
+%     The console prints recon1 - recon3 split into a dose part (recon1 - null)
+%     and a medium part (null - recon3). The fidelity plot has no copy (the
+%     null is scored against Truth CT_1 only).
+%
 %   BEAM MODE (the hash's registered reconstruction_mode = 'beam'): Step 2
 %     reconstructed each beam's summed dose, so Part B has ONE value per beam
 %     per comparison (Step 2.5 on the beam totals). It prints a per-beam table
@@ -70,6 +79,9 @@ function results = step3_analysis(patient_id, session, config)
 %               (beam mode: one value per beam, no .statistics)
 %           .snr              - per-beam SNR (mean, se, n)
 %           .noise_floor      - Step 2.5 noise-only null (or [])
+%           .medium_null.gamma / .ssim - (Step 2.4 files only) per-beam table with
+%               recon3 replaced by the medium-null recon, its differentials,
+%               and .decomposition (n, recon1, recon3, medium_null means)
 %           .random_segments  - beam/segment/scores of the random panels
 %           .metadata
 %
@@ -81,6 +93,7 @@ function results = step3_analysis(patient_id, session, config)
 %       segment_statistics.csv    - t-test / floor / correlation rows (segment mode)
 %       step3_console_log.txt     - full console output of this run
 %       figures/*.png             - every figure
+%       figures/medium_null/*.png - medium-null copies (when Step 2.4 ran)
 %
 %   ALGORITHM:
 %       1. Load total recon, RS total, ETHOS truth (position-resampled) and CBCT
@@ -340,9 +353,24 @@ for n = 1:nB + 1
     fprintf('  beam %-4s  SNR %7.2f +/- %6.2f  (%d field(s))\n', x_labels{n}, ...
         snr.mean(n), snr.se(n), snr.n(n));
 end
-results.snr = rmfield(snr, 'seg_ct1');
+results.snr = rmfield(snr, {'seg_ct1', 'seg_ids'});
 if config.analysis_plot_results
     plot_beam_snr(x_labels, snr, patient_id, session, fullfile(fig_dir, 'beam_snr.png'));
+end
+
+%% ======================== PART B: MEDIUM NULL (Step 2.4) ========================
+% Step 2.4 simulated each CT_3 dose in the CT_1 medium. Its scores are matched
+% to the Step 2.5 rows by beam + segment and drawn as copies of the recon1 vs
+% recon3 figures in figures/medium_null/. Skipped when Step 2.4 has not run.
+null_scores = load_medium_null_scores(sim_dir, hash8, config.metrics_plan_type, beam_mode);
+null_dir    = fullfile(fig_dir, 'medium_null');
+have_null   = ~isempty(null_scores.beam);
+if have_null
+    fprintf('\n  Medium null (Step 2.4): %d field(s) on disk; figures in %s\n', ...
+        numel(null_scores.beam), null_dir);
+    if ~isfolder(null_dir), mkdir(null_dir); end
+else
+    fprintf('\n  [NOTE] No Step 2.4 medium-null files for hash %s; medium_null figures skipped.\n', hash8);
 end
 
 %% ======================== PART B: BOTH METRICS ========================
@@ -426,16 +454,57 @@ for m = 1:2
             spread_tag = [title_tag, ' | mean \pm SE over segments'];
         end
         plot_pass_rates(x_labels, B, c_r1, c_r3, c_tt, nf, mlabel, mword, spread_tag, ...
-            fullfile(fig_dir, sprintf('%s_pass_rates_by_beam.png', key)));
+            fullfile(fig_dir, sprintf('%s_pass_rates_by_beam.png', key)), false);
         plot_differentials(x_labels, D, B.mean(:, c_r1), nf, mword, spread_tag, ...
-            fullfile(fig_dir, sprintf('%s_differentials_by_beam.png', key)));
+            fullfile(fig_dir, sprintf('%s_differentials_by_beam.png', key)), false);
         plot_fidelity(x_labels, B, c_r1, c_33, mlabel, spread_tag, ...
             fullfile(fig_dir, sprintf('%s_recon_fidelity_by_beam.png', key)));
         if ~beam_mode
             plot_correlations(stats(end).pooled_diff, stats(end).pooled_truth, ...
                 stats(end).pooled_snr, mword, title_tag, ...
-                fullfile(fig_dir, sprintf('%s_diff_correlations.png', key)));
+                fullfile(fig_dir, sprintf('%s_diff_correlations.png', key)), false);
         end
+    end
+
+    % ---- Medium null: the same table with recon CT_3 replaced by the
+    %      medium-null recon (CT_3 dose, CT_1 medium). Grader-side control. ----
+    if have_null
+        null_by_beam = medium_null_table(seg_by_beam, snr.seg_ids, beam_list, null_scores, ...
+            key, c_r3, c_33);
+        Bn = beam_stats(null_by_beam);
+        Dn = differential_stats(null_by_beam, c_r1, c_r3, c_tt);
+        if beam_mode
+            Bn.std(1:nB, :)   = NaN;
+            Bn.se(1:nB, :)    = NaN;
+            Dn.recon_se(1:nB) = NaN;
+            Dn.truth_se(1:nB) = NaN;
+        end
+
+        % Split the observed recon1 - recon3 change into a dose part and a
+        % medium part, over the fields that have all three recons.
+        M  = vertcat(seg_by_beam{:});
+        Mn = vertcat(null_by_beam{:});
+        ok = isfinite(M(:, c_r1)) & isfinite(M(:, c_r3)) & isfinite(Mn(:, c_r3));
+        decomp = struct('n', nnz(ok), 'recon1', mean(M(ok, c_r1)), ...
+            'recon3', mean(M(ok, c_r3)), 'medium_null', mean(Mn(ok, c_r3)));
+        fprintf(['\n  MEDIUM NULL %s over %d field(s): recon1 %.2f | recon3 %.2f | null %.2f %%\n' ...
+                 '    recon1 - recon3 = %+.2f = dose part (recon1 - null) %+.2f' ...
+                 ' + medium part (null - recon3) %+.2f\n'], mword, decomp.n, decomp.recon1, ...
+            decomp.recon3, decomp.medium_null, decomp.recon1 - decomp.recon3, ...
+            decomp.recon1 - decomp.medium_null, decomp.medium_null - decomp.recon3);
+
+        if config.analysis_plot_results
+            plot_pass_rates(x_labels, Bn, c_r1, c_r3, c_tt, nf, mlabel, mword, spread_tag, ...
+                fullfile(null_dir, sprintf('%s_pass_rates_by_beam.png', key)), true);
+            plot_differentials(x_labels, Dn, Bn.mean(:, c_r1), nf, mword, spread_tag, ...
+                fullfile(null_dir, sprintf('%s_differentials_by_beam.png', key)), true);
+            if ~beam_mode
+                sn = segment_statistics(null_by_beam, c_r1, c_r3, c_tt, snr.seg_ct1, fl, x_labels);
+                plot_correlations(sn(end).pooled_diff, sn(end).pooled_truth, sn(end).pooled_snr, ...
+                    mword, title_tag, fullfile(null_dir, sprintf('%s_diff_correlations.png', key)), true);
+            end
+        end
+        results.medium_null.(key) = struct('beam_stats', Bn, 'differential', Dn, 'decomposition', decomp);
     end
 
     results.segments.(key).comparisons  = SM.comparisons;
@@ -474,9 +543,16 @@ if config.analysis_plot_results && n_panels > 0
             fig_title = sprintf('Beam %d, Segment %d', picks(i).beam, picks(i).seg);
             fig_name  = sprintf('random_segment_B%d_S%d.png', picks(i).beam, picks(i).seg);
         end
-        plot_random_segment(picks(i), crit, fig_title, fullfile(fig_dir, fig_name));
+        plot_random_segment(picks(i), crit, fig_title, fullfile(fig_dir, fig_name), false);
+        % Medium-null copy: the recon CT_3 row becomes the medium-null recon.
+        if have_null && ~isempty(picks(i).null_row)
+            pk_null           = picks(i);
+            pk_null.rows(2)   = pk_null.null_row;
+            pk_null.scores(2) = pk_null.null_score;
+            plot_random_segment(pk_null, crit, fig_title, fullfile(null_dir, fig_name), true);
+        end
     end
-    results.random_segments = rmfield(picks, 'rows');
+    results.random_segments = rmfield(picks, {'rows', 'null_row'});
 end
 
 %% ======================== SAVE RESULTS ========================
@@ -999,16 +1075,65 @@ function snr = gather_snr(sim_dir, hash8, plan_type, ct1_str, beam_list, n_seg, 
     end
 
     snr.seg_ct1 = cell(1, nB);
+    snr.seg_ids = cell(1, nB);   % segment number of each Step 2.5 row (NaN = unknown)
     for n = 1:nB
-        [~, ord] = sort(ct1_seg{n});
+        [sorted_seg, ord] = sort(ct1_seg{n});
         if numel(ord) == n_seg(n)
             snr.seg_ct1{n} = ct1_val{n}(ord)';
+            snr.seg_ids{n} = sorted_seg(:);
         else
             warning('step3_analysis:SNRAlignSkip', ...
-                'Beam #%d: %d CT_1 SNR value(s) vs %d Step 2.5 segment(s); SNR correlation skipped.', ...
-                beam_list(n), numel(ord), n_seg(n));
+                ['Beam #%d: %d CT_1 SNR value(s) vs %d Step 2.5 segment(s); SNR correlation ' ...
+                 'and medium-null matching skipped.'], beam_list(n), numel(ord), n_seg(n));
             snr.seg_ct1{n} = nan(n_seg(n), 1);
+            snr.seg_ids{n} = nan(n_seg(n), 1);
         end
+    end
+end
+
+
+function ns = load_medium_null_scores(sim_dir, hash8, plan_type, beam_mode)
+% Step 2.4 scores (null_scores only, not the maps) of every medium-null file of
+% this hash. Segment mode keeps only the Step 2.5 plan type.
+    ns = struct('beam', [], 'seg', [], 'gamma', [], 'ssim', []);
+    listing = dir(fullfile(sim_dir, sprintf('*_medium_null_%s.mat', hash8)));
+    for k = 1:numel(listing)
+        L = load(fullfile(sim_dir, listing(k).name), 'null_scores');
+        s = L.null_scores;
+        if ~beam_mode && ~strcmpi(plan_type, 'any') && ~strcmpi(s.plan_type, plan_type)
+            continue;
+        end
+        ns.beam(end + 1)  = s.beam_num;
+        ns.seg(end + 1)   = s.seg_num;
+        ns.gamma(end + 1) = s.gamma_pass_rate;
+        ns.ssim(end + 1)  = s.ssim_mean;
+    end
+end
+
+
+function null_by_beam = medium_null_table(seg_by_beam, seg_ids, beam_list, ns, key, c_r3, c_33)
+% Copy of the Step 2.5 per-beam table with the recon CT_3 column replaced by the
+% medium-null score of the same beam + segment. Rows without a Step 2.4 result
+% are all NaN, so every column is averaged over the same fields.
+% truth3_vs_recon3 is NaN: the null is scored against Truth CT_1 only.
+    if strcmp(key, 'gamma')
+        vals = ns.gamma;
+    else
+        vals = ns.ssim;
+    end
+    null_by_beam = seg_by_beam;
+    for n = 1:numel(seg_by_beam)
+        M = seg_by_beam{n};
+        for r = 1:size(M, 1)
+            k = find(ns.beam == beam_list(n) & ns.seg == seg_ids{n}(r), 1);
+            if isempty(k)
+                M(r, :) = NaN;
+            else
+                M(r, c_r3) = vals(k);
+            end
+        end
+        M(:, c_33) = NaN;
+        null_by_beam{n} = M;
     end
 end
 
@@ -1017,9 +1142,11 @@ end
 %  PART B: BEAM-AXIS FIGURES
 %  =========================================================================
 
-function plot_pass_rates(x_labels, B, c_r1, c_r3, c_tt, noise_floor, mlabel, mword, title_tag, fpath)
+function plot_pass_rates(x_labels, B, c_r1, c_r3, c_tt, noise_floor, mlabel, mword, title_tag, ...
+        fpath, medium_null)
 % recon1 vs truth1 (green), recon3 vs truth1 (red), truth1 vs truth3 (blue),
 % connector between the recon means, noise-only null band (gamma only).
+% medium_null = true: the red series is the Step 2.4 medium-null recon.
     green = [0.15, 0.60, 0.20]; red = [0.80, 0.15, 0.15];
     blue  = [0.20, 0.40, 0.80]; grey = [0.35, 0.35, 0.35];
     nX = numel(x_labels);
@@ -1046,19 +1173,25 @@ function plot_pass_rates(x_labels, B, c_r1, c_r3, c_tt, noise_floor, mlabel, mwo
         'MarkerFaceColor', red, 'MarkerSize', 8, 'LineStyle', 'none', 'CapSize', 7);
     h(end + 1) = errorbar(ax, x, B.mean(:, c_tt), B.se(:, c_tt), 'o', 'Color', blue, ...
         'MarkerFaceColor', blue, 'MarkerSize', 7, 'LineStyle', 'none', 'CapSize', 7);
-    leg = [leg, {'Recon CT\_1 vs Truth CT\_1', 'Recon CT\_3 vs Truth CT\_1', 'Truth CT\_1 vs Truth CT\_3'}];
+    r3_name = 'Recon CT\_3 vs Truth CT\_1';
+    if medium_null
+        r3_name = 'Medium-null recon (CT\_3 dose, CT\_1 medium) vs Truth CT\_1';
+    end
+    leg = [leg, {'Recon CT\_1 vs Truth CT\_1', r3_name, 'Truth CT\_1 vs Truth CT\_3'}];
     yline(ax, 90, 'k--', '90%');
     beam_axis(ax, x_labels);
     ylim(ax, [0, 105]); ylabel(ax, mlabel);
     title(ax, sprintf('%s by beam | %s', mword, title_tag));
     legend(ax, h, leg, 'Location', 'best', 'FontSize', 9);
+    if medium_null, mark_medium_null(fig, ax.Title); end
     save_figure(fig, fpath);
 end
 
 
-function plot_differentials(x_labels, D, m_r1, noise_floor, mword, title_tag, fpath)
+function plot_differentials(x_labels, D, m_r1, noise_floor, mword, title_tag, fpath, medium_null)
 % recon1 - recon3 (green >= 0, red < 0), 100 - truth1_vs_truth3 (blue),
 % recon1 - noise-only null (grey, gamma only).
+% medium_null = true: recon3 is the Step 2.4 medium-null recon.
     green = [0.15, 0.60, 0.20]; red = [0.80, 0.15, 0.15];
     blue  = [0.20, 0.40, 0.80]; grey = [0.35, 0.35, 0.35];
     nX = numel(x_labels);
@@ -1076,7 +1209,12 @@ function plot_differentials(x_labels, D, m_r1, noise_floor, mword, title_tag, fp
          plot(ax, nan, nan, 'o', 'Color', red, 'MarkerFaceColor', red)];
     h(end + 1) = errorbar(ax, x, D.truth_mean, D.truth_se, 's', 'Color', blue, ...
         'MarkerFaceColor', blue, 'MarkerSize', 7, 'LineStyle', 'none', 'CapSize', 7);
-    leg = {'Recon CT\_1 - CT\_3 \geq 0', 'Recon CT\_1 - CT\_3 < 0', '100 - (Truth CT\_1 vs CT\_3)'};
+    r3_name = 'CT\_3';
+    if medium_null
+        r3_name = 'medium null';
+    end
+    leg = {sprintf('Recon CT\\_1 - %s \\geq 0', r3_name), sprintf('Recon CT\\_1 - %s < 0', r3_name), ...
+        '100 - (Truth CT\_1 vs CT\_3)'};
     if ~isempty(noise_floor)
         h(end + 1) = plot(ax, x, m_r1 - noise_floor.mean_pass_rate, 'd', 'Color', grey, ...
             'MarkerFaceColor', grey, 'LineStyle', 'none');
@@ -1086,6 +1224,7 @@ function plot_differentials(x_labels, D, m_r1, noise_floor, mword, title_tag, fp
     ylabel(ax, sprintf('%s differential (%%)', mword));
     title(ax, sprintf('Change-detection differentials | %s', title_tag));
     legend(ax, h, leg, 'Location', 'best', 'FontSize', 9);
+    if medium_null, mark_medium_null(fig, ax.Title); end
     save_figure(fig, fpath);
 end
 
@@ -1133,14 +1272,19 @@ function plot_beam_snr(x_labels, snr, patient_id, session, fpath)
 end
 
 
-function plot_correlations(d, T, S, mword, title_tag, fpath)
+function plot_correlations(d, T, S, mword, title_tag, fpath, medium_null)
 % Pooled scatter of the recon differential vs the true change and vs CT_1 SNR.
+% medium_null = true: the differential is recon1 - Step 2.4 medium-null recon.
     fig = figure('Visible', 'off', 'Color', 'w', 'Position', [100, 100, 1000, 440]);
     tl  = tiledlayout(fig, 1, 2, 'TileSpacing', 'compact', 'Padding', 'compact');
     title(tl, sprintf('%s: recon differential correlations | %s', mword, title_tag), ...
         'FontWeight', 'bold');
     xs   = {T, S};
     xlab = {'Truth CT\_1 vs Truth CT\_3 (%)', 'CT\_1 SNR'};
+    ylab = 'Recon CT\_1 - CT\_3 (%)';
+    if medium_null
+        ylab = 'Recon CT\_1 - medium null (%)';
+    end
     for k = 1:2
         ax = nexttile(tl); hold(ax, 'on');
         x  = xs{k};
@@ -1154,10 +1298,21 @@ function plot_correlations(d, T, S, mword, title_tag, fpath)
         rho = pearson_r(rank_average(d, x), rank_average(x, d));
         title(ax, sprintf('R^2 = %.3f | Spearman \\rho = %+.3f (n = %d)', ...
             pearson_r(d, x) ^ 2, rho, nnz(ok)), 'FontWeight', 'normal');
-        xlabel(ax, xlab{k}); ylabel(ax, 'Recon CT\_1 - CT\_3 (%)');
+        xlabel(ax, xlab{k}); ylabel(ax, ylab);
         grid(ax, 'on'); box(ax, 'on');
     end
+    if medium_null, mark_medium_null(fig, tl.Title); end
     save_figure(fig, fpath);
+end
+
+
+function mark_medium_null(fig, title_handle)
+% A medium-null figure must not be mistaken for a result: pink background and
+% a red first title line.
+    set(fig, 'Color', [1, 0.88, 0.88]);
+    old = cellstr(title_handle.String);
+    title_handle.String = [{['{\color{red}\bfMEDIUM NULL - NOT A RESULT: CT\_3 dose ' ...
+        'forward-simulated and reconstructed in the CT\_1 medium (constant medium)}']}; old(:)];
 end
 
 
@@ -1182,7 +1337,8 @@ function picks = select_random_segments(patient_id, session, config, beam_list, 
 % dose) of truth CT_1, recon CT_1 / CT_3, and the Step 2.5 folded gamma + SSIM
 % maps for truth1_vs_recon1 and truth1_vs_recon3. Loads one beam at a time.
 % Beam mode loads the beam totals + beam recons instead (one pick per beam, seg 0).
-    picks = struct('beam', {}, 'seg', {}, 'iz', {}, 'scores', {}, 'rows', {});
+    picks = struct('beam', {}, 'seg', {}, 'iz', {}, 'scores', {}, 'rows', {}, ...
+        'null_row', {}, 'null_score', {});
     rng(config.analysis_random_seed);
     beam_order = beam_list(randperm(numel(beam_list)));
     comps = {'truth1_vs_recon1', 'Recon CT\_1'; 'truth1_vs_recon3', 'Recon CT\_3'};
@@ -1243,6 +1399,27 @@ function picks = select_random_segments(patient_id, session, config, beam_list, 
                 pk.scores(c).gamma_pass_pct = gpass;
                 pk.scores(c).ssim_mean_pct  = smean;
             end
+
+            % Step 2.4 medium-null recon of the CT_3 field, if it exists.
+            pk.null_row   = [];
+            pk.null_score = [];
+            null_file = strrep(S.fields(i3).recon_file, sprintf('_recon_%s.mat', config.config_hash), ...
+                sprintf('_medium_null_%s.mat', config.config_hash));
+            if isfile(null_file)
+                N    = load(null_file, 'recon_dose', 'null_scores', 'null_maps');
+                gmap = nan(N.null_maps.vol_size);
+                smap = nan(N.null_maps.vol_size);
+                gmap(N.null_maps.mask_idx) = double(N.null_maps.gamma_vals);
+                if ~isempty(N.null_maps.ssim_vals)
+                    smap(N.null_maps.mask_idx) = double(N.null_maps.ssim_vals);
+                end
+                pk.null_row = struct('label', 'Medium-null recon', 'truth', rs1(:, :, iz), ...
+                    'recon', double(N.recon_dose(:, :, iz)) * N.null_scores.recon_gain, ...
+                    'gamma', gmap(:, :, iz), 'ssim', smap(:, :, iz));
+                pk.null_score = struct('comparison', 'truth1_vs_medium_null', ...
+                    'gamma_pass_pct', N.null_scores.gamma_pass_rate, ...
+                    'ssim_mean_pct', N.null_scores.ssim_mean);
+            end
             picks(end + 1) = pk; %#ok<AGROW>
         end
         clear S;
@@ -1275,8 +1452,9 @@ function [gmap, gpass, smap, smean] = folded_maps(recon_file, comp_name, hash8, 
 end
 
 
-function plot_random_segment(pk, crit, fig_title, fpath)
+function plot_random_segment(pk, crit, fig_title, fpath, medium_null)
 % 2 rows (recon CT_1, recon CT_3) x 4 columns (truth | recon | gamma | SSIM).
+% medium_null = true: row 2 is the Step 2.4 medium-null recon.
     fig = figure('Visible', 'off', 'Color', 'w', 'Position', [80, 80, 1400, 650]);
     tl  = tiledlayout(fig, 2, 4, 'TileSpacing', 'compact', 'Padding', 'compact');
     title(tl, sprintf('%s | axial slice %d (truth CT\\_1 max)', fig_title, pk.iz), ...
@@ -1304,6 +1482,7 @@ function plot_random_segment(pk, crit, fig_title, fpath)
         colormap(ax, parula(256)); clim(ax, [0, 1]); colorbar(ax);
         title(ax, sprintf('Local SSIM (mean %.1f%%)', pk.scores(r).ssim_mean_pct));
     end
+    if medium_null, mark_medium_null(fig, tl.Title); end
     save_figure(fig, fpath);
 end
 

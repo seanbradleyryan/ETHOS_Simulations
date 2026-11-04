@@ -13,6 +13,7 @@
 | 1.5 | `step15_process_doses.m` | `[fields, sct, total, meta] = step15_process_doses(...)` | Resample CT to dose grid, process per-field doses (**Windows work laptop** via `pipeline_compress.m`) |
 | 2 | `run_single_field_simulation.m` | `[recon, results] = run_single_field_simulation(...)` | k-Wave forward + time-reversal for one field |
 | 2.05 | `step205_run_full_field_simulation.m` | `results = step205_run_full_field_simulation(patient_id, session, config)` | Each CT's total RS dose (`total_dose_CT_1/3.mat`) simulated as ONE field (CT_1 full access, CT_3 blind on CT_1) with the Step 2 sensor mask; four Step 2.5 gamma + SSIM comparisons on the totals. Saves `full_field_dose_CT_*_<hash>.mat` beside the recons. To be compared with the summed per-field recon in analysis |
+| 2.4 | `step24_medium_null.m` | `results = step24_medium_null(patient_id, session, config)` | Medium null (`CONFIG.run_step24`, default off): every CT_3 field's p0 (D3·Γ3·ρ3) forward-simulated AND reconstructed in the CT_1 medium (forward medium = CT_1 with Γ := Γ3ρ3/ρ1; blind recon on CT_1; CT_1 CBCT/body mask). LS gain to Truth CT_3, gamma + local SSIM vs Truth CT_1. One extra sim per CT_3 field; resumable, per-field `.lock`. Saves `<CT_3 base>_medium_null_<hash>.mat` (`recon_dose`, `null_scores`, `null_maps`). Grader-side control. Runs after Step 2, before Step 3 |
 | 2.5 | `step25_segment_metrics.m` | `results = step25_segment_metrics(patient_id, session, config)` | Per-beam/segment gamma + local SSIM (4 study comparisons); folds raw masked results into each segment's **CT_1** recon file. `pipeline_simulate` now scores pairs inline in Step 2; step25 builds the summary/noise floor (run by Step 3) |
 | 3 | `step3_analysis.m` | `results = step3_analysis(patient_id, session, config)` | Total-dose gamma + local SSIM, and the full per-segment study (tables, statistics, figures) from the Step 2.5 summary; everything saved to `AnalysisResults/<pid>/<session>/<label>/step3_analysis/` |
 
@@ -81,7 +82,7 @@ load('total_recon_dose_<hash8>.mat');  % Contains: total_recon, metadata, config
 | What | Where | Named by |
 |---|---|---|
 | Step 1.5 doses, CBCTs, totals (nothing else) | `RayStationFiles/<pid>/<session>/processed/` | — |
-| Step 2/2.05/2.5 data (recons, `total_recon_dose`, `sensor_mask`, manifests, `segment_metrics_summary`, `full_field_dose`, noise-ensemble cache, `*.lock` / `*.metrics_lock`, `simulation_log.txt`, `field_status/`) + empty `<label>/` folder | `get_simulation_dir(..., hash)` = `processed/simulated_doses/<hash>/` | `<hash>` folder + filename |
+| Step 2/2.05/2.4/2.5 data (recons, `*_medium_null_<hash>.mat`, `total_recon_dose`, `sensor_mask`, manifests, `segment_metrics_summary`, `full_field_dose`, noise-ensemble cache, `*.lock` / `*.metrics_lock`, `simulation_log.txt`, `field_status/`) + empty `<label>/` folder | `get_simulation_dir(..., hash)` = `processed/simulated_doses/<hash>/` | `<hash>` folder + filename |
 | `config_registry.json`, `adjoint_power_cache_*.mat` (shared by all hashes) | `get_simulation_dir(...)` = `processed/simulated_doses/` | — |
 | Step 3 | `AnalysisResults/<pid>/<session>/<label>/step3_analysis/` | config label |
 | `verify_pipeline_simulate` | `AnalysisResults/<pid>/<session>/<label>/verify_pipeline_simulate/` | config label |
@@ -214,6 +215,12 @@ standalone. It absorbed every analysis from `study_pass_rates_allsegments.m`.
 
   It also produces per-beam `noise_stats.snr` and `analysis_n_random` random segment panels
   (truth | recon | folded gamma map | folded SSIM map). No metric is recomputed here.
+- **Medium null (Step 2.4 files present):** pass-rate, differential, correlation and random-panel
+  figures are redrawn in `figures/medium_null/` with recon CT_3 replaced by the medium-null recon
+  (matched by beam + segment via the Step 2.5 row order; unmatched rows NaN). Pink background + red
+  "MEDIUM NULL - NOT A RESULT" title line. Console prints recon1 − recon3 = dose part (recon1 − null)
+  + medium part (null − recon3); stored in `results.medium_null`. No fidelity copy (null scored vs
+  Truth CT_1 only).
 - **Outputs** go to `AnalysisResults/<pid>/<session>/<label>/step3_analysis/`:
   - `step3_results.mat`
   - `beam_summary.csv`

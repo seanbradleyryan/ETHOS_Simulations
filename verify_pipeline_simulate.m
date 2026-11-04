@@ -27,7 +27,9 @@ function results = verify_pipeline_simulate(patient_id, session, config, config_
 %        has not scored is recomputed.                      [window, tab per pair]
 %     5  Totals per CT: ETHOS truth, RS total and recon total, with gamma maps,
 %        pass rates and gamma histograms. Step 2.5 scores segments only, so the
-%        total gammas are computed here.                      [window, tab per CT]
+%        total gammas are computed here. Plus a cross-check tab: RS total CT_1
+%        vs recon total CT_3 (CT_3 recon gain fitted to RS CT_3, as Step 2.5).
+%                                                             [window, tab per CT]
 %     6  Sensor signal after each processing stage (raw, pulse convolved,
 %        band-limited, noise added, deconvolved), averaged over all sensor
 %        points, on a log axis. The pipeline does not save these signals, so
@@ -658,12 +660,55 @@ function results = verify_pipeline_simulate(patient_id, session, config, config_
                     nCt, center(3)), 'Interpreter', 'none');
                 save_figure(panel, outDir, sprintf('totals_%s_%s', ctLabels{c}, config_hash));
             end
+
+            % Cross check: RS total CT_1 vs recon total CT_3 (the totals version of
+            % Step 2.5's truth1_vs_recon3). The CT_3 recon keeps its own gain,
+            % fitted to RS CT_3, as in Step 2.5.
+            gain3 = 1;
+            if normalizeRecon
+                gain3 = least_squares_gain(rsSums{2}, reconSums{2});
+            end
+            crossVols  = {rsSums{1}, gain3 * reconSums{2}};
+            crossNames = {'RS total CT_1', sprintf('recon total CT_3 x %.3g', gain3)};
+            crossGamma = compute_gamma(crossVols{1}, crossVols{2}, gammaWidth, ...
+                'Criteria', gammaCriteria, 'Cutoff', cutoffFraction);
+            crossPass  = crossGamma.pass_rates(1);
+
+            [~, iMax] = max(crossVols{1}(:));
+            [row, col, slc] = ind2sub(size(crossVols{1}), iMax);
+            center  = [row, col, slc];
+            doseMax = max(max(crossVols{1}(:)), max(crossVols{2}(:)));
+            panel   = new_tab_panel(tabGroup, 'Cross: RS CT_1 vs recon CT_3');
+            for m = 1:2   % top row: the two doses
+                ax = subplot(2, 2, m, 'Parent', panel);
+                show_ct(ax, cbcts{1}.cubeHU, 1, center, spacing, ctWindowHu);
+                add_overlay(ax, crossVols{m}, crossVols{m} >= cutoffFraction * doseMax, 1, center, ...
+                    [0 doseMax], jet(256));
+                colorbar(ax);
+                title(ax, [crossNames{m} ' (Gy)'], 'Interpreter', 'none');
+            end
+            ax = subplot(2, 2, 3, 'Parent', panel);
+            show_ct(ax, cbcts{1}.cubeHU, 1, center, spacing, ctWindowHu);
+            add_overlay(ax, crossGamma.maps{1}, crossGamma.eval_mask, 1, center, [0 2], gammaCmap);
+            colorbar(ax);
+            title(ax, sprintf('gamma RS CT_1 vs recon CT_3: %.1f%% pass', crossPass), 'Interpreter', 'none');
+            ax = subplot(2, 2, 4, 'Parent', panel);
+            histogram(ax, min(crossGamma.maps{1}(crossGamma.eval_mask > 0), 3), 0:0.05:3, ...
+                'Normalization', 'probability');
+            xline(ax, 1, 'k--');
+            xlabel(ax, 'gamma index (clipped at 3); <= 1 passes');
+            ylabel(ax, 'fraction of evaluated voxels');
+            sgtitle(panel, sprintf('%s %s | cross check: RS total CT_1 vs recon total CT_3 | axial slice %d (RS CT_1 max)', ...
+                patient_id, session, center(3)), 'Interpreter', 'none');
+            save_figure(panel, outDir, sprintf('totals_cross_RS_CT_1_vs_recon_CT_3_%s', config_hash));
+
             if ~showFigures
                 close(fig);
             end
             tests = add_result(tests, testName, 'INFO', sprintf( ...
                 ['gamma pass, ETHOS-RS / RS-recon / ETHOS-recon: CT_1 %.1f / %.1f / %.1f%%, ' ...
-                 'CT_3 %.1f / %.1f / %.1f%%; figures totals_CT_*.png'], passRates(1, :), passRates(2, :)));
+                 'CT_3 %.1f / %.1f / %.1f%%; cross RS CT_1 vs recon CT_3 %.1f%%; ' ...
+                 'figures totals_*.png'], passRates(1, :), passRates(2, :), crossPass));
         end
     catch ME
         tests = add_result(tests, testName, 'ERROR', ME.message);
